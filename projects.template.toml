@@ -1,0 +1,65 @@
+[defaults]
+gitlab_api_base_url = "http://127.0.0.1:8181/gitlab/api/v4"
+gitlab_token_env = "GITLAB_TOKEN"
+
+[defaults.branch_rules]
+target_keywords = ["staging", "pre", "main", "release"]
+
+[defaults.jenkins_profiles.default]
+base_url = "http://127.0.0.1:8080"
+username = ""
+password_env = "JENKINS_PASSWORD"
+
+[[projects]]
+key = "example-web"
+name = "示例项目"
+category = "Workspace"
+repo_path = "/path/to/example-web"
+git_url = "http://git.example.com/group/example-web.git"
+
+[projects.dev]
+command = "npm run dev"
+
+[projects.dev.env]
+# PORT = "3000"
+
+[projects.focus]
+# bundle_id = "com.example.webapp"
+# url = "http://127.0.0.1:3000"
+
+[projects.build]
+command = "npm run build"
+
+[projects.build.env]
+# NODE_ENV = "production"
+
+[[projects.deploy_targets]]
+key = "standard"
+label = "标准"
+jenkins_profile = "default"
+job_name = "Example/example-web"
+
+[[projects.deploy_targets.params]]
+key = "ENV_PROFILE"
+label = "环境"
+type = "select"
+default = "uat3"
+options = ["sit1", "sit2", "sit3", "uat1", "uat2", "uat3", "pre", "pro"]
+required = true
+
+[[projects.deploy_targets.params]]
+key = "BRANCH"
+label = "分支"
+type = "branch"
+required = true
+
+[[projects.deploy_targets.params]]
+key = "IS_GRAY"
+label = "灰度发布"
+type = "boolean"
+default = "否"
+true_value = "是"
+false_value = "否"
+
+[projects.branch_rules]
+target_keywords = ["staging", "pre", "main", "release"]

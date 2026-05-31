@@ -1,0 +1,214 @@
+import type {
+  ComponentType,
+  Dispatch,
+  LazyExoticComponent,
+  SetStateAction,
+} from "react";
+import type {
+  BranchOption,
+  BranchPushAction,
+  BranchPushStatus,
+  BranchTaskHistoryEntry,
+  BranchTaskResponse,
+  BranchWorkflowMode,
+} from "./app-types";
+import type {
+  ProjectSelectionEntry,
+  ProjectSummary,
+} from "./hooks/useBranchContext";
+import type { DeployRequest } from "./hooks/useDeployContext";
+import type { WorkflowSignalsState } from "./hooks/useWorkflowSignals";
+import type { WorkflowProjectReplay } from "./lib/workflowSignals";
+import type { DeployPageProps } from "./pages/DeployPage";
+import type { MergePageProps } from "./pages/MergePage";
+import type { ProjectsPageProps } from "./pages/ProjectsPage";
+
+export type PageComponent = LazyExoticComponent<ComponentType<any>>;
+
+export type AppPagePropsMap = {
+  deploy: DeployPageProps;
+  merge: MergePageProps;
+  projects: ProjectsPageProps;
+};
+
+export type AppShellContext = {
+  enabledPages: Array<"projects" | "merge" | "deploy">;
+  projects: ProjectSummary[];
+  deployProjects: ProjectSummary[];
+  branchProjects: ProjectSummary[];
+  selectedProject: string;
+  selectedProjectInfo: ProjectSummary | null;
+  setSelectedProject: (projectKey: string) => void;
+  setPage: (page: "projects" | "merge" | "deploy") => void;
+};
+
+export type DeployModuleContext = {
+  branch: string;
+  setBranch: (value: string) => void;
+  env: string;
+  setEnv: (value: string) => void;
+  target: string;
+  setTarget: Dispatch<SetStateAction<string>>;
+  targetMeta: DeployPageProps["targetMeta"];
+  paramValues: DeployPageProps["paramValues"];
+  defaultParamValues: DeployPageProps["defaultParamValues"];
+  setParamValue: DeployPageProps["onParamChange"];
+  setDeployContextLoadedKey: (value: string) => void;
+  deployContextStatus: "idle" | "loading" | "ready" | "error";
+  deployContextError: string;
+  plan: DeployPageProps["plan"];
+  buildResult: DeployPageProps["buildResult"];
+  buildResultUpdatedAtMs: DeployPageProps["buildResultUpdatedAtMs"];
+  buildAutoRefreshTimedOut: boolean;
+  visibleDeployHistory: DeployPageProps["deployHistory"];
+  handleTriggerBuild: () => Promise<void>;
+  handleTriggerDeployRequest: (
+    request: DeployRequest,
+    busyText?: string,
+  ) => Promise<void>;
+  handleRefreshBuild: () => Promise<void>;
+  handleReplayDeployHistory: DeployPageProps["onReplayDeployHistory"];
+  handleOpenBuildRecord: () => Promise<void>;
+  handleOpenBuildUrl: DeployPageProps["onOpenBuildUrl"];
+  currentDeployRequest: () => DeployRequest;
+  loadDeployHistory: () => Promise<void>;
+  refreshDeployHistoryStatuses: () => Promise<void>;
+  handleClearDeployHistory: () => Promise<void>;
+};
+
+export type BranchModuleContext = {
+  branchEntries: BranchOption[];
+  branchOptions: string[];
+  selectedProjectSelection: ProjectSelectionEntry | null;
+  handleSyncBranches: (projectKey: string) => Promise<void>;
+  branchSyncText: string;
+};
+
+export type MergeSelectionContext = {
+  mergeSource: string;
+  setMergeSource: (value: string) => void;
+  mergeTarget: string;
+  setMergeTarget: (value: string) => void;
+  sourceBranchEntries: BranchOption[];
+  targetBranchEntries: BranchOption[];
+  sourceBranchOptions: string[];
+  targetBranchOptions: string[];
+};
+
+export type MergeModuleContext = {
+  mode: BranchWorkflowMode;
+  setMode: Dispatch<SetStateAction<BranchWorkflowMode>>;
+  projectOptions: Array<{ key: string; name: string }>;
+  syncSource: string;
+  setSyncSource: Dispatch<SetStateAction<string>>;
+  syncTargets: string[];
+  setSyncTargets: Dispatch<SetStateAction<string[]>>;
+  createProjects: string[];
+  setCreateProjects: Dispatch<SetStateAction<string[]>>;
+  createSource: string;
+  setCreateSource: Dispatch<SetStateAction<string>>;
+  createTarget: string;
+  setCreateTarget: Dispatch<SetStateAction<string>>;
+  checkoutSource: string;
+  setCheckoutSource: Dispatch<SetStateAction<string>>;
+  checkoutDestinationDir: string;
+  setCheckoutDestinationDir: Dispatch<SetStateAction<string>>;
+  switchTarget: string;
+  setSwitchTarget: Dispatch<SetStateAction<string>>;
+  pushAction: BranchPushAction;
+  setPushAction: Dispatch<SetStateAction<BranchPushAction>>;
+  pushCommitMessage: string;
+  setPushCommitMessage: Dispatch<SetStateAction<string>>;
+  pushStatus: BranchPushStatus | null;
+  pushStatusLoading: boolean;
+  pushStatusError: string;
+  pushStatusUpdatedAtMs: number;
+  branchTaskResult: BranchTaskResponse | null;
+  visibleBranchTaskHistory: BranchTaskHistoryEntry[];
+  loadBranchTaskHistory: () => Promise<void>;
+  loadPushStatus: (
+    projectKey?: string,
+  ) => Promise<BranchPushStatus | null | undefined>;
+  handleClearBranchTaskHistory: () => Promise<void>;
+  handleChooseCheckoutDirectory: () => Promise<void>;
+  handleExecuteSync: () => Promise<void>;
+  handleExecuteCreate: () => Promise<void>;
+  handleExecuteCheckout: () => Promise<void>;
+  handleExecuteSwitch: () => Promise<void>;
+  handleExecutePush: () => Promise<void>;
+  handleReplayBranchTaskHistory: MergePageProps["onReplayBranchTaskHistory"];
+  handleOpenTaskOutput: (path: string) => Promise<void>;
+};
+
+export type ProjectsModuleContext = {
+  finderTypeOptions: ProjectsPageProps["finderTypeOptions"];
+  finderType: ProjectsPageProps["finderType"];
+  finderTypeCounts: ProjectsPageProps["finderTypeCounts"];
+  finderQuickFilterOptions: ProjectsPageProps["finderQuickFilterOptions"];
+  finderQuickFilter: ProjectsPageProps["finderQuickFilter"];
+  finderQuickFilterCounts: ProjectsPageProps["finderQuickFilterCounts"];
+  finderCategories: ProjectsPageProps["finderCategories"];
+  finderCategory: ProjectsPageProps["finderCategory"];
+  finderCategoryCounts: ProjectsPageProps["finderCategoryCounts"];
+  finderQuery: string;
+  runtimeEntries: ProjectsPageProps["runtimeEntries"];
+  filteredRuntimeEntries: ProjectsPageProps["filteredRuntimeEntries"];
+  shortcutEntries: ProjectsPageProps["shortcutEntries"];
+  filteredShortcutEntries: ProjectsPageProps["filteredShortcutEntries"];
+  favoriteProjectKeys: ProjectsPageProps["favoriteProjectKeys"];
+  recentProjectKeys: ProjectsPageProps["recentProjectKeys"];
+  favoriteShortcutKeys: ProjectsPageProps["favoriteShortcutKeys"];
+  recentShortcutKeys: ProjectsPageProps["recentShortcutKeys"];
+  setFinderType: ProjectsPageProps["onFinderTypeChange"];
+  setFinderQuickFilter: ProjectsPageProps["onFinderQuickFilterChange"];
+  setFinderCategory: ProjectsPageProps["onFinderCategoryChange"];
+  setFinderQuery: ProjectsPageProps["onFinderQueryChange"];
+  toggleProjectFavorite: ProjectsPageProps["onToggleProjectFavorite"];
+  toggleShortcutFavorite: ProjectsPageProps["onToggleShortcutFavorite"];
+  markShortcutUsed: ProjectsPageProps["onMarkShortcutUsed"];
+  loadFinderData: (options?: { force?: boolean }) => Promise<void>;
+  loadProjectRuntimes: () => Promise<void>;
+  handleOpenFinderEntry: (
+    entry: ProjectsPageProps["shortcutEntries"][number]["entry"],
+  ) => Promise<boolean>;
+  handleStartRuntime: (projectKey: string) => Promise<void>;
+  handleStopRuntime: (projectKey: string) => Promise<void>;
+  handleRunBuild: (projectKey: string) => Promise<void>;
+  handleStopBuild: (projectKey: string) => Promise<void>;
+  handleOpenBuildOutput: (projectKey: string) => Promise<void>;
+  handleFocusRuntime: (projectKey: string) => Promise<void>;
+  handleOpenProjectDirectory: (projectKey: string) => Promise<void>;
+  handleReplayProjectWorkflow: (replay: WorkflowProjectReplay) => Promise<void>;
+};
+
+export type BuildModulePropsContext = {
+  appShell: AppShellContext;
+  branchContext: BranchModuleContext;
+  mergeSelection: MergeSelectionContext;
+  deployModule: DeployModuleContext;
+  mergeModule: MergeModuleContext;
+  projectsModule: ProjectsModuleContext;
+  workflowSignals: WorkflowSignalsState;
+  busy: string;
+};
+
+export type ModuleRuntimeContext = {
+  appShell: {
+    loadProjects: (
+      preferredProjectKey?: string,
+      replaceSelection?: boolean,
+    ) => Promise<void>;
+  };
+  deployModule: Pick<DeployModuleContext, "loadDeployHistory">;
+  mergeModule: Pick<MergeModuleContext, "loadBranchTaskHistory">;
+  projectsModule: Pick<ProjectsModuleContext, "loadFinderData">;
+};
+
+export type AppModuleDefinition<TKey extends keyof AppPagePropsMap> = {
+  key: TKey;
+  label: string;
+  shortLabel: string;
+  component: PageComponent;
+  buildProps: (context: BuildModulePropsContext) => AppPagePropsMap[TKey];
+  loadOnStartup?: (context: ModuleRuntimeContext) => Promise<void>;
+};

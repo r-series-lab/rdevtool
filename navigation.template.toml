@@ -1,0 +1,23 @@
+preferred_category = "常用入口"
+
+[[categories]]
+title = "常用入口"
+short_label = "常用"
+
+[[categories.entries]]
+name = "示例平台"
+kind = "url"
+url = "https://example.com/"
+note = "Replace with your team's internal platform entry."
+
+[[categories.entries]]
+name = "示例应用"
+kind = "app"
+bundle_id = "com.example.app"
+note = "优先使用 bundle_id；也可以改成 app_name"
+
+[[categories.entries]]
+name = "示例脚本"
+kind = "script"
+script = "/path/to/scripts/example.sh"
+note = "Use an absolute path when possible; if script is relative, configure an absolute cwd."

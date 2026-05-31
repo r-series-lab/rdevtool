@@ -1,0 +1,13 @@
+/target
+/web/dist
+/web/node_modules
+/src-tauri/target
+node_modules
+dist
+.env
+.env.*
+*.local
+projects.toml
+workspace.toml
+navigation.toml
+*.state.toml

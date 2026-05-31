@@ -1,0 +1,174 @@
+import { Box, Card, CardContent, Stack, Typography } from "@mui/material";
+import { alpha } from "@mui/material/styles";
+import type { ReactNode } from "react";
+import type { CommitInfo } from "../app-types";
+
+export function CommitSummaryCard({
+  title,
+  branch,
+  commit,
+  emptyText = "未读取",
+  formatCommitDate,
+}: {
+  title: string;
+  branch: string;
+  commit?: CommitInfo | null;
+  emptyText?: string;
+  formatCommitDate: (value?: string | null) => string;
+}) {
+  return (
+    <Box
+      sx={{
+        border: "1px solid",
+        borderColor: "divider",
+        borderRadius: "16px",
+        p: 1.15,
+        minWidth: 0,
+        bgcolor: "rgba(255,255,255,0.012)",
+        boxShadow: "inset 0 1px 0 rgba(255,255,255,0.018)",
+      }}
+    >
+      <Stack spacing={0.45} minWidth={0}>
+        <Stack direction="row" spacing={0.6} alignItems="center" minWidth={0}>
+          <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
+            {title}
+          </Typography>
+          <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0, fontWeight: 700 }}>
+            {branch || "-"}
+          </Typography>
+        </Stack>
+        <Typography variant="body2" sx={{ fontWeight: 700, overflowWrap: "anywhere" }}>
+          {commit?.subject || emptyText}
+        </Typography>
+        <Stack direction="row" spacing={0.8} color="text.secondary" minWidth={0}>
+          <Typography variant="caption" noWrap sx={{ minWidth: 0 }}>
+            {commit?.shortHash || "-"}
+          </Typography>
+          <Typography variant="caption" noWrap sx={{ minWidth: 0 }}>
+            {formatCommitDate(commit?.committedAt)}
+          </Typography>
+        </Stack>
+      </Stack>
+    </Box>
+  );
+}
+
+export function HistoryCard({
+  title,
+  subtitle,
+  badge,
+  detail,
+  meta,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  badge?: ReactNode;
+  detail: string;
+  meta: string[];
+  children?: ReactNode;
+}) {
+  return (
+    <Card
+      variant="outlined"
+      sx={{ borderRadius: "16px", bgcolor: "rgba(255,255,255,0.01)", minWidth: 0, maxWidth: "100%" }}
+    >
+      <CardContent sx={{ minWidth: 0, maxWidth: "100%", "&:last-child": { pb: 1.5 } }}>
+        <Stack spacing={0.5} minWidth={0} maxWidth="100%">
+          <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1} minWidth={0}>
+            <Box sx={{ minWidth: 0, flex: 1 }}>
+              <Typography variant="subtitle2" sx={{ fontWeight: 700 }} noWrap>
+                {title}
+              </Typography>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{
+                  display: "block",
+                  mt: 0.25,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  lineHeight: 1.45,
+                }}
+              >
+                {subtitle}
+              </Typography>
+            </Box>
+            <Box sx={{ flexShrink: 0, maxWidth: "46%" }}>{badge}</Box>
+          </Stack>
+          <Typography
+            variant="caption"
+            color="text.secondary"
+            sx={{ display: "block", overflowWrap: "anywhere", lineHeight: 1.45 }}
+          >
+            {detail}
+          </Typography>
+          <Stack
+            direction="row"
+            spacing={0.7}
+            flexWrap="wrap"
+            useFlexGap
+            minWidth={0}
+            rowGap={0.45}
+          >
+            {meta.filter(Boolean).map((item, index) => (
+              <Box
+                key={`${title}-${index}-${item}`}
+                component="span"
+                title={item}
+                sx={(theme) => ({
+                  display: "inline-flex",
+                  alignItems: "center",
+                  maxWidth: "100%",
+                  minHeight: 23,
+                  px: 0.85,
+                  py: 0.12,
+                  borderRadius: "999px",
+                  border: "1px solid",
+                  borderColor:
+                    theme.palette.mode === "dark"
+                      ? alpha(theme.palette.common.white, 0.12)
+                      : "rgba(63,72,87,0.1)",
+                  bgcolor:
+                    theme.palette.mode === "dark"
+                      ? alpha(theme.palette.common.white, 0.045)
+                      : "rgba(63,72,87,0.04)",
+                  color:
+                    theme.palette.mode === "dark"
+                      ? alpha(theme.palette.common.white, 0.72)
+                      : "rgba(54,63,77,0.68)",
+                  boxShadow:
+                    theme.palette.mode === "dark"
+                      ? "inset 0 1px 0 rgba(255,255,255,0.035)"
+                      : "inset 0 1px 0 rgba(255,255,255,0.72)",
+                  fontSize: "0.72rem",
+                  fontWeight: 680,
+                  lineHeight: 1.25,
+                  letterSpacing: 0,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                })}
+              >
+                <Box
+                  component="span"
+                  sx={{
+                    minWidth: 0,
+                    maxWidth: "100%",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {item}
+                </Box>
+              </Box>
+            ))}
+          </Stack>
+          {children}
+        </Stack>
+      </CardContent>
+    </Card>
+  );
+}

@@ -1,0 +1,7 @@
+[app]
+style_mode = "light"
+# default_page = "projects"
+# enabled_pages = ["projects", "merge", "deploy"]
+# Leave enabled_pages empty to use the default menu set and default order.
+# If enabled_pages is provided, only those pages are shown and the order follows the list exactly.
+# Keep dynamic data such as Git branch cache, recent selections, and histories in SQLite.

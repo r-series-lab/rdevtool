@@ -1,0 +1,430 @@
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+const APP_CONFIG_DIR_NAME: &str = "rDevTool";
+const DEFAULT_PROJECTS_TEMPLATE: &str = include_str!("../projects.template.toml");
+const DEFAULT_WORKSPACE_TEMPLATE: &str = include_str!("../workspace.template.toml");
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AppConfig {
+    pub defaults: Defaults,
+    pub projects: Vec<ProjectConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct WorkspaceConfig {
+    #[serde(default)]
+    pub app: WorkspaceAppConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WorkspaceAppConfig {
+    #[serde(default = "default_workspace_style_mode")]
+    pub style_mode: String,
+    #[serde(default)]
+    pub default_page: Option<String>,
+    #[serde(default = "default_workspace_enabled_pages")]
+    pub enabled_pages: Vec<String>,
+}
+
+fn default_workspace_style_mode() -> String {
+    "light".to_string()
+}
+
+fn default_workspace_enabled_pages() -> Vec<String> {
+    vec![
+        "projects".to_string(),
+        "merge".to_string(),
+        "deploy".to_string(),
+    ]
+}
+
+impl Default for WorkspaceAppConfig {
+    fn default() -> Self {
+        Self {
+            style_mode: default_workspace_style_mode(),
+            default_page: None,
+            enabled_pages: default_workspace_enabled_pages(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ConfigPaths {
+    pub dir: PathBuf,
+    pub projects: PathBuf,
+    pub workspace: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Defaults {
+    #[serde(default)]
+    pub jenkins_profiles: BTreeMap<String, JenkinsProfileConfig>,
+    #[serde(default)]
+    pub jenkins_base_url: String,
+    #[serde(default)]
+    pub jenkins_username: String,
+    #[serde(default)]
+    pub jenkins_password: Option<String>,
+    #[serde(default = "default_jenkins_password_env")]
+    pub jenkins_password_env: String,
+    #[serde(default)]
+    pub jenkins_password_fallback_file: Option<PathBuf>,
+    #[serde(default)]
+    pub gitlab_api_base_url: Option<String>,
+    #[serde(default = "default_gitlab_token_env")]
+    pub gitlab_token_env: String,
+    #[serde(default)]
+    pub gitlab_token: Option<String>,
+    #[serde(default)]
+    pub branch_rules: BranchRules,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct JenkinsProfileConfig {
+    pub base_url: String,
+    pub username: String,
+    #[serde(default)]
+    pub password: Option<String>,
+    #[serde(default = "default_jenkins_password_env")]
+    pub password_env: String,
+    #[serde(default)]
+    pub password_fallback_file: Option<PathBuf>,
+}
+
+fn default_jenkins_password_env() -> String {
+    "JENKINS_PASSWORD".to_string()
+}
+
+fn default_gitlab_token_env() -> String {
+    "GITLAB_TOKEN".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectConfig {
+    pub key: String,
+    pub name: String,
+    #[serde(default = "default_project_category")]
+    pub category: String,
+    #[serde(default)]
+    pub repo_path: Option<PathBuf>,
+    #[serde(default)]
+    pub git_url: String,
+    #[serde(default)]
+    pub deploy_targets: Vec<DeployTargetConfig>,
+    #[serde(default)]
+    pub jobs: Jobs,
+    #[serde(default)]
+    pub dev: Option<ProjectCommandConfig>,
+    #[serde(default)]
+    pub build: Option<ProjectCommandConfig>,
+    #[serde(default)]
+    pub focus: ProjectFocusConfig,
+    #[serde(default)]
+    pub branch_rules: BranchRules,
+}
+
+fn default_project_category() -> String {
+    "Workspace".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProjectCommandConfig {
+    pub command: String,
+    #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
+    pub output_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProjectFocusConfig {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub bundle_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BranchRules {
+    #[serde(default = "default_source_branch_keywords")]
+    pub source_keywords: Vec<String>,
+    #[serde(default = "default_target_branch_keywords")]
+    pub target_keywords: Vec<String>,
+}
+
+impl Default for BranchRules {
+    fn default() -> Self {
+        Self {
+            source_keywords: default_source_branch_keywords(),
+            target_keywords: default_target_branch_keywords(),
+        }
+    }
+}
+
+fn default_source_branch_keywords() -> Vec<String> {
+    vec!["release".to_string(), "feature".to_string()]
+}
+
+fn default_target_branch_keywords() -> Vec<String> {
+    vec![
+        "variant".to_string(),
+        "pre".to_string(),
+        "master".to_string(),
+        "release".to_string(),
+    ]
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeployTargetConfig {
+    pub key: String,
+    pub label: String,
+    pub jenkins_profile: String,
+    pub job_name: String,
+    #[serde(default)]
+    pub params: Vec<DeployParamConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DeployParamConfig {
+    pub key: String,
+    pub label: String,
+    #[serde(rename = "type")]
+    pub kind: DeployParamKind,
+    #[serde(default)]
+    pub default: Option<String>,
+    #[serde(default)]
+    pub options: Vec<String>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
+    pub true_value: Option<String>,
+    #[serde(default)]
+    pub false_value: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeployParamKind {
+    Select,
+    Boolean,
+    Branch,
+    Text,
+    Hidden,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct Jobs {
+    #[serde(default)]
+    pub standard: JobConfig,
+    #[serde(default)]
+    pub variant: Option<JobConfig>,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct JobConfig {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub params: Vec<String>,
+    #[serde(default)]
+    pub default_params: BTreeMap<String, String>,
+}
+
+pub fn load_config(path: &Path) -> Result<AppConfig> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read config: {}", path.display()))?;
+    let config: AppConfig = toml::from_str(&content)
+        .with_context(|| format!("failed to parse config: {}", path.display()))?;
+    Ok(config)
+}
+
+pub fn save_config(path: &Path, config: &AppConfig) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create config directory: {}", parent.display()))?;
+    }
+
+    let content = toml::to_string_pretty(config)
+        .with_context(|| format!("failed to serialize config: {}", path.display()))?;
+    fs::write(path, content)
+        .with_context(|| format!("failed to write config: {}", path.display()))?;
+    Ok(())
+}
+
+pub fn load_workspace_config(path: &Path) -> Result<WorkspaceConfig> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read workspace config: {}", path.display()))?;
+    let config: WorkspaceConfig = toml::from_str(&content)
+        .with_context(|| format!("failed to parse workspace config: {}", path.display()))?;
+    Ok(config)
+}
+
+pub fn save_workspace_config(path: &Path, config: &WorkspaceConfig) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create workspace config directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+
+    let content = toml::to_string_pretty(config)
+        .with_context(|| format!("failed to serialize workspace config: {}", path.display()))?;
+    fs::write(path, content)
+        .with_context(|| format!("failed to write workspace config: {}", path.display()))?;
+    Ok(())
+}
+
+pub fn default_config_dir() -> PathBuf {
+    let Some(home) = std::env::var_os("HOME") else {
+        return PathBuf::from(".rdevtool");
+    };
+    let home = PathBuf::from(home);
+    if cfg!(target_os = "macos") {
+        home.join("Library")
+            .join("Application Support")
+            .join(APP_CONFIG_DIR_NAME)
+    } else {
+        home.join(".config").join(APP_CONFIG_DIR_NAME)
+    }
+}
+
+pub fn default_projects_path() -> PathBuf {
+    default_config_dir().join("projects.toml")
+}
+
+pub fn default_workspace_path() -> PathBuf {
+    default_config_dir().join("workspace.toml")
+}
+
+pub fn legacy_projects_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("projects.toml")
+}
+
+pub fn ensure_default_configs() -> Result<ConfigPaths> {
+    let dir = default_config_dir();
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create config directory: {}", dir.display()))?;
+
+    let projects = default_projects_path();
+    let legacy = legacy_projects_path();
+    if !projects.exists() {
+        if legacy.exists() {
+            fs::copy(&legacy, &projects).with_context(|| {
+                format!(
+                    "failed to migrate legacy config from {} to {}",
+                    legacy.display(),
+                    projects.display()
+                )
+            })?;
+        } else {
+            fs::write(&projects, DEFAULT_PROJECTS_TEMPLATE).with_context(|| {
+                format!(
+                    "failed to write default projects config: {}",
+                    projects.display()
+                )
+            })?;
+        }
+    } else if legacy.exists() && is_starter_projects_config(&projects) {
+        fs::copy(&legacy, &projects).with_context(|| {
+            format!(
+                "failed to replace starter config from {} to {}",
+                legacy.display(),
+                projects.display()
+            )
+        })?;
+    }
+
+    let workspace = default_workspace_path();
+    if !workspace.exists() {
+        fs::write(&workspace, DEFAULT_WORKSPACE_TEMPLATE).with_context(|| {
+            format!(
+                "failed to write default workspace config: {}",
+                workspace.display()
+            )
+        })?;
+    }
+
+    Ok(ConfigPaths {
+        dir,
+        projects,
+        workspace,
+    })
+}
+
+fn is_starter_projects_config(path: &Path) -> bool {
+    let Ok(content) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(config) = toml::from_str::<AppConfig>(&content) else {
+        return false;
+    };
+    config.projects.len() == 1
+        && config
+            .projects
+            .first()
+            .is_some_and(|item| item.key == "example-web")
+}
+
+pub fn resolve_config_path(requested: &Path) -> Result<PathBuf> {
+    if requested.exists() {
+        return Ok(requested.to_path_buf());
+    }
+
+    let fallback = PathBuf::from("projects.example.toml");
+    if fallback.exists() {
+        return Ok(fallback);
+    }
+
+    bail!(
+        "config not found: {} (and fallback projects.example.toml is missing)",
+        requested.display()
+    );
+}
+
+impl AppConfig {
+    pub fn find_project(&self, key: &str) -> Result<&ProjectConfig> {
+        self.projects
+            .iter()
+            .find(|project| project.key == key)
+            .with_context(|| format!("project not found: {key}"))
+    }
+
+    pub fn branch_rules_for_project(&self, key: &str) -> Result<BranchRules> {
+        let project = self.find_project(key)?;
+        Ok(BranchRules {
+            source_keywords: if project.branch_rules.source_keywords.is_empty() {
+                self.defaults.branch_rules.source_keywords.clone()
+            } else {
+                project.branch_rules.source_keywords.clone()
+            },
+            target_keywords: if project.branch_rules.target_keywords.is_empty() {
+                self.defaults.branch_rules.target_keywords.clone()
+            } else {
+                project.branch_rules.target_keywords.clone()
+            },
+        })
+    }
+}
+
+impl ProjectConfig {
+    pub fn category_label(&self) -> &str {
+        let value = self.category.trim();
+        if value.is_empty() { "Workspace" } else { value }
+    }
+
+    pub fn supports_deploy(&self) -> bool {
+        !self.deploy_targets.is_empty()
+    }
+
+    pub fn supports_branch(&self) -> bool {
+        self.repo_path.is_some() && !self.git_url.trim().is_empty()
+    }
+}

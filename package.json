@@ -1,0 +1,20 @@
+{
+  "name": "rdevtool",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "node ./scripts/dev.mjs",
+    "prebuild": "npm run clean:build-cache",
+    "build": "cd src-tauri && ../web/node_modules/.bin/tauri build --config tauri.conf.json",
+    "cli": "cargo run --quiet --",
+    "cli:json": "cargo run --quiet -- --json",
+    "web:install": "npm --prefix web install",
+    "web:dev": "npm --prefix web run dev",
+    "web:build": "npm --prefix web run build",
+    "rust-check": "cargo check --manifest-path ./src-tauri/Cargo.toml",
+    "size": "du -sh ./target ./web/node_modules ./web/dist 2>/dev/null || true",
+    "clean:build-cache": "cargo clean --manifest-path ./src-tauri/Cargo.toml -p rdevtool-core -p rdevtool-tauri && rm -rf ./web/dist ./target/release/bundle",
+    "clean": "cargo clean --manifest-path ./src-tauri/Cargo.toml && rm -rf ./web/dist",
+    "clean:all": "cargo clean --manifest-path ./src-tauri/Cargo.toml && rm -rf ./web/dist ./web/node_modules"
+  }
+}
