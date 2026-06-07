@@ -78,6 +78,9 @@ export type WorkflowSignal = {
   title: string;
   summary: string;
   createdAt: string;
+  chainId?: string | null;
+  parentActivityId?: string | null;
+  sourceStepLabel?: string | null;
   payload: {
     projectKey: string;
     projectName: string;
@@ -488,6 +491,15 @@ export function normalizeWorkflowSignal(value: unknown): WorkflowSignal | null {
     title: typeof candidate.title === "string" ? candidate.title : workflowSourceLabel(source),
     summary: typeof candidate.summary === "string" ? candidate.summary : "",
     createdAt: candidate.createdAt,
+    chainId: typeof candidate.chainId === "string" && candidate.chainId ? candidate.chainId : null,
+    parentActivityId:
+      typeof candidate.parentActivityId === "string" && candidate.parentActivityId
+        ? candidate.parentActivityId
+        : null,
+    sourceStepLabel:
+      typeof candidate.sourceStepLabel === "string" && candidate.sourceStepLabel
+        ? candidate.sourceStepLabel
+        : null,
     payload: {
       projectKey: typeof payload.projectKey === "string" ? payload.projectKey : "",
       projectName: typeof payload.projectName === "string" ? payload.projectName : "",
@@ -644,6 +656,9 @@ export function createBranchTaskSignals({
   sourceBranch,
   targetBranches,
   result,
+  chainId,
+  parentActivityId,
+  sourceStepLabel,
 }: {
   broadcasts: WorkflowBroadcastRule[];
   replay?: WorkflowReplay | null;
@@ -652,6 +667,9 @@ export function createBranchTaskSignals({
   sourceBranch: string;
   targetBranches: string[];
   result: BranchTaskResponse;
+  chainId?: string;
+  parentActivityId?: string;
+  sourceStepLabel?: string;
 }): WorkflowSignal[] {
   const source = workflowSourceForBranchTask(result.taskKind);
   const replayKey = replay ? workflowReplayKey(replay) : "";
@@ -679,6 +697,9 @@ export function createBranchTaskSignals({
       title: workflowSourceLabel(source),
       summary: result.summary,
       createdAt: new Date().toISOString(),
+      chainId: chainId || null,
+      parentActivityId: parentActivityId || null,
+      sourceStepLabel: sourceStepLabel || null,
       payload: {
         projectKey,
         projectName,
@@ -693,10 +714,16 @@ export function createProjectWorkflowSignals({
   broadcasts,
   replay,
   summary,
+  chainId,
+  parentActivityId,
+  sourceStepLabel,
 }: {
   broadcasts: WorkflowBroadcastRule[];
   replay: WorkflowProjectReplay;
   summary?: string;
+  chainId?: string;
+  parentActivityId?: string;
+  sourceStepLabel?: string;
 }): WorkflowSignal[] {
   const source = workflowSourceForProjectAction(replay.action);
   const replayKey = workflowReplayKey(replay);
@@ -727,6 +754,9 @@ export function createProjectWorkflowSignals({
       title: workflowSourceLabel(source),
       summary: summary || workflowReplayLabel(replay),
       createdAt: new Date().toISOString(),
+      chainId: chainId || null,
+      parentActivityId: parentActivityId || null,
+      sourceStepLabel: sourceStepLabel || null,
       payload: {
         projectKey,
         projectName,

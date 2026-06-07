@@ -7,6 +7,7 @@ import type {
   ActivityStatus,
   ActivityUpdater,
 } from "../lib/activityCenter";
+import { stableActivityJson } from "../lib/activityCenter";
 import { getStoredJson, setStoredJson } from "../lib/storage";
 import {
   createProjectWorkflowSignals,
@@ -33,6 +34,8 @@ type NavigationEntry = {
   kind: string;
   targetLabel: string;
   url?: string | null;
+  browser?: string | null;
+  browserProfile?: string | null;
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
@@ -72,6 +75,7 @@ type FinderPreferences = {
   recentProjectKeys: string[];
   favoriteShortcutKeys: string[];
   recentShortcutKeys: string[];
+  debugProfileKeysByProject: Record<string, string>;
   lastFinderType?: FinderType;
   lastFinderCategory?: string;
   lastFinderQuickFilter?: FinderQuickFilter;
@@ -81,11 +85,18 @@ type LoadFinderDataOptions = {
   force?: boolean;
 };
 
+type ProjectWorkflowReplayOptions = {
+  chainId?: string | null;
+  parentId?: string | null;
+  stepLabel?: string | null;
+};
+
 const EMPTY_FINDER_PREFERENCES: FinderPreferences = {
   favoriteProjectKeys: [],
   recentProjectKeys: [],
   favoriteShortcutKeys: [],
   recentShortcutKeys: [],
+  debugProfileKeysByProject: {},
 };
 
 function normalizeFinderType(value: unknown): FinderType | undefined {
@@ -116,6 +127,139 @@ function normalizeStringArray(value: unknown): string[] {
   );
 }
 
+function normalizeStringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const next: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const normalizedKey = key.trim();
+    const normalizedValue = item.trim();
+    if (normalizedKey && normalizedValue) {
+      next[normalizedKey] = normalizedValue;
+    }
+  }
+  return next;
+}
+
+function normalizeRuntimeEnvOverrides(
+  value?: Record<string, string> | null,
+): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  const next: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item !== "string") {
+      continue;
+    }
+    const normalizedKey = key.trim();
+    if (normalizedKey) {
+      next[normalizedKey] = item;
+    }
+  }
+  return next;
+}
+
+function normalizeRuntimeEntries(value: unknown): ProjectRuntimeEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.filter(
+    (item): item is ProjectRuntimeEntry =>
+      Boolean(
+        item &&
+          typeof item === "object" &&
+          typeof (item as { key?: unknown }).key === "string",
+      ),
+  );
+}
+
+function normalizeNavigationData(value: unknown): NavigationData | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const data = value as {
+    filePath?: unknown;
+    preferredCategory?: unknown;
+    categories?: unknown;
+  };
+  const categories = Array.isArray(data.categories)
+    ? data.categories
+        .filter((category): category is Record<string, unknown> =>
+          Boolean(category && typeof category === "object"),
+        )
+        .map((category) => ({
+          title: typeof category.title === "string" ? category.title : "",
+          shortLabel:
+            typeof category.shortLabel === "string" ? category.shortLabel : "",
+          entries: Array.isArray(category.entries)
+            ? category.entries.filter(
+                (entry): entry is NavigationEntry =>
+                  Boolean(entry && typeof entry === "object"),
+              )
+            : [],
+        }))
+        .filter((category) => category.title || category.entries.length > 0)
+    : [];
+
+  return {
+    filePath: typeof data.filePath === "string" ? data.filePath : "",
+    preferredCategory:
+      typeof data.preferredCategory === "string" ? data.preferredCategory : null,
+    categories,
+  };
+}
+
+function projectWorkflowActionLabel(action: ProjectWorkflowAction) {
+  switch (action) {
+    case "project.runtime.start":
+      return "启动 dev 服务";
+    case "project.runtime.stop":
+      return "停止 dev 服务";
+    case "project.build.run":
+      return "执行构建";
+    case "project.build.stop":
+      return "中止构建";
+    case "project.build.openOutput":
+      return "打开构建产物";
+    case "project.runtime.focus":
+      return "唤起项目";
+    case "project.openDirectory":
+      return "打开项目目录";
+    case "finder.shortcut.open":
+      return "打开入口";
+  }
+}
+
+function projectActivityExecutionKey(
+  action: ProjectWorkflowAction | string,
+  projectKey: string,
+  variant = "",
+) {
+  return `project:${action}:${projectKey}:${variant}`;
+}
+
+function shortcutActivityExecutionKey(entry: NavigationEntry) {
+  return `shortcut:finder.shortcut.open:${stableActivityJson({
+    appName: entry.appName ?? null,
+    browser: entry.browser ?? null,
+    browserProfile: entry.browserProfile ?? null,
+    bundleId: entry.bundleId ?? null,
+    cwd: entry.cwd ?? null,
+    kind: entry.kind,
+    name: entry.name,
+    script: entry.script ?? null,
+    targetLabel: entry.targetLabel,
+    url: entry.url ?? null,
+  })}`;
+}
+
 function normalizeFinderPreferences(value: unknown): FinderPreferences {
   if (!value || typeof value !== "object") {
     return EMPTY_FINDER_PREFERENCES;
@@ -132,6 +276,7 @@ function normalizeFinderPreferences(value: unknown): FinderPreferences {
       0,
       MAX_RECENT_FINDER_ITEMS,
     ),
+    debugProfileKeysByProject: normalizeStringRecord(record.debugProfileKeysByProject),
     lastFinderType: normalizeFinderType(record.lastFinderType),
     lastFinderCategory:
       typeof record.lastFinderCategory === "string" &&
@@ -294,20 +439,29 @@ export type ProjectsModuleState = {
   recentProjectKeys: string[];
   favoriteShortcutKeys: string[];
   recentShortcutKeys: string[];
+  selectedDebugProfileKeys: Record<string, string>;
   toggleProjectFavorite: (projectKey: string) => void;
   toggleShortcutFavorite: (item: FinderShortcutItem) => void;
+  setProjectDebugProfile: (projectKey: string, profileKey: string) => void;
   markShortcutUsed: (item: FinderShortcutItem) => void;
   loadFinderData: (options?: LoadFinderDataOptions) => Promise<void>;
   loadProjectRuntimes: () => Promise<void>;
   handleOpenFinderEntry: (entry: NavigationEntry) => Promise<boolean>;
-  handleStartRuntime: (projectKey: string) => Promise<void>;
+  handleStartRuntime: (
+    projectKey: string,
+    debugProfileKey?: string,
+    envOverrides?: Record<string, string>,
+  ) => Promise<void>;
   handleStopRuntime: (projectKey: string) => Promise<void>;
   handleRunBuild: (projectKey: string) => Promise<void>;
   handleStopBuild: (projectKey: string) => Promise<void>;
   handleOpenBuildOutput: (projectKey: string) => Promise<void>;
   handleFocusRuntime: (projectKey: string) => Promise<void>;
   handleOpenProjectDirectory: (projectKey: string) => Promise<void>;
-  handleReplayProjectWorkflow: (replay: WorkflowProjectReplay) => Promise<void>;
+  handleReplayProjectWorkflow: (
+    replay: WorkflowProjectReplay,
+    options?: ProjectWorkflowReplayOptions,
+  ) => Promise<void>;
 };
 
 export function useProjectsModule({
@@ -335,9 +489,18 @@ export function useProjectsModule({
   const finderDataPromiseRef = useRef<Promise<void> | null>(null);
   const activeRuntimeKeysRef = useRef<string[]>([]);
   const activeBuildActivityIdsRef = useRef<Record<string, string>>({});
+  const projectWorkflowReplayOptionsRef = useRef<ProjectWorkflowReplayOptions | null>(null);
   const previousRuntimeStatesRef = useRef<
     Map<string, { statusKey: string; buildStatusKey: string }>
   >(new Map());
+  const runtimeItems = useMemo(
+    () => normalizeRuntimeEntries(runtimeEntries),
+    [runtimeEntries],
+  );
+  const navigationCategories = useMemo(
+    () => (Array.isArray(navigationData?.categories) ? navigationData.categories : []),
+    [navigationData?.categories],
+  );
 
   const favoriteProjectKeySet = useMemo(
     () => new Set(preferences.favoriteProjectKeys),
@@ -362,7 +525,7 @@ export function useProjectsModule({
       return [] as FinderShortcutItem[];
     }
 
-    return (navigationData?.categories ?? []).flatMap((category) =>
+    return navigationCategories.flatMap((category) =>
       category.entries
         .filter((entry) => entry.kind === expectedKind)
         .map((entry) => ({
@@ -371,28 +534,28 @@ export function useProjectsModule({
           entry,
         })),
     );
-  }, [finderType, navigationData?.categories]);
+  }, [finderType, navigationCategories]);
 
   const finderTypeCounts = useMemo(
     () => ({
-      项目: runtimeEntries.length,
-      网站: (navigationData?.categories ?? []).reduce(
+      项目: runtimeItems.length,
+      网站: navigationCategories.reduce(
         (count, category) =>
           count + category.entries.filter((entry) => entry.kind === "url").length,
         0,
       ),
-      应用: (navigationData?.categories ?? []).reduce(
+      应用: navigationCategories.reduce(
         (count, category) =>
           count + category.entries.filter((entry) => entry.kind === "app").length,
         0,
       ),
-      脚本: (navigationData?.categories ?? []).reduce(
+      脚本: navigationCategories.reduce(
         (count, category) =>
           count + category.entries.filter((entry) => entry.kind === "script").length,
         0,
       ),
     }),
-    [navigationData?.categories, runtimeEntries],
+    [navigationCategories, runtimeItems],
   );
 
   const finderCategories = useMemo(() => {
@@ -428,10 +591,10 @@ export function useProjectsModule({
   const finderQuickFilterCounts = useMemo(() => {
     if (finderType === "项目") {
       return {
-        全部: runtimeEntries.length,
-        收藏: runtimeEntries.filter((item) => favoriteProjectKeySet.has(item.key))
+        全部: runtimeItems.length,
+        收藏: runtimeItems.filter((item) => favoriteProjectKeySet.has(item.key))
           .length,
-        最近: runtimeEntries.filter((item) => recentProjectKeySet.has(item.key))
+        最近: runtimeItems.filter((item) => recentProjectKeySet.has(item.key))
           .length,
       };
     }
@@ -451,7 +614,7 @@ export function useProjectsModule({
     finderType,
     recentProjectKeySet,
     recentShortcutKeySet,
-    runtimeEntries,
+    runtimeItems,
     shortcutEntriesInCategory,
   ]);
 
@@ -486,7 +649,7 @@ export function useProjectsModule({
     const recentOrder = new Map(
       preferences.recentProjectKeys.map((key, index) => [key, index] as const),
     );
-    const filtered = runtimeEntries.filter((item) => {
+    const filtered = runtimeItems.filter((item) => {
       if (finderType !== "项目") {
         return false;
       }
@@ -516,7 +679,7 @@ export function useProjectsModule({
     finderType,
     preferences.recentProjectKeys,
     recentProjectKeySet,
-    runtimeEntries,
+    runtimeItems,
   ]);
 
   const filteredShortcutEntries = useMemo(() => {
@@ -564,10 +727,10 @@ export function useProjectsModule({
 
   const activeRuntimeKeys = useMemo(
     () =>
-      runtimeEntries
+      runtimeItems
         .filter((item) => item.canStop || item.canStopBuild)
         .map((item) => item.key),
-    [runtimeEntries],
+    [runtimeItems],
   );
   const activeRuntimePollingKey = useMemo(
     () => activeRuntimeKeys.join("|"),
@@ -576,20 +739,25 @@ export function useProjectsModule({
 
   function replaceRuntimeEntry(projectKey: string, updated: ProjectRuntimeEntry) {
     setRuntimeEntries((current) =>
-      current.map((item) => (item.key === projectKey ? updated : item)),
+      normalizeRuntimeEntries(current).map((item) =>
+        item.key === projectKey ? updated : item,
+      ),
     );
   }
 
-  function mergeRuntimeEntries(updatedEntries: ProjectRuntimeEntry[]) {
-    if (updatedEntries.length === 0) {
+  function mergeRuntimeEntries(updatedEntries: unknown) {
+    const normalizedEntries = normalizeRuntimeEntries(updatedEntries);
+    if (normalizedEntries.length === 0) {
       return;
     }
 
     const updatedEntriesMap = new Map(
-      updatedEntries.map((item) => [item.key, item] as const),
+      normalizedEntries.map((item) => [item.key, item] as const),
     );
     setRuntimeEntries((current) =>
-      current.map((item) => updatedEntriesMap.get(item.key) ?? item),
+      normalizeRuntimeEntries(current).map(
+        (item) => updatedEntriesMap.get(item.key) ?? item,
+      ),
     );
   }
 
@@ -610,7 +778,7 @@ export function useProjectsModule({
   }
 
   function runtimeEntryForActivity(projectKey: string) {
-    return runtimeEntries.find((item) => item.key === projectKey);
+    return runtimeItems.find((item) => item.key === projectKey);
   }
 
   function runtimeProjectName(projectKey: string) {
@@ -629,18 +797,47 @@ export function useProjectsModule({
     };
   }
 
+  function projectWorkflowChainFields(fallbackStepLabel: string) {
+    const options = projectWorkflowReplayOptionsRef.current;
+    if (!options?.chainId) {
+      return {};
+    }
+    return {
+      chainId: options.chainId,
+      parentId: options.parentId ?? null,
+      stepLabel: options.stepLabel || fallbackStepLabel,
+      chainLabel: "联动链路",
+    };
+  }
+
   async function emitProjectWorkflowSignals(
     replay: WorkflowProjectReplay,
     summary?: string,
+    chain?: {
+      sourceActivityId?: string;
+      sourceStepLabel?: string;
+      chainId?: string | null;
+    },
   ) {
     try {
-      await emitWorkflowSignals(
-        createProjectWorkflowSignals({
-          broadcasts: workflowBroadcastRules,
-          replay,
-          summary,
-        }),
-      );
+      const nextChainId =
+        chain?.chainId || (chain?.sourceActivityId ? `chain:${chain.sourceActivityId}` : "");
+      const signals = createProjectWorkflowSignals({
+        broadcasts: workflowBroadcastRules,
+        replay,
+        summary,
+        chainId: nextChainId,
+        parentActivityId: chain?.sourceActivityId,
+        sourceStepLabel: chain?.sourceStepLabel,
+      });
+      if (signals.length > 0 && chain?.sourceActivityId && nextChainId) {
+        updateActivity?.(chain.sourceActivityId, {
+          chainId: nextChainId,
+          stepLabel: chain.sourceStepLabel || projectWorkflowActionLabel(replay.action),
+          chainLabel: "联动链路",
+        });
+      }
+      await emitWorkflowSignals(signals);
     } catch (reason) {
       setError(String(reason));
     }
@@ -708,6 +905,26 @@ export function useProjectsModule({
     }));
   }
 
+  function setProjectDebugProfile(projectKey: string, profileKey: string) {
+    const normalizedProjectKey = projectKey.trim();
+    if (!normalizedProjectKey) {
+      return;
+    }
+    const normalizedProfileKey = profileKey.trim();
+    updatePreferences((current) => {
+      const nextProfiles = { ...current.debugProfileKeysByProject };
+      if (normalizedProfileKey) {
+        nextProfiles[normalizedProjectKey] = normalizedProfileKey;
+      } else {
+        delete nextProfiles[normalizedProjectKey];
+      }
+      return {
+        ...current,
+        debugProfileKeysByProject: nextProfiles,
+      };
+    });
+  }
+
   function markShortcutUsed(item: FinderShortcutItem) {
     const shortcutKey = buildFinderShortcutKey(item);
     updatePreferences((current) => ({
@@ -730,13 +947,13 @@ export function useProjectsModule({
     }
     try {
       if (options?.projectKeys?.length) {
-        const items = await invoke<ProjectRuntimeEntry[]>("list_selected_project_runtimes", {
+        const items = await invoke<unknown>("list_selected_project_runtimes", {
           projects: options.projectKeys,
         });
         mergeRuntimeEntries(items);
       } else {
-        const items = await invoke<ProjectRuntimeEntry[]>("list_project_runtimes");
-        setRuntimeEntries(items);
+        const items = await invoke<unknown>("list_project_runtimes");
+        setRuntimeEntries(normalizeRuntimeEntries(items));
       }
       setError("");
     } catch (reason) {
@@ -750,8 +967,8 @@ export function useProjectsModule({
       return;
     }
     try {
-      const data = await invoke<NavigationData>("load_page_navigation");
-      setNavigationData(data);
+      const data = await invoke<unknown>("load_page_navigation");
+      setNavigationData(normalizeNavigationData(data));
     } catch (reason) {
       setError(String(reason));
     }
@@ -954,6 +1171,7 @@ export function useProjectsModule({
             title: "构建完成",
             summary: runtimeActivitySummary(item.buildStatusLabel, item.buildDetail),
             detail: item.buildLogPath || item.buildOutputDir || null,
+            executionKey: projectActivityExecutionKey("project.build.run", item.key),
             projectKey: item.key,
             projectName: item.name,
             target: runtimeActivityTarget(item.key),
@@ -973,6 +1191,11 @@ export function useProjectsModule({
           title: item.statusKey === "exited" ? "dev 服务已退出" : "dev 服务异常退出",
           summary: runtimeActivitySummary(item.statusLabel, item.detail),
           detail: item.logPath || null,
+          executionKey: projectActivityExecutionKey(
+            "project.runtime.exit",
+            item.key,
+            item.statusKey,
+          ),
           projectKey: item.key,
           projectName: item.name,
           target: runtimeActivityTarget(item.key),
@@ -982,7 +1205,7 @@ export function useProjectsModule({
     }
 
     previousRuntimeStatesRef.current = new Map(
-      runtimeEntries.map((item) => [
+      runtimeItems.map((item) => [
         item.key,
         {
           statusKey: item.statusKey,
@@ -990,7 +1213,7 @@ export function useProjectsModule({
         },
       ]),
     );
-  }, [enabled, recordActivity, runtimeEntries, updateActivity]);
+  }, [enabled, recordActivity, runtimeItems, updateActivity]);
 
   async function handleOpenFinderEntry(entry: NavigationEntry): Promise<boolean> {
     if (!enabled) {
@@ -1005,6 +1228,8 @@ export function useProjectsModule({
         title: "打开入口",
         summary: `${entry.name} · ${entry.targetLabel}`,
         detail: entry.note || entry.url || entry.bundleId || entry.script || null,
+        executionKey: shortcutActivityExecutionKey(entry),
+        ...projectWorkflowChainFields("打开入口"),
         resource: shortcutResource(entry),
         target: {
           page: "projects",
@@ -1036,10 +1261,19 @@ export function useProjectsModule({
     }
   }
 
-  async function handleStartRuntime(projectKey: string) {
+  async function handleStartRuntime(
+    projectKey: string,
+    debugProfileKey?: string,
+    envOverrides?: Record<string, string>,
+  ) {
     if (!enabled) {
       return;
     }
+    const selectedDebugProfile =
+      (debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey] ?? "").trim();
+    const hasExplicitEnvOverrides = envOverrides != null;
+    const normalizedEnvOverrides = normalizeRuntimeEnvOverrides(envOverrides);
+    const envOverrideCount = Object.keys(normalizedEnvOverrides).length;
 
     setBusy("正在启动 dev 服务");
     setError("");
@@ -1048,7 +1282,19 @@ export function useProjectsModule({
         kind: "runtime",
         status: "running",
         title: "启动 dev 服务",
-        summary: runtimeProjectName(projectKey),
+        summary: hasExplicitEnvOverrides && envOverrideCount
+          ? `${runtimeProjectName(projectKey)} · 临时参数 ${envOverrideCount} 项`
+          : runtimeProjectName(projectKey),
+        executionKey: projectActivityExecutionKey(
+          "project.runtime.start",
+          projectKey,
+          hasExplicitEnvOverrides
+            ? `${selectedDebugProfile || "default"}:${stableActivityJson(
+                normalizedEnvOverrides,
+              )}`
+            : selectedDebugProfile || "default",
+        ),
+        ...projectWorkflowChainFields("启动 dev 服务"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
         target: runtimeActivityTarget(projectKey),
@@ -1056,12 +1302,19 @@ export function useProjectsModule({
     try {
       const updated = await invoke<ProjectRuntimeEntry>("start_project_runtime", {
         project: projectKey,
+        debugProfile: selectedDebugProfile || null,
+        envOverrides: hasExplicitEnvOverrides ? normalizedEnvOverrides : null,
       });
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
       await emitProjectWorkflowSignals(
         projectWorkflowReplay(projectKey, "project.runtime.start"),
         runtimeStartActivitySummary(updated),
+        {
+          sourceActivityId: activityId,
+          sourceStepLabel: "启动 dev 服务",
+          chainId: projectWorkflowReplayOptionsRef.current?.chainId,
+        },
       );
       if (activityId) {
         updateActivity?.(activityId, {
@@ -1101,6 +1354,8 @@ export function useProjectsModule({
         status: "running",
         title: "停止 dev 服务",
         summary: runtimeProjectName(projectKey),
+        executionKey: projectActivityExecutionKey("project.runtime.stop", projectKey),
+        ...projectWorkflowChainFields("停止 dev 服务"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
         target: runtimeActivityTarget(projectKey),
@@ -1114,6 +1369,11 @@ export function useProjectsModule({
       await emitProjectWorkflowSignals(
         projectWorkflowReplay(projectKey, "project.runtime.stop"),
         runtimeActivitySummary(updated.statusLabel, updated.detail),
+        {
+          sourceActivityId: activityId,
+          sourceStepLabel: "停止 dev 服务",
+          chainId: projectWorkflowReplayOptionsRef.current?.chainId,
+        },
       );
       if (activityId) {
         updateActivity?.(activityId, {
@@ -1152,6 +1412,8 @@ export function useProjectsModule({
         status: "running",
         title: "执行构建",
         summary: runtimeProjectName(projectKey),
+        executionKey: projectActivityExecutionKey("project.build.run", projectKey),
+        ...projectWorkflowChainFields("执行构建"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
         target: runtimeActivityTarget(projectKey),
@@ -1165,6 +1427,11 @@ export function useProjectsModule({
       await emitProjectWorkflowSignals(
         projectWorkflowReplay(projectKey, "project.build.run"),
         runtimeActivitySummary(updated.buildStatusLabel, updated.buildDetail),
+        {
+          sourceActivityId: activityId,
+          sourceStepLabel: "执行构建",
+          chainId: projectWorkflowReplayOptionsRef.current?.chainId,
+        },
       );
       if (activityId) {
         if (updated.buildStatusKey === "running") {
@@ -1216,6 +1483,8 @@ export function useProjectsModule({
         status: "running",
         title: "中止构建",
         summary: runtimeProjectName(projectKey),
+        executionKey: projectActivityExecutionKey("project.build.stop", projectKey),
+        ...projectWorkflowChainFields("中止构建"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
         target: runtimeActivityTarget(projectKey),
@@ -1230,6 +1499,11 @@ export function useProjectsModule({
       await emitProjectWorkflowSignals(
         projectWorkflowReplay(projectKey, "project.build.stop"),
         runtimeActivitySummary(updated.buildStatusLabel, updated.buildDetail),
+        {
+          sourceActivityId: activityId,
+          sourceStepLabel: "中止构建",
+          chainId: projectWorkflowReplayOptionsRef.current?.chainId,
+        },
       );
       if (runningBuildActivityId) {
         updateActivity?.(runningBuildActivityId, {
@@ -1278,6 +1552,8 @@ export function useProjectsModule({
         status: "running",
         title: "打开构建产物",
         summary: runtimeProjectName(projectKey),
+        executionKey: projectActivityExecutionKey("project.build.openOutput", projectKey),
+        ...projectWorkflowChainFields("打开构建产物"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
         target: runtimeActivityTarget(projectKey),
@@ -1292,6 +1568,11 @@ export function useProjectsModule({
       await emitProjectWorkflowSignals(
         projectWorkflowReplay(projectKey, "project.build.openOutput"),
         updated.buildOutputDir || "构建产物目录已打开",
+        {
+          sourceActivityId: activityId,
+          sourceStepLabel: "打开构建产物",
+          chainId: projectWorkflowReplayOptionsRef.current?.chainId,
+        },
       );
       if (activityId) {
         updateActivity?.(activityId, {
@@ -1330,6 +1611,8 @@ export function useProjectsModule({
         status: "running",
         title: "唤起项目",
         summary: runtimeProjectName(projectKey),
+        executionKey: projectActivityExecutionKey("project.runtime.focus", projectKey),
+        ...projectWorkflowChainFields("唤起项目"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
         target: runtimeActivityTarget(projectKey),
@@ -1343,6 +1626,11 @@ export function useProjectsModule({
       await emitProjectWorkflowSignals(
         projectWorkflowReplay(projectKey, "project.runtime.focus"),
         runtimeActivitySummary(updated.statusLabel, updated.detail),
+        {
+          sourceActivityId: activityId,
+          sourceStepLabel: "唤起项目",
+          chainId: projectWorkflowReplayOptionsRef.current?.chainId,
+        },
       );
       if (activityId) {
         updateActivity?.(activityId, {
@@ -1371,7 +1659,7 @@ export function useProjectsModule({
       return;
     }
 
-    const entry = runtimeEntries.find((item) => item.key === projectKey);
+    const entry = runtimeItems.find((item) => item.key === projectKey);
     const path = entry?.cwd || entry?.repoPath;
     if (!path) {
       setError("当前项目未配置目录");
@@ -1387,17 +1675,27 @@ export function useProjectsModule({
         title: "打开项目目录",
         summary: entry.name,
         detail: path,
+        executionKey: projectActivityExecutionKey("project.openDirectory", projectKey),
+        ...projectWorkflowChainFields("打开项目目录"),
         projectKey,
         projectName: entry.name,
         target: runtimeActivityTarget(projectKey),
         resource: localPathResource("打开项目目录", path),
       }) || "";
     try {
-      await invoke("open_local_path", { path });
+      const updated = await invoke<ProjectRuntimeEntry>("open_project_directory", {
+        project: projectKey,
+      });
+      replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
       await emitProjectWorkflowSignals(
         projectWorkflowReplay(projectKey, "project.openDirectory"),
         "项目目录已打开",
+        {
+          sourceActivityId: activityId,
+          sourceStepLabel: "打开项目目录",
+          chainId: projectWorkflowReplayOptionsRef.current?.chainId,
+        },
       );
       if (activityId) {
         updateActivity?.(activityId, {
@@ -1421,41 +1719,55 @@ export function useProjectsModule({
     }
   }
 
-  async function handleReplayProjectWorkflow(replay: WorkflowProjectReplay) {
-    if (replay.action === "finder.shortcut.open") {
-      if (replay.shortcut) {
-        await handleOpenFinderEntry(replay.shortcut.entry);
+  async function handleReplayProjectWorkflow(
+    replay: WorkflowProjectReplay,
+    options: ProjectWorkflowReplayOptions = {},
+  ) {
+    const previousOptions = projectWorkflowReplayOptionsRef.current;
+    projectWorkflowReplayOptionsRef.current = options.chainId
+      ? {
+          ...options,
+          stepLabel: options.stepLabel || projectWorkflowActionLabel(replay.action),
+        }
+      : null;
+    try {
+      if (replay.action === "finder.shortcut.open") {
+        if (replay.shortcut) {
+          await handleOpenFinderEntry(replay.shortcut.entry);
+        }
+        return;
       }
-      return;
-    }
 
-    const projectKey = replay.projectKey ?? "";
-    if (!projectKey) {
-      return;
-    }
+      const projectKey = replay.projectKey ?? "";
+      if (!projectKey) {
+        return;
+      }
 
-    switch (replay.action) {
-      case "project.runtime.start":
-        await handleStartRuntime(projectKey);
-        break;
-      case "project.runtime.stop":
-        await handleStopRuntime(projectKey);
-        break;
-      case "project.build.run":
-        await handleRunBuild(projectKey);
-        break;
-      case "project.build.stop":
-        await handleStopBuild(projectKey);
-        break;
-      case "project.build.openOutput":
-        await handleOpenBuildOutput(projectKey);
-        break;
-      case "project.runtime.focus":
-        await handleFocusRuntime(projectKey);
-        break;
-      case "project.openDirectory":
-        await handleOpenProjectDirectory(projectKey);
-        break;
+      switch (replay.action) {
+        case "project.runtime.start":
+          await handleStartRuntime(projectKey);
+          break;
+        case "project.runtime.stop":
+          await handleStopRuntime(projectKey);
+          break;
+        case "project.build.run":
+          await handleRunBuild(projectKey);
+          break;
+        case "project.build.stop":
+          await handleStopBuild(projectKey);
+          break;
+        case "project.build.openOutput":
+          await handleOpenBuildOutput(projectKey);
+          break;
+        case "project.runtime.focus":
+          await handleFocusRuntime(projectKey);
+          break;
+        case "project.openDirectory":
+          await handleOpenProjectDirectory(projectKey);
+          break;
+      }
+    } finally {
+      projectWorkflowReplayOptionsRef.current = previousOptions;
     }
   }
 
@@ -1474,7 +1786,7 @@ export function useProjectsModule({
     setFinderCategory,
     finderQuery,
     setFinderQuery,
-    runtimeEntries,
+    runtimeEntries: runtimeItems,
     filteredRuntimeEntries,
     shortcutEntries,
     filteredShortcutEntries,
@@ -1482,8 +1794,10 @@ export function useProjectsModule({
     recentProjectKeys: preferences.recentProjectKeys,
     favoriteShortcutKeys: preferences.favoriteShortcutKeys,
     recentShortcutKeys: preferences.recentShortcutKeys,
+    selectedDebugProfileKeys: preferences.debugProfileKeysByProject,
     toggleProjectFavorite,
     toggleShortcutFavorite,
+    setProjectDebugProfile,
     markShortcutUsed,
     loadFinderData,
     loadProjectRuntimes,

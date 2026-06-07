@@ -10,10 +10,10 @@ const lightTokens = {
   lineSoft: "rgba(42,82,132,0.1)",
   text: "#172133",
   muted: "#65758b",
-  accent: "#2563eb",
-  accentHover: "#3778ff",
-  accentSoft: "rgba(37,99,235,0.065)",
-  accentBorder: "rgba(37,99,235,0.2)",
+  accent: "#315fbb",
+  accentHover: "#3d6fcd",
+  accentSoft: "rgba(49,95,187,0.07)",
+  accentBorder: "rgba(49,95,187,0.22)",
   secondary: "#0f766e",
   success: "#138a56",
   info: "#0284c7",
@@ -30,10 +30,10 @@ const monoTokens = {
   lineSoft: "rgba(139,169,208,0.08)",
   text: "#f2f6fb",
   muted: "rgba(218,226,238,0.62)",
-  accent: "#4f8cff",
-  accentHover: "#6aa0ff",
-  accentSoft: "rgba(79,140,255,0.07)",
-  accentBorder: "rgba(79,140,255,0.2)",
+  accent: "#4f6fa6",
+  accentHover: "#5877ad",
+  accentSoft: "rgba(111,143,202,0.11)",
+  accentBorder: "rgba(136,165,216,0.24)",
   secondary: "#48c6b0",
   success: "#54d98f",
   info: "#58bdf6",
@@ -128,11 +128,19 @@ export function createAppTheme(styleMode: AppStyleMode) {
             minWidth: 0,
           },
           containedPrimary: {
+            border: `1px solid ${tokens.accentBorder}`,
+            backgroundColor: tokens.accent,
             boxShadow: mono
-              ? "0 12px 24px rgba(11,78,190,0.22), inset 0 1px 0 rgba(255,255,255,0.18)"
-              : "0 10px 22px rgba(37,99,235,0.18)",
+              ? "0 10px 22px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.12)"
+              : "0 8px 18px rgba(49,95,187,0.14)",
             "&:hover": {
               backgroundColor: tokens.accentHover,
+              boxShadow: mono
+                ? "0 12px 24px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.14)"
+                : "0 10px 20px rgba(49,95,187,0.16)",
+            },
+            "&.Mui-disabled": {
+              borderColor: tokens.lineSoft,
             },
           },
           outlinedInherit: {

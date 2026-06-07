@@ -3,6 +3,7 @@ import {
   Box,
   Card,
   CardContent,
+  Chip,
   Collapse,
   IconButton,
   Pagination,
@@ -10,6 +11,7 @@ import {
   Typography,
 } from "@mui/material";
 import type { BranchTaskHistoryEntry } from "../../app-types";
+import type { TrayPinnedAction } from "../../lib/trayPins";
 import { HistoryCard } from "../AppCards";
 import {
   WorkflowLinkButton,
@@ -20,9 +22,11 @@ import {
   ExpandIcon,
   RefreshIcon,
   ReplayIcon,
+  StarIcon,
   TrashIcon,
 } from "../AppIcons";
 import { groupConsecutiveBy, stableStringify } from "../../lib/historyGroups";
+import { useTrayPinnedActions } from "../../hooks/useTrayPinnedActions";
 import { branchWorkflowModeLabel } from "./BranchModeTabs";
 
 const HISTORY_PAGE_SIZE = 5;
@@ -46,6 +50,49 @@ function branchHistorySignature(item: BranchTaskHistoryEntry) {
       remote: taskItem.remote,
     })),
   });
+}
+
+function branchTrayDedupeKeyFromHistory(item: BranchTaskHistoryEntry) {
+  if (!item.replay) {
+    return null;
+  }
+  return `branch.replay:${stableStringify({
+    historyId: item.id,
+    command: item.replay.command,
+    request: item.replay.request,
+  })}`;
+}
+
+function branchLegacyTrayDedupeKeyFromHistory(item: BranchTaskHistoryEntry) {
+  if (!item.replay) {
+    return null;
+  }
+  return `branch.replay:${stableStringify({
+    command: item.replay.command,
+    request: item.replay.request,
+  })}`;
+}
+
+function branchTrayActionFromHistory(item: BranchTaskHistoryEntry): TrayPinnedAction | null {
+  if (!item.replay) {
+    return null;
+  }
+  const firstItem = item.items[0];
+  const projectName =
+    item.items.length === 1 && firstItem?.projectName ? firstItem.projectName : "多项目";
+  return {
+    kind: "branch.replay",
+    label: `分支：${branchWorkflowModeLabel(item.taskKind)} / ${projectName}`,
+    detail: item.summary,
+    projectKey: firstItem?.projectKey ?? null,
+    entry: null,
+    payload: {
+      command: item.replay.command,
+      request: item.replay.request,
+    },
+    dedupeKey: branchTrayDedupeKeyFromHistory(item) ?? "",
+    updatedAtMs: Date.now(),
+  };
 }
 
 type BranchHistoryPanelProps = {
@@ -81,6 +128,99 @@ export function BranchHistoryPanel({
   const [expandedHistoryGroups, setExpandedHistoryGroups] = useState<Set<string>>(
     () => new Set(),
   );
+  const {
+    scopedActions: pinnedBranchActions,
+    togglePinned,
+    removePinned,
+    replacePinnedActions,
+  } = useTrayPinnedActions("branch.replay");
+  const branchHistoryByPinnedKey = useMemo(() => {
+    const next = new Map<string, BranchTaskHistoryEntry>();
+    for (const item of history) {
+      const key = branchTrayDedupeKeyFromHistory(item);
+      if (key && !next.has(key)) {
+        next.set(key, item);
+      }
+    }
+    return next;
+  }, [history]);
+  const branchLegacyHistoryByPinnedKey = useMemo(() => {
+    const next = new Map<string, BranchTaskHistoryEntry>();
+    for (const item of history) {
+      const key = branchLegacyTrayDedupeKeyFromHistory(item);
+      if (key && !next.has(key)) {
+        next.set(key, item);
+      }
+    }
+    return next;
+  }, [history]);
+  const branchSpecificLegacyPinnedKeys = useMemo(() => {
+    const next = new Set<string>();
+    for (const action of pinnedBranchActions) {
+      const item = branchHistoryByPinnedKey.get(action.dedupeKey);
+      const legacyKey = item ? branchLegacyTrayDedupeKeyFromHistory(item) : null;
+      if (legacyKey) {
+        next.add(legacyKey);
+      }
+    }
+    return next;
+  }, [branchHistoryByPinnedKey, pinnedBranchActions]);
+  const duplicateLegacyPinnedKeys = useMemo(
+    () =>
+      pinnedBranchActions
+        .filter(
+          (action) =>
+            branchLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
+            branchSpecificLegacyPinnedKeys.has(action.dedupeKey),
+        )
+        .map((action) => action.dedupeKey)
+        .sort(),
+    [branchLegacyHistoryByPinnedKey, branchSpecificLegacyPinnedKeys, pinnedBranchActions],
+  );
+  const duplicateLegacyPinnedKeySignature = duplicateLegacyPinnedKeys.join("\n");
+  useEffect(() => {
+    if (!duplicateLegacyPinnedKeySignature) {
+      return;
+    }
+    const duplicateKeys = new Set(duplicateLegacyPinnedKeySignature.split("\n"));
+    replacePinnedActions((actions) =>
+      actions.filter((action) => !duplicateKeys.has(action.dedupeKey)),
+    ).catch((error) => {
+      console.error("failed to prune legacy tray pinned actions", error);
+    });
+  }, [duplicateLegacyPinnedKeySignature, replacePinnedActions]);
+  const displayPinnedBranchActions = useMemo(
+    () =>
+      pinnedBranchActions.filter((action) => {
+        if (branchHistoryByPinnedKey.has(action.dedupeKey)) {
+          return true;
+        }
+        return (
+          branchLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
+          !branchSpecificLegacyPinnedKeys.has(action.dedupeKey)
+        );
+      }),
+    [
+      branchHistoryByPinnedKey,
+      branchLegacyHistoryByPinnedKey,
+      branchSpecificLegacyPinnedKeys,
+      pinnedBranchActions,
+    ],
+  );
+  const pinnedActionOrder = useMemo(
+    () =>
+      new Map(
+        displayPinnedBranchActions.map((action, index) => [action.dedupeKey, index]),
+      ),
+    [displayPinnedBranchActions],
+  );
+  const pinnedActionByKey = useMemo(
+    () =>
+      new Map(
+        displayPinnedBranchActions.map((action) => [action.dedupeKey, action]),
+      ),
+    [displayPinnedBranchActions],
+  );
   const groupedHistory = useMemo(
     () =>
       groupConsecutiveBy(
@@ -90,17 +230,80 @@ export function BranchHistoryPanel({
       ),
     [history],
   );
+  const sortedHistoryGroups = useMemo(() => {
+    const originalOrder = new Map(
+      groupedHistory.map((group, index) => [group.id, index]),
+    );
+    const groupPinnedOrder = (group: (typeof groupedHistory)[number]) => {
+      let order: number | undefined;
+      for (const item of group.items) {
+        const key = branchTrayDedupeKeyFromHistory(item);
+        const itemOrder = key ? pinnedActionOrder.get(key) : undefined;
+        if (itemOrder !== undefined) {
+          order = order === undefined ? itemOrder : Math.min(order, itemOrder);
+        }
+      }
+      if (order !== undefined) {
+        return order;
+      }
+      const legacyKey = branchLegacyTrayDedupeKeyFromHistory(group.latest);
+      return legacyKey ? pinnedActionOrder.get(legacyKey) : undefined;
+    };
+    return [...groupedHistory].sort((left, right) => {
+      const leftPinnedOrder = groupPinnedOrder(left);
+      const rightPinnedOrder = groupPinnedOrder(right);
+      const leftPinned = leftPinnedOrder !== undefined;
+      const rightPinned = rightPinnedOrder !== undefined;
+
+      if (leftPinned && rightPinned) {
+        return (
+          (leftPinnedOrder ?? 0) - (rightPinnedOrder ?? 0) ||
+          (originalOrder.get(left.id) ?? 0) - (originalOrder.get(right.id) ?? 0)
+        );
+      }
+      if (leftPinned !== rightPinned) {
+        return leftPinned ? -1 : 1;
+      }
+      return (originalOrder.get(left.id) ?? 0) - (originalOrder.get(right.id) ?? 0);
+    });
+  }, [groupedHistory, pinnedActionOrder]);
+  function pinnedActionForBranchGroup(group: (typeof groupedHistory)[number]) {
+    let pinnedAction: TrayPinnedAction | null = null;
+    let pinnedOrder = Number.POSITIVE_INFINITY;
+    for (const item of group.items) {
+      const key = branchTrayDedupeKeyFromHistory(item);
+      const order = key ? pinnedActionOrder.get(key) : undefined;
+      const action = key ? pinnedActionByKey.get(key) : undefined;
+      if (action && order !== undefined && order < pinnedOrder) {
+        pinnedAction = action;
+        pinnedOrder = order;
+      }
+    }
+    if (pinnedAction) {
+      return pinnedAction;
+    }
+    const legacyKey = branchLegacyTrayDedupeKeyFromHistory(group.latest);
+    return legacyKey ? pinnedActionByKey.get(legacyKey) ?? null : null;
+  }
+  function pinnedBranchChipLabel(action: TrayPinnedAction) {
+    const item =
+      branchHistoryByPinnedKey.get(action.dedupeKey) ??
+      branchLegacyHistoryByPinnedKey.get(action.dedupeKey) ??
+      null;
+    const label = action.label.replace(/^分支：/, "");
+    return item ? `${label} · ${formatRelativeTime(item.createdAt)}` : label;
+  }
   const historyPageCount = Math.max(
     1,
-    Math.ceil(groupedHistory.length / HISTORY_PAGE_SIZE),
+    Math.ceil(sortedHistoryGroups.length / HISTORY_PAGE_SIZE),
   );
   const pagedHistoryGroups = useMemo(
     () =>
-      groupedHistory.slice(
+      sortedHistoryGroups.slice(
         (historyPage - 1) * HISTORY_PAGE_SIZE,
         historyPage * HISTORY_PAGE_SIZE,
       ),
-    [groupedHistory, historyPage],
+    [historyPage, sortedHistoryGroups],
   );
 
   useEffect(() => {
@@ -109,11 +312,11 @@ export function BranchHistoryPanel({
 
   useEffect(() => {
     setExpandedHistoryGroups((current) => {
-      const visibleIds = new Set(groupedHistory.map((group) => group.id));
+      const visibleIds = new Set(sortedHistoryGroups.map((group) => group.id));
       const next = new Set([...current].filter((id) => visibleIds.has(id)));
       return next.size === current.size ? current : next;
     });
-  }, [groupedHistory]);
+  }, [sortedHistoryGroups]);
 
   function toggleHistoryGroup(groupId: string) {
     setExpandedHistoryGroups((current) => {
@@ -125,6 +328,25 @@ export function BranchHistoryPanel({
       }
       return next;
     });
+  }
+
+  function handleTogglePinned(action: TrayPinnedAction | null) {
+    if (!action) {
+      return;
+    }
+    togglePinned(action)
+      .then(() => setHistoryPage(1))
+      .catch((error) => {
+        console.error("failed to update tray pinned action", error);
+      });
+  }
+
+  function handleRemovePinned(dedupeKey: string) {
+    removePinned(dedupeKey)
+      .then(() => setHistoryPage(1))
+      .catch((error) => {
+        console.error("failed to remove tray pinned action", error);
+      });
   }
 
   return (
@@ -198,16 +420,49 @@ export function BranchHistoryPanel({
         <Collapse in={expanded} timeout="auto" unmountOnExit>
           {history.length > 0 ? (
             <Stack spacing={0.8} minWidth={0}>
+              {displayPinnedBranchActions.length > 0 ? (
+                <Stack direction="row" flexWrap="wrap" gap={0.55} alignItems="center">
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    sx={{ fontWeight: 800, mr: 0.1 }}
+                  >
+                    置顶
+                  </Typography>
+                  {displayPinnedBranchActions.map((action) => (
+                    <Chip
+                      key={action.dedupeKey}
+                      size="small"
+                      icon={<StarIcon />}
+                      label={pinnedBranchChipLabel(action)}
+                      onDelete={() => handleRemovePinned(action.dedupeKey)}
+                      sx={{
+                        maxWidth: "100%",
+                        borderRadius: "999px",
+                        fontWeight: 800,
+                        "& .MuiChip-label": {
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                        },
+                      }}
+                    />
+                  ))}
+                </Stack>
+              ) : null}
               {pagedHistoryGroups.map((group) => {
                 const item = group.latest;
                 const isGrouped = group.items.length > 1;
                 const groupExpanded = expandedHistoryGroups.has(group.id);
                 const workflowSignalIds = workflowSignalIdsForBranchReplay(item);
+                const trayAction = branchTrayActionFromHistory(item);
+                const groupPinnedAction = pinnedActionForBranchGroup(group);
+                const pinned = Boolean(groupPinnedAction);
                 return (
                   <HistoryCard
                     key={group.id}
                     title={`${branchWorkflowModeLabel(item.taskKind)} · ${item.summary}`}
                     subtitle={formatRelativeTime(item.createdAt)}
+                    pinned={pinned}
                     badge={
                       <Stack
                         direction="row"
@@ -250,6 +505,38 @@ export function BranchHistoryPanel({
                             )}
                           </IconButton>
                         ) : null}
+                        <IconButton
+                          size="small"
+                          onClick={() =>
+                            groupPinnedAction
+                              ? handleRemovePinned(groupPinnedAction.dedupeKey)
+                              : handleTogglePinned(trayAction)
+                          }
+                          disabled={!trayAction}
+                          color={pinned ? "primary" : "default"}
+                          aria-label={pinned ? "取消置顶到托盘" : "置顶到托盘"}
+                          title={
+                            trayAction
+                              ? pinned
+                                ? "取消置顶到托盘"
+                                : "置顶到托盘"
+                              : "旧记录缺少回放参数"
+                          }
+                          sx={
+                            pinned
+                              ? {
+                                  bgcolor: "primary.main",
+                                  color: "primary.contrastText",
+                                  borderColor: "primary.main",
+                                  "&:hover": {
+                                    bgcolor: "primary.dark",
+                                  },
+                                }
+                              : undefined
+                          }
+                        >
+                          <StarIcon fontSize="small" />
+                        </IconButton>
                       </Stack>
                     }
                     detail={item.detail}

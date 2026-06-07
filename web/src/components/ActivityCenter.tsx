@@ -10,14 +10,17 @@ import {
   DialogTitle,
   Drawer,
   IconButton,
+  Pagination,
   Stack,
   Tooltip,
   Typography,
 } from "@mui/material";
-import type {
-  ActivityEntry,
-  ActivityKind,
-  ActivityStatus,
+import {
+  DEPLOY_STATUS_SYNC_MAX_FAILURES,
+  activityExecutionKey,
+  type ActivityEntry,
+  type ActivityKind,
+  type ActivityStatus,
 } from "../lib/activityCenter";
 import {
   CheckIcon,
@@ -49,19 +52,48 @@ type ActivityQueueGroup = {
   total: number;
 };
 
+type ActivityChainGroup = {
+  id: string;
+  items: ActivityEntry[];
+  primary: ActivityEntry;
+  latest: ActivityEntry;
+  status: ActivityStatus;
+  failedItems: ActivityEntry[];
+  resourceItem: ActivityEntry | null;
+  targetItem: ActivityEntry | null;
+};
+
+type ActivityExecutionGroup = {
+  id: string;
+  items: ActivityEntry[];
+  latest: ActivityEntry;
+  status: ActivityStatus;
+  failedItems: ActivityEntry[];
+  resourceItem: ActivityEntry | null;
+  targetItem: ActivityEntry | null;
+  executionCount: number;
+};
+
+type ActivityDisplayUnit =
+  | { type: "item"; item: ActivityEntry }
+  | { type: "chain"; group: ActivityChainGroup }
+  | { type: "execution"; group: ActivityExecutionGroup };
+
 type ActivityCenterProps = {
   open: boolean;
+  variant?: "drawer" | "panel";
   items: ActivityEntry[];
   onClose: () => void;
   onClear: () => void;
   onOpenEntry: (entry: ActivityEntry) => void;
   onOpenResource: (entry: ActivityEntry) => void;
-  onRefresh: () => Promise<void> | void;
+  onRefresh: (options?: { force?: boolean }) => Promise<void> | void;
   onAcknowledgeEntry: (entry: ActivityEntry) => void;
   onAcknowledgeEntries: (entries: ActivityEntry[]) => void;
 };
 
 const ACTIVITY_REFRESH_INTERVAL_MS = 10000;
+const ACTIVITY_LIST_PAGE_SIZE = 6;
 
 const KIND_LABELS: Record<ActivityKind, string> = {
   runtime: "运行",
@@ -79,8 +111,8 @@ const STATUS_LABELS: Record<ActivityStatus, string> = {
 };
 
 const activityActionIconSx = {
-  width: 26,
-  height: 26,
+  width: 28,
+  height: 28,
   borderRadius: "999px",
   border: "1px solid var(--line-soft)",
   bgcolor: "transparent",
@@ -93,8 +125,8 @@ const activityActionIconSx = {
 };
 
 const activityHeaderIconSx = {
-  width: 30,
-  height: 30,
+  width: 32,
+  height: 32,
   color: "var(--muted)",
   "&:hover": {
     color: "var(--accent)",
@@ -103,13 +135,13 @@ const activityHeaderIconSx = {
 };
 
 const activityChipSx = {
-  height: 18,
+  height: 20,
   borderRadius: "999px",
   borderColor: "var(--line-soft)",
   "& .MuiChip-label": {
-    px: 0.6,
-    fontSize: "0.62rem",
-    fontWeight: 760,
+    px: 0.65,
+    fontSize: "0.66rem",
+    fontWeight: 780,
   },
 };
 
@@ -150,6 +182,9 @@ function statusTint(status: ActivityStatus) {
 
 function activityStatusLabel(item: ActivityEntry) {
   if (item.status === "failed" && item.summary.startsWith("状态同步失败")) {
+    if ((item.syncFailureCount ?? 0) >= DEPLOY_STATUS_SYNC_MAX_FAILURES) {
+      return "停止重试";
+    }
     return "同步失败";
   }
   return STATUS_LABELS[item.status];
@@ -234,14 +269,15 @@ function ActivityTitleCluster({ item }: { item: ActivityEntry }) {
       />
       <Typography
         variant="body2"
-        fontWeight={780}
+        fontWeight={820}
         noWrap
         title={item.title}
         sx={{
           minWidth: 0,
           flex: "1 1 auto",
           color: "var(--text)",
-          lineHeight: 1.25,
+          fontSize: "0.82rem",
+          lineHeight: 1.22,
           letterSpacing: 0,
         }}
       >
@@ -272,20 +308,36 @@ function displayActivitySummary(item: ActivityEntry) {
   return item.summary;
 }
 
-function isUnhandledFailure(item: ActivityEntry) {
-  return item.status === "failed" && !item.acknowledgedAt;
-}
-
 function isDeploySyncFailure(item: ActivityEntry) {
   return item.status === "failed" && item.summary.startsWith("状态同步失败");
 }
 
-function isRefreshableDeployActivity(item: ActivityEntry) {
+function isDeploySyncNotice(item: ActivityEntry) {
+  return (
+    item.kind === "deploy" &&
+    (item.summary.startsWith("状态同步失败") ||
+      item.summary === "同步 Jenkins 状态中…")
+  );
+}
+
+function isVisibleRunningActivity(item: ActivityEntry) {
+  return item.status === "running" && !isDeploySyncNotice(item);
+}
+
+function isUnhandledFailure(item: ActivityEntry) {
+  return item.status === "failed" && !item.acknowledgedAt && !isDeploySyncNotice(item);
+}
+
+function isAutoRefreshableDeployActivity(item: ActivityEntry) {
+  return item.kind === "deploy" && isVisibleRunningActivity(item);
+}
+
+function isManualRefreshableDeployActivity(item: ActivityEntry) {
   return item.kind === "deploy" && (item.status === "running" || isDeploySyncFailure(item));
 }
 
 function queueGroupKey(item: ActivityEntry) {
-  return item.projectKey || item.projectName || item.kind;
+  return item.chainId ? `chain:${item.chainId}` : activityExecutionKey(item);
 }
 
 function queueGroupLabel(item: ActivityEntry) {
@@ -301,8 +353,189 @@ function compareActivityPriority(left: ActivityEntry, right: ActivityEntry) {
   return right.updatedAt.localeCompare(left.updatedAt);
 }
 
+function compareActivityCreated(left: ActivityEntry, right: ActivityEntry) {
+  return left.createdAt.localeCompare(right.createdAt);
+}
+
+function compareActivityUpdatedDesc(left: ActivityEntry, right: ActivityEntry) {
+  return right.updatedAt.localeCompare(left.updatedAt);
+}
+
+function activityStepLabel(item: ActivityEntry) {
+  return item.stepLabel || item.title;
+}
+
+function aggregateChainStatus(items: ActivityEntry[]): ActivityStatus {
+  if (items.some((item) => isUnhandledFailure(item))) {
+    return "failed";
+  }
+  if (items.some(isVisibleRunningActivity)) {
+    return "running";
+  }
+  if (items.every((item) => item.status === "success")) {
+    return "success";
+  }
+  return items[0]?.status ?? "info";
+}
+
+function buildActivityExecutionGroup(
+  id: string,
+  groupItems: ActivityEntry[],
+): ActivityExecutionGroup {
+  const items = [...groupItems].sort(compareActivityUpdatedDesc);
+  const prioritized = [...groupItems].sort(compareActivityPriority);
+  const failedItems = groupItems.filter(isUnhandledFailure);
+  const latest = items[0];
+  return {
+    id,
+    items,
+    latest,
+    status: aggregateChainStatus(groupItems),
+    failedItems,
+    resourceItem:
+      prioritized.find((item) => isUnhandledFailure(item) && item.resource) ??
+      prioritized.find((item) => item.resource) ??
+      null,
+    targetItem:
+      failedItems.find((item) => item.target) ??
+      prioritized.find((item) => item.target) ??
+      null,
+    executionCount: groupItems.length,
+  };
+}
+
+function buildActivityDisplayUnits(items: ActivityEntry[]): ActivityDisplayUnit[] {
+  const chained = new Map<string, ActivityEntry[]>();
+  const loose: ActivityEntry[] = [];
+
+  for (const item of items) {
+    if (item.chainId) {
+      chained.set(item.chainId, [...(chained.get(item.chainId) ?? []), item]);
+    } else {
+      loose.push(item);
+    }
+  }
+
+  const executionGroups = new Map<string, ActivityEntry[]>();
+  for (const item of loose) {
+    const key = activityExecutionKey(item);
+    executionGroups.set(key, [...(executionGroups.get(key) ?? []), item]);
+  }
+
+  const units: ActivityDisplayUnit[] = [];
+  for (const [id, groupItems] of executionGroups.entries()) {
+    if (groupItems.length < 2) {
+      units.push({ type: "item", item: groupItems[0] });
+    } else {
+      units.push({
+        type: "execution",
+        group: buildActivityExecutionGroup(id, groupItems),
+      });
+    }
+  }
+  for (const [id, chainItems] of chained.entries()) {
+    if (chainItems.length < 2) {
+      units.push({ type: "item", item: chainItems[0] });
+      continue;
+    }
+    const ordered = [...chainItems].sort(compareActivityCreated);
+    const latest = [...chainItems].sort(compareActivityUpdatedDesc)[0];
+    const prioritized = [...chainItems].sort(compareActivityPriority);
+    const primary =
+      ordered.find((item) => !item.parentId) ??
+      ordered.find((item) => item.id === latest.parentId) ??
+      ordered[0];
+    const failedItems = chainItems.filter(isUnhandledFailure);
+    units.push({
+      type: "chain",
+      group: {
+        id,
+        items: ordered,
+        primary,
+        latest,
+        status: aggregateChainStatus(chainItems),
+        failedItems,
+        resourceItem: prioritized.find((item) => item.resource) ?? null,
+        targetItem:
+          failedItems.find((item) => item.target) ??
+          prioritized.find((item) => item.target) ??
+          null,
+      },
+    });
+  }
+
+  return units.sort((left, right) => {
+    const leftUpdated =
+      left.type === "item" ? left.item.updatedAt : left.group.latest.updatedAt;
+    const rightUpdated =
+      right.type === "item" ? right.item.updatedAt : right.group.latest.updatedAt;
+    return rightUpdated.localeCompare(leftUpdated);
+  });
+}
+
+function ActivityChainTrail({ items }: { items: ActivityEntry[] }) {
+  return (
+    <Stack
+      direction="row"
+      alignItems="center"
+      flexWrap="wrap"
+      rowGap={0.35}
+      columnGap={0.45}
+      sx={{ mt: 0.6, color: "var(--muted)" }}
+    >
+      {items.map((item, index) => (
+        <Stack
+          key={item.id}
+          direction="row"
+          alignItems="center"
+          spacing={0.45}
+          sx={{ minWidth: 0 }}
+        >
+          {index > 0 ? (
+            <Typography
+              component="span"
+              variant="caption"
+              sx={{ color: "var(--muted)", fontSize: "0.66rem", fontWeight: 760 }}
+            >
+              →
+            </Typography>
+          ) : null}
+          <Box
+            component="span"
+            sx={{
+              width: 5,
+              height: 5,
+              borderRadius: "50%",
+              bgcolor: item.acknowledgedAt ? "var(--muted)" : statusColor(item.status),
+              flexShrink: 0,
+            }}
+          />
+          <Typography
+            component="span"
+            variant="caption"
+            title={activityStepLabel(item)}
+            sx={{
+              maxWidth: 120,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+              color: item.status === "failed" ? "var(--danger)" : "var(--text)",
+              fontSize: "0.66rem",
+              fontWeight: item.status === "running" ? 820 : 740,
+              lineHeight: 1.2,
+            }}
+          >
+            {activityStepLabel(item)}
+          </Typography>
+        </Stack>
+      ))}
+    </Stack>
+  );
+}
+
 export function ActivityCenter({
   open,
+  variant = "drawer",
   items,
   onClose,
   onClear,
@@ -313,29 +546,37 @@ export function ActivityCenter({
   onAcknowledgeEntries,
 }: ActivityCenterProps) {
   const [filter, setFilter] = useState<ActivityFilter>("attention");
+  const [listPage, setListPage] = useState(1);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const refreshingRef = useRef(false);
-  const hasRefreshableDeployActivity = useMemo(
-    () => items.some(isRefreshableDeployActivity),
+  const hasAutoRefreshableDeployActivity = useMemo(
+    () => items.some(isAutoRefreshableDeployActivity),
     [items],
   );
-  const runRefresh = useCallback(async () => {
-    if (!hasRefreshableDeployActivity || refreshingRef.current) {
+  const hasManualRefreshableDeployActivity = useMemo(
+    () => items.some(isManualRefreshableDeployActivity),
+    [items],
+  );
+  const runRefresh = useCallback(async (options: { force?: boolean } = {}) => {
+    const canRefresh = options.force
+      ? hasManualRefreshableDeployActivity
+      : hasAutoRefreshableDeployActivity;
+    if (!canRefresh || refreshingRef.current) {
       return;
     }
     refreshingRef.current = true;
     setRefreshing(true);
     try {
-      await onRefresh();
+      await onRefresh(options);
     } finally {
       refreshingRef.current = false;
       setRefreshing(false);
     }
-  }, [hasRefreshableDeployActivity, onRefresh]);
+  }, [hasAutoRefreshableDeployActivity, hasManualRefreshableDeployActivity, onRefresh]);
 
   useEffect(() => {
-    if (!open || !hasRefreshableDeployActivity) {
+    if (!open || !hasAutoRefreshableDeployActivity) {
       return;
     }
     void runRefresh();
@@ -345,10 +586,10 @@ export function ActivityCenter({
     return () => {
       window.clearInterval(timer);
     };
-  }, [hasRefreshableDeployActivity, open, runRefresh]);
+  }, [hasAutoRefreshableDeployActivity, open, runRefresh]);
 
   const attentionItems = useMemo(
-    () => items.filter((item) => isUnhandledFailure(item) || item.status === "running"),
+    () => items.filter((item) => isUnhandledFailure(item) || isVisibleRunningActivity(item)),
     [items],
   );
   const failedItems = useMemo(
@@ -366,7 +607,12 @@ export function ActivityCenter({
   const handledItems = useMemo(
     () =>
       items
-        .filter((item) => item.status === "failed" && item.acknowledgedAt)
+        .filter(
+          (item) =>
+            item.status === "failed" &&
+            item.acknowledgedAt &&
+            !isDeploySyncFailure(item),
+        )
         .sort((left, right) =>
           (right.acknowledgedAt ?? "").localeCompare(left.acknowledgedAt ?? ""),
         ),
@@ -376,7 +622,7 @@ export function ActivityCenter({
     () => ({
       attention: attentionItems.length,
       all: items.length,
-      running: items.filter((item) => item.status === "running").length,
+      running: items.filter(isVisibleRunningActivity).length,
       success: successItems.length,
       failed: failedItems.length,
       handled: handledItems.length,
@@ -446,7 +692,7 @@ export function ActivityCenter({
             sorted.find((item) => item.target) ??
             null,
           failedCount: groupFailedItems.length,
-          runningCount: groupItems.filter((item) => item.status === "running").length,
+          runningCount: groupItems.filter(isVisibleRunningActivity).length,
           total: groupItems.length,
         };
       })
@@ -475,7 +721,7 @@ export function ActivityCenter({
       return attentionItems;
     }
     if (filter === "running") {
-      return items.filter((item) => item.status === "running");
+      return items.filter(isVisibleRunningActivity);
     }
     if (filter === "success") {
       return successItems;
@@ -491,6 +737,38 @@ export function ActivityCenter({
     }
     return items;
   }, [attentionItems, failedItems, filter, handledItems, infoItems, items, successItems]);
+  const visibleUnits = useMemo(() => {
+    const visibleIds = new Set(visibleItems.map((item) => item.id));
+    const visibleChainIds = new Set(
+      visibleItems.map((item) => item.chainId).filter((value): value is string => Boolean(value)),
+    );
+    const chainAwareItems = items.filter(
+      (item) => visibleIds.has(item.id) || (item.chainId && visibleChainIds.has(item.chainId)),
+    );
+    return buildActivityDisplayUnits(chainAwareItems);
+  }, [items, visibleItems]);
+  const listPageCount = Math.max(
+    1,
+    Math.ceil(visibleUnits.length / ACTIVITY_LIST_PAGE_SIZE),
+  );
+  useEffect(() => {
+    setListPage(1);
+  }, [filter, open]);
+  useEffect(() => {
+    if (listPage > listPageCount) {
+      setListPage(listPageCount);
+    }
+  }, [listPage, listPageCount]);
+  const paginatedUnits = useMemo(() => {
+    const start = (listPage - 1) * ACTIVITY_LIST_PAGE_SIZE;
+    return visibleUnits.slice(start, start + ACTIVITY_LIST_PAGE_SIZE);
+  }, [listPage, visibleUnits]);
+  const listStartIndex =
+    visibleUnits.length === 0 ? 0 : (listPage - 1) * ACTIVITY_LIST_PAGE_SIZE + 1;
+  const listEndIndex = Math.min(
+    visibleUnits.length,
+    listPage * ACTIVITY_LIST_PAGE_SIZE,
+  );
   const visibleQueueGroups = queueGroups.slice(0, 4);
   const hiddenQueueCount = Math.max(0, queueGroups.length - visibleQueueGroups.length);
   const handleClearConfirmed = () => {
@@ -498,26 +776,12 @@ export function ActivityCenter({
     setClearConfirmOpen(false);
   };
 
-  return (
-    <Drawer
-      anchor="right"
-      open={open}
-      onClose={onClose}
-      PaperProps={{
-        sx: {
-          width: { xs: "100%", sm: 392 },
-          maxWidth: "100vw",
-          height: "100dvh",
-          overflow: "hidden",
-          bgcolor: "var(--panel-strong)",
-          color: "var(--text)",
-          borderLeft: "1px solid var(--line)",
-        },
-      }}
-    >
+  const content = (
+    <>
       <Box
+        className="activity-center-surface"
         sx={{
-          p: { xs: 1.5, sm: 1.6 },
+          p: { xs: 1.6, sm: 1.85 },
           display: "flex",
           flexDirection: "column",
           height: "100%",
@@ -527,25 +791,33 @@ export function ActivityCenter({
       >
         <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
           <Box minWidth={0}>
-            <Typography variant="subtitle1" fontWeight={820} lineHeight={1.15}>
+            <Typography
+              variant="subtitle1"
+              sx={{
+                fontSize: "1.02rem",
+                fontWeight: 860,
+                lineHeight: 1.12,
+                textWrap: "balance",
+              }}
+            >
               活动
             </Typography>
             <Typography
               variant="caption"
               color="text.secondary"
-              sx={{ display: "block", mt: 0.2, fontSize: "0.68rem" }}
+              sx={{ display: "block", mt: 0.25, fontSize: "0.72rem", lineHeight: 1.3 }}
             >
               {attentionSummary}
             </Typography>
           </Box>
           <Stack direction="row" spacing={0.5}>
-            <Tooltip title="刷新部署状态">
+            <Tooltip title="刷新活动状态">
               <span>
                 <IconButton
                   size="small"
-                  onClick={() => void runRefresh()}
-                  disabled={!hasRefreshableDeployActivity || refreshing}
-                  aria-label="刷新部署状态"
+                  onClick={() => void runRefresh({ force: true })}
+                  disabled={!hasManualRefreshableDeployActivity || refreshing}
+                  aria-label="刷新活动状态"
                   sx={activityHeaderIconSx}
                 >
                   <RefreshIcon fontSize="small" />
@@ -600,7 +872,7 @@ export function ActivityCenter({
                   noWrap
                   sx={{ minWidth: 0, fontSize: "0.68rem" }}
                 >
-                  {queueGroups.length} 个项目需要关注
+                  {queueGroups.length} 个分组需要关注
                 </Typography>
               </Stack>
               <Chip
@@ -617,11 +889,12 @@ export function ActivityCenter({
                 <Box
                   key={group.id}
                   sx={{
-                    px: 0.9,
-                    py: 0.75,
-                    borderRadius: 1.3,
+                    px: 1,
+                    py: 0.85,
+                    borderRadius: 1.5,
                     border: "1px solid var(--line-soft)",
                     bgcolor: "var(--panel)",
+                    boxShadow: "0 1px 0 rgba(20,31,50,0.025)",
                   }}
                 >
                   <Stack direction="row" spacing={0.8} alignItems="flex-start">
@@ -650,7 +923,16 @@ export function ActivityCenter({
                           minWidth={0}
                           flex={1}
                         >
-                          <Typography variant="body2" fontWeight={780} sx={{ overflowWrap: "anywhere" }}>
+                          <Typography
+                            variant="body2"
+                            sx={{
+                              color: "var(--text)",
+                              fontSize: "0.84rem",
+                              fontWeight: 830,
+                              lineHeight: 1.22,
+                              overflowWrap: "anywhere",
+                            }}
+                          >
                             {group.label}
                           </Typography>
                           {group.failedCount > 0 ? (
@@ -667,6 +949,14 @@ export function ActivityCenter({
                               label={`进行中 ${group.runningCount}`}
                               variant="outlined"
                               sx={{ ...activityChipSx, color: "var(--accent)" }}
+                            />
+                          ) : null}
+                          {group.total > 1 ? (
+                            <Chip
+                              size="small"
+                              label={`执行 ${group.total} 次`}
+                              variant="outlined"
+                              sx={activityChipSx}
                             />
                           ) : null}
                         </Stack>
@@ -715,9 +1005,12 @@ export function ActivityCenter({
                         variant="caption"
                         color="text.secondary"
                         sx={{
-                          display: "block",
+                          display: "-webkit-box",
                           mt: 0.25,
+                          overflow: "hidden",
                           overflowWrap: "anywhere",
+                          WebkitBoxOrient: "vertical",
+                          WebkitLineClamp: 2,
                           fontSize: "0.66rem",
                           lineHeight: 1.35,
                         }}
@@ -741,7 +1034,7 @@ export function ActivityCenter({
                   }}
                 >
                   <Typography variant="caption">
-                    还有 {hiddenQueueCount} 个待处理项目在下方列表中
+                    还有 {hiddenQueueCount} 个待处理分组在下方列表中
                   </Typography>
                   <Button
                     size="small"
@@ -796,16 +1089,44 @@ export function ActivityCenter({
         <Stack
           spacing={0.9}
           sx={{
-            py: 0.9,
-            pr: 0.8,
+            mt: 0.85,
+            mb: 0.7,
+            p: 0.65,
             flex: 1,
             minHeight: 0,
             overflowY: "auto",
             overscrollBehavior: "contain",
-            scrollbarGutter: "stable",
+            border: "1px solid var(--line-soft)",
+            borderRadius: 1.6,
+            bgcolor: "rgba(42,82,132,0.025)",
+            scrollbarWidth: "thin",
+            scrollbarColor: "transparent transparent",
+            transition: "scrollbar-color 140ms ease",
+            "&:hover": {
+              scrollbarColor: "color-mix(in srgb, var(--muted) 28%, transparent) transparent",
+            },
+            "&::-webkit-scrollbar": {
+              width: 7,
+              height: 7,
+            },
+            "&::-webkit-scrollbar-track": {
+              background: "transparent",
+            },
+            "&::-webkit-scrollbar-thumb": {
+              backgroundColor: "transparent",
+              borderRadius: "999px",
+              border: "2px solid transparent",
+              backgroundClip: "padding-box",
+            },
+            "&:hover::-webkit-scrollbar-thumb": {
+              backgroundColor: "color-mix(in srgb, var(--muted) 28%, transparent)",
+            },
+            "&:hover::-webkit-scrollbar-thumb:hover": {
+              backgroundColor: "color-mix(in srgb, var(--muted) 42%, transparent)",
+            },
           }}
         >
-          {visibleItems.length === 0 ? (
+          {visibleUnits.length === 0 ? (
             <Box
               sx={{
                 border: "1px dashed var(--line)",
@@ -818,16 +1139,346 @@ export function ActivityCenter({
               {filter === "attention" ? "当前没有待处理活动。" : "暂无匹配的活动记录。"}
             </Box>
           ) : (
-            visibleItems.map((item) => (
+            paginatedUnits.map((unit) => {
+              if (unit.type === "chain") {
+                const { group } = unit;
+                const headlineItem: ActivityEntry = {
+                  ...group.latest,
+                  kind: group.primary.kind,
+                  title: group.primary.title,
+                  status: group.status,
+                  acknowledgedAt:
+                    group.status === "failed" ? group.latest.acknowledgedAt : null,
+                };
+                return (
+                  <Box
+                    key={group.id}
+                    sx={{
+                      border: "1px solid var(--line-soft)",
+                      borderRadius: 1.5,
+                      px: 1.05,
+                      py: 0.95,
+                      bgcolor: "var(--panel)",
+                      boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
+                      transition: "border-color 120ms ease, background-color 120ms ease",
+                      "&:hover": {
+                        borderColor: "var(--accent-border)",
+                        bgcolor: "var(--panel-strong)",
+                      },
+                    }}
+                  >
+                    <Stack direction="row" alignItems="flex-start" spacing={0.75}>
+                      <Box
+                        sx={{
+                          width: 3,
+                          alignSelf: "stretch",
+                          minHeight: 68,
+                          borderRadius: 999,
+                          bgcolor: statusColor(group.status),
+                          flexShrink: 0,
+                        }}
+                      />
+                      <Box minWidth={0} flex={1}>
+                        <Stack
+                          direction="row"
+                          alignItems="center"
+                          justifyContent="space-between"
+                          spacing={0.8}
+                        >
+                          <ActivityTitleCluster item={headlineItem} />
+                          {group.targetItem || group.resourceItem || group.failedItems.length > 0 ? (
+                            <Stack direction="row" spacing={0.35} flexShrink={0}>
+                              {group.resourceItem ? (
+                                <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => onOpenResource(group.resourceItem!)}
+                                    aria-label={group.resourceItem.resource?.label ?? "打开关联资源"}
+                                    sx={activityActionIconSx}
+                                  >
+                                    <OpenExternalIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              ) : null}
+                              {group.targetItem ? (
+                                <Tooltip title="定位">
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => onOpenEntry(group.targetItem!)}
+                                    aria-label="定位活动"
+                                    sx={activityActionIconSx}
+                                  >
+                                    <LocateIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              ) : null}
+                              {group.failedItems.length > 0 ? (
+                                <Tooltip title="标记已处理">
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => onAcknowledgeEntries(group.failedItems)}
+                                    aria-label="标记已处理"
+                                    sx={activityActionIconSx}
+                                  >
+                                    <CheckIcon fontSize="small" />
+                                  </IconButton>
+                                </Tooltip>
+                              ) : null}
+                            </Stack>
+                          ) : null}
+                        </Stack>
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{
+                            display: "block",
+                            mt: 0.35,
+                            overflowWrap: "anywhere",
+                            fontSize: "0.68rem",
+                            lineHeight: 1.35,
+                          }}
+                        >
+                          {[group.primary.projectName || group.primary.projectKey, formatActivityTime(group.latest.updatedAt)]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </Typography>
+                        <ActivityChainTrail items={group.items} />
+                        <Stack
+                          spacing={0.35}
+                          sx={{
+                            mt: 0.65,
+                            pl: 0.2,
+                          }}
+                        >
+                          {group.items.map((item) => (
+                            <Box
+                              key={item.id}
+                              sx={{
+                                display: "grid",
+                                gridTemplateColumns: "74px minmax(0, 1fr)",
+                                gap: 0.7,
+                                alignItems: "baseline",
+                              }}
+                            >
+                              <Typography
+                                variant="caption"
+                                noWrap
+                                sx={{
+                                  color: statusColor(item.status),
+                                  fontSize: "0.62rem",
+                                  fontWeight: 800,
+                                }}
+                              >
+                                {activityStepLabel(item)}
+                              </Typography>
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  color: "var(--muted)",
+                                  overflowWrap: "anywhere",
+                                  fontSize: "0.64rem",
+                                  lineHeight: 1.35,
+                                }}
+                              >
+                                {displayActivitySummary(item) || item.detail || STATUS_LABELS[item.status]}
+                              </Typography>
+                            </Box>
+                          ))}
+                        </Stack>
+                      </Box>
+                    </Stack>
+                  </Box>
+                );
+              }
+              if (unit.type === "execution") {
+                const { group } = unit;
+                const headlineItem: ActivityEntry = {
+                  ...group.latest,
+                  status: group.status,
+                  acknowledgedAt:
+                    group.status === "failed" ? group.latest.acknowledgedAt : null,
+                };
+                return (
+                  <Box
+                    key={group.id}
+                    sx={{
+                      border: "1px solid var(--line-soft)",
+                      borderRadius: 1.5,
+                      px: 1.05,
+                      py: 0.95,
+                      bgcolor: "var(--panel)",
+                      boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
+                      transition: "border-color 120ms ease, background-color 120ms ease",
+                      "&:hover": {
+                        borderColor: "var(--accent-border)",
+                        bgcolor: "var(--panel-strong)",
+                      },
+                    }}
+                  >
+                    <Stack direction="row" alignItems="flex-start" spacing={0.75}>
+                      <Box
+                        sx={{
+                          width: 3,
+                          alignSelf: "stretch",
+                          minHeight: 68,
+                          borderRadius: 999,
+                          bgcolor: statusColor(group.status),
+                          flexShrink: 0,
+                        }}
+                      />
+                      <Box minWidth={0} flex={1}>
+                        <Stack
+                          direction="row"
+                          alignItems="center"
+                          justifyContent="space-between"
+                          spacing={0.8}
+                        >
+                          <ActivityTitleCluster item={headlineItem} />
+                          <Stack direction="row" spacing={0.35} flexShrink={0}>
+                            <Chip
+                              size="small"
+                              label={`执行 ${group.executionCount} 次`}
+                              variant="outlined"
+                              sx={activityChipSx}
+                            />
+                            {group.resourceItem ? (
+                              <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => onOpenResource(group.resourceItem!)}
+                                  aria-label={group.resourceItem.resource?.label ?? "打开关联资源"}
+                                  sx={activityActionIconSx}
+                                >
+                                  <OpenExternalIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            ) : null}
+                            {group.targetItem ? (
+                              <Tooltip title="定位">
+                                <IconButton
+                                  size="small"
+                                  onClick={() => onOpenEntry(group.targetItem!)}
+                                  aria-label="定位活动"
+                                  sx={activityActionIconSx}
+                                >
+                                  <LocateIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            ) : null}
+                            {group.failedItems.length > 0 ? (
+                              <Tooltip title="标记已处理">
+                                <IconButton
+                                  size="small"
+                                  onClick={() => onAcknowledgeEntries(group.failedItems)}
+                                  aria-label="标记已处理"
+                                  sx={activityActionIconSx}
+                                >
+                                  <CheckIcon fontSize="small" />
+                                </IconButton>
+                              </Tooltip>
+                            ) : null}
+                          </Stack>
+                        </Stack>
+                        <Typography
+                          variant="caption"
+                          color="text.secondary"
+                          sx={{
+                            display: "block",
+                            mt: 0.35,
+                            overflowWrap: "anywhere",
+                            fontSize: "0.68rem",
+                            lineHeight: 1.35,
+                          }}
+                        >
+                          {[group.latest.projectName || group.latest.projectKey, formatActivityTime(group.latest.updatedAt)]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </Typography>
+                        {displayActivitySummary(group.latest) ? (
+                          <Typography
+                            variant="caption"
+                            sx={{
+                              display: "-webkit-box",
+                              mt: 0.35,
+                              color: "var(--text)",
+                              overflow: "hidden",
+                              overflowWrap: "anywhere",
+                              WebkitBoxOrient: "vertical",
+                              WebkitLineClamp: 2,
+                              fontSize: "0.74rem",
+                              fontWeight: 720,
+                              lineHeight: 1.42,
+                            }}
+                          >
+                            {displayActivitySummary(group.latest)}
+                          </Typography>
+                        ) : null}
+                        <Stack
+                          spacing={0.35}
+                          sx={{
+                            mt: 0.65,
+                            pl: 0.2,
+                          }}
+                        >
+                          {group.items.map((item, index) => (
+                            <Box
+                              key={item.id}
+                              sx={{
+                                display: "grid",
+                                gridTemplateColumns: "54px minmax(0, 1fr)",
+                                gap: 0.7,
+                                alignItems: "baseline",
+                              }}
+                            >
+                              <Typography
+                                variant="caption"
+                                noWrap
+                                sx={{
+                                  color: statusColor(item.status),
+                                  fontSize: "0.62rem",
+                                  fontWeight: 800,
+                                }}
+                              >
+                                第{group.executionCount - index}次
+                              </Typography>
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  color: "var(--muted)",
+                                  overflowWrap: "anywhere",
+                                  fontSize: "0.64rem",
+                                  lineHeight: 1.35,
+                                }}
+                              >
+                                {[
+                                  activityStatusLabel(item),
+                                  formatActivityTime(item.updatedAt),
+                                  displayActivitySummary(item) ||
+                                    item.detail ||
+                                    STATUS_LABELS[item.status],
+                                ]
+                                  .filter(Boolean)
+                                  .join(" · ")}
+                              </Typography>
+                            </Box>
+                          ))}
+                        </Stack>
+                      </Box>
+                    </Stack>
+                  </Box>
+                );
+              }
+              const item = unit.item;
+              return (
               <Box
                 key={item.id}
-                sx={{
-                  border: "1px solid var(--line-soft)",
-                  borderRadius: 1.4,
-                  px: 1,
-                  py: 0.85,
-                  bgcolor: "var(--panel)",
-                  boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
+                    sx={{
+                      border: "1px solid var(--line-soft)",
+                      borderRadius: 1.5,
+                      px: 1.05,
+                      py: 0.95,
+                      bgcolor: "var(--panel)",
+                      boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
                   transition: "border-color 120ms ease, background-color 120ms ease",
                   "&:hover": {
                     borderColor: "var(--accent-border)",
@@ -904,13 +1555,16 @@ export function ActivityCenter({
                       <Typography
                         variant="caption"
                         sx={{
-                          display: "block",
+                          display: "-webkit-box",
                           mt: 0.35,
                           color: "var(--text)",
+                          overflow: "hidden",
                           overflowWrap: "anywhere",
-                          fontSize: "0.7rem",
-                          fontWeight: 640,
-                          lineHeight: 1.38,
+                          WebkitBoxOrient: "vertical",
+                          WebkitLineClamp: 2,
+                          fontSize: "0.74rem",
+                          fontWeight: 720,
+                          lineHeight: 1.42,
                         }}
                       >
                         {displayActivitySummary(item)}
@@ -938,19 +1592,71 @@ export function ActivityCenter({
                   </Box>
                 </Stack>
               </Box>
-            ))
+              );
+            })
           )}
         </Stack>
+        {visibleUnits.length > 0 ? (
+          <Stack
+            direction="row"
+            alignItems="center"
+            justifyContent="space-between"
+            spacing={1}
+            sx={{
+              px: 0.2,
+              py: 0.72,
+              borderTop: "1px solid var(--line)",
+              flexShrink: 0,
+            }}
+          >
+            <Typography
+              variant="caption"
+              color="text.secondary"
+              sx={{ fontSize: "0.66rem", fontWeight: 720, whiteSpace: "nowrap" }}
+            >
+              {listStartIndex}-{listEndIndex} / {visibleUnits.length}
+            </Typography>
+            {listPageCount > 1 ? (
+              <Pagination
+                size="small"
+                page={listPage}
+                count={listPageCount}
+                siblingCount={0}
+                boundaryCount={1}
+                onChange={(_, nextPage) => setListPage(nextPage)}
+                sx={{
+                  "& .MuiPaginationItem-root": {
+                    minWidth: 28,
+                    height: 28,
+                    borderRadius: "10px",
+                    fontSize: "0.72rem",
+                    fontWeight: 820,
+                  },
+                }}
+              />
+            ) : (
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ fontSize: "0.66rem", fontWeight: 720, whiteSpace: "nowrap" }}
+              >
+                本页已全部显示
+              </Typography>
+            )}
+          </Stack>
+        ) : null}
       </Box>
       <Dialog
+        className="activity-confirm-dialog-root"
         open={clearConfirmOpen}
         onClose={() => setClearConfirmOpen(false)}
         PaperProps={{
+          className: "activity-confirm-dialog-paper",
           sx: {
             bgcolor: "var(--panel-strong)",
             color: "var(--text)",
             border: "1px solid var(--line)",
-            borderRadius: 2,
+            borderRadius: "18px",
             width: "min(360px, calc(100vw - 32px))",
           },
         }}
@@ -966,6 +1672,72 @@ export function ActivityCenter({
           </Button>
         </DialogActions>
       </Dialog>
+    </>
+  );
+
+  if (variant === "panel") {
+    if (!open) {
+      return null;
+    }
+    return (
+      <Box
+        component="aside"
+        aria-label="活动中心"
+        className="activity-side-panel"
+        sx={{
+          height: "100%",
+          maxHeight: "100%",
+          overflow: "hidden",
+          bgcolor: "var(--panel-strong)",
+          color: "var(--text)",
+          borderLeft: "1px solid var(--line)",
+          fontVariantNumeric: "tabular-nums",
+          letterSpacing: 0,
+        }}
+      >
+        {content}
+      </Box>
+    );
+  }
+
+  const drawerTopOffset = "var(--window-drag-height)";
+
+  return (
+    <Drawer
+      anchor="right"
+      open={open}
+      onClose={onClose}
+      ModalProps={{
+        className: "activity-drawer-root",
+      }}
+      slotProps={{
+        backdrop: {
+          className: "activity-drawer-backdrop",
+          sx: {
+            top: drawerTopOffset,
+          },
+        },
+      }}
+      PaperProps={{
+        className: "activity-drawer-paper",
+        sx: {
+          width: { xs: "min(420px, 100vw)", sm: 420 },
+          maxWidth: "100vw",
+          top: drawerTopOffset,
+          right: 0,
+          bottom: 0,
+          height: `calc(100dvh - ${drawerTopOffset})`,
+          overflow: "hidden",
+          bgcolor: "var(--panel-strong)",
+          color: "var(--text)",
+          borderLeft: "1px solid var(--line)",
+          borderRadius: 0,
+          fontVariantNumeric: "tabular-nums",
+          letterSpacing: 0,
+        },
+      }}
+    >
+      {content}
     </Drawer>
   );
 }

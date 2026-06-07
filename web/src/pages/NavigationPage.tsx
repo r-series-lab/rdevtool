@@ -23,6 +23,8 @@ type NavigationEntry = {
   kind: string;
   targetLabel: string;
   url?: string | null;
+  browser?: string | null;
+  browserProfile?: string | null;
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;

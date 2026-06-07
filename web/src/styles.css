@@ -7,14 +7,15 @@
   --line-soft: rgba(42, 82, 132, 0.1);
   --text: #172133;
   --muted: #65758b;
-  --accent: #2563eb;
-  --accent-hover: #3778ff;
-  --accent-soft: rgba(37, 99, 235, 0.065);
-  --accent-border: rgba(37, 99, 235, 0.2);
+  --accent: #315fbb;
+  --accent-hover: #3d6fcd;
+  --accent-soft: rgba(49, 95, 187, 0.07);
+  --accent-border: rgba(49, 95, 187, 0.22);
   --success: #138a56;
   --warning: #b7791f;
   --danger: #c24141;
   --shadow: 0 18px 42px rgba(46, 83, 126, 0.1);
+  --window-drag-height: 44px;
   font-family:
     "SF Pro Display",
     "PingFang SC",
@@ -36,10 +37,10 @@
   --line-soft: rgba(139, 169, 208, 0.08);
   --text: #f2f6fb;
   --muted: rgba(218, 226, 238, 0.62);
-  --accent: #4f8cff;
-  --accent-hover: #6aa0ff;
-  --accent-soft: rgba(79, 140, 255, 0.07);
-  --accent-border: rgba(79, 140, 255, 0.2);
+  --accent: #4f6fa6;
+  --accent-hover: #5877ad;
+  --accent-soft: rgba(111, 143, 202, 0.11);
+  --accent-border: rgba(136, 165, 216, 0.24);
   --success: #54d98f;
   --warning: #f2bc5b;
   --danger: #ff7d7d;
@@ -71,6 +72,13 @@ body,
 
 body {
   min-height: 100vh;
+  background: var(--bg);
+}
+
+html.settings-scroll-lock,
+body.settings-scroll-lock {
+  overflow: hidden;
+  overscroll-behavior: none;
 }
 
 button,
@@ -129,55 +137,93 @@ body::-webkit-scrollbar-corner,
   display: grid;
   width: 100%;
   min-width: 0;
-  grid-template-columns: 118px minmax(0, 1fr);
+  grid-template-columns: 108px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   justify-content: stretch;
-  gap: 12px;
-  padding: 10px;
-  align-items: start;
+  gap: 0;
+  padding: var(--window-drag-height) 0 0;
+  align-items: stretch;
   align-content: start;
+  background: var(--bg);
+}
+
+.window-drag-region {
+  position: fixed;
+  z-index: 20;
+  inset: 0 0 auto;
+  height: var(--window-drag-height);
+  background: var(--bg);
+  border-bottom: 1px solid var(--line-soft);
+  user-select: none;
+}
+
+.window-toolbar {
+  position: fixed;
+  z-index: 32;
+  top: calc((var(--window-drag-height) - 32px) / 2);
+  right: 10px;
+  display: inline-grid;
+  grid-template-columns: repeat(2, 32px);
+  align-items: center;
+  justify-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .sidebar {
+  grid-column: 1;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px 10px;
-  border-radius: 16px;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  box-shadow: var(--shadow);
-  min-height: calc(100vh - 20px);
+  padding: 10px;
+  border-radius: 0;
+  background: rgba(248, 251, 255, 0.72);
+  border: 0;
+  border-right: 1px solid var(--line);
+  box-shadow: none;
+  min-height: calc(100vh - var(--window-drag-height));
   align-items: stretch;
-  align-self: start;
+  align-self: stretch;
   position: sticky;
-  top: 10px;
+  top: var(--window-drag-height);
+}
+
+:root[data-style="mono"] .window-drag-region {
+  background: var(--bg);
+  border-bottom-color: rgba(139, 169, 208, 0.08);
+}
+
+:root[data-style="mono"] .window-toolbar {
+  background: transparent;
+  box-shadow: none;
 }
 
 :root[data-style="mono"] .sidebar {
-  background: var(--panel);
-  border-color: var(--line);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.032),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.01),
-    0 24px 54px rgba(0, 0, 0, 0.38);
+  background: linear-gradient(180deg, rgba(13, 20, 30, 0.94), rgba(8, 13, 19, 0.98));
+  border-right-color: rgba(139, 169, 208, 0.11);
+  box-shadow: inset -1px 0 0 rgba(255, 255, 255, 0.02);
 }
 
 .shell-brand {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 8px 0 4px;
+  padding: 0 0 8px;
 }
 
 .shell-brand-mark {
-  width: 46px;
-  height: 46px;
+  width: 42px;
+  height: 42px;
   border-radius: 12px;
   display: grid;
   place-items: center;
   background: var(--accent);
   color: #ffffff;
-  font-size: 26px;
+  font-size: 24px;
   font-weight: 800;
   letter-spacing: -0.04em;
   box-shadow:
@@ -194,17 +240,8 @@ body::-webkit-scrollbar-corner,
     0 12px 28px rgba(0, 0, 0, 0.22);
 }
 
-.sidebar-footer {
-  margin-top: auto;
-  padding-top: 2px;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 6px;
-}
-
 .settings-icon-toggle,
-.activity-icon-toggle,
-.command-icon-toggle {
+.activity-icon-toggle {
   width: 100%;
   min-height: 36px;
   display: inline-flex;
@@ -224,25 +261,53 @@ body::-webkit-scrollbar-corner,
 }
 
 .settings-icon-toggle:hover,
-.activity-icon-toggle:hover,
-.command-icon-toggle:hover {
+.activity-icon-toggle:hover {
   transform: translateY(-1px);
   border-color: var(--accent);
 }
 
-.command-icon-toggle svg,
 .activity-icon-toggle svg,
 .settings-icon-toggle svg {
   font-size: 18px;
 }
 
 :root[data-style="mono"] .settings-icon-toggle,
-:root[data-style="mono"] .activity-icon-toggle,
-:root[data-style="mono"] .command-icon-toggle {
+:root[data-style="mono"] .activity-icon-toggle {
   background: rgba(255, 255, 255, 0.018);
   color: rgba(237, 241, 245, 0.82);
   border-color: rgba(255, 255, 255, 0.05);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.026);
+}
+
+.window-toolbar .settings-icon-toggle,
+.window-toolbar .activity-icon-toggle {
+  width: 32px;
+  min-height: 32px;
+  border-radius: 9px;
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted);
+}
+
+.window-toolbar .settings-icon-toggle:hover,
+.window-toolbar .activity-icon-toggle:hover {
+  color: var(--text);
+  background: var(--panel-strong);
+  border-color: var(--line-soft);
+}
+
+:root[data-style="mono"] .window-toolbar .settings-icon-toggle,
+:root[data-style="mono"] .window-toolbar .activity-icon-toggle {
+  background: transparent;
+  border-color: transparent;
+  color: rgba(237, 241, 245, 0.72);
+}
+
+:root[data-style="mono"] .window-toolbar .settings-icon-toggle:hover,
+:root[data-style="mono"] .window-toolbar .activity-icon-toggle:hover {
+  color: var(--accent-hover);
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
 }
 
 .activity-badge {
@@ -266,17 +331,22 @@ body::-webkit-scrollbar-corner,
 
 .command-overlay {
   position: fixed;
-  inset: 0;
+  inset: var(--window-drag-height) 0 0;
   z-index: 1300;
   display: grid;
   place-items: start center;
   padding: max(56px, 9vh) 16px 16px;
-  background: rgba(244, 247, 251, 0.42);
+  background:
+    linear-gradient(180deg, rgba(244, 247, 251, 0.86), rgba(244, 247, 251, 0.5) 38%, rgba(244, 247, 251, 0.34)),
+    rgba(244, 247, 251, 0.28);
   backdrop-filter: blur(7px);
+  overscroll-behavior: contain;
 }
 
 :root[data-style="mono"] .command-overlay {
-  background: rgba(4, 7, 11, 0.38);
+  background:
+    linear-gradient(180deg, rgba(8, 13, 19, 0.96), rgba(8, 13, 19, 0.72) 42%, rgba(8, 13, 19, 0.56)),
+    rgba(8, 13, 19, 0.42);
 }
 
 .command-panel {
@@ -297,11 +367,12 @@ body::-webkit-scrollbar-corner,
 }
 
 :root[data-style="mono"] .command-panel {
-  background: var(--panel-strong);
-  border-color: var(--line);
+  background:
+    linear-gradient(180deg, #080d13 0%, #0b1119 76px, #0b1119 100%);
+  border-color: rgba(139, 169, 208, 0.12);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.042),
-    0 30px 86px rgba(0, 0, 0, 0.56);
+    inset 0 1px 0 rgba(255, 255, 255, 0.026),
+    0 30px 86px rgba(0, 0, 0, 0.44);
 }
 
 .command-search-row {
@@ -373,6 +444,7 @@ body::-webkit-scrollbar-corner,
   grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
+  padding: 7px 8px;
   border: 1px solid transparent;
   border-radius: 11px;
   background: transparent;
@@ -458,44 +530,6 @@ body::-webkit-scrollbar-corner,
   font-size: 10px;
 }
 
-.settings-shortcut-note {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px;
-  border-radius: 12px;
-  border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.3);
-}
-
-:root[data-style="mono"] .settings-shortcut-note {
-  background: rgba(255, 255, 255, 0.018);
-}
-
-.settings-shortcut-note .MuiTypography-subtitle2 {
-  font-weight: 850;
-  color: var(--text);
-}
-
-.settings-shortcut-note .MuiTypography-caption {
-  display: block;
-  margin-top: 2px;
-  color: var(--muted);
-  font-weight: 700;
-}
-
-.settings-shortcut-note kbd {
-  flex: 0 0 auto;
-  padding: 5px 8px;
-  border-radius: 8px;
-  border: 1px solid var(--line-soft);
-  background: var(--panel-strong);
-  color: var(--text);
-  font: 11px/1.2 "SF Mono", "JetBrains Mono", monospace;
-  font-weight: 850;
-}
-
 .settings-overlay {
   position: fixed;
   inset: 0;
@@ -503,6 +537,8 @@ body::-webkit-scrollbar-corner,
   display: grid;
   place-items: center;
   padding: 18px;
+  overflow: hidden;
+  overscroll-behavior: none;
   background: rgba(244, 247, 251, 0.42);
   backdrop-filter: blur(6px);
 }
@@ -511,10 +547,72 @@ body::-webkit-scrollbar-corner,
   background: rgba(3, 6, 10, 0.34);
 }
 
+.settings-confirm-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 1210;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: rgba(15, 23, 42, 0.18);
+  backdrop-filter: blur(4px);
+}
+
+:root[data-style="mono"] .settings-confirm-layer {
+  background: rgba(0, 0, 0, 0.34);
+}
+
+.settings-confirm-card {
+  width: min(360px, calc(100vw - 36px));
+  padding: 16px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  background: var(--panel-strong);
+  color: var(--text);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.64),
+    0 20px 54px rgba(31, 46, 70, 0.24);
+}
+
+:root[data-style="mono"] .settings-confirm-card {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 24px 64px rgba(0, 0, 0, 0.5);
+}
+
+.settings-confirm-card .MuiTypography-subtitle2 {
+  font-size: 16px;
+  font-weight: 850;
+  color: var(--text);
+}
+
+.settings-confirm-card .MuiTypography-body2 {
+  margin-top: 7px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.settings-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 15px;
+}
+
+.settings-confirm-actions .MuiButton-root {
+  min-height: 34px;
+  border-radius: 10px;
+  font-weight: 850;
+}
+
 .settings-panel {
   --settings-field-label-bg: #fbfdff;
   width: min(420px, calc(100vw - 34px));
   overflow: hidden;
+  overscroll-behavior: contain;
   padding: 18px;
   border-radius: 14px;
   border: 1px solid var(--line);
@@ -672,6 +770,7 @@ body::-webkit-scrollbar-corner,
   align-items: stretch;
   gap: 14px;
   overflow: hidden;
+  overscroll-behavior: contain;
 }
 
 .settings-section-nav {
@@ -732,8 +831,221 @@ body::-webkit-scrollbar-corner,
   flex-direction: column;
   gap: 9px;
   overflow: auto;
+  overscroll-behavior: contain;
   padding: 2px 4px 2px 0;
   scrollbar-gutter: stable;
+}
+
+.settings-overview {
+  min-height: 100%;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+}
+
+.settings-overview-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.settings-overview-copy .MuiTypography-subtitle2 {
+  font-size: 13px;
+  font-weight: 850;
+  color: var(--text);
+}
+
+.settings-overview-copy .MuiTypography-caption {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 720;
+  line-height: 1.35;
+}
+
+.settings-list-section {
+  overflow: hidden;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--panel-strong) 74%, transparent);
+}
+
+.settings-list-section--appearance {
+  overflow: visible;
+}
+
+:root[data-style="mono"] .settings-list-section {
+  background: rgba(255, 255, 255, 0.014);
+}
+
+.settings-list-head {
+  min-height: 42px;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.settings-list-head .MuiTypography-subtitle2 {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 850;
+}
+
+.settings-list-head .MuiTypography-caption {
+  color: var(--muted);
+  font-weight: 760;
+}
+
+.settings-list {
+  display: grid;
+}
+
+.settings-list-row {
+  min-width: 0;
+  min-height: 56px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+
+.settings-list-row:last-child {
+  border-bottom: 0;
+}
+
+.settings-list-row--split {
+  grid-template-columns: minmax(150px, 0.45fr) minmax(240px, 1fr);
+}
+
+.settings-list-button.MuiButton-root {
+  width: 100%;
+  min-height: 56px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  justify-content: stretch;
+  text-align: left;
+  border-radius: 0;
+  border: 0;
+  border-bottom: 1px solid var(--line-soft);
+  background: transparent;
+  box-shadow: none;
+  text-transform: none;
+  padding: 10px 12px;
+  color: var(--text);
+}
+
+.settings-list-button.MuiButton-root:last-child {
+  border-bottom: 0;
+}
+
+.settings-list-button.MuiButton-root:hover {
+  background: color-mix(in srgb, var(--accent-soft) 64%, transparent);
+}
+
+.settings-list-button.MuiButton-root .MuiButton-icon {
+  margin: 0;
+}
+
+.settings-list-icon {
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 10px;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--panel-strong) 70%, transparent);
+  color: var(--muted);
+}
+
+.settings-list-icon svg {
+  font-size: 17px;
+}
+
+.settings-list-icon span {
+  font: 14px/1 "SF Mono", "JetBrains Mono", monospace;
+  font-weight: 900;
+}
+
+.settings-list-action-icon {
+  color: var(--muted);
+  opacity: 0.72;
+}
+
+.settings-list-row kbd {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border-radius: 9px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel-strong);
+  color: var(--text);
+  font: 12px/1.1 "SF Mono", "JetBrains Mono", monospace;
+  font-weight: 850;
+}
+
+.settings-style-choice {
+  min-width: 220px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.settings-style-choice button {
+  min-width: 0;
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-weight: 850;
+  cursor: pointer;
+}
+
+.settings-style-choice button:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.settings-style-choice button.is-active {
+  color: var(--accent-hover);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+}
+
+.settings-style-swatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32);
+}
+
+.settings-style-swatch--light {
+  background: linear-gradient(135deg, #fbfdff 0%, #dfe8f4 100%);
+}
+
+.settings-style-swatch--mono {
+  background: linear-gradient(135deg, #0f1722 0%, #25364c 100%);
+}
+
+:root[data-style="mono"] .settings-list-icon {
+  background: rgba(255, 255, 255, 0.018);
+  color: rgba(238, 242, 248, 0.74);
 }
 
 .settings-action-grid,
@@ -911,6 +1223,107 @@ body::-webkit-scrollbar-corner,
   font-size: 11px;
   font-weight: 760;
   opacity: 0.78;
+}
+
+.settings-debug-profile-switcher .MuiButton-root {
+  min-width: 108px;
+  max-width: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+
+.settings-finder-toolbar {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+}
+
+.settings-finder-switcher button {
+  min-width: 112px;
+}
+
+.settings-finder-entry-title {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.settings-finder-entry-title .MuiTypography-caption {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-finder-entry .MuiChip-root {
+  height: 22px;
+  border-radius: 999px;
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  font-weight: 850;
+}
+
+.settings-browser-route {
+  display: grid;
+  gap: 9px;
+  min-width: 0;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid var(--line-soft);
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--accent-soft) 52%, transparent), transparent 58%),
+    color-mix(in srgb, var(--panel-strong) 82%, transparent);
+}
+
+:root[data-style="mono"] .settings-browser-route {
+  background:
+    linear-gradient(135deg, rgba(111, 143, 202, 0.08), transparent 62%),
+    rgba(255, 255, 255, 0.018);
+}
+
+.settings-browser-route-head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 9px;
+}
+
+.settings-browser-route-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.settings-browser-route-head .MuiTypography-caption:first-child {
+  color: var(--text);
+  font-weight: 850;
+}
+
+.settings-browser-route-head .MuiTypography-caption:last-child {
+  color: var(--muted);
+  font-weight: 720;
+  line-height: 1.35;
+}
+
+.settings-browser-route .MuiChip-root {
+  max-width: 210px;
+  height: 22px;
+  border-radius: 999px;
+  color: var(--accent-hover);
+  border-color: var(--accent-border);
+  background: var(--accent-soft);
+  font-weight: 850;
+}
+
+.settings-browser-route .MuiChip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 :root[data-style="mono"] .settings-deploy-switcher {
@@ -1128,9 +1541,153 @@ body::-webkit-scrollbar-corner,
   max-width: none;
   width: 100%;
   min-width: 0;
-  align-self: start;
+  min-height: 0;
+  padding: 10px 10px 10px 12px;
+  align-self: stretch;
   justify-content: flex-start;
   align-items: stretch;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.workspace-frame {
+  grid-column: 2;
+  grid-row: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-self: stretch;
+  width: 100%;
+  min-width: 0;
+  height: calc(100vh - var(--window-drag-height));
+  min-height: 0;
+  overflow: hidden;
+}
+
+.workspace-frame.has-activity-panel {
+  grid-template-columns: minmax(0, 1fr) minmax(360px, 420px);
+  column-gap: 0;
+  padding-right: 0;
+}
+
+.activity-side-panel {
+  position: sticky;
+  top: var(--window-drag-height);
+  align-self: start;
+  width: 100%;
+  min-width: 0;
+  margin: 0;
+  height: 100%;
+  max-height: 100%;
+  border-radius: 0;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 24%),
+    linear-gradient(180deg, rgba(251, 253, 255, 0.98), rgba(247, 250, 254, 0.96));
+  box-shadow:
+    inset 1px 0 0 rgba(255, 255, 255, 0.72),
+    -18px 0 42px rgba(31, 55, 90, 0.06);
+  animation: activity-panel-in 140ms ease-out;
+}
+
+:root[data-style="mono"] .activity-side-panel {
+  background:
+    linear-gradient(180deg, #080d13 0%, #0b1119 82px, #0a1017 100%);
+  box-shadow:
+    inset 1px 0 0 rgba(139, 169, 208, 0.08),
+    -18px 0 42px rgba(0, 0, 0, 0.18);
+}
+
+.activity-center-surface {
+  border-radius: 0;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), transparent 24%),
+    transparent;
+}
+
+:root[data-style="mono"] .activity-center-surface {
+  background:
+    linear-gradient(180deg, rgba(8, 13, 19, 0.98), rgba(8, 13, 19, 0) 150px),
+    transparent;
+}
+
+.activity-drawer-root {
+  top: var(--window-drag-height) !important;
+  pointer-events: none;
+}
+
+.activity-drawer-root .activity-drawer-backdrop,
+.activity-drawer-root .activity-drawer-paper {
+  pointer-events: auto;
+}
+
+.activity-drawer-backdrop {
+  background-color: rgba(11, 17, 25, 0.24) !important;
+  backdrop-filter: blur(2px);
+}
+
+.activity-drawer-paper {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.18), transparent 24%),
+    linear-gradient(180deg, rgba(251, 253, 255, 0.98), rgba(247, 250, 254, 0.96)) !important;
+  box-shadow:
+    -18px 0 52px rgba(20, 31, 50, 0.18),
+    inset 1px 0 0 rgba(255, 255, 255, 0.68) !important;
+}
+
+:root[data-style="mono"] .activity-drawer-backdrop {
+  background-color: rgba(8, 13, 19, 0.52) !important;
+}
+
+:root[data-style="mono"] .activity-drawer-paper {
+  background:
+    linear-gradient(180deg, #080d13 0%, #0b1119 82px, #0a1017 100%) !important;
+  box-shadow:
+    -18px 0 52px rgba(0, 0, 0, 0.28),
+    inset 1px 0 0 rgba(139, 169, 208, 0.08) !important;
+}
+
+.activity-confirm-dialog-paper {
+  background:
+    radial-gradient(circle at 20% 0%, rgba(61, 111, 205, 0.1), transparent 40%),
+    var(--panel-strong) !important;
+  box-shadow: var(--shadow) !important;
+}
+
+.activity-confirm-dialog-root {
+  top: var(--window-drag-height) !important;
+  pointer-events: none;
+}
+
+.activity-confirm-dialog-root .MuiBackdrop-root,
+.activity-confirm-dialog-root .MuiDialog-container {
+  pointer-events: auto;
+}
+
+.activity-confirm-dialog-root .MuiBackdrop-root {
+  top: var(--window-drag-height) !important;
+}
+
+:root[data-style="mono"] .activity-confirm-dialog-paper {
+  background:
+    radial-gradient(circle at 18% 0%, rgba(88, 119, 173, 0.13), transparent 42%),
+    var(--panel-strong) !important;
+}
+
+@keyframes activity-panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-side-panel {
+    animation: none;
+  }
 }
 
 .content-status-stack {
@@ -1140,8 +1697,36 @@ body::-webkit-scrollbar-corner,
 
 .content-stage {
   position: relative;
+  width: 100%;
   min-width: 0;
   max-width: 100%;
+}
+
+.page-loading-strip {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 14px;
+  border: 1px solid rgba(37, 99, 235, 0.08);
+  border-radius: 14px;
+  background: rgba(226, 246, 252, 0.68);
+  color: #17415a;
+  font-size: 15px;
+  font-weight: 760;
+  line-height: 1.3;
+}
+
+.page-loading-strip .MuiCircularProgress-root {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+:root[data-style="mono"] .page-loading-strip {
+  background: rgba(79, 140, 255, 0.08);
+  border-color: rgba(79, 140, 255, 0.16);
+  color: var(--text);
 }
 
 .page-header {
@@ -1221,6 +1806,7 @@ body::-webkit-scrollbar-corner,
   flex-direction: column;
   gap: 10px;
   margin-top: 0;
+  width: 100%;
   min-width: 0;
   max-width: 100%;
 }
@@ -1879,17 +2465,12 @@ body::-webkit-scrollbar-corner,
   }
 }
 
-@media (max-width: 1080px) {
-  .content {
-    max-width: 860px;
-  }
-}
-
 @media (max-width: 900px) {
   .shell {
     grid-template-columns: 1fr;
-    gap: 8px;
-    padding: 8px;
+    grid-template-rows: auto minmax(0, 1fr);
+    gap: 0;
+    padding: var(--window-drag-height) 0 0;
   }
 
   .sidebar {
@@ -1899,7 +2480,12 @@ body::-webkit-scrollbar-corner,
     justify-content: flex-start;
     gap: 8px;
     padding: 8px 10px;
-    position: static;
+    position: sticky;
+    top: var(--window-drag-height);
+    z-index: 18;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    align-self: start;
   }
 
   .nav-stack {
@@ -1920,21 +2506,6 @@ body::-webkit-scrollbar-corner,
     font-size: 22px;
   }
 
-  .sidebar-footer {
-    margin-top: 0;
-    margin-left: auto;
-    padding-top: 0;
-  }
-
-  .settings-icon-toggle,
-  .activity-icon-toggle,
-  .command-icon-toggle {
-    flex: 0 0 auto;
-    width: 38px;
-    min-height: 38px;
-    border-radius: 11px;
-  }
-
   .nav-item {
     width: auto;
     min-width: 58px;
@@ -1947,6 +2518,93 @@ body::-webkit-scrollbar-corner,
 
   .content {
     max-width: 100%;
+    min-height: auto;
+    padding: 8px;
+  }
+
+  .workspace-frame,
+  .workspace-frame.has-activity-panel {
+    grid-column: 1;
+    grid-row: 2;
+    grid-template-columns: 1fr;
+    height: auto;
+    min-height: auto;
+    overflow: visible;
+  }
+
+  .activity-side-panel {
+    display: none;
+  }
+
+  .command-overlay {
+    inset: var(--window-drag-height) 0 0;
+    padding: 8px;
+    place-items: start center;
+    overflow: hidden;
+  }
+
+  .command-panel {
+    width: min(100%, calc(100vw - 16px));
+    max-height: calc(100dvh - var(--window-drag-height) - 16px);
+    border-radius: 12px;
+  }
+
+  .command-search-row {
+    min-height: 54px;
+    gap: 8px;
+    padding: 9px 11px;
+  }
+
+  .command-shortcut {
+    min-width: 70px;
+    padding-inline: 7px;
+  }
+
+  .command-result-list {
+    min-height: 120px;
+    padding: 6px;
+    gap: 3px;
+  }
+
+  .command-result {
+    min-height: 58px;
+    grid-template-columns: 30px minmax(0, 1fr);
+    align-items: start;
+    gap: 7px 9px;
+    padding: 8px;
+  }
+
+  .command-result-icon {
+    width: 28px;
+    height: 28px;
+    margin: 1px 0 0;
+    border-radius: 8px;
+  }
+
+  .command-result-meta {
+    grid-column: 2;
+    justify-content: flex-start;
+    padding: 0;
+    font-size: 10px;
+    line-height: 1.2;
+  }
+
+  .settings-list-row--split {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+    align-items: stretch;
+    align-content: start;
+    gap: 7px;
+    padding: 10px 10px 14px;
+  }
+
+  .settings-list-section--appearance .settings-style-choice {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .settings-list-section--appearance .settings-style-choice button {
+    min-height: 34px;
   }
 
   .workspace-grid {
@@ -1955,8 +2613,12 @@ body::-webkit-scrollbar-corner,
 }
 
 @media (max-width: 640px) {
+  :root {
+    --window-drag-height: 42px;
+  }
+
   .shell {
-    padding: 6px;
+    padding: var(--window-drag-height) 0 0;
   }
 
   .settings-overlay {
@@ -1974,22 +2636,21 @@ body::-webkit-scrollbar-corner,
 
   .command-overlay {
     padding: 8px;
-    place-items: start center;
   }
 
   .command-panel {
     width: 100%;
-    max-height: calc(100vh - 16px);
+    max-height: calc(100dvh - var(--window-drag-height) - 16px);
   }
 
   .command-result {
-    grid-template-columns: 34px minmax(0, 1fr);
+    grid-template-columns: 30px minmax(0, 1fr);
   }
 
   .command-result-meta {
     grid-column: 2;
     justify-content: flex-start;
-    padding: 0 0 7px;
+    padding: 0;
   }
 
   .settings-panel-body {
@@ -2025,8 +2686,56 @@ body::-webkit-scrollbar-corner,
 
   .settings-action-grid,
   .settings-form-grid,
-  .settings-project-toolbar {
+  .settings-project-toolbar,
+  .settings-finder-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .settings-browser-route-head {
+    display: grid;
+  }
+
+  .settings-browser-route .MuiChip-root {
+    justify-self: start;
+    max-width: 100%;
+  }
+
+  .settings-list-row,
+  .settings-list-button.MuiButton-root {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .settings-list-row.settings-list-row--split {
+    min-height: auto;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto;
+    gap: 6px;
+    padding: 9px 10px 13px;
+  }
+
+  .settings-list-row--split .settings-overview-copy {
+    gap: 1px;
+  }
+
+  .settings-list-row--split .settings-overview-copy .MuiTypography-caption {
+    line-height: 1.32;
+  }
+
+  .settings-list-row--split .settings-style-choice {
+    width: 100%;
+    min-width: 0;
+    gap: 5px;
+  }
+
+  .settings-list-row--split .settings-style-choice button {
+    min-height: 32px;
+    border-radius: 9px;
+  }
+
+  .settings-list-row kbd,
+  .settings-list-action-icon {
+    grid-column: 2;
+    justify-self: start;
   }
 
   .settings-deploy-switcher {

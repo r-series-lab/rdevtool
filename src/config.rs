@@ -79,7 +79,7 @@ pub struct Defaults {
     pub gitlab_token_env: String,
     #[serde(default)]
     pub gitlab_token: Option<String>,
-    #[serde(default)]
+    #[serde(default = "empty_branch_rules")]
     pub branch_rules: BranchRules,
 }
 
@@ -123,8 +123,10 @@ pub struct ProjectConfig {
     pub build: Option<ProjectCommandConfig>,
     #[serde(default)]
     pub focus: ProjectFocusConfig,
-    #[serde(default)]
+    #[serde(default = "empty_branch_rules")]
     pub branch_rules: BranchRules,
+    #[serde(default)]
+    pub debug_profiles: Vec<ProjectDebugProfileConfig>,
 }
 
 fn default_project_category() -> String {
@@ -148,6 +150,41 @@ pub struct ProjectFocusConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub bundle_id: Option<String>,
+    #[serde(default)]
+    pub auto_on_start: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProjectDebugProfileConfig {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub local_files: Vec<ProjectDebugLocalFileConfig>,
+    #[serde(default)]
+    pub browser: Option<String>,
+    #[serde(default)]
+    pub browser_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectDebugLocalFileConfig {
+    pub path: PathBuf,
+    #[serde(default = "default_debug_local_file_mode")]
+    pub mode: String,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_debug_local_file_mode() -> String {
+    "overwrite".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -165,6 +202,19 @@ impl Default for BranchRules {
             target_keywords: default_target_branch_keywords(),
         }
     }
+}
+
+impl BranchRules {
+    pub fn empty() -> Self {
+        Self {
+            source_keywords: Vec::new(),
+            target_keywords: Vec::new(),
+        }
+    }
+}
+
+fn empty_branch_rules() -> BranchRules {
+    BranchRules::empty()
 }
 
 fn default_source_branch_keywords() -> Vec<String> {

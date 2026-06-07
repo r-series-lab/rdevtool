@@ -8,6 +8,8 @@ short_label = "常用"
 name = "示例平台"
 kind = "url"
 url = "https://example.com/"
+# browser = "system" # system default, Google Chrome, Microsoft Edge, Safari, Arc, or custom app name
+# browser_profile = "Profile 1" # Chrome, Edge, Chromium, and Brave only
 note = "Replace with your team's internal platform entry."
 
 [[categories.entries]]

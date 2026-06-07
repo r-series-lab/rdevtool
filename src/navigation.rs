@@ -28,6 +28,8 @@ pub struct NavigationEntry {
     pub kind: String,
     pub target_label: String,
     pub url: Option<String>,
+    pub browser: Option<String>,
+    pub browser_profile: Option<String>,
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub script: Option<String>,
@@ -49,6 +51,37 @@ pub struct NavigationData {
     pub file_path: String,
     pub preferred_category: Option<String>,
     pub categories: Vec<NavigationCategory>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavigationEditorEntry {
+    pub name: String,
+    pub kind: String,
+    pub url: Option<String>,
+    pub browser: Option<String>,
+    pub browser_profile: Option<String>,
+    pub bundle_id: Option<String>,
+    pub app_name: Option<String>,
+    pub script: Option<String>,
+    pub cwd: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavigationEditorCategory {
+    pub title: String,
+    pub short_label: String,
+    pub entries: Vec<NavigationEditorEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NavigationEditorData {
+    pub file_path: String,
+    pub preferred_category: Option<String>,
+    pub categories: Vec<NavigationEditorCategory>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -93,6 +126,10 @@ struct NavigationEntryConfig {
     kind: Option<String>,
     #[serde(default)]
     url: String,
+    #[serde(default)]
+    browser: Option<String>,
+    #[serde(default)]
+    browser_profile: Option<String>,
     #[serde(default)]
     bundle_id: Option<String>,
     #[serde(default)]
@@ -141,6 +178,36 @@ pub fn load_navigation_data() -> Result<NavigationData> {
         config,
         path.display().to_string(),
     ))
+}
+
+pub fn load_navigation_editor_data() -> Result<NavigationEditorData> {
+    let path = ensure_navigation_config()?;
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read navigation config: {}", path.display()))?;
+    let config: NavigationFileConfig = toml::from_str(&content)
+        .with_context(|| format!("failed to parse navigation config: {}", path.display()))?;
+
+    Ok(NavigationEditorData {
+        file_path: path.display().to_string(),
+        preferred_category: config
+            .preferred_category
+            .and_then(|value| normalize_optional_text(Some(value))),
+        categories: config
+            .categories
+            .into_iter()
+            .map(navigation_editor_category_from_config)
+            .collect(),
+    })
+}
+
+pub fn save_navigation_editor_data(data: NavigationEditorData) -> Result<NavigationData> {
+    let path = ensure_navigation_config()?;
+    let config = navigation_file_config_from_editor(data)?;
+    let content =
+        toml::to_string_pretty(&config).context("failed to serialize navigation config")?;
+    fs::write(&path, content)
+        .with_context(|| format!("failed to write navigation config: {}", path.display()))?;
+    load_navigation_data()
 }
 
 fn ensure_navigation_config() -> Result<PathBuf> {
@@ -245,6 +312,8 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
     let kind = resolve_entry_kind(&entry)?;
     let note = normalize_optional_text(entry.note);
     let url = normalize_non_empty(entry.url);
+    let browser = normalize_optional_text(entry.browser);
+    let browser_profile = normalize_optional_text(entry.browser_profile);
     let bundle_id = normalize_optional_text(entry.bundle_id);
     let app_name = normalize_optional_text(entry.app_name);
     let script = normalize_optional_text(entry.script);
@@ -274,6 +343,16 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
         } else {
             None
         },
+        browser: if matches!(kind, NavigationEntryKind::Url) {
+            browser
+        } else {
+            None
+        },
+        browser_profile: if matches!(kind, NavigationEntryKind::Url) {
+            browser_profile
+        } else {
+            None
+        },
         bundle_id,
         app_name,
         script,
@@ -287,12 +366,163 @@ fn navigation_entry_config_from_entry(entry: &NavigationEntry) -> NavigationEntr
         name: entry.name.clone(),
         kind: Some(entry.kind.clone()),
         url: entry.url.clone().unwrap_or_default(),
+        browser: entry.browser.clone(),
+        browser_profile: entry.browser_profile.clone(),
         bundle_id: entry.bundle_id.clone(),
         app_name: entry.app_name.clone(),
         script: entry.script.clone(),
         cwd: entry.cwd.clone(),
         note: entry.note.clone(),
     }
+}
+
+fn navigation_editor_category_from_config(
+    category: NavigationCategoryConfig,
+) -> NavigationEditorCategory {
+    let title = category.title.trim().to_string();
+    let short_label = category
+        .short_label
+        .and_then(|value| normalize_optional_text(Some(value)))
+        .unwrap_or_else(|| navigation_category_label(&title));
+
+    NavigationEditorCategory {
+        title,
+        short_label,
+        entries: category
+            .entries
+            .into_iter()
+            .map(navigation_editor_entry_from_config)
+            .collect(),
+    }
+}
+
+fn navigation_editor_entry_from_config(entry: NavigationEntryConfig) -> NavigationEditorEntry {
+    let kind = entry
+        .kind
+        .as_deref()
+        .and_then(normalize_entry_kind)
+        .or_else(|| resolve_entry_kind(&entry).map(|kind| kind.key().to_string()))
+        .unwrap_or_else(|| NavigationEntryKind::Url.key().to_string());
+
+    NavigationEditorEntry {
+        name: entry.name.trim().to_string(),
+        kind,
+        url: normalize_optional_text(Some(entry.url)),
+        browser: normalize_optional_text(entry.browser),
+        browser_profile: normalize_optional_text(entry.browser_profile),
+        bundle_id: normalize_optional_text(entry.bundle_id),
+        app_name: normalize_optional_text(entry.app_name),
+        script: normalize_optional_text(entry.script),
+        cwd: normalize_optional_text(entry.cwd),
+        note: normalize_optional_text(entry.note),
+    }
+}
+
+fn navigation_file_config_from_editor(data: NavigationEditorData) -> Result<NavigationFileConfig> {
+    let mut categories = Vec::new();
+    for category in data.categories {
+        let title = category.title.trim().to_string();
+        if title.is_empty() {
+            anyhow::bail!("访达分类名称不能为空");
+        }
+        let short_label = normalize_optional_text(Some(category.short_label))
+            .unwrap_or_else(|| navigation_category_label(&title));
+        let entries = category
+            .entries
+            .into_iter()
+            .filter(|entry| !navigation_editor_entry_is_blank(entry))
+            .map(navigation_entry_config_from_editor_entry)
+            .collect::<Result<Vec<_>>>()?;
+        categories.push(NavigationCategoryConfig {
+            title,
+            short_label: Some(short_label),
+            entries,
+        });
+    }
+
+    let preferred_category = data
+        .preferred_category
+        .and_then(|value| normalize_optional_text(Some(value)))
+        .filter(|value| categories.iter().any(|category| category.title == *value))
+        .or_else(|| categories.first().map(|category| category.title.clone()));
+
+    Ok(NavigationFileConfig {
+        preferred_category,
+        categories,
+    })
+}
+
+fn navigation_editor_entry_is_blank(entry: &NavigationEditorEntry) -> bool {
+    [
+        entry.name.as_str(),
+        entry.kind.as_str(),
+        entry.url.as_deref().unwrap_or(""),
+        entry.browser.as_deref().unwrap_or(""),
+        entry.browser_profile.as_deref().unwrap_or(""),
+        entry.bundle_id.as_deref().unwrap_or(""),
+        entry.app_name.as_deref().unwrap_or(""),
+        entry.script.as_deref().unwrap_or(""),
+        entry.cwd.as_deref().unwrap_or(""),
+        entry.note.as_deref().unwrap_or(""),
+    ]
+    .iter()
+    .all(|value| value.trim().is_empty())
+}
+
+fn navigation_entry_config_from_editor_entry(
+    entry: NavigationEditorEntry,
+) -> Result<NavigationEntryConfig> {
+    let name = entry.name.trim().to_string();
+    if name.is_empty() {
+        anyhow::bail!("访达入口名称不能为空");
+    }
+    let kind = normalize_entry_kind(&entry.kind)
+        .ok_or_else(|| anyhow!("不支持的访达入口类型: {}", entry.kind))?;
+    let url = normalize_optional_text(entry.url);
+    let browser = normalize_optional_text(entry.browser);
+    let browser_profile = normalize_optional_text(entry.browser_profile);
+    let bundle_id = normalize_optional_text(entry.bundle_id);
+    let app_name = normalize_optional_text(entry.app_name);
+    let script = normalize_optional_text(entry.script);
+    let cwd = normalize_optional_text(entry.cwd);
+    let note = normalize_optional_text(entry.note);
+
+    match kind.as_str() {
+        "url" => {
+            let Some(value) = url.as_deref() else {
+                anyhow::bail!("网站入口需要填写 URL");
+            };
+            if !is_http_url(value) {
+                anyhow::bail!("网站入口 URL 仅支持 http/https");
+            }
+        }
+        "app" => {
+            if bundle_id.is_none() && app_name.is_none() {
+                anyhow::bail!("应用入口需要填写 Bundle ID 或应用名");
+            }
+        }
+        "script" => {
+            if script.is_none() {
+                anyhow::bail!("脚本入口需要填写脚本路径");
+            }
+        }
+        _ => unreachable!("entry kind was normalized"),
+    }
+
+    let is_url = kind == "url";
+
+    Ok(NavigationEntryConfig {
+        name,
+        kind: Some(kind),
+        url: url.unwrap_or_default(),
+        browser: if is_url { browser } else { None },
+        browser_profile: if is_url { browser_profile } else { None },
+        bundle_id,
+        app_name,
+        script,
+        cwd,
+        note,
+    })
 }
 
 fn navigation_config_from_data(data: &NavigationData) -> NavigationFileConfig {
@@ -375,15 +605,56 @@ fn parse_navigation_markdown(content: &str, file_path: String) -> NavigationData
 
 pub fn open_navigation_entry(entry: &NavigationEntry) -> Result<NavigationOpenResult> {
     match entry_kind(entry)? {
-        NavigationEntryKind::Url => {
-            let url = entry
-                .url
-                .as_deref()
-                .ok_or_else(|| anyhow!("missing url for url shortcut"))?;
-            open_in_current_chrome(url)
-        }
+        NavigationEntryKind::Url => open_navigation_url(entry),
         NavigationEntryKind::App => open_navigation_app(entry),
         NavigationEntryKind::Script => open_navigation_script(entry),
+    }
+}
+
+fn open_navigation_url(entry: &NavigationEntry) -> Result<NavigationOpenResult> {
+    let url = entry
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow!("missing url for url shortcut"))?;
+    let browser = entry
+        .browser
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let profile = entry
+        .browser_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match browser.map(normalize_browser_choice) {
+        None | Some(NavigationBrowserChoice::CurrentChrome) => open_in_current_chrome(url),
+        Some(NavigationBrowserChoice::System) => open_system_browser(url),
+        Some(NavigationBrowserChoice::App(app_name)) => {
+            if let Some(profile) = profile {
+                open_chromium_profile(&app_name, profile, url)
+            } else {
+                open_browser_app(&app_name, url)
+            }
+        }
+    }
+}
+
+enum NavigationBrowserChoice<'a> {
+    CurrentChrome,
+    System,
+    App(&'a str),
+}
+
+fn normalize_browser_choice(value: &str) -> NavigationBrowserChoice<'_> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "current_chrome" | "current chrome" | "chrome_current" | "chrome-current" => {
+            NavigationBrowserChoice::CurrentChrome
+        }
+        "system" | "default" | "system_default" | "default_browser" => {
+            NavigationBrowserChoice::System
+        }
+        _ => NavigationBrowserChoice::App(value.trim()),
     }
 }
 
@@ -420,6 +691,69 @@ pub fn open_in_current_chrome(url: &str) -> Result<NavigationOpenResult> {
         url: url.to_string(),
         detail: "已在当前 Chrome 窗口打开入口".to_string(),
     })
+}
+
+fn open_system_browser(url: &str) -> Result<NavigationOpenResult> {
+    let status = Command::new("open")
+        .arg(url)
+        .status()
+        .map_err(|error| anyhow!("failed to open system browser: {error}"))?;
+    if !status.success() {
+        anyhow::bail!("failed to open system browser");
+    }
+
+    Ok(NavigationOpenResult {
+        url: url.to_string(),
+        detail: "已使用系统默认浏览器打开入口".to_string(),
+    })
+}
+
+fn open_browser_app(app_name: &str, url: &str) -> Result<NavigationOpenResult> {
+    let status = Command::new("open")
+        .arg("-a")
+        .arg(app_name)
+        .arg(url)
+        .status()
+        .map_err(|error| anyhow!("failed to open browser app: {error}"))?;
+    if !status.success() {
+        anyhow::bail!("failed to open browser app: {}", app_name);
+    }
+
+    Ok(NavigationOpenResult {
+        url: url.to_string(),
+        detail: format!("已使用 {} 打开入口", app_name),
+    })
+}
+
+fn open_chromium_profile(app_name: &str, profile: &str, url: &str) -> Result<NavigationOpenResult> {
+    if !browser_supports_profile(app_name) {
+        anyhow::bail!("{} 暂不支持 profile 打开方式", app_name);
+    }
+
+    let status = Command::new("open")
+        .arg("-na")
+        .arg(app_name)
+        .arg("--args")
+        .arg(format!("--profile-directory={profile}"))
+        .arg(url)
+        .status()
+        .map_err(|error| anyhow!("failed to open browser profile: {error}"))?;
+    if !status.success() {
+        anyhow::bail!("failed to open {} profile: {}", app_name, profile);
+    }
+
+    Ok(NavigationOpenResult {
+        url: url.to_string(),
+        detail: format!("已使用 {} · {} 打开入口", app_name, profile),
+    })
+}
+
+fn browser_supports_profile(app_name: &str) -> bool {
+    let normalized = app_name.trim().to_ascii_lowercase();
+    normalized.contains("chrome")
+        || normalized.contains("edge")
+        || normalized.contains("chromium")
+        || normalized.contains("brave")
 }
 
 fn open_navigation_app(entry: &NavigationEntry) -> Result<NavigationOpenResult> {
@@ -615,6 +949,8 @@ fn parse_nav_entry(cells: &[String]) -> Option<NavigationEntry> {
         kind: NavigationEntryKind::Url.key().to_string(),
         target_label: url.clone(),
         url: Some(url),
+        browser: None,
+        browser_profile: None,
         bundle_id: None,
         app_name: None,
         script: None,
@@ -690,6 +1026,15 @@ fn resolve_entry_kind(entry: &NavigationEntryConfig) -> Option<NavigationEntryKi
         return Some(NavigationEntryKind::Script);
     }
     None
+}
+
+fn normalize_entry_kind(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "url" => Some(NavigationEntryKind::Url.key().to_string()),
+        "app" => Some(NavigationEntryKind::App.key().to_string()),
+        "script" => Some(NavigationEntryKind::Script.key().to_string()),
+        _ => None,
+    }
 }
 
 fn entry_kind(entry: &NavigationEntry) -> Result<NavigationEntryKind> {

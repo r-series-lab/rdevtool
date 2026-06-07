@@ -446,7 +446,10 @@ impl DesktopApp {
     }
 
     fn deploy_scope_key(&self, project_key: &str, use_variant: bool) -> String {
-        format!("{project_key}:{}", if use_variant { "variant" } else { "standard" })
+        format!(
+            "{project_key}:{}",
+            if use_variant { "variant" } else { "standard" }
+        )
     }
 
     fn current_extra_params(&self) -> BTreeMap<String, String> {
@@ -1654,8 +1657,8 @@ fn mix_rgb(base: [f32; 3], top: [f32; 3], amount: f32) -> [f32; 3] {
 }
 
 fn load_navigation_categories() -> Result<Vec<NavCategory>> {
-    let path = std::env::var("RDEVTOOL_NAVIGATION_MD")
-        .unwrap_or_else(|_| "navigation.md".to_string());
+    let path =
+        std::env::var("RDEVTOOL_NAVIGATION_MD").unwrap_or_else(|_| "navigation.md".to_string());
     let content = fs::read_to_string(path)
         .map_err(|error| anyhow!("failed to read navigation file: {error}"))?;
 
@@ -2087,7 +2090,8 @@ fn render_deploy_form(
     let mut use_variant = app.uses_variant();
     let has_variant = project.jobs.variant.is_some();
 
-    app.variant_overrides.insert(project_key.clone(), use_variant);
+    app.variant_overrides
+        .insert(project_key.clone(), use_variant);
 
     if job_has_param(&project, use_variant, &["ENV_PROFILE", "projectEnv", "env"]) {
         let env_options = app.env_options();
@@ -2123,7 +2127,8 @@ fn render_deploy_form(
             }
         });
     });
-    app.variant_overrides.insert(project_key.clone(), use_variant);
+    app.variant_overrides
+        .insert(project_key.clone(), use_variant);
 
     if let Some(job) = selected_job(&project, use_variant) {
         let has_deploy_option_params = job.params.iter().any(|param: &String| {
@@ -2151,9 +2156,12 @@ fn render_deploy_form(
                 "IS_BUILD_MOBILE",
                 &mobile_preferred_default,
             ) == "是";
-            let mut is_gray =
-                app.deploy_param_value(&project_key, use_variant, "IS_GRAY", &gray_preferred_default)
-                    == "是";
+            let mut is_gray = app.deploy_param_value(
+                &project_key,
+                use_variant,
+                "IS_GRAY",
+                &gray_preferred_default,
+            ) == "是";
 
             let inline_two_blocks =
                 (has_admin_param || has_mobile_param) && show_gray && control_width >= 420.0;

@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   Alert,
   Button,
@@ -6,7 +6,7 @@ import {
 import type { PageKey } from "../app-shell";
 import type { ActivityEntry } from "../lib/activityCenter";
 import type { AppStyleMode } from "../theme";
-import { ActivityIcon, SettingsIcon, TerminalIcon } from "./AppIcons";
+import { PanelSideIcon, SettingsIcon } from "./AppIcons";
 import { ActivityCenter } from "./ActivityCenter";
 import { SettingsPanel } from "./SettingsPanel";
 
@@ -20,7 +20,6 @@ type AppShellLayoutProps = {
   visibleNavItems: NavItem[];
   activePage: PageKey;
   onPageChange: (page: PageKey) => void;
-  onOpenCommandPalette: () => void;
   styleMode: AppStyleMode;
   onStyleModeChange: (mode: AppStyleMode) => void;
   selectedProjectKey: string;
@@ -32,7 +31,7 @@ type AppShellLayoutProps = {
   activityAlertCount: number;
   onOpenActivityEntry: (entry: ActivityEntry) => void;
   onOpenActivityResource: (entry: ActivityEntry) => void;
-  onRefreshActivities: () => Promise<void> | void;
+  onRefreshActivities: (options?: { force?: boolean }) => Promise<void> | void;
   onAcknowledgeActivityEntry: (entry: ActivityEntry) => void;
   onAcknowledgeActivityEntries: (entries: ActivityEntry[]) => void;
   onClearActivities: () => void;
@@ -41,11 +40,22 @@ type AppShellLayoutProps = {
   children: ReactNode;
 };
 
+function shouldShowBusyMessage(value: string) {
+  const message = value.trim();
+  if (!message) {
+    return false;
+  }
+  return !(
+    message.startsWith("正在刷新") ||
+    message === "正在同步分支" ||
+    message === "正在同步状态"
+  );
+}
+
 export function AppShellLayout({
   visibleNavItems,
   activePage,
   onPageChange,
-  onOpenCommandPalette,
   styleMode,
   onStyleModeChange,
   selectedProjectKey,
@@ -67,6 +77,21 @@ export function AppShellLayout({
 }: AppShellLayoutProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [activityPanelMode, setActivityPanelMode] = useState(() =>
+    typeof window === "undefined"
+      ? false
+      : window.matchMedia("(min-width: 901px)").matches,
+  );
+
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 901px)");
+    const handleChange = () => setActivityPanelMode(query.matches);
+    handleChange();
+    query.addEventListener("change", handleChange);
+    return () => {
+      query.removeEventListener("change", handleChange);
+    };
+  }, []);
 
   function openSettings() {
     setSettingsOpen(true);
@@ -76,8 +101,38 @@ export function AppShellLayout({
     setSettingsOpen(false);
   }
 
+  const visibleBusy = shouldShowBusyMessage(busy) ? busy : "";
+
   return (
-    <div className="shell">
+      <div className="shell">
+      <div className="window-drag-region" data-tauri-drag-region />
+      <div className="window-toolbar" aria-label="窗口工具">
+        <button
+          type="button"
+          className="activity-icon-toggle"
+          aria-label={activityOpen ? "关闭活动中心" : "打开活动中心"}
+          title="活动"
+          onClick={() => setActivityOpen((current) => !current)}
+          aria-expanded={activityOpen}
+        >
+          <PanelSideIcon fontSize="small" />
+          {activityAlertCount > 0 ? (
+            <span className="activity-badge">
+              {activityAlertCount > 99 ? "99+" : activityAlertCount}
+            </span>
+          ) : null}
+        </button>
+        <button
+          type="button"
+          className="settings-icon-toggle"
+          aria-label="打开设置"
+          title="设置"
+          onClick={openSettings}
+          aria-expanded={settingsOpen}
+        >
+          <SettingsIcon fontSize="small" />
+        </button>
+      </div>
       <aside className="sidebar">
         <div className="shell-brand">
           <div className="shell-brand-mark" aria-hidden="true">
@@ -100,42 +155,6 @@ export function AppShellLayout({
             </Button>
           ))}
         </nav>
-        <div className="sidebar-footer">
-          <button
-            type="button"
-            className="command-icon-toggle"
-            aria-label="打开命令面板"
-            title="命令面板 Cmd/Ctrl K"
-            onClick={onOpenCommandPalette}
-          >
-            <TerminalIcon fontSize="small" />
-          </button>
-          <button
-            type="button"
-            className="activity-icon-toggle"
-            aria-label="打开活动中心"
-            title="活动"
-            onClick={() => setActivityOpen(true)}
-            aria-expanded={activityOpen}
-          >
-            <ActivityIcon fontSize="small" />
-            {activityAlertCount > 0 ? (
-              <span className="activity-badge">
-                {activityAlertCount > 99 ? "99+" : activityAlertCount}
-              </span>
-            ) : null}
-          </button>
-          <button
-            type="button"
-            className="settings-icon-toggle"
-            aria-label="打开设置"
-            title="设置"
-            onClick={openSettings}
-            aria-expanded={settingsOpen}
-          >
-            <SettingsIcon fontSize="small" />
-          </button>
-        </div>
       </aside>
 
       {settingsOpen ? (
@@ -151,38 +170,58 @@ export function AppShellLayout({
           onClose={closeSettings}
         />
       ) : null}
-      <ActivityCenter
-        open={activityOpen}
-        items={activityItems}
-        onClose={() => setActivityOpen(false)}
-        onClear={onClearActivities}
-        onOpenResource={onOpenActivityResource}
-        onRefresh={onRefreshActivities}
-        onAcknowledgeEntry={onAcknowledgeActivityEntry}
-        onAcknowledgeEntries={onAcknowledgeActivityEntries}
-        onOpenEntry={(entry) => {
-          onOpenActivityEntry(entry);
-          setActivityOpen(false);
-        }}
-      />
+      {!activityPanelMode ? (
+        <ActivityCenter
+          open={activityOpen}
+          items={activityItems}
+          onClose={() => setActivityOpen(false)}
+          onClear={onClearActivities}
+          onOpenResource={onOpenActivityResource}
+          onRefresh={onRefreshActivities}
+          onAcknowledgeEntry={onAcknowledgeActivityEntry}
+          onAcknowledgeEntries={onAcknowledgeActivityEntries}
+          onOpenEntry={(entry) => {
+            onOpenActivityEntry(entry);
+            setActivityOpen(false);
+          }}
+        />
+      ) : null}
 
-      <main className="content">
-        {busy || error ? (
-          <div className="content-status-stack">
-            {busy ? (
-              <Alert severity="info" sx={{ py: 0 }}>
-                {busy}
-              </Alert>
-            ) : null}
-            {error ? (
-              <Alert severity="error" sx={{ py: 0 }}>
-                {error}
-              </Alert>
-            ) : null}
-          </div>
+      <div className={`workspace-frame${activityPanelMode && activityOpen ? " has-activity-panel" : ""}`}>
+        <main className="content">
+          {visibleBusy || error ? (
+            <div className="content-status-stack">
+              {visibleBusy ? (
+                <Alert severity="info" sx={{ py: 0 }}>
+                  {visibleBusy}
+                </Alert>
+              ) : null}
+              {error ? (
+                <Alert severity="error" sx={{ py: 0 }}>
+                  {error}
+                </Alert>
+              ) : null}
+            </div>
+          ) : null}
+          <div className="content-stage">{children}</div>
+        </main>
+        {activityPanelMode ? (
+          <ActivityCenter
+            variant="panel"
+            open={activityOpen}
+            items={activityItems}
+            onClose={() => setActivityOpen(false)}
+            onClear={onClearActivities}
+            onOpenResource={onOpenActivityResource}
+            onRefresh={onRefreshActivities}
+            onAcknowledgeEntry={onAcknowledgeActivityEntry}
+            onAcknowledgeEntries={onAcknowledgeActivityEntries}
+            onOpenEntry={(entry) => {
+              onOpenActivityEntry(entry);
+            }}
+          />
         ) : null}
-        <div className="content-stage">{children}</div>
-      </main>
+      </div>
     </div>
   );
 }

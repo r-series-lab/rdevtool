@@ -1,12 +1,12 @@
 use rdevtool_core::config::{
-    AppConfig, ProjectCommandConfig, ProjectConfig, default_config_dir,
+    AppConfig, ProjectCommandConfig, ProjectConfig, ProjectDebugProfileConfig, default_config_dir,
 };
 use rdevtool_core::navigation::open_in_current_chrome;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
-use std::fs::{File, OpenOptions};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -21,6 +21,7 @@ pub struct ProjectRuntimeSnapshot {
     pub repo_path: Option<String>,
     pub command: Option<String>,
     pub cwd: Option<String>,
+    pub focus_url: Option<String>,
     pub status_key: String,
     pub status_label: String,
     pub detail: String,
@@ -43,6 +44,19 @@ pub struct ProjectRuntimeSnapshot {
     pub can_stop_build: bool,
     pub can_open_build_output: bool,
     pub can_focus_runtime: bool,
+    pub debug_profiles: Vec<ProjectDebugProfileSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectDebugProfileSummary {
+    pub key: String,
+    pub label: String,
+    pub env: BTreeMap<String, String>,
+    pub env_count: usize,
+    pub local_file_count: usize,
+    pub browser: Option<String>,
+    pub browser_profile: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,18 +230,38 @@ impl ProjectRuntimeState {
         &self,
         config: &AppConfig,
         project_key: &str,
+        debug_profile_key: Option<&str>,
+        env_overrides: Option<&BTreeMap<String, String>>,
     ) -> Result<ProjectRuntimeSnapshot, String> {
         log_project_runtime_event(format!("start requested key={}", project_key));
         let project = config
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
-        let resolved = resolve_project_command(project, ProjectCommandKind::Dev)?;
+        let debug_profile = selected_debug_profile(project, debug_profile_key)?;
+        if let Some(profile) = debug_profile.as_ref() {
+            apply_debug_profile_local_files(project, profile)?;
+        }
+        let mut resolved = resolve_project_command(project, ProjectCommandKind::Dev)?;
+        if let Some(env_overrides) = env_overrides {
+            for (key, value) in env_overrides {
+                resolved.env.insert(key.clone(), value.clone());
+            }
+        } else if let Some(profile) = debug_profile.as_ref() {
+            for (key, value) in &profile.env {
+                resolved.env.insert(key.clone(), value.clone());
+            }
+        }
         let launch_resolved = resolved.clone();
         log_project_runtime_event(format!(
-            "start resolved key={} cwd={} command={}",
+            "start resolved key={} cwd={} command={} debug_profile={} env_overrides={}",
             project.key,
             resolved.cwd.display(),
-            resolved.command
+            resolved.command,
+            debug_profile
+                .as_ref()
+                .map(|profile| profile.key.as_str())
+                .unwrap_or("default"),
+            env_overrides.map(|values| values.len()).unwrap_or(0)
         ));
 
         let mut store = self
@@ -518,16 +552,16 @@ fn snapshot_for_project(
         && build_output_dir
             .as_ref()
             .is_some_and(|path| path.exists() && path.is_dir());
-    let log_path = display
-        .dev
-        .command
-        .as_ref()
-        .map(|_| task_log_path(project, ProjectCommandKind::Dev).display().to_string());
-    let build_log_path = display
-        .build
-        .command
-        .as_ref()
-        .map(|_| task_log_path(project, ProjectCommandKind::Build).display().to_string());
+    let log_path = display.dev.command.as_ref().map(|_| {
+        task_log_path(project, ProjectCommandKind::Dev)
+            .display()
+            .to_string()
+    });
+    let build_log_path = display.build.command.as_ref().map(|_| {
+        task_log_path(project, ProjectCommandKind::Build)
+            .display()
+            .to_string()
+    });
 
     Ok(ProjectRuntimeSnapshot {
         key: project.key.clone(),
@@ -536,6 +570,13 @@ fn snapshot_for_project(
         repo_path: display.repo_path,
         command: display.dev.command,
         cwd: display.dev.cwd,
+        focus_url: project
+            .focus
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
         status_key: dev_state.status_key,
         status_label: dev_state.status_label,
         detail: dev_state.detail,
@@ -558,6 +599,23 @@ fn snapshot_for_project(
         can_stop_build: build_state.is_running,
         can_open_build_output,
         can_focus_runtime,
+        debug_profiles: project
+            .debug_profiles
+            .iter()
+            .map(|profile| ProjectDebugProfileSummary {
+                key: profile.key.clone(),
+                label: profile.label.clone(),
+                env: profile.env.clone(),
+                env_count: profile.env.len(),
+                local_file_count: profile
+                    .local_files
+                    .iter()
+                    .filter(|item| item.enabled)
+                    .count(),
+                browser: profile.browser.clone(),
+                browser_profile: profile.browser_profile.clone(),
+            })
+            .collect(),
     })
 }
 
@@ -710,12 +768,7 @@ fn launch_project_command(
     thread::sleep(Duration::from_millis(240));
     match child.try_wait().map_err(|error| error.to_string())? {
         Some(status) => {
-            let _ = writeln!(
-                log_file,
-                "[{}] exited quickly status={}",
-                now_ms(),
-                status
-            );
+            let _ = writeln!(log_file, "[{}] exited quickly status={}", now_ms(), status);
             last_results.insert(project.key.clone(), kind.quick_exit_state(status.code()));
         }
         None => {
@@ -742,8 +795,7 @@ fn open_task_log(
 ) -> Result<File, String> {
     let path = task_log_path(project, kind);
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("创建日志目录失败: {}", error))?;
+        std::fs::create_dir_all(parent).map_err(|error| format!("创建日志目录失败: {}", error))?;
     }
     let mut file = OpenOptions::new()
         .create(true)
@@ -764,9 +816,11 @@ fn open_task_log(
 }
 
 fn task_log_path(project: &ProjectConfig, kind: ProjectCommandKind) -> PathBuf {
-    default_config_dir()
-        .join("runtime-logs")
-        .join(format!("{}-{}.log", sanitize_log_name(&project.key), kind.log_file_suffix()))
+    default_config_dir().join("runtime-logs").join(format!(
+        "{}-{}.log",
+        sanitize_log_name(&project.key),
+        kind.log_file_suffix()
+    ))
 }
 
 fn sanitize_log_name(value: &str) -> String {
@@ -862,6 +916,185 @@ fn resolve_project_command(
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect(),
     })
+}
+
+fn selected_debug_profile(
+    project: &ProjectConfig,
+    profile_key: Option<&str>,
+) -> Result<Option<ProjectDebugProfileConfig>, String> {
+    let Some(profile_key) = profile_key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    project
+        .debug_profiles
+        .iter()
+        .find(|profile| profile.key == profile_key)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| format!("调试档案不存在: {}", profile_key))
+}
+
+fn apply_debug_profile_local_files(
+    project: &ProjectConfig,
+    profile: &ProjectDebugProfileConfig,
+) -> Result<(), String> {
+    if profile.local_files.is_empty() {
+        return Ok(());
+    }
+    let repo_path = project
+        .repo_path
+        .as_ref()
+        .ok_or_else(|| "调试档案写入本地文件需要项目配置 repo_path".to_string())?;
+    if !repo_path.exists() || !repo_path.is_dir() {
+        return Err(format!(
+            "项目目录不存在，无法应用调试档案: {}",
+            repo_path.display()
+        ));
+    }
+    let git_checked = repo_path.join(".git").exists();
+    for local_file in profile.local_files.iter().filter(|item| item.enabled) {
+        let (target_path, relative_path) =
+            resolve_debug_local_file_path(repo_path, &local_file.path)?;
+        if git_checked {
+            ensure_debug_local_file_git_safe(repo_path, &relative_path)?;
+        }
+        if let Some(parent) = target_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("创建本地调试文件目录失败: {}", error))?;
+        }
+        match local_file.mode.trim() {
+            "" | "overwrite" => {
+                fs::write(&target_path, &local_file.content)
+                    .map_err(|error| format!("写入本地调试文件失败: {}", error))?;
+            }
+            "append_block" => {
+                write_debug_append_block(
+                    &target_path,
+                    &profile.key,
+                    &relative_path,
+                    &local_file.content,
+                )?;
+            }
+            other => {
+                return Err(format!(
+                    "本地调试文件 {} 使用了不支持的写入方式: {}",
+                    relative_path, other
+                ));
+            }
+        }
+        log_project_runtime_event(format!(
+            "debug profile applied project={} profile={} file={} mode={}",
+            project.key, profile.key, relative_path, local_file.mode
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_debug_local_file_path(
+    repo_path: &Path,
+    file_path: &Path,
+) -> Result<(PathBuf, String), String> {
+    if file_path.as_os_str().is_empty() {
+        return Err("本地调试文件路径不能为空".to_string());
+    }
+    if file_path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir))
+    {
+        return Err(format!(
+            "本地调试文件路径不能包含 ..: {}",
+            file_path.display()
+        ));
+    }
+    let target_path = if file_path.is_absolute() {
+        if !file_path.starts_with(repo_path) {
+            return Err(format!(
+                "本地调试文件必须位于项目目录内: {}",
+                file_path.display()
+            ));
+        }
+        file_path.to_path_buf()
+    } else {
+        repo_path.join(file_path)
+    };
+    let relative_path = target_path
+        .strip_prefix(repo_path)
+        .map_err(|_| format!("本地调试文件必须位于项目目录内: {}", target_path.display()))?
+        .to_string_lossy()
+        .replace('\\', "/");
+    Ok((target_path, relative_path))
+}
+
+fn ensure_debug_local_file_git_safe(repo_path: &Path, relative_path: &str) -> Result<(), String> {
+    let tracked = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("ls-files")
+        .arg("--error-unmatch")
+        .arg("--")
+        .arg(relative_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|error| format!("检查本地调试文件 Git 状态失败: {}", error))?
+        .success();
+    if tracked {
+        return Err(format!(
+            "{} 已被 git 跟踪，拒绝用调试档案覆盖；请改用被 .gitignore 忽略的本地配置文件",
+            relative_path
+        ));
+    }
+
+    let ignored_status = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .arg("check-ignore")
+        .arg("-q")
+        .arg("--")
+        .arg(relative_path)
+        .status()
+        .map_err(|error| format!("检查本地调试文件 .gitignore 状态失败: {}", error))?;
+    if !ignored_status.success() {
+        return Err(format!(
+            "{} 当前没有被 .gitignore 忽略；为避免误提交，请先加入 .gitignore 后再应用调试档案",
+            relative_path
+        ));
+    }
+    Ok(())
+}
+
+fn write_debug_append_block(
+    target_path: &Path,
+    profile_key: &str,
+    relative_path: &str,
+    content: &str,
+) -> Result<(), String> {
+    let existing = match fs::read_to_string(target_path) {
+        Ok(value) => value,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(format!("读取本地调试文件失败: {}", error)),
+    };
+    let start_marker = format!("# >>> rDevTool:{}:{}\n", profile_key, relative_path);
+    let end_marker = format!("# <<< rDevTool:{}:{}\n", profile_key, relative_path);
+    let block = format!(
+        "{}{}\n{}",
+        start_marker,
+        content.trim_end_matches('\n'),
+        end_marker
+    );
+    let next = if let (Some(start), Some(end)) = (
+        existing.find(&start_marker),
+        existing
+            .find(&end_marker)
+            .map(|index| index + end_marker.len()),
+    ) {
+        format!("{}{}{}", &existing[..start], block, &existing[end..])
+    } else if existing.trim().is_empty() {
+        block
+    } else {
+        format!("{}\n\n{}", existing.trim_end_matches('\n'), block)
+    };
+    fs::write(target_path, next).map_err(|error| format!("写入本地调试文件失败: {}", error))
 }
 
 fn resolve_command_cwd(

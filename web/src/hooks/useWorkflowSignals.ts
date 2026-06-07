@@ -25,6 +25,15 @@ type UseWorkflowSignalsOptions = {
   setError: (value: string) => void;
 };
 
+export type WorkflowSignalSummary = {
+  id: string;
+  receiveCount: number;
+  broadcastCount: number;
+  pendingCount: number;
+  enabledReceiveCount: number;
+  enabledBroadcastCount: number;
+};
+
 export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
   const [rules, setRules] = useState<WorkflowRules>(DEFAULT_WORKFLOW_RULES);
   const [pendingSignals, setPendingSignals] = useState<WorkflowSignal[]>([]);
@@ -215,14 +224,63 @@ export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
         new Set(
           [
             ...rules.broadcasts.map((rule) => rule.signalId),
+            ...rules.receivers.map((rule) => rule.signalId),
             ...pendingSignals.map((signal) => signal.id),
           ]
             .map((item) => item.trim())
             .filter(Boolean),
         ),
       ).sort((left, right) => left.localeCompare(right)),
-    [pendingSignals, rules.broadcasts],
+    [pendingSignals, rules.broadcasts, rules.receivers],
   );
+  const signalSummaries = useMemo(() => {
+    const summaries = new Map<string, WorkflowSignalSummary>();
+    const ensureSummary = (id: string) => {
+      const normalizedId = id.trim();
+      if (!normalizedId) {
+        return null;
+      }
+      const current = summaries.get(normalizedId) ?? {
+        id: normalizedId,
+        receiveCount: 0,
+        broadcastCount: 0,
+        pendingCount: 0,
+        enabledReceiveCount: 0,
+        enabledBroadcastCount: 0,
+      };
+      summaries.set(normalizedId, current);
+      return current;
+    };
+
+    for (const rule of rules.receivers) {
+      const summary = ensureSummary(rule.signalId);
+      if (summary) {
+        summary.receiveCount += 1;
+        if (rule.enabled) {
+          summary.enabledReceiveCount += 1;
+        }
+      }
+    }
+    for (const rule of rules.broadcasts) {
+      const summary = ensureSummary(rule.signalId);
+      if (summary) {
+        summary.broadcastCount += 1;
+        if (rule.enabled) {
+          summary.enabledBroadcastCount += 1;
+        }
+      }
+    }
+    for (const signal of pendingSignals) {
+      const summary = ensureSummary(signal.id);
+      if (summary) {
+        summary.pendingCount += 1;
+      }
+    }
+
+    return Array.from(summaries.values()).sort((left, right) =>
+      left.id.localeCompare(right.id),
+    );
+  }, [pendingSignals, rules.broadcasts, rules.receivers]);
 
   function matchingReceivers(signal: WorkflowSignal) {
     return matchingReceiversForSignal(signal, rules.receivers);
@@ -239,6 +297,29 @@ export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
     await persistPendingSignals(
       pendingSignalsRef.current.filter((signal) => signal.instanceId !== instanceId),
     );
+  }
+
+  async function deleteWorkflowSignal(signalId: string) {
+    const normalizedId = signalId.trim();
+    if (!normalizedId) {
+      return;
+    }
+    await persistRules({
+      broadcasts: rulesRef.current.broadcasts.filter(
+        (rule) => rule.signalId.trim() !== normalizedId,
+      ),
+      receivers: rulesRef.current.receivers.filter(
+        (rule) => rule.signalId.trim() !== normalizedId,
+      ),
+    });
+    await persistPendingSignals(
+      pendingSignalsRef.current.filter((signal) => signal.id.trim() !== normalizedId),
+    );
+  }
+
+  async function clearWorkflowSignals() {
+    await persistRules(DEFAULT_WORKFLOW_RULES);
+    await persistPendingSignals([]);
   }
 
   return {
@@ -259,9 +340,12 @@ export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
     receiveRulesForReplay,
     signalIdsForReplay,
     signalOptions,
+    signalSummaries,
     matchingReceivers,
     emitWorkflowSignals,
     clearWorkflowSignal,
+    deleteWorkflowSignal,
+    clearWorkflowSignals,
   };
 }
 

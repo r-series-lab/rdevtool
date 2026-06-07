@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
+  Button,
   Chip,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   Drawer,
   IconButton,
   ListItemIcon,
@@ -18,6 +23,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   FinderEntry,
   FinderShortcutItem,
+  ProjectDebugProfileSummary,
   ProjectWorkflowAction,
   ProjectRuntimeEntry,
   ProjectRuntimeLogKind,
@@ -40,15 +46,16 @@ import {
   WebsiteIcon,
   WorkflowIcon,
 } from "../components/AppIcons";
-import {
-  WorkflowLinkButton,
-  WorkflowLinkSummaryButton,
-} from "../components/WorkflowLinkButton";
+import { WorkflowLinkSummaryButton } from "../components/WorkflowLinkButton";
 import {
   WorkflowLinksDialog,
   type WorkflowLinkListItem,
 } from "../components/WorkflowLinksDialog";
 import { WorkflowRulesConfigDialog } from "../components/WorkflowRulesConfigDialog";
+import {
+  WebActionsDialog,
+  type WebActionsDialogContext,
+} from "../components/WebActionsDialog";
 import {
   defaultSignalIdForReplay,
   workflowProjectActionLabel,
@@ -56,6 +63,7 @@ import {
   type WorkflowBroadcastRule,
   type WorkflowReceiveRule,
 } from "../lib/workflowSignals";
+import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 
 type FinderType = "项目" | "网站" | "应用" | "脚本";
 type FinderQuickFilter = "全部" | "收藏" | "最近";
@@ -93,11 +101,13 @@ export type ProjectsPageProps = {
   recentProjectKeys: string[];
   favoriteShortcutKeys: string[];
   recentShortcutKeys: string[];
+  selectedDebugProfileKeys: Record<string, string>;
   branchProjectKeys: string[];
   deployProjectKeys: string[];
   workflowReceiveRules: WorkflowReceiveRule[];
   workflowBroadcastRules: WorkflowBroadcastRule[];
   workflowSignalOptions: string[];
+  workflowSignalSummaries: WorkflowSignalSummary[];
   workflowReceiveSignalIdsForProjectReplay: (
     entry: ProjectRuntimeEntry,
     action: ProjectWorkflowAction,
@@ -118,14 +128,21 @@ export type ProjectsPageProps = {
   onWorkflowReceiveRulesDelete: (ruleIds: string[]) => void;
   onWorkflowBroadcastRulesEnabledChange: (ruleIds: string[], enabled: boolean) => void;
   onWorkflowBroadcastRulesDelete: (ruleIds: string[]) => void;
+  onWorkflowSignalDelete: (signalId: string) => void;
+  onWorkflowSignalsClear: () => void;
   onToggleProjectFavorite: (projectKey: string) => void;
   onToggleShortcutFavorite: (item: FinderShortcutItem) => void;
+  onProjectDebugProfileChange: (projectKey: string, profileKey: string) => void;
   onMarkShortcutUsed: (item: FinderShortcutItem) => void;
   onOpenProjectBranch: (projectKey: string) => void;
   onOpenProjectDeploy: (projectKey: string) => void;
   onRefresh: () => void;
   onOpenFinderEntry: (entry: FinderEntry) => Promise<boolean> | boolean;
-  onStartRuntime: (projectKey: string) => void;
+  onStartRuntime: (
+    projectKey: string,
+    debugProfileKey?: string,
+    envOverrides?: Record<string, string>,
+  ) => void;
   onStopRuntime: (projectKey: string) => void;
   onRunBuild: (projectKey: string) => void;
   onStopBuild: (projectKey: string) => void;
@@ -136,6 +153,7 @@ export type ProjectsPageProps = {
 
 const SHORTCUT_CONFIRM_MS = 1100;
 const RUNTIME_LOG_MAX_LINES = 120;
+const DEFAULT_RUNTIME_PROFILE_VALUE = "__default__";
 const PROJECT_WORKFLOW_ACTIONS: ProjectWorkflowAction[] = [
   "project.runtime.start",
   "project.runtime.stop",
@@ -145,6 +163,69 @@ const PROJECT_WORKFLOW_ACTIONS: ProjectWorkflowAction[] = [
   "project.runtime.focus",
   "project.openDirectory",
 ];
+
+type RuntimeEnvParseResult = {
+  values: Record<string, string>;
+  error: string;
+};
+
+function formatRuntimeEnvText(env?: Record<string, string> | null) {
+  if (!env) {
+    return "";
+  }
+  return Object.entries(env)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
+}
+
+function parseRuntimeEnvText(text: string): RuntimeEnvParseResult {
+  const values: Record<string, string> = {};
+  const lines = text.split(/\r?\n/);
+  for (const [index, sourceLine] of lines.entries()) {
+    let line = sourceLine.trim();
+    if (!line || line.startsWith("#")) {
+      continue;
+    }
+    if (line.startsWith("export ")) {
+      line = line.slice("export ".length).trim();
+    }
+    const separatorIndex = line.indexOf("=");
+    if (separatorIndex < 0) {
+      return {
+        values: {},
+        error: `第 ${index + 1} 行缺少 =`,
+      };
+    }
+    const key = line.slice(0, separatorIndex).trim();
+    const value = line.slice(separatorIndex + 1).trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
+      return {
+        values: {},
+        error: `第 ${index + 1} 行变量名无效`,
+      };
+    }
+    values[key] = value;
+  }
+  return { values, error: "" };
+}
+
+function projectSelectedProfileKey(
+  item: ProjectRuntimeEntry,
+  selectedDebugProfileKeys: Record<string, string>,
+) {
+  const candidate = selectedDebugProfileKeys[item.key] ?? "";
+  return item.debugProfiles.some((profile) => profile.key === candidate)
+    ? candidate
+    : "";
+}
+
+function findDebugProfile(
+  profiles: ProjectDebugProfileSummary[],
+  profileKey: string,
+) {
+  return profiles.find((profile) => profile.key === profileKey) ?? null;
+}
 
 function groupWorkflowRules(
   rules: Array<WorkflowReceiveRule | WorkflowBroadcastRule>,
@@ -184,10 +265,10 @@ function buildStatusPalette(statusKey: string, mono: boolean) {
     switch (statusKey) {
       case "running":
         return {
-          dot: "#5f6978",
-          pillBg: "rgba(55, 66, 82, 0.08)",
-          pillBorder: "rgba(55, 66, 82, 0.14)",
-          pillColor: "#2d3745",
+          dot: "#3f6b4f",
+          pillBg: "rgba(63, 107, 79, 0.1)",
+          pillBorder: "rgba(63, 107, 79, 0.18)",
+          pillColor: "#2f5a3d",
         };
       case "notConfigured":
         return {
@@ -225,10 +306,10 @@ function buildStatusPalette(statusKey: string, mono: boolean) {
   switch (statusKey) {
     case "running":
       return {
-        dot: "#eceff4",
-        pillBg: "rgba(236, 239, 244, 0.1)",
-        pillBorder: "rgba(236, 239, 244, 0.12)",
-        pillColor: "#f3f5f8",
+        dot: "#5f8068",
+        pillBg: "rgba(95, 128, 104, 0.14)",
+        pillBorder: "rgba(95, 128, 104, 0.24)",
+        pillColor: "#c6d8c9",
       };
     case "notConfigured":
       return {
@@ -350,7 +431,7 @@ function buildProjectsTone(mono: boolean) {
       buildButtonBusyBg: "rgba(255,255,255,0.044)",
       buildButtonBusyColor: "rgba(236,240,245,0.62)",
       buildButtonDisabledColor: "rgba(225,230,237,0.2)",
-      runningDotHalo: "0 0 0 4px rgba(79,140,255,0.1)",
+      runningDotHalo: "0 0 0 4px rgba(95,128,104,0.16)",
       mobileMeta: "rgba(218,224,232,0.44)",
     };
   }
@@ -422,28 +503,9 @@ function buildProjectsTone(mono: boolean) {
     buildButtonBusyBg: "rgba(255,255,255,0.68)",
     buildButtonBusyColor: "rgba(52,60,74,0.62)",
     buildButtonDisabledColor: "rgba(120,126,136,0.24)",
-    runningDotHalo: "0 0 0 4px rgba(37,99,235,0.1)",
+    runningDotHalo: "0 0 0 4px rgba(63,107,79,0.14)",
     mobileMeta: "rgba(83,92,106,0.7)",
   };
-}
-
-function formatRuntimeHint(item: ProjectRuntimeEntry): string {
-  return "";
-}
-
-function formatBuildHint(item: ProjectRuntimeEntry): string {
-  return "";
-}
-
-function buildMetaSegments(item: ProjectRuntimeEntry): string[] {
-  const segments: string[] = [];
-  if (item.cwd || item.repoPath) {
-    segments.push(item.cwd || item.repoPath || "");
-  }
-  if (item.command) {
-    segments.push(item.command);
-  }
-  return segments.filter(Boolean);
 }
 
 function finderPlaceholder(type: FinderType): string {
@@ -502,6 +564,8 @@ function buildFinderEntryDetails(item: FinderShortcutItem): string[] {
   addDetail("说明", entry.note);
   addDetail("目标", entry.targetLabel);
   addDetail("地址", entry.url);
+  addDetail("浏览器", entry.browser);
+  addDetail("Profile", entry.browserProfile);
   addDetail("Bundle ID", entry.bundleId);
   addDetail("应用", entry.appName);
   addDetail("脚本", entry.script);
@@ -518,6 +582,33 @@ function buildFinderShortcutKey(item: FinderShortcutItem): string {
     item.entry.name,
     item.entry.targetLabel,
   ].join("\u0000");
+}
+
+function slugWebActionScopePart(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/^www\./, "")
+    .replace(/\.[a-z0-9-]+$/i, "")
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function webActionScopeForShortcut(item: FinderShortcutItem): string {
+  const url = item.entry.url?.trim();
+  if (url) {
+    try {
+      const host = new URL(url).hostname;
+      const slug = slugWebActionScopePart(host);
+      if (slug) {
+        return `url:${slug}`;
+      }
+    } catch {
+      // Fall through to the entry name.
+    }
+  }
+  const slug = slugWebActionScopePart(item.entry.name);
+  return slug ? `url:${slug}` : "url";
 }
 
 async function copyPlainText(value: string) {
@@ -580,6 +671,17 @@ function isTextEditingTarget(target: EventTarget | null) {
   );
 }
 
+function isInteractiveClickTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) {
+    return false;
+  }
+  return Boolean(
+    target.closest(
+      'button, a, input, textarea, select, [role="button"], [role="menuitem"], [data-project-row-action="true"]',
+    ),
+  );
+}
+
 export function ProjectsPage({
   finderTypeOptions,
   finderType,
@@ -603,11 +705,13 @@ export function ProjectsPage({
   recentProjectKeys,
   favoriteShortcutKeys,
   recentShortcutKeys,
+  selectedDebugProfileKeys,
   branchProjectKeys,
   deployProjectKeys,
   workflowReceiveRules,
   workflowBroadcastRules,
   workflowSignalOptions,
+  workflowSignalSummaries,
   workflowReceiveSignalIdsForProjectReplay,
   workflowBroadcastSignalIdsForProjectReplay,
   onWorkflowProjectReplayRulesChange,
@@ -615,8 +719,11 @@ export function ProjectsPage({
   onWorkflowReceiveRulesDelete,
   onWorkflowBroadcastRulesEnabledChange,
   onWorkflowBroadcastRulesDelete,
+  onWorkflowSignalDelete,
+  onWorkflowSignalsClear,
   onToggleProjectFavorite,
   onToggleShortcutFavorite,
+  onProjectDebugProfileChange,
   onMarkShortcutUsed,
   onOpenProjectBranch,
   onOpenProjectDeploy,
@@ -639,6 +746,14 @@ export function ProjectsPage({
   const [projectMenuAnchor, setProjectMenuAnchor] =
     useState<HTMLElement | null>(null);
   const [projectMenuKey, setProjectMenuKey] = useState("");
+  const [shortcutMenuAnchor, setShortcutMenuAnchor] =
+    useState<HTMLElement | null>(null);
+  const [shortcutMenuKey, setShortcutMenuKey] = useState("");
+  const [webActionsContext, setWebActionsContext] =
+    useState<WebActionsDialogContext | null>(null);
+  const [runtimeOptionsProjectKey, setRuntimeOptionsProjectKey] = useState("");
+  const [runtimeOptionsProfileKey, setRuntimeOptionsProfileKey] = useState("");
+  const [runtimeOptionsEnvText, setRuntimeOptionsEnvText] = useState("");
   const [detailsProjectKey, setDetailsProjectKey] = useState("");
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [workflowListOpen, setWorkflowListOpen] = useState(false);
@@ -681,6 +796,11 @@ export function ProjectsPage({
   const deployProjectKeySet = new Set(deployProjectKeys);
   const projectMenuEntry =
     runtimeEntries.find((item) => item.key === projectMenuKey) ?? null;
+  const shortcutMenuItem =
+    shortcutEntries.find((item) => buildFinderShortcutKey(item) === shortcutMenuKey) ??
+    null;
+  const runtimeOptionsEntry =
+    runtimeEntries.find((item) => item.key === runtimeOptionsProjectKey) ?? null;
   const detailsProjectEntry =
     runtimeEntries.find((item) => item.key === detailsProjectKey) ?? null;
   const workflowProjectEntry =
@@ -688,7 +808,19 @@ export function ProjectsPage({
   const workflowReplay = workflowProjectEntry
     ? workflowReplayFromProjectRuntime(workflowProjectEntry, workflowAction)
     : null;
-  const projectMenuPath = projectMenuEntry?.cwd || projectMenuEntry?.repoPath || "";
+  const projectMenuFavorite = projectMenuEntry
+    ? favoriteProjectKeySet.has(projectMenuEntry.key)
+    : false;
+  const shortcutMenuFavorite = shortcutMenuItem
+    ? favoriteShortcutKeySet.has(buildFinderShortcutKey(shortcutMenuItem))
+    : false;
+  const runtimeOptionsProfiles = runtimeOptionsEntry?.debugProfiles ?? [];
+  const runtimeOptionsSelectedProfile =
+    findDebugProfile(runtimeOptionsProfiles, runtimeOptionsProfileKey) ?? null;
+  const runtimeOptionsParseResult = useMemo(
+    () => parseRuntimeEnvText(runtimeOptionsEnvText),
+    [runtimeOptionsEnvText],
+  );
   const detailsProjectPath =
     detailsProjectEntry?.cwd || detailsProjectEntry?.repoPath || "";
   const showQuickFilters =
@@ -898,6 +1030,70 @@ export function ProjectsPage({
     setProjectMenuKey("");
   }
 
+  function closeShortcutMenu() {
+    setShortcutMenuAnchor(null);
+    setShortcutMenuKey("");
+  }
+
+  function openProjectWebActions(item: ProjectRuntimeEntry) {
+    const url = item.focusUrl?.trim();
+    if (!url) {
+      return;
+    }
+    setWebActionsContext({
+      title: item.name,
+      scope: `project:${item.key}`,
+      url,
+    });
+  }
+
+  function openShortcutWebActions(item: FinderShortcutItem) {
+    const url = item.entry.url?.trim();
+    if (!url) {
+      return;
+    }
+    setWebActionsContext({
+      title: item.entry.name,
+      scope: webActionScopeForShortcut(item),
+      url,
+    });
+  }
+
+  function openRuntimeOptionsDialog(item: ProjectRuntimeEntry) {
+    const profileKey = projectSelectedProfileKey(item, selectedDebugProfileKeys);
+    const profile = findDebugProfile(item.debugProfiles ?? [], profileKey);
+    setRuntimeOptionsProjectKey(item.key);
+    setRuntimeOptionsProfileKey(profileKey);
+    setRuntimeOptionsEnvText(formatRuntimeEnvText(profile?.env));
+  }
+
+  function closeRuntimeOptionsDialog() {
+    setRuntimeOptionsProjectKey("");
+    setRuntimeOptionsProfileKey("");
+    setRuntimeOptionsEnvText("");
+  }
+
+  function handleRuntimeOptionsProfileChange(profileKey: string) {
+    const nextProfileKey =
+      profileKey === DEFAULT_RUNTIME_PROFILE_VALUE ? "" : profileKey;
+    const profile = findDebugProfile(runtimeOptionsProfiles, nextProfileKey);
+    setRuntimeOptionsProfileKey(nextProfileKey);
+    setRuntimeOptionsEnvText(formatRuntimeEnvText(profile?.env));
+  }
+
+  function handleRuntimeOptionsStart() {
+    if (!runtimeOptionsEntry || runtimeOptionsParseResult.error) {
+      return;
+    }
+    onProjectDebugProfileChange(runtimeOptionsEntry.key, runtimeOptionsProfileKey);
+    onStartRuntime(
+      runtimeOptionsEntry.key,
+      runtimeOptionsProfileKey || undefined,
+      runtimeOptionsParseResult.values,
+    );
+    closeRuntimeOptionsDialog();
+  }
+
   async function handleCopyProjectValue(value: string, label: string) {
     if (!value) {
       return;
@@ -967,13 +1163,6 @@ export function ProjectsPage({
     return "project.openDirectory";
   }
 
-  function workflowSignalIdsForProject(item: ProjectRuntimeEntry) {
-    return PROJECT_WORKFLOW_ACTIONS.flatMap((action) => [
-      ...workflowReceiveSignalIdsForProjectReplay(item, action),
-      ...workflowBroadcastSignalIdsForProjectReplay(item, action),
-    ]);
-  }
-
   function openProjectWorkflowDialog(item: ProjectRuntimeEntry) {
     setWorkflowProjectKey(item.key);
     setWorkflowAction(defaultProjectWorkflowAction(item));
@@ -981,10 +1170,22 @@ export function ProjectsPage({
   }
 
   return (
-    <Box className="workspace">
+    <Box
+      className="workspace"
+      sx={{
+        minHeight: "calc(100dvh - var(--window-drag-height) - 20px)",
+        "@media (max-width: 900px)": {
+          minHeight: "calc(100dvh - var(--window-drag-height) - 71px)",
+        },
+      }}
+    >
       <Box
         sx={{
           position: "relative",
+          flex: "1 1 auto",
+          display: "flex",
+          flexDirection: "column",
+          minHeight: 0,
           borderRadius: "20px",
           overflow: "hidden",
           border: "1px solid",
@@ -1002,7 +1203,16 @@ export function ProjectsPage({
           },
         }}
       >
-        <Box sx={{ position: "relative", p: 1.5 }}>
+        <Box
+          sx={{
+            position: "relative",
+            flex: "1 1 auto",
+            display: "flex",
+            flexDirection: "column",
+            minHeight: 0,
+            p: 1.5,
+          }}
+        >
           <Stack
             direction="row"
             alignItems="center"
@@ -1101,6 +1311,10 @@ export function ProjectsPage({
 
           <Box
             sx={{
+              flex: "1 1 auto",
+              minHeight: 0,
+              display: "flex",
+              flexDirection: "column",
               position: "relative",
               borderRadius: "20px",
               border: `1px solid ${tone.stageBorder}`,
@@ -1120,6 +1334,8 @@ export function ProjectsPage({
             <Box
               sx={{
                 position: "relative",
+                flex: "1 1 auto",
+                minHeight: 0,
                 p: 0.9,
               }}
             >
@@ -1481,9 +1697,6 @@ export function ProjectsPage({
                   }}
                 >
                   {filteredRuntimeEntries.map((item, index) => {
-                    const metaSegments = buildMetaSegments(item);
-                    const runtimeHint = formatRuntimeHint(item);
-                    const buildHint = formatBuildHint(item);
                     const runtimeRunning = item.canStop;
                     const runtimeAvailable = item.canStart || item.canStop;
                     const runtimeTooltip = runtimeRunning
@@ -1492,336 +1705,233 @@ export function ProjectsPage({
                     const runtimeAriaLabel = runtimeRunning
                       ? `停止 ${item.name}`
                       : `启动 ${item.name}`;
-                    const canFocusRuntime =
-                      runtimeRunning && item.canFocusRuntime;
                     const statusPalette = buildStatusPalette(
                       item.statusKey,
                       mono,
                     );
-                    const buildPalette = buildStatusPalette(
-                      item.buildStatusKey,
-                      mono,
-                    );
-                    const buildRunning = item.canStopBuild;
-                    const showBuildStatus =
-                      Boolean(item.buildCommand) ||
-                      item.buildStatusKey !== "notConfigured";
-                    const buildTooltip = buildRunning
-                      ? "中止打包"
-                      : item.buildCommand
-                        ? item.buildStatusKey === "succeeded"
-                          ? "重新打包"
-                          : "执行打包"
-                        : "未配置打包命令";
-                    const buildStatusTooltip = item.canOpenBuildOutput
-                      ? item.buildOutputDir
-                        ? `打开产物目录\n${item.buildOutputDir}`
-                        : "打开产物目录"
-                      : item.buildDetail;
+                    const debugProfiles = item.debugProfiles ?? [];
                     const projectFavorite = favoriteProjectKeySet.has(item.key);
                     const projectRecent = recentProjectKeySet.has(item.key);
-                    const projectCanOpenBranch = branchProjectKeySet.has(item.key);
-                    const projectCanOpenDeploy = deployProjectKeySet.has(item.key);
-                    const projectPath = item.cwd || item.repoPath || "";
-                    const workflowSignalIds = workflowSignalIdsForProject(item);
+                    const selectedDebugProfileKey = projectSelectedProfileKey(
+                      item,
+                      selectedDebugProfileKeys,
+                    );
+                    const selectedDebugProfile =
+                      debugProfiles.find((profile) => profile.key === selectedDebugProfileKey) ??
+                      null;
+                    const runtimeStartTooltip =
+                      !runtimeRunning && selectedDebugProfile
+                        ? `启动项目 · ${selectedDebugProfile.label}`
+                        : runtimeTooltip;
+                    const focusableRuntimeRow =
+                      runtimeRunning && item.canFocusRuntime;
+                    const runtimeFocusGlow = mono
+                      ? "rgba(117, 151, 255, 0.2)"
+                      : "rgba(77, 123, 214, 0.16)";
                     return (
                       <Box
                         key={item.key}
+                        title={focusableRuntimeRow ? "点击唤起项目" : undefined}
+                        onClick={(event) => {
+                          if (
+                            !focusableRuntimeRow ||
+                            isInteractiveClickTarget(event.target)
+                          ) {
+                            return;
+                          }
+                          onFocusRuntime(item.key);
+                        }}
                         sx={{
                           position: "relative",
                           display: "grid",
                           gridTemplateColumns: {
                             xs: "minmax(0,1fr)",
-                            md: "minmax(180px, 224px) minmax(220px, 1fr) minmax(176px, 208px) max-content",
+                            md: "minmax(0, 1fr) max-content",
                           },
                           columnGap: { xs: 1, md: 1.1 },
                           rowGap: 0.75,
                           alignItems: "center",
                           px: 1.25,
-                          py: { xs: 1.1, md: 0.96 },
-                          pr: { xs: 19.2, md: 1.25 },
+                          py: { xs: 1.05, md: 0.92 },
+                          pr: { xs: 15.4, md: 1.25 },
+                          minHeight: { xs: 64, md: 54 },
                           borderRadius: "18px",
                           border: "1px solid",
                           borderColor:
                             projectFavorite
                               ? tone.categoryChipActiveBorder
+                              : focusableRuntimeRow
+                                ? tone.startButtonBorder
                               : index === 0
                                 ? tone.rowBorderStrong
                                 : tone.rowBorder,
                           background:
                             index % 2 === 0 ? tone.rowBgEven : tone.rowBgOdd,
-                          boxShadow: tone.rowShadow,
+                          boxShadow: focusableRuntimeRow
+                            ? `${tone.rowShadow}, 0 0 0 1px ${tone.startButtonBorder}, 0 0 22px ${runtimeFocusGlow}`
+                            : tone.rowShadow,
                           backdropFilter: "blur(16px)",
+                          cursor: focusableRuntimeRow ? "pointer" : "default",
+                          animation:
+                            item.statusKey === "running"
+                              ? "projectRuntimeStartGlow 920ms ease-out 1"
+                              : "none",
                           transition:
                             "border-color 160ms ease, background 160ms ease, box-shadow 160ms ease, transform 160ms ease",
                           "&:hover": {
                             transform: "translateY(-1px)",
-                            borderColor: tone.rowHoverBorder,
+                            borderColor: focusableRuntimeRow
+                              ? tone.startButtonBorder
+                              : tone.rowHoverBorder,
                             background: tone.rowHoverBg,
-                            boxShadow: tone.rowHoverShadow,
+                            boxShadow: focusableRuntimeRow
+                              ? `${tone.rowHoverShadow}, 0 0 0 1px ${tone.startButtonBorder}, 0 0 24px ${runtimeFocusGlow}`
+                              : tone.rowHoverShadow,
+                          },
+                          "@keyframes projectRuntimeStartGlow": {
+                            "0%": {
+                              boxShadow: `${tone.rowShadow}, 0 0 0 0 ${runtimeFocusGlow}`,
+                            },
+                            "42%": {
+                              boxShadow: `${tone.rowShadow}, 0 0 0 2px ${tone.startButtonBorder}, 0 0 26px ${runtimeFocusGlow}`,
+                            },
+                            "100%": {
+                              boxShadow: focusableRuntimeRow
+                                ? `${tone.rowShadow}, 0 0 0 1px ${tone.startButtonBorder}, 0 0 22px ${runtimeFocusGlow}`
+                              : tone.rowShadow,
+                            },
+                          },
+                          "@media (prefers-reduced-motion: reduce)": {
+                            animation: "none",
+                            transition: "none",
+                            "&:hover": {
+                              transform: "none",
+                            },
                           },
                         }}
                       >
                         <Stack
                           direction="row"
                           alignItems="center"
-                          spacing={0.8}
+                          spacing={0.9}
                           minWidth={0}
-                          sx={{ pr: { xs: 0.5, md: 0 } }}
+                          sx={{
+                            pr: { xs: 0.75, md: 0 },
+                            maxWidth: "100%",
+                          }}
                         >
-                          {projectFavorite ? (
-                            <StarIcon
+                          <Box
+                            aria-hidden="true"
+                            sx={{
+                              width: 28,
+                              height: 28,
+                              display: "grid",
+                              placeItems: "center",
+                              flexShrink: 0,
+                              borderRadius: "10px",
+                              border: "1px solid",
+                              borderColor:
+                                item.statusKey === "running"
+                                  ? statusPalette.pillBorder
+                                  : tone.actionGroupBorder,
+                              bgcolor:
+                                item.statusKey === "running"
+                                  ? statusPalette.pillBg
+                                  : tone.actionGroupBg,
+                              boxShadow: tone.actionGroupShadow,
+                            }}
+                          >
+                            <Box
                               sx={{
-                                width: 14,
-                                height: 14,
-                                flexShrink: 0,
-                                color: tone.categoryChipActiveColor,
+                                width: 9,
+                                height: 9,
+                                borderRadius: "50%",
+                                bgcolor: statusPalette.dot,
+                                boxShadow:
+                                  item.statusKey === "running"
+                                    ? tone.runningDotHalo
+                                    : "none",
                               }}
                             />
-                          ) : null}
-                          <Box
-                            sx={{
-                              width: 8,
-                              height: 8,
-                              borderRadius: "50%",
-                              flexShrink: 0,
-                              bgcolor: statusPalette.dot,
-                              boxShadow:
-                                item.statusKey === "running"
-                                  ? tone.runningDotHalo
-                                  : "none",
-                            }}
-                          />
+                          </Box>
                           <Box minWidth={0}>
-                            <Typography
-                              variant="body2"
-                              sx={{
-                                fontWeight: 700,
-                                lineHeight: 1.15,
-                                color: tone.rowTitle,
-                              }}
+                            <Stack
+                              direction="row"
+                              alignItems="center"
+                              spacing={0.55}
+                              minWidth={0}
                             >
-                              {item.name}
-                            </Typography>
+                              <Typography
+                                variant="body2"
+                                noWrap
+                                sx={{
+                                  minWidth: 0,
+                                  fontWeight: 760,
+                                  lineHeight: 1.18,
+                                  color: tone.rowTitle,
+                                }}
+                              >
+                                {item.name}
+                              </Typography>
+                              {projectFavorite ? (
+                                <StarIcon
+                                  sx={{
+                                    width: 13,
+                                    height: 13,
+                                    flexShrink: 0,
+                                    color: tone.categoryChipActiveColor,
+                                    opacity: 0.82,
+                                  }}
+                                />
+                              ) : null}
+                              {projectRecent ? (
+                                <Chip
+                                  size="small"
+                                  label="最近"
+                                  sx={{
+                                    height: 18,
+                                    flexShrink: 0,
+                                    borderRadius: "6px",
+                                    border: `1px solid ${tone.categoryChipBorder}`,
+                                    bgcolor: tone.categoryChipBg,
+                                    color: tone.categoryChipColor,
+                                    fontSize: "0.62rem",
+                                    fontWeight: 700,
+                                    "& .MuiChip-label": {
+                                      px: 0.7,
+                                      lineHeight: "18px",
+                                    },
+                                  }}
+                                />
+                              ) : null}
+                            </Stack>
                             <Typography
                               variant="caption"
+                              noWrap
                               sx={{
                                 display: "block",
-                                letterSpacing: "0.05em",
+                                mt: 0.28,
+                                overflow: "hidden",
+                                textOverflow: "ellipsis",
+                                letterSpacing: 0,
                                 color: tone.rowKey,
                               }}
                             >
-                              {projectRecent ? `${item.key} · 最近` : item.key}
+                              {item.key}
                             </Typography>
                           </Box>
                         </Stack>
 
                         <Stack
                           direction="row"
-                          alignItems="center"
-                          spacing={1}
-                          minWidth={0}
-                          sx={{
-                            display: { xs: "none", md: "flex" },
-                            color: tone.rowMeta,
-                          }}
-                        >
-                          <Tooltip
-                            title={item.cwd || item.repoPath || "未配置路径"}
-                          >
-                            <Stack
-                              direction="row"
-                              spacing={0.55}
-                              alignItems="center"
-                              minWidth={0}
-                            >
-                              <FolderIcon
-                                sx={{
-                                  fontSize: 15,
-                                  flexShrink: 0,
-                                  opacity: 0.72,
-                                }}
-                              />
-                              <Typography
-                                variant="caption"
-                                sx={{
-                                  minWidth: 0,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap",
-                                  fontFamily:
-                                    '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                                  color: "inherit",
-                                }}
-                              >
-                                {item.cwd || item.repoPath || "未配置目录"}
-                              </Typography>
-                            </Stack>
-                          </Tooltip>
-
-                          <Tooltip title={item.command || "未配置命令"}>
-                            <Stack
-                              direction="row"
-                              spacing={0.55}
-                              alignItems="center"
-                              minWidth={0}
-                            >
-                              <TerminalIcon
-                                sx={{
-                                  fontSize: 15,
-                                  flexShrink: 0,
-                                  opacity: 0.72,
-                                }}
-                              />
-                              <Typography
-                                variant="caption"
-                                sx={{
-                                  minWidth: 0,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap",
-                                  fontFamily:
-                                    '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                                  color: "inherit",
-                                }}
-                              >
-                                {item.command || "未配置命令"}
-                              </Typography>
-                            </Stack>
-                          </Tooltip>
-                        </Stack>
-
-                        <Box
-                          sx={{
-                            display: "grid",
-                            gridTemplateColumns: {
-                              xs: showBuildStatus
-                                ? "repeat(2, minmax(64px, max-content))"
-                                : "minmax(64px, max-content)",
-                              md: showBuildStatus
-                                ? "repeat(2, minmax(82px, 96px))"
-                                : "minmax(82px, 96px)",
-                            },
-                            gap: 0.55,
-                            alignItems: "center",
-                            justifyContent: { xs: "flex-start", md: "flex-end" },
-                            minWidth: { md: showBuildStatus ? 176 : 92 },
-                            width: { md: "100%" },
-                            "& .MuiChip-root": {
-                              width: { xs: "auto", md: "100%" },
-                              minWidth: 0,
-                              height: 24,
-                            },
-                            "& .MuiChip-label": {
-                              minWidth: 0,
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                              px: 0.85,
-                            },
-                          }}
-                        >
-                          <Stack spacing={0.22} minWidth={0}>
-                            <Tooltip
-                              title={
-                                canFocusRuntime
-                                  ? "唤起运行中的项目"
-                                  : item.statusLabel
-                              }
-                            >
-                              <Chip
-                                size="small"
-                                label={item.statusLabel}
-                                onClick={
-                                  canFocusRuntime
-                                    ? () => onFocusRuntime(item.key)
-                                    : undefined
-                                }
-                                clickable={canFocusRuntime}
-                                sx={{
-                                  bgcolor: statusPalette.pillBg,
-                                  color: statusPalette.pillColor,
-                                  border: `1px solid ${statusPalette.pillBorder}`,
-                                  backdropFilter: "blur(10px)",
-                                  cursor: canFocusRuntime ? "pointer" : "default",
-                                }}
-                              />
-                            </Tooltip>
-                            {runtimeHint ? (
-                              <Typography
-                                variant="caption"
-                                noWrap
-                                sx={{
-                                  minWidth: 0,
-                                  textAlign: { md: "center" },
-                                  fontSize: "0.66rem",
-                                  fontWeight: 500,
-                                  letterSpacing: "0.02em",
-                                  color: tone.rowHint,
-                                }}
-                              >
-                                {runtimeHint}
-                              </Typography>
-                            ) : null}
-                          </Stack>
-                          {showBuildStatus ? (
-                            <Stack spacing={0.22} minWidth={0}>
-                              <Tooltip title={buildStatusTooltip}>
-                                <Chip
-                                  size="small"
-                                  icon={
-                                    item.canOpenBuildOutput ? (
-                                      <FolderIcon
-                                        sx={{
-                                          fontSize: "0.8rem !important",
-                                        }}
-                                      />
-                                    ) : undefined
-                                  }
-                                  label={item.buildStatusLabel}
-                                  onClick={
-                                    item.canOpenBuildOutput
-                                      ? () => onOpenBuildOutput(item.key)
-                                      : undefined
-                                  }
-                                  clickable={item.canOpenBuildOutput}
-                                  sx={{
-                                    bgcolor: buildPalette.pillBg,
-                                    color: buildPalette.pillColor,
-                                    border: `1px solid ${buildPalette.pillBorder}`,
-                                    backdropFilter: "blur(10px)",
-                                    "& .MuiChip-icon": {
-                                      color: "inherit",
-                                    },
-                                  }}
-                                />
-                              </Tooltip>
-                              {buildHint ? (
-                                <Typography
-                                  variant="caption"
-                                  noWrap
-                                  sx={{
-                                    minWidth: 0,
-                                    textAlign: { md: "center" },
-                                    fontSize: "0.66rem",
-                                    fontWeight: 500,
-                                    letterSpacing: "0.02em",
-                                    color: tone.rowHint,
-                                  }}
-                                >
-                                  {buildHint}
-                                </Typography>
-                              ) : null}
-                            </Stack>
-                          ) : null}
-                        </Box>
-
-                        <Stack
-                          direction="row"
                           spacing={0.45}
                           justifyContent={{ xs: "flex-start", md: "flex-end" }}
+                          data-project-row-action="true"
                           sx={{
+                            gridColumn: { md: 2 },
                             width: "fit-content",
+                            minWidth: "max-content",
+                            flexShrink: 0,
                             justifySelf: { md: "end" },
                             alignSelf: "center",
                             px: 0.45,
@@ -1836,60 +1946,22 @@ export function ProjectsPage({
                             zIndex: 1,
                           }}
                         >
-                          <Tooltip title={projectFavorite ? "取消收藏" : "收藏项目"}>
-                            <span>
-                              <IconButton
-                                aria-label={
-                                  projectFavorite
-                                    ? `取消收藏 ${item.name}`
-                                    : `收藏 ${item.name}`
-                                }
-                                onClick={() => onToggleProjectFavorite(item.key)}
-                                sx={{
-                                  width: 28,
-                                  height: 28,
-                                  borderRadius: "999px",
-                                  bgcolor: projectFavorite
-                                    ? tone.categoryChipActiveBg
-                                    : tone.stopButtonBg,
-                                  color: projectFavorite
-                                    ? tone.categoryChipActiveColor
-                                    : tone.stopButtonColor,
-                                  border: `1px solid ${
-                                    projectFavorite
-                                      ? tone.categoryChipActiveBorder
-                                      : tone.stopButtonBorder
-                                  }`,
-                                  "&:hover": {
-                                    bgcolor: projectFavorite
-                                      ? tone.categoryChipActiveBg
-                                      : tone.stopButtonHoverBg,
-                                  },
-                                }}
-                              >
-                                <StarIcon fontSize="small" />
-                              </IconButton>
-                            </span>
-                          </Tooltip>
-                          <Tooltip title="配置联动">
-                            <span>
-                              <WorkflowLinkButton
-                                active={workflowSignalIds.length > 0}
-                                onClick={() => openProjectWorkflowDialog(item)}
-                                title="配置联动"
-                              />
-                            </span>
-                          </Tooltip>
-                          <Tooltip title={runtimeTooltip}>
+                          <Tooltip title={runtimeStartTooltip}>
                             <span>
                               <IconButton
                                 aria-label={runtimeAriaLabel}
                                 disabled={!runtimeAvailable}
-                                onClick={() =>
-                                  runtimeRunning
-                                    ? onStopRuntime(item.key)
-                                    : onStartRuntime(item.key)
-                                }
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  if (runtimeRunning) {
+                                    onStopRuntime(item.key);
+                                    return;
+                                  }
+                                  onStartRuntime(
+                                    item.key,
+                                    selectedDebugProfileKey || undefined,
+                                  );
+                                }}
                                 sx={{
                                   width: 28,
                                   height: 28,
@@ -1933,7 +2005,10 @@ export function ProjectsPage({
                               <IconButton
                                 aria-label={`打开 ${item.name} 的项目目录`}
                                 disabled={!item.cwd && !item.repoPath}
-                                onClick={() => onOpenProjectDirectory(item.key)}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onOpenProjectDirectory(item.key);
+                                }}
                                 sx={{
                                   width: 28,
                                   height: 28,
@@ -1952,60 +2027,12 @@ export function ProjectsPage({
                               </IconButton>
                             </span>
                           </Tooltip>
-                          <Tooltip title={buildTooltip}>
-                            <span>
-                              <IconButton
-                                aria-label={
-                                  buildRunning
-                                    ? `中止 ${item.name} 的打包`
-                                    : `打包 ${item.name}`
-                                }
-                                disabled={!buildRunning && !item.canBuild}
-                                onClick={() =>
-                                  buildRunning
-                                    ? onStopBuild(item.key)
-                                    : onRunBuild(item.key)
-                                }
-                                sx={{
-                                  width: 28,
-                                  height: 28,
-                                  borderRadius: "999px",
-                                  bgcolor: buildRunning
-                                    ? tone.buildButtonBusyBg
-                                    : item.canBuild
-                                      ? tone.buildButtonBg
-                                      : "transparent",
-                                  color: buildRunning
-                                    ? tone.buildButtonBusyColor
-                                    : item.canBuild
-                                      ? tone.buildButtonColor
-                                      : tone.buildButtonDisabledColor,
-                                  border:
-                                    buildRunning || item.canBuild
-                                      ? `1px solid ${tone.buildButtonBorder}`
-                                      : "1px solid transparent",
-                                  "&:hover": {
-                                    bgcolor: buildRunning
-                                      ? tone.buildButtonBusyBg
-                                      : item.canBuild
-                                        ? tone.buildButtonHoverBg
-                                        : "transparent",
-                                  },
-                                }}
-                              >
-                                {buildRunning ? (
-                                  <StopIcon fontSize="small" />
-                                ) : (
-                                  <PackageIcon fontSize="small" />
-                                )}
-                              </IconButton>
-                            </span>
-                          </Tooltip>
                           <Tooltip title="更多操作">
                             <span>
                               <IconButton
                                 aria-label={`${item.name} 更多操作`}
                                 onClick={(event) => {
+                                  event.stopPropagation();
                                   setProjectMenuAnchor(event.currentTarget);
                                   setProjectMenuKey(item.key);
                                 }}
@@ -2013,14 +2040,8 @@ export function ProjectsPage({
                                   width: 28,
                                   height: 28,
                                   borderRadius: "999px",
-                                  bgcolor:
-                                    projectCanOpenBranch || projectCanOpenDeploy || projectPath
-                                      ? tone.stopButtonBg
-                                      : "transparent",
-                                  color:
-                                    projectCanOpenBranch || projectCanOpenDeploy || projectPath
-                                      ? tone.stopButtonColor
-                                      : tone.stopButtonDisabledColor,
+                                  bgcolor: tone.stopButtonBg,
+                                  color: tone.stopButtonColor,
                                   border: `1px solid ${tone.stopButtonBorder}`,
                                   "&:hover": {
                                     bgcolor: tone.stopButtonHoverBg,
@@ -2033,37 +2054,6 @@ export function ProjectsPage({
                           </Tooltip>
                         </Stack>
 
-                        {metaSegments.length > 0 ? (
-                          <Stack
-                            direction="row"
-                            spacing={0.8}
-                            flexWrap="wrap"
-                            useFlexGap
-                            sx={{
-                              display: { xs: "flex", md: "none" },
-                              gridColumn: "1 / -1",
-                              color: tone.mobileMeta,
-                            }}
-                          >
-                            {metaSegments.map((segment) => (
-                              <Typography
-                                key={`${item.key}-${segment}`}
-                                variant="caption"
-                                sx={{
-                                  maxWidth: "100%",
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  whiteSpace: "nowrap",
-                                  fontFamily:
-                                    '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                                  color: "inherit",
-                                }}
-                              >
-                                {segment}
-                              </Typography>
-                            ))}
-                          </Stack>
-                        ) : null}
                       </Box>
                     );
                   })}
@@ -2099,6 +2089,48 @@ export function ProjectsPage({
                 }}
               >
                 <MenuItem
+                  disabled={!projectMenuEntry?.command}
+                  onClick={() => {
+                    if (!projectMenuEntry) {
+                      return;
+                    }
+                    openRuntimeOptionsDialog(projectMenuEntry);
+                    closeProjectMenu();
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                    <PlayIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="项目配置"
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  disabled={!projectMenuEntry?.focusUrl}
+                  onClick={() => {
+                    if (!projectMenuEntry) {
+                      return;
+                    }
+                    openProjectWebActions(projectMenuEntry);
+                    closeProjectMenu();
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                    <WebsiteIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="网页动作"
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+                <MenuItem
                   disabled={!projectMenuEntry}
                   onClick={() => {
                     if (!projectMenuEntry) {
@@ -2112,7 +2144,88 @@ export function ProjectsPage({
                     <AppWindowIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary="查看运行详情"
+                    primary="运行日志"
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  disabled={!projectMenuEntry}
+                  onClick={() => {
+                    if (!projectMenuEntry) {
+                      return;
+                    }
+                    onToggleProjectFavorite(projectMenuEntry.key);
+                    closeProjectMenu();
+                  }}
+                >
+                  <ListItemIcon
+                    sx={{
+                      minWidth: 30,
+                      color: projectMenuFavorite
+                        ? tone.categoryChipActiveColor
+                        : "inherit",
+                    }}
+                  >
+                    <StarIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={projectMenuFavorite ? "取消收藏" : "收藏项目"}
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  disabled={!projectMenuEntry}
+                  onClick={() => {
+                    if (!projectMenuEntry) {
+                      return;
+                    }
+                    openProjectWorkflowDialog(projectMenuEntry);
+                    closeProjectMenu();
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                    <WorkflowIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="配置联动"
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  disabled={
+                    !projectMenuEntry ||
+                    (!projectMenuEntry.canStopBuild && !projectMenuEntry.canBuild)
+                  }
+                  onClick={() => {
+                    if (!projectMenuEntry) {
+                      return;
+                    }
+                    if (projectMenuEntry.canStopBuild) {
+                      onStopBuild(projectMenuEntry.key);
+                    } else {
+                      onRunBuild(projectMenuEntry.key);
+                    }
+                    closeProjectMenu();
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                    {projectMenuEntry?.canStopBuild ? (
+                      <StopIcon fontSize="small" />
+                    ) : (
+                      <PackageIcon fontSize="small" />
+                    )}
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={projectMenuEntry?.canStopBuild ? "中止打包" : "执行打包"}
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -2167,58 +2280,337 @@ export function ProjectsPage({
                     }}
                   />
                 </MenuItem>
-                <MenuItem
-                  disabled={!projectMenuPath}
-                  onClick={() =>
-                    void handleCopyProjectValue(projectMenuPath, "path")
-                  }
-                >
-                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    {copiedProjectAction === "path" ? (
-                      <CheckIcon fontSize="small" />
-                    ) : (
-                      <CopyIcon fontSize="small" />
-                    )}
-                  </ListItemIcon>
-                  <ListItemText
-                    primary={
-                      copiedProjectAction === "path" ? "已复制路径" : "复制路径"
-                    }
-                    primaryTypographyProps={{
-                      fontSize: "0.82rem",
-                      fontWeight: 650,
-                    }}
-                  />
-                </MenuItem>
-                <MenuItem
-                  disabled={!projectMenuEntry?.command}
-                  onClick={() =>
-                    void handleCopyProjectValue(
-                      projectMenuEntry?.command ?? "",
-                      "command",
-                    )
-                  }
-                >
-                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    {copiedProjectAction === "command" ? (
-                      <CheckIcon fontSize="small" />
-                    ) : (
-                      <TerminalIcon fontSize="small" />
-                    )}
-                  </ListItemIcon>
-                  <ListItemText
-                    primary={
-                      copiedProjectAction === "command"
-                        ? "已复制命令"
-                        : "复制启动命令"
-                    }
-                    primaryTypographyProps={{
-                      fontSize: "0.82rem",
-                      fontWeight: 650,
-                    }}
-                  />
-                </MenuItem>
               </Menu>
+
+              <Dialog
+                open={Boolean(runtimeOptionsEntry)}
+                onClose={closeRuntimeOptionsDialog}
+                fullWidth
+                maxWidth="sm"
+                PaperProps={{
+                  sx: {
+                    bgcolor: "var(--panel-strong)",
+                    color: tone.outerColor,
+                    borderRadius: "18px",
+                    border: `1px solid ${tone.outerBorder}`,
+                    boxShadow: tone.outerShadow,
+                    overflow: "hidden",
+                  },
+                }}
+                slotProps={{
+                  backdrop: {
+                    sx: {
+                      bgcolor: mono
+                        ? "rgba(3, 8, 15, 0.56)"
+                        : "rgba(220, 230, 242, 0.42)",
+                      backdropFilter: "blur(2px)",
+                    },
+                  },
+                }}
+              >
+                {runtimeOptionsEntry ? (
+                  <>
+                    <DialogTitle
+                      sx={{
+                        px: 2.2,
+                        pt: 1.8,
+                        pb: 0.8,
+                        background: mono
+                          ? "linear-gradient(180deg, rgba(255,255,255,0.018), transparent)"
+                          : "linear-gradient(180deg, rgba(255,255,255,0.46), transparent)",
+                      }}
+                    >
+                      <Stack spacing={1}>
+                        <Stack
+                          direction="row"
+                          alignItems="center"
+                          justifyContent="space-between"
+                          spacing={1}
+                        >
+                          <Typography
+                            variant="h6"
+                            sx={{
+                              fontSize: "1.02rem",
+                              fontWeight: 850,
+                              lineHeight: 1.2,
+                            }}
+                          >
+                            项目配置
+                          </Typography>
+                          <Chip
+                            size="small"
+                            label={runtimeOptionsEntry.key}
+                            variant="outlined"
+                            sx={{
+                              height: 24,
+                              borderColor: tone.actionGroupBorder,
+                              color: tone.rowHint,
+                              fontWeight: 700,
+                            }}
+                          />
+                        </Stack>
+                        <Typography
+                          variant="body2"
+                          sx={{
+                            minWidth: 0,
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                            whiteSpace: "nowrap",
+                            color: tone.rowMeta,
+                            fontWeight: 750,
+                            lineHeight: 1.2,
+                          }}
+                        >
+                          {runtimeOptionsEntry.name}
+                        </Typography>
+                      </Stack>
+                    </DialogTitle>
+                    <DialogContent sx={{ px: 2.2, pt: 0.85, pb: 1.5 }}>
+                      <Stack spacing={1.2}>
+                        <Box
+                          sx={{
+                            p: 1.2,
+                            borderRadius: "14px",
+                            border: `1px solid ${tone.actionGroupBorder}`,
+                            bgcolor: mono
+                              ? "rgba(255,255,255,0.018)"
+                              : "rgba(255,255,255,0.58)",
+                            boxShadow: mono
+                              ? "inset 0 1px 0 rgba(255,255,255,0.012)"
+                              : "inset 0 1px 0 rgba(255,255,255,0.58)",
+                          }}
+                        >
+                          <Stack spacing={0.85}>
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                color: tone.rowHint,
+                                fontWeight: 850,
+                                letterSpacing: "0.04em",
+                              }}
+                            >
+                              运行入口
+                            </Typography>
+                            {[
+                              {
+                                icon: <FolderIcon fontSize="small" />,
+                                label: "工作目录",
+                                value:
+                                  runtimeOptionsEntry.cwd ||
+                                  runtimeOptionsEntry.repoPath ||
+                                  "未配置目录",
+                              },
+                              {
+                                icon: <TerminalIcon fontSize="small" />,
+                                label: "启动命令",
+                                value: runtimeOptionsEntry.command || "未配置命令",
+                              },
+                            ].map((row) => (
+                              <Stack
+                                key={row.label}
+                                direction="row"
+                                spacing={0.8}
+                                alignItems="flex-start"
+                                minWidth={0}
+                              >
+                                <Box
+                                  sx={{
+                                    display: "grid",
+                                    placeItems: "center",
+                                    width: 22,
+                                    height: 22,
+                                    mt: 0.1,
+                                    color: tone.rowHint,
+                                    flexShrink: 0,
+                                  }}
+                                >
+                                  {row.icon}
+                                </Box>
+                                <Box minWidth={0}>
+                                  <Typography
+                                    variant="caption"
+                                    sx={{
+                                      display: "block",
+                                      color: tone.rowMeta,
+                                      fontWeight: 750,
+                                      lineHeight: 1.15,
+                                      mb: 0.18,
+                                    }}
+                                  >
+                                    {row.label}
+                                  </Typography>
+                                  <Typography
+                                    variant="caption"
+                                    sx={{
+                                      display: "block",
+                                      color: tone.rowHint,
+                                      fontFamily:
+                                        '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                      lineHeight: 1.45,
+                                      overflowWrap: "anywhere",
+                                    }}
+                                  >
+                                    {row.value}
+                                  </Typography>
+                                </Box>
+                              </Stack>
+                            ))}
+                          </Stack>
+                        </Box>
+                        <Box
+                          sx={{
+                            p: 1.2,
+                            borderRadius: "14px",
+                            border: `1px solid ${tone.actionGroupBorder}`,
+                            bgcolor: mono
+                              ? "rgba(255,255,255,0.018)"
+                              : "rgba(255,255,255,0.58)",
+                          }}
+                        >
+                          <Stack spacing={1.05}>
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                color: tone.rowHint,
+                                fontWeight: 850,
+                                letterSpacing: "0.04em",
+                              }}
+                            >
+                              启动选项
+                            </Typography>
+                            <Stack spacing={0.55}>
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  color: tone.rowMeta,
+                                  fontWeight: 750,
+                                }}
+                              >
+                                调试档案
+                              </Typography>
+                              <TextField
+                                select
+                                size="small"
+                                value={
+                                  runtimeOptionsProfileKey ||
+                                  DEFAULT_RUNTIME_PROFILE_VALUE
+                                }
+                                onChange={(event) =>
+                                  handleRuntimeOptionsProfileChange(
+                                    event.target.value,
+                                  )
+                                }
+                                fullWidth
+                                inputProps={{ "aria-label": "调试档案" }}
+                                sx={{
+                                  "& .MuiSelect-select": {
+                                    minHeight: "unset",
+                                    py: 1.05,
+                                    fontSize: "0.92rem",
+                                    fontWeight: 750,
+                                  },
+                                }}
+                              >
+                                <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
+                                  默认启动
+                                </MenuItem>
+                                {runtimeOptionsProfiles.map((profile) => (
+                                  <MenuItem key={profile.key} value={profile.key}>
+                                    {profile.label || profile.key}
+                                    {profile.envCount > 0
+                                      ? ` · ${profile.envCount} env`
+                                      : ""}
+                                    {profile.localFileCount > 0
+                                      ? ` · ${profile.localFileCount} 文件`
+                                      : ""}
+                                  </MenuItem>
+                                ))}
+                              </TextField>
+                            </Stack>
+                            <Stack spacing={0.55}>
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  color: tone.rowMeta,
+                                  fontWeight: 750,
+                                }}
+                              >
+                                环境变量
+                              </Typography>
+                              <TextField
+                                value={runtimeOptionsEnvText}
+                                onChange={(event) =>
+                                  setRuntimeOptionsEnvText(event.target.value)
+                                }
+                                fullWidth
+                                multiline
+                                minRows={6}
+                                placeholder={"app_env=uat3-vke\nIMOP_PROXY_ENV=uat3"}
+                                error={Boolean(runtimeOptionsParseResult.error)}
+                                helperText={
+                                  runtimeOptionsParseResult.error ||
+                                  "每行 KEY=VALUE；同名变量会覆盖档案默认值，仅本次启动生效。"
+                                }
+                                inputProps={{ "aria-label": "环境变量" }}
+                                sx={{
+                                  "& .MuiInputBase-root": {
+                                    fontFamily:
+                                      '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                    fontSize: "0.8rem",
+                                    lineHeight: 1.45,
+                                  },
+                                }}
+                              />
+                            </Stack>
+                            {runtimeOptionsSelectedProfile?.browser ||
+                            runtimeOptionsSelectedProfile?.browserProfile ? (
+                              <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap>
+                                {runtimeOptionsSelectedProfile.browser ? (
+                                  <Chip
+                                    size="small"
+                                    label={`浏览器 ${runtimeOptionsSelectedProfile.browser}`}
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                                {runtimeOptionsSelectedProfile.browserProfile ? (
+                                  <Chip
+                                    size="small"
+                                    label={`Profile ${runtimeOptionsSelectedProfile.browserProfile}`}
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                              </Stack>
+                            ) : null}
+                          </Stack>
+                        </Box>
+                      </Stack>
+                    </DialogContent>
+                    <DialogActions sx={{ px: 2.2, pb: 1.8, pt: 0.4 }}>
+                      <Button
+                        color="inherit"
+                        onClick={() => setRuntimeOptionsEnvText("")}
+                        disabled={!runtimeOptionsEnvText.trim()}
+                      >
+                        清空变量
+                      </Button>
+                      <Box sx={{ flex: 1 }} />
+                      <Button color="inherit" onClick={closeRuntimeOptionsDialog}>
+                        取消
+                      </Button>
+                      <Button
+                        variant="contained"
+                        disabled={
+                          !runtimeOptionsEntry.canStart ||
+                          Boolean(runtimeOptionsParseResult.error)
+                        }
+                        onClick={handleRuntimeOptionsStart}
+                      >
+                        使用此配置启动
+                      </Button>
+                    </DialogActions>
+                  </>
+                ) : null}
+              </Dialog>
 
               <Drawer
                 anchor="right"
@@ -2841,21 +3233,16 @@ export function ProjectsPage({
                             },
                           }}
                         >
-                          <Tooltip
-                            title={shortcutFavorite ? "取消收藏" : "收藏入口"}
-                          >
+                          <Tooltip title="更多操作">
                             <Box
                               component="span"
                               role="button"
                               tabIndex={0}
-                              aria-label={
-                                shortcutFavorite
-                                  ? `取消收藏 ${item.entry.name}`
-                                  : `收藏 ${item.entry.name}`
-                              }
+                              aria-label={`${item.entry.name} 更多操作`}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                onToggleShortcutFavorite(item);
+                                setShortcutMenuAnchor(event.currentTarget);
+                                setShortcutMenuKey(shortcutKey);
                               }}
                               onKeyDown={(event) => {
                                 if (event.key !== "Enter" && event.key !== " ") {
@@ -2863,7 +3250,8 @@ export function ProjectsPage({
                                 }
                                 event.preventDefault();
                                 event.stopPropagation();
-                                onToggleShortcutFavorite(item);
+                                setShortcutMenuAnchor(event.currentTarget);
+                                setShortcutMenuKey(shortcutKey);
                               }}
                               sx={{
                                 position: "absolute",
@@ -2875,25 +3263,17 @@ export function ProjectsPage({
                                 display: "grid",
                                 placeItems: "center",
                                 cursor: "pointer",
-                                bgcolor: shortcutFavorite
-                                  ? tone.categoryChipActiveBg
-                                  : tone.actionGroupBg,
+                                bgcolor: tone.actionGroupBg,
                                 color: shortcutFavorite
                                   ? tone.categoryChipActiveColor
                                   : tone.rowHint,
-                                border: `1px solid ${
-                                  shortcutFavorite
-                                    ? tone.categoryChipActiveBorder
-                                    : tone.actionGroupBorder
-                                }`,
+                                border: `1px solid ${tone.actionGroupBorder}`,
                                 "&:hover": {
-                                  bgcolor: shortcutFavorite
-                                    ? tone.categoryChipActiveBg
-                                    : tone.categoryChipHoverBg,
+                                  bgcolor: tone.categoryChipHoverBg,
                                 },
                               }}
                             >
-                              <StarIcon sx={{ fontSize: 14 }} />
+                              <MoreIcon sx={{ fontSize: 14 }} />
                             </Box>
                           </Tooltip>
 
@@ -2951,6 +3331,108 @@ export function ProjectsPage({
                   })}
                 </Box>
               ) : null}
+              <Menu
+                anchorEl={shortcutMenuAnchor}
+                open={Boolean(shortcutMenuAnchor)}
+                onClose={closeShortcutMenu}
+                slotProps={{
+                  paper: {
+                    sx: {
+                      mt: 0.5,
+                      minWidth: 170,
+                      borderRadius: "14px",
+                      border: `1px solid ${tone.actionGroupBorder}`,
+                      bgcolor: tone.outerBg,
+                      color: tone.outerColor,
+                      boxShadow: tone.outerShadow,
+                      "& .MuiMenu-list": {
+                        py: 0.55,
+                      },
+                      "& .MuiMenuItem-root": {
+                        minHeight: 34,
+                        px: 1.1,
+                        gap: 0.4,
+                        borderRadius: "10px",
+                        mx: 0.45,
+                      },
+                    },
+                  },
+                }}
+              >
+                <MenuItem
+                  disabled={!shortcutMenuItem}
+                  onClick={() => {
+                    if (!shortcutMenuItem) {
+                      return;
+                    }
+                    const shortcutKey = buildFinderShortcutKey(shortcutMenuItem);
+                    closeShortcutMenu();
+                    void handleOpenShortcut(shortcutMenuItem, shortcutKey);
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                    <OpenExternalIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="打开入口"
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  disabled={
+                    !shortcutMenuItem ||
+                    shortcutMenuItem.entry.kind !== "url" ||
+                    !shortcutMenuItem.entry.url
+                  }
+                  onClick={() => {
+                    if (!shortcutMenuItem) {
+                      return;
+                    }
+                    openShortcutWebActions(shortcutMenuItem);
+                    closeShortcutMenu();
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                    <WebsiteIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="网页动作"
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  disabled={!shortcutMenuItem}
+                  onClick={() => {
+                    if (!shortcutMenuItem) {
+                      return;
+                    }
+                    onToggleShortcutFavorite(shortcutMenuItem);
+                    closeShortcutMenu();
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                    <StarIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={shortcutMenuFavorite ? "取消收藏" : "收藏入口"}
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+              </Menu>
+              <WebActionsDialog
+                open={Boolean(webActionsContext)}
+                context={webActionsContext}
+                onClose={() => setWebActionsContext(null)}
+              />
               <WorkflowRulesConfigDialog
                 open={workflowOpen}
                 title="联动配置"
@@ -2994,9 +3476,12 @@ export function ProjectsPage({
                     : []
                 }
                 signalOptions={workflowSignalOptions}
+                signalSummaries={workflowSignalSummaries}
                 defaultBroadcastSignalId={
                   workflowReplay ? defaultSignalIdForReplay(workflowReplay) : undefined
                 }
+                onDeleteSignal={onWorkflowSignalDelete}
+                onClearSignals={onWorkflowSignalsClear}
                 onClose={() => setWorkflowOpen(false)}
                 onSave={({ receiveSignalIds, broadcastSignalIds }) => {
                   if (workflowProjectEntry) {
@@ -3025,6 +3510,20 @@ export function ProjectsPage({
                     onWorkflowReceiveRulesDelete(item.ruleIds);
                   } else {
                     onWorkflowBroadcastRulesDelete(item.ruleIds);
+                  }
+                }}
+                onClearAll={(items) => {
+                  const receiveRuleIds = items
+                    .filter((item) => item.ruleKind === "receive")
+                    .flatMap((item) => item.ruleIds);
+                  const broadcastRuleIds = items
+                    .filter((item) => item.ruleKind === "broadcast")
+                    .flatMap((item) => item.ruleIds);
+                  if (receiveRuleIds.length > 0) {
+                    onWorkflowReceiveRulesDelete(receiveRuleIds);
+                  }
+                  if (broadcastRuleIds.length > 0) {
+                    onWorkflowBroadcastRulesDelete(broadcastRuleIds);
                   }
                 }}
               />

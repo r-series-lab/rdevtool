@@ -8,12 +8,17 @@ import type {
   ActivityStatus,
   ActivityUpdater,
 } from "../lib/activityCenter";
+import {
+  DEPLOY_STATUS_SYNC_MAX_FAILURES,
+  stableActivityJson,
+} from "../lib/activityCenter";
 import type { DeployPlan, DeployRequest } from "./useDeployContext";
 
 const BUILD_STATUS_POLL_DELAY_MS = 3000;
 const ACCEPTED_STATUS_POLL_DELAY_MS = 1500;
 const BUILD_STATUS_POLL_TIMEOUT_MS = 5 * 60 * 1000;
 const MAX_DEPLOY_HISTORY_ITEMS = 20;
+const DEPLOY_HISTORY_STATUS_SYNC_LIMIT = 5;
 
 export type BuildResult = {
   plan?: DeployPlan;
@@ -70,6 +75,14 @@ function normalizeDeployParams(params?: Record<string, string> | null) {
   return normalized;
 }
 
+function deployActivityExecutionKey(
+  projectKey: string,
+  target: string | null | undefined,
+  params?: Record<string, string> | null,
+) {
+  return `deploy:${projectKey}:${target ?? ""}:${stableActivityJson(normalizeDeployParams(params))}`;
+}
+
 function buildRecordResource(
   value: Pick<BuildResult, "buildUrl" | "queueUrl">,
 ): ActivityResource | null {
@@ -94,7 +107,17 @@ function compactSyncError(reason: unknown) {
   if (!message) {
     return "无法读取 Jenkins 当前状态";
   }
-  return message.length > 160 ? `${message.slice(0, 157)}...` : message;
+  return message.length > 160 ? `${message.slice(0, 157)}…` : message;
+}
+
+function activityProjectNameForRequest(
+  plan: DeployPlan | null,
+  request: DeployRequest,
+  fallbackProjectKey: string,
+) {
+  return plan?.projectKey === request.project
+    ? plan.projectName
+    : request.project || fallbackProjectKey;
 }
 
 type UseDeployHistoryOptions = {
@@ -111,6 +134,13 @@ type UseDeployHistoryOptions = {
   recordActivity?: ActivityRecorder;
   updateActivity?: ActivityUpdater;
   syncActivities?: ActivityBulkUpdater;
+};
+
+export type DeployReplayOptions = {
+  force?: boolean;
+  chainId?: string | null;
+  parentId?: string | null;
+  stepLabel?: string | null;
 };
 
 export function useDeployHistory({
@@ -180,6 +210,7 @@ export function useDeployHistory({
         status: activityStatusFromBuildState(result.stateKey),
         summary: `${result.stateLabel} · ${result.detail}`,
         detail: buildUrl || queueUrl || null,
+        executionKey: deployActivityExecutionKey(item.projectKey, item.mode, item.params),
         projectKey: item.projectKey,
         projectName: result.plan?.projectName || item.projectName,
         resource: buildRecordResource({ queueUrl, buildUrl }),
@@ -200,29 +231,6 @@ export function useDeployHistory({
     });
   }
 
-  function syncDeployActivityStatusSyncing(item: DeployHistoryEntry) {
-    if (!syncActivities) {
-      return;
-    }
-    const resourceValues = buildActivityResourceValues(item.queueUrl, item.buildUrl);
-    if (resourceValues.length === 0) {
-      return;
-    }
-    syncActivities(
-      {
-        kind: "deploy",
-        projectKey: item.projectKey,
-        resourceValues,
-      },
-      {
-        status: "running",
-        summary: "正在同步 Jenkins 状态",
-        detail: item.buildUrl || item.queueUrl || null,
-        resource: buildRecordResource(item),
-      },
-    );
-  }
-
   function syncDeployActivityStatusFailure(item: DeployHistoryEntry, reason: unknown) {
     if (!syncActivities) {
       return;
@@ -239,10 +247,12 @@ export function useDeployHistory({
       },
       {
         status: "failed",
-        summary: "状态同步失败 · 保留上次状态",
+        summary: `状态同步失败 · 请手动刷新（1/${DEPLOY_STATUS_SYNC_MAX_FAILURES}）`,
         detail: compactSyncError(reason),
+        executionKey: deployActivityExecutionKey(item.projectKey, item.mode, item.params),
         resource: buildRecordResource(item),
-        acknowledgedAt: null,
+        syncFailureCount: 1,
+        acknowledgedAt: new Date().toISOString(),
       },
     );
   }
@@ -428,13 +438,14 @@ export function useDeployHistory({
     setBusy(busyText);
     setError("");
     const activityProjectName =
-      currentPlan?.projectName || request.project || selectedProject;
+      activityProjectNameForRequest(currentPlan, request, selectedProject);
     const activityId =
       recordActivity?.({
         kind: "deploy",
         status: "running",
         title: "触发部署",
         summary: `${activityProjectName} · ${request.target || target || "默认目标"}`,
+        executionKey: deployActivityExecutionKey(request.project, request.target, request.params),
         projectKey: request.project,
         projectName: activityProjectName,
         target: {
@@ -489,21 +500,30 @@ export function useDeployHistory({
     await triggerDeployRequest(currentDeployRequest(), "正在触发部署");
   }
 
-  async function handleReplayDeployHistory(item: DeployHistoryEntry) {
-    if (!enabled) {
+  async function handleReplayDeployHistory(
+    item: DeployHistoryEntry,
+    options: DeployReplayOptions = {},
+  ) {
+    if (!enabled && !options.force) {
       return;
     }
     setBusy("正在重播部署");
     setError("");
+    const replayTarget = item.mode || null;
+    const replayParams = normalizeDeployParams(item.params);
     const activityId =
       recordActivity?.({
         kind: "deploy",
         status: "running",
         title: "重播部署",
-        summary: `${item.projectName} · ${item.mode || "默认目标"}`,
+        summary: `${item.projectName} · ${replayTarget || "默认目标"}`,
+        executionKey: deployActivityExecutionKey(item.projectKey, replayTarget, replayParams),
+        chainId: options.chainId ?? null,
+        parentId: options.parentId ?? null,
+        stepLabel: options.stepLabel ?? "触发部署",
+        chainLabel: options.chainId ? "联动链路" : null,
         projectKey: item.projectKey,
         projectName: item.projectName,
-        resource: buildRecordResource(item),
         target: {
           page: "deploy",
           projectKey: item.projectKey,
@@ -514,8 +534,8 @@ export function useDeployHistory({
       const result = await invoke<BuildResult>("trigger_build", {
         request: {
           project: item.projectKey,
-          target: item.mode || null,
-          params: normalizeDeployParams(item.params),
+          target: replayTarget,
+          params: replayParams,
         },
       });
       setPlan(result.plan ?? null);
@@ -538,6 +558,10 @@ export function useDeployHistory({
           status: activityStatusFromBuildState(result.stateKey),
           summary: `${result.stateLabel} · ${result.detail}`,
           detail: result.buildUrl || result.queueUrl || null,
+          chainId: options.chainId ?? undefined,
+          parentId: options.parentId ?? undefined,
+          stepLabel: options.stepLabel ?? "触发部署",
+          chainLabel: options.chainId ? "联动链路" : undefined,
           projectName: result.plan?.projectName || item.projectName,
           resource: buildRecordResource(result),
         });
@@ -616,11 +640,9 @@ export function useDeployHistory({
     const activeItems = items
       .filter((item) => isActiveBuildState(item.stateKey))
       .filter((item) => item.queueUrl || item.buildUrl)
-      .slice(0, 3);
-    let failedCount = 0;
+      .slice(0, DEPLOY_HISTORY_STATUS_SYNC_LIMIT);
 
     for (const item of activeItems) {
-      syncDeployActivityStatusSyncing(item);
       try {
         const result = await invoke<BuildResult>("refresh_build_status", {
           request: {
@@ -641,13 +663,10 @@ export function useDeployHistory({
           setBuildResultUpdatedAtMs(Date.now());
         }
       } catch (reason) {
-        failedCount += 1;
-        syncDeployActivityStatusFailure(item, reason);
+        if (reportItemFailure) {
+          syncDeployActivityStatusFailure(item, reason);
+        }
       }
-    }
-
-    if (reportItemFailure && failedCount > 0) {
-      setError(`有 ${failedCount} 条部署状态同步失败，已在活动中心标记。`);
     }
   }
 

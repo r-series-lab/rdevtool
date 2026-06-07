@@ -98,8 +98,9 @@ impl App {
         Self {
             selected: 0,
             list_state,
-            status: "ready: ↑/↓ select, v toggle variant, e edit env, b edit branch, t trigger, q quit"
-                .to_string(),
+            status:
+                "ready: ↑/↓ select, v toggle variant, e edit env, b edit branch, t trigger, q quit"
+                    .to_string(),
             env_overrides: BTreeMap::new(),
             branch_overrides: BTreeMap::new(),
             variant_overrides: BTreeMap::new(),

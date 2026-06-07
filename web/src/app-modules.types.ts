@@ -159,26 +159,39 @@ export type ProjectsModuleContext = {
   recentProjectKeys: ProjectsPageProps["recentProjectKeys"];
   favoriteShortcutKeys: ProjectsPageProps["favoriteShortcutKeys"];
   recentShortcutKeys: ProjectsPageProps["recentShortcutKeys"];
+  selectedDebugProfileKeys: ProjectsPageProps["selectedDebugProfileKeys"];
   setFinderType: ProjectsPageProps["onFinderTypeChange"];
   setFinderQuickFilter: ProjectsPageProps["onFinderQuickFilterChange"];
   setFinderCategory: ProjectsPageProps["onFinderCategoryChange"];
   setFinderQuery: ProjectsPageProps["onFinderQueryChange"];
   toggleProjectFavorite: ProjectsPageProps["onToggleProjectFavorite"];
   toggleShortcutFavorite: ProjectsPageProps["onToggleShortcutFavorite"];
+  setProjectDebugProfile: ProjectsPageProps["onProjectDebugProfileChange"];
   markShortcutUsed: ProjectsPageProps["onMarkShortcutUsed"];
   loadFinderData: (options?: { force?: boolean }) => Promise<void>;
   loadProjectRuntimes: () => Promise<void>;
   handleOpenFinderEntry: (
     entry: ProjectsPageProps["shortcutEntries"][number]["entry"],
   ) => Promise<boolean>;
-  handleStartRuntime: (projectKey: string) => Promise<void>;
+  handleStartRuntime: (
+    projectKey: string,
+    debugProfileKey?: string,
+    envOverrides?: Record<string, string>,
+  ) => Promise<void>;
   handleStopRuntime: (projectKey: string) => Promise<void>;
   handleRunBuild: (projectKey: string) => Promise<void>;
   handleStopBuild: (projectKey: string) => Promise<void>;
   handleOpenBuildOutput: (projectKey: string) => Promise<void>;
   handleFocusRuntime: (projectKey: string) => Promise<void>;
   handleOpenProjectDirectory: (projectKey: string) => Promise<void>;
-  handleReplayProjectWorkflow: (replay: WorkflowProjectReplay) => Promise<void>;
+  handleReplayProjectWorkflow: (
+    replay: WorkflowProjectReplay,
+    options?: {
+      chainId?: string | null;
+      parentId?: string | null;
+      stepLabel?: string | null;
+    },
+  ) => Promise<void>;
 };
 
 export type BuildModulePropsContext = {

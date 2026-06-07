@@ -6,7 +6,6 @@ import {
   useState,
 } from "react";
 import {
-  Alert,
   CircularProgress,
   CssBaseline,
   ThemeProvider,
@@ -53,7 +52,6 @@ function App() {
   const appShell = useAppShell({ setError });
   const activityCenter = useActivityCenter({ setError });
   const workflowSignals = useWorkflowSignals({ setError });
-  const workflowAutoOpenKeyRef = useRef("");
   const workflowAutoRunKeyRef = useRef("");
   const deployAvailable = appShell.enabledPages.includes("deploy");
   const mergeAvailable = appShell.enabledPages.includes("merge");
@@ -222,61 +220,6 @@ function App() {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [projectsAvailable, projectsModule]);
 
-  function openCommandPalette() {
-    setCommandPaletteOpen(true);
-    if (projectsAvailable) {
-      void projectsModule.loadFinderData();
-    }
-  }
-
-  useEffect(() => {
-    const signal = workflowSignals.nextPendingSignal;
-    if (!signal) {
-      return;
-    }
-    if (!isFreshWorkflowSignal(signal.createdAt)) {
-      void workflowSignals.clearWorkflowSignal(signal.instanceId);
-      return;
-    }
-    const receivers = workflowSignals.matchingReceivers(signal);
-    const branchReceivers = receivers.filter(
-      (receiver) => receiver.replay.target === "branch.replay",
-    );
-    const deployReceivers = receivers.filter(
-      (receiver) => receiver.replay.target === "deploy.replay",
-    );
-    const projectReceivers = receivers.filter(
-      (receiver) => receiver.replay.target === "project.replay",
-    );
-    if (branchReceivers.length > 0 && mergeAvailable) {
-      const openKey = `${signal.instanceId}:merge`;
-      if (workflowAutoOpenKeyRef.current === openKey) {
-        return;
-      }
-      workflowAutoOpenKeyRef.current = openKey;
-      appShell.setPage("merge");
-      return;
-    }
-    if (projectReceivers.length > 0 && projectsAvailable) {
-      const openKey = `${signal.instanceId}:projects`;
-      if (workflowAutoOpenKeyRef.current === openKey) {
-        return;
-      }
-      workflowAutoOpenKeyRef.current = openKey;
-      appShell.setPage("projects");
-      return;
-    }
-    if (!deployAvailable || deployReceivers.length === 0) {
-      return;
-    }
-    const openKey = `${signal.instanceId}:deploy`;
-    if (workflowAutoOpenKeyRef.current === openKey) {
-      return;
-    }
-    workflowAutoOpenKeyRef.current = openKey;
-    appShell.setPage("deploy");
-  }, [appShell, deployAvailable, mergeAvailable, projectsAvailable, workflowSignals]);
-
   useEffect(() => {
     const signal = workflowSignals.nextPendingSignal;
     const deployReceivers = signal
@@ -304,68 +247,67 @@ function App() {
     ) {
       return;
     }
-    if (branchReceivers.length > 0 && !mergeEnabled) {
+    if (branchReceivers.length > 0 && !mergeAvailable) {
       return;
     }
-    if (branchReceivers.length === 0 && projectReceivers.length > 0 && !projectsAvailable) {
+    if (projectReceivers.length > 0 && !projectsAvailable) {
       return;
     }
-    if (
-      branchReceivers.length === 0 &&
-      projectReceivers.length > 0 &&
-      appShell.page !== "projects"
-    ) {
-      return;
-    }
-    if (
-      branchReceivers.length === 0 &&
-      projectReceivers.length === 0 &&
-      deployReceivers.length > 0 &&
-      !deployEnabled
-    ) {
+    if (deployReceivers.length > 0 && !deployAvailable) {
       return;
     }
 
-    const targetKey =
-      branchReceivers.length > 0
-        ? "merge"
-        : projectReceivers.length > 0
-          ? "projects"
-          : "deploy";
-    const runKey = `${signal.instanceId}:${targetKey}`;
+    const runKey = signal.instanceId;
     if (workflowAutoRunKeyRef.current === runKey) {
       return;
     }
     workflowAutoRunKeyRef.current = runKey;
 
     void (async () => {
+      const chainId = signal.chainId || `chain:${signal.instanceId}`;
+      const parentId = signal.parentActivityId || null;
       if (branchReceivers.length > 0) {
         for (const receiver of branchReceivers) {
           if (receiver.replay.target === "branch.replay") {
-            await mergeModule.handleReplayBranchTaskHistory(receiver.replay.entry);
+            await mergeModule.handleReplayBranchTaskHistory(receiver.replay.entry, {
+              force: true,
+              chainId,
+              parentId,
+              stepLabel: "重播分支",
+            });
           }
         }
-      } else if (projectReceivers.length > 0) {
+      }
+      if (projectReceivers.length > 0) {
         for (const receiver of projectReceivers) {
           if (receiver.replay.target === "project.replay") {
-            await projectsModule.handleReplayProjectWorkflow(receiver.replay);
+            await projectsModule.handleReplayProjectWorkflow(receiver.replay, {
+              chainId,
+              parentId,
+              stepLabel: "重播项目",
+            });
           }
         }
-      } else {
+      }
+      if (deployReceivers.length > 0) {
         for (const receiver of deployReceivers) {
           if (receiver.replay.target === "deploy.replay") {
-            await deployModule.handleReplayDeployHistory(receiver.replay.entry);
+            await deployModule.handleReplayDeployHistory(receiver.replay.entry, {
+              force: true,
+              chainId,
+              parentId,
+              stepLabel: "触发部署",
+            });
           }
         }
       }
       await workflowSignals.clearWorkflowSignal(signal.instanceId);
     })();
   }, [
-    appShell.page,
     busy,
-    deployEnabled,
+    deployAvailable,
     deployModule,
-    mergeEnabled,
+    mergeAvailable,
     mergeModule,
     projectsAvailable,
     projectsModule,
@@ -461,7 +403,6 @@ function App() {
         visibleNavItems={appShell.visibleNavItems}
         activePage={appShell.page}
         onPageChange={appShell.setPage}
-        onOpenCommandPalette={openCommandPalette}
         styleMode={appShell.styleMode}
         onStyleModeChange={appShell.setStyleMode}
         selectedProjectKey={appShell.selectedProject}
@@ -492,13 +433,10 @@ function App() {
       >
         <Suspense
           fallback={
-            <Alert
-              severity="info"
-              icon={<CircularProgress size={16} color="inherit" />}
-              sx={{ py: 0 }}
-            >
+            <div className="page-loading-strip" role="status" aria-live="polite">
+              <CircularProgress size={16} thickness={5} />
               正在加载页面模块
-            </Alert>
+            </div>
           }
           >
           <PageErrorBoundary resetKey={appShell.page}>

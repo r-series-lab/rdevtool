@@ -60,6 +60,7 @@ export function HistoryCard({
   detail,
   meta,
   children,
+  pinned = false,
 }: {
   title: string;
   subtitle: string;
@@ -67,19 +68,56 @@ export function HistoryCard({
   detail: string;
   meta: string[];
   children?: ReactNode;
+  pinned?: boolean;
 }) {
   return (
     <Card
       variant="outlined"
-      sx={{ borderRadius: "16px", bgcolor: "rgba(255,255,255,0.01)", minWidth: 0, maxWidth: "100%" }}
+      sx={(theme) => ({
+        borderRadius: "16px",
+        bgcolor:
+          pinned && theme.palette.mode === "dark"
+            ? alpha(theme.palette.primary.main, 0.08)
+            : pinned
+              ? alpha(theme.palette.primary.main, 0.045)
+              : "rgba(255,255,255,0.01)",
+        borderColor: pinned
+          ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.36 : 0.24)
+          : undefined,
+        boxShadow: pinned
+          ? `inset 3px 0 0 ${alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.72 : 0.5)}`
+          : undefined,
+        minWidth: 0,
+        maxWidth: "100%",
+      })}
     >
       <CardContent sx={{ minWidth: 0, maxWidth: "100%", "&:last-child": { pb: 1.5 } }}>
         <Stack spacing={0.5} minWidth={0} maxWidth="100%">
           <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1} minWidth={0}>
             <Box sx={{ minWidth: 0, flex: 1 }}>
-              <Typography variant="subtitle2" sx={{ fontWeight: 700 }} noWrap>
-                {title}
-              </Typography>
+              <Stack direction="row" spacing={0.65} alignItems="center" minWidth={0}>
+                {pinned ? (
+                  <Box
+                    component="span"
+                    sx={(theme) => ({
+                      flexShrink: 0,
+                      px: 0.65,
+                      py: 0.14,
+                      borderRadius: "999px",
+                      bgcolor: alpha(theme.palette.primary.main, 0.12),
+                      color: theme.palette.primary.main,
+                      fontSize: "0.66rem",
+                      lineHeight: 1.35,
+                      fontWeight: 820,
+                    })}
+                  >
+                    已置顶
+                  </Box>
+                ) : null}
+                <Typography variant="subtitle2" sx={{ minWidth: 0, fontWeight: 700 }} noWrap>
+                  {title}
+                </Typography>
+              </Stack>
               <Typography
                 variant="caption"
                 color="text.secondary"

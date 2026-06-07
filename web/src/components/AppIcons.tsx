@@ -62,6 +62,50 @@ export function ActivityIcon(props: SvgIconProps) {
   );
 }
 
+export function PanelBottomIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M6.8 5.8h10.4c1.5 0 2.6 1.1 2.6 2.6v7.2c0 1.5-1.1 2.6-2.6 2.6H6.8c-1.5 0-2.6-1.1-2.6-2.6V8.4c0-1.5 1.1-2.6 2.6-2.6Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+      <path
+        d="M8.1 15.2h7.8"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="2"
+      />
+    </SvgIcon>
+  );
+}
+
+export function PanelSideIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M6.8 5.8h10.4c1.5 0 2.6 1.1 2.6 2.6v7.2c0 1.5-1.1 2.6-2.6 2.6H6.8c-1.5 0-2.6-1.1-2.6-2.6V8.4c0-1.5 1.1-2.6 2.6-2.6Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="2"
+      />
+      <path
+        d="M14.5 8.3v7.4"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="2"
+      />
+    </SvgIcon>
+  );
+}
+
 export function TrashIcon(props: SvgIconProps) {
   return (
     <SvgIcon viewBox="0 0 24 24" {...props}>

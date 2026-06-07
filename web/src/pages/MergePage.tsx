@@ -51,6 +51,7 @@ import {
   type WorkflowBroadcastRule,
   type WorkflowReceiveRule,
 } from "../lib/workflowSignals";
+import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 
 type ProjectOption = {
   key: string;
@@ -115,6 +116,7 @@ export type MergePageProps = {
   workflowReceiveSignalIdsForBranchReplay: (entry: BranchTaskHistoryEntry) => string[];
   workflowBroadcastSignalIdsForBranchReplay: (entry: BranchTaskHistoryEntry) => string[];
   workflowSignalOptions: string[];
+  workflowSignalSummaries: WorkflowSignalSummary[];
   onWorkflowBranchReplayRulesChange: (
     entry: BranchTaskHistoryEntry,
     value: {
@@ -126,6 +128,8 @@ export type MergePageProps = {
   onWorkflowReceiveRulesDelete: (ruleIds: string[]) => void;
   onWorkflowBroadcastRulesEnabledChange: (ruleIds: string[], enabled: boolean) => void;
   onWorkflowBroadcastRulesDelete: (ruleIds: string[]) => void;
+  onWorkflowSignalDelete: (signalId: string) => void;
+  onWorkflowSignalsClear: () => void;
   onRefreshBranchTaskHistory: () => void;
   onClearBranchTaskHistory: () => void;
   onOpenTaskOutput: (path: string) => void;
@@ -257,7 +261,7 @@ function PushStatusFreshness({
   onRefresh: () => void;
 }) {
   const stale = Boolean(updatedAtMs && nowMs - updatedAtMs > PUSH_STATUS_STALE_MS);
-  if (!loading && !stale) {
+  if (!stale) {
     return null;
   }
 
@@ -268,7 +272,7 @@ function PushStatusFreshness({
         color="text.secondary"
         sx={{ fontSize: "0.7rem", lineHeight: 1.4 }}
       >
-        {loading ? "正在刷新本地状态" : "本地状态可能已过期"}
+        本地状态可能已过期
       </Typography>
       {stale ? (
         <Button
@@ -470,11 +474,14 @@ export function MergePage({
   workflowReceiveSignalIdsForBranchReplay,
   workflowBroadcastSignalIdsForBranchReplay,
   workflowSignalOptions,
+  workflowSignalSummaries,
   onWorkflowBranchReplayRulesChange,
   onWorkflowReceiveRulesEnabledChange,
   onWorkflowReceiveRulesDelete,
   onWorkflowBroadcastRulesEnabledChange,
   onWorkflowBroadcastRulesDelete,
+  onWorkflowSignalDelete,
+  onWorkflowSignalsClear,
   onRefreshBranchTaskHistory,
   onClearBranchTaskHistory,
   onOpenTaskOutput,
@@ -1217,7 +1224,10 @@ export function MergePage({
           workflowEntry ? workflowBroadcastSignalIdsForBranchReplay(workflowEntry) : []
         }
         signalOptions={workflowSignalOptions}
+        signalSummaries={workflowSignalSummaries}
         defaultBroadcastSignalId={workflowReplay ? defaultSignalIdForReplay(workflowReplay) : undefined}
+        onDeleteSignal={onWorkflowSignalDelete}
+        onClearSignals={onWorkflowSignalsClear}
         onClose={() => setWorkflowOpen(false)}
         onSave={({ receiveSignalIds, broadcastSignalIds }) => {
           if (workflowEntry) {
@@ -1246,6 +1256,20 @@ export function MergePage({
             onWorkflowReceiveRulesDelete(item.ruleIds);
           } else {
             onWorkflowBroadcastRulesDelete(item.ruleIds);
+          }
+        }}
+        onClearAll={(items) => {
+          const receiveRuleIds = items
+            .filter((item) => item.ruleKind === "receive")
+            .flatMap((item) => item.ruleIds);
+          const broadcastRuleIds = items
+            .filter((item) => item.ruleKind === "broadcast")
+            .flatMap((item) => item.ruleIds);
+          if (receiveRuleIds.length > 0) {
+            onWorkflowReceiveRulesDelete(receiveRuleIds);
+          }
+          if (broadcastRuleIds.length > 0) {
+            onWorkflowBroadcastRulesDelete(broadcastRuleIds);
           }
         }}
       />

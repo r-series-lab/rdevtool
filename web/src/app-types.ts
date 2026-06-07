@@ -121,11 +121,28 @@ export type ProjectCommandConfigDraft = {
 export type ProjectFocusConfigDraft = {
   url?: string | null;
   bundleId?: string | null;
+  autoOnStart: boolean;
 };
 
 export type ProjectBranchRulesDraft = {
   sourceKeywords: string[];
   targetKeywords: string[];
+};
+
+export type ProjectDebugLocalFileDraft = {
+  path: string;
+  mode: "overwrite" | "append_block" | string;
+  content: string;
+  enabled: boolean;
+};
+
+export type ProjectDebugProfileDraft = {
+  key: string;
+  label: string;
+  envText: string;
+  localFiles: ProjectDebugLocalFileDraft[];
+  browser?: string | null;
+  browserProfile?: string | null;
 };
 
 export type DeployParamConfigKind = "select" | "boolean" | "branch" | "text" | "hidden";
@@ -160,12 +177,24 @@ export type ProjectConfigDraft = {
   focus: ProjectFocusConfigDraft;
   branchRules: ProjectBranchRulesDraft;
   deployTargets: DeployTargetConfigSummary[];
+  debugProfiles: ProjectDebugProfileDraft[];
 };
 
 export type ProjectConfigEditorState = {
   configPath: string;
   jenkinsProfiles: string[];
+  defaultBranchRules: ProjectBranchRulesDraft;
   projects: ProjectConfigDraft[];
+};
+
+export type ProjectDebugProfileSummary = {
+  key: string;
+  label: string;
+  env: Record<string, string>;
+  envCount: number;
+  localFileCount: number;
+  browser?: string | null;
+  browserProfile?: string | null;
 };
 
 export type ProjectRuntimeEntry = {
@@ -175,6 +204,7 @@ export type ProjectRuntimeEntry = {
   repoPath?: string | null;
   command?: string | null;
   cwd?: string | null;
+  focusUrl?: string | null;
   statusKey: string;
   statusLabel: string;
   detail: string;
@@ -197,6 +227,7 @@ export type ProjectRuntimeEntry = {
   canStopBuild: boolean;
   canOpenBuildOutput: boolean;
   canFocusRuntime: boolean;
+  debugProfiles: ProjectDebugProfileSummary[];
 };
 
 export type ProjectRuntimeLogKind = "dev" | "build";
@@ -212,6 +243,8 @@ export type FinderEntry = {
   kind: string;
   targetLabel: string;
   url?: string | null;
+  browser?: string | null;
+  browserProfile?: string | null;
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
@@ -223,6 +256,73 @@ export type FinderShortcutItem = {
   categoryTitle: string;
   categoryLabel: string;
   entry: FinderEntry;
+};
+
+export type WebActionParamSummary = {
+  key: string;
+  label: string;
+  defaultValue: string;
+};
+
+export type WebActionSummary = {
+  key: string;
+  name: string;
+  scope: string;
+  matchPatterns: string[];
+  runManually: boolean;
+  params: WebActionParamSummary[];
+  script: string;
+};
+
+export type WebActionListResponse = {
+  configPath: string;
+  actions: WebActionSummary[];
+};
+
+export type WebActionTarget = {
+  id: string;
+  title: string;
+  url: string;
+  type: string;
+  webSocketDebuggerUrl?: string | null;
+};
+
+export type WebActionRunResult = {
+  actionKey: string;
+  targetId: string;
+  title: string;
+  url: string;
+  success: boolean;
+  result?: unknown;
+  resultText: string;
+  error?: string | null;
+};
+
+export type NavigationEditorEntryKind = "url" | "app" | "script";
+
+export type NavigationEditorEntry = {
+  name: string;
+  kind: NavigationEditorEntryKind;
+  url?: string | null;
+  browser?: string | null;
+  browserProfile?: string | null;
+  bundleId?: string | null;
+  appName?: string | null;
+  script?: string | null;
+  cwd?: string | null;
+  note?: string | null;
+};
+
+export type NavigationEditorCategory = {
+  title: string;
+  shortLabel: string;
+  entries: NavigationEditorEntry[];
+};
+
+export type NavigationEditorState = {
+  filePath: string;
+  preferredCategory?: string | null;
+  categories: NavigationEditorCategory[];
 };
 
 export type ProjectWorkflowAction =

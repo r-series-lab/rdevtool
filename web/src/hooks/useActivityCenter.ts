@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { deleteStoredJson, getStoredJson, setStoredJson } from "../lib/storage";
 import {
+  DEPLOY_STATUS_SYNC_MAX_FAILURES,
   createActivityEntry,
   normalizeActivityEntries,
   type ActivityBulkUpdater,
@@ -31,6 +32,10 @@ type BuildStatusResponse = {
   detail: string;
 };
 
+type DeployStatusSyncOptions = {
+  force?: boolean;
+};
+
 function normalizedActivityLink(value?: string | null) {
   return value?.trim() ?? "";
 }
@@ -48,6 +53,9 @@ function deployActivityResourceValue(item: ActivityEntry) {
 }
 
 function activityDedupeKey(item: ActivityEntry) {
+  if (item.chainId || item.parentId) {
+    return `id:${item.id}`;
+  }
   const deployResource = deployActivityResourceValue(item);
   if (deployResource) {
     return `deploy:${item.projectKey ?? ""}:${deployResource}`;
@@ -88,6 +96,18 @@ function activityStatusFromBuildState(stateKey?: string | null): ActivityStatus 
   return "info";
 }
 
+function deploySyncFailureCount(item: ActivityEntry) {
+  return item.syncFailureCount ?? 0;
+}
+
+function isDeployStatusSyncNotice(item: ActivityEntry) {
+  return (
+    item.kind === "deploy" &&
+    (item.summary.startsWith("状态同步失败") ||
+      item.summary === "同步 Jenkins 状态中…")
+  );
+}
+
 function buildRecordResource(
   value: Pick<BuildStatusResponse, "buildUrl" | "queueUrl">,
 ): ActivityEntry["resource"] {
@@ -101,9 +121,14 @@ function buildRecordResource(
     : null;
 }
 
-function deployActivityStatusRequest(item: ActivityEntry) {
+function deployActivityStatusRequest(
+  item: ActivityEntry,
+  options: DeployStatusSyncOptions = {},
+) {
   const shouldRetrySyncFailure =
-    item.status === "failed" && item.summary.startsWith("状态同步失败");
+    item.status === "failed" &&
+    item.summary.startsWith("状态同步失败") &&
+    options.force;
   if (item.kind !== "deploy" || (item.status !== "running" && !shouldRetrySyncFailure)) {
     return null;
   }
@@ -130,7 +155,15 @@ function compactSyncError(reason: unknown) {
   if (!message) {
     return "无法读取 Jenkins 当前状态";
   }
-  return message.length > 160 ? `${message.slice(0, 157)}...` : message;
+  return message.length > 160 ? `${message.slice(0, 157)}…` : message;
+}
+
+function syncFailureSummary(failureCount: number) {
+  const countText = `${failureCount}/${DEPLOY_STATUS_SYNC_MAX_FAILURES}`;
+  if (failureCount >= DEPLOY_STATUS_SYNC_MAX_FAILURES) {
+    return `状态同步失败 · 已停止自动重试（${countText}）`;
+  }
+  return `状态同步失败 · 请手动刷新（${countText}）`;
 }
 
 function chooseActivityDuplicate(left: ActivityEntry, right: ActivityEntry) {
@@ -187,8 +220,19 @@ function shouldApplyActivityPatch(item: ActivityEntry, patch: ActivityPatch) {
   if (patch.title !== undefined && patch.title !== item.title) return true;
   if (patch.summary !== undefined && patch.summary !== item.summary) return true;
   if (patch.detail !== undefined && patch.detail !== item.detail) return true;
+  if (patch.executionKey !== undefined && patch.executionKey !== item.executionKey) return true;
+  if (patch.chainId !== undefined && patch.chainId !== item.chainId) return true;
+  if (patch.parentId !== undefined && patch.parentId !== item.parentId) return true;
+  if (patch.stepLabel !== undefined && patch.stepLabel !== item.stepLabel) return true;
+  if (patch.chainLabel !== undefined && patch.chainLabel !== item.chainLabel) return true;
   if (patch.projectKey !== undefined && patch.projectKey !== item.projectKey) return true;
   if (patch.projectName !== undefined && patch.projectName !== item.projectName) return true;
+  if (
+    patch.syncFailureCount !== undefined &&
+    patch.syncFailureCount !== item.syncFailureCount
+  ) {
+    return true;
+  }
   if (patch.acknowledgedAt !== undefined && patch.acknowledgedAt !== item.acknowledgedAt) {
     return true;
   }
@@ -204,11 +248,21 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
 
   const stats = useMemo(
     () => ({
-      running: items.filter((item) => item.status === "running").length,
-      failed: items.filter((item) => item.status === "failed" && !item.acknowledgedAt)
-        .length,
-      handled: items.filter((item) => item.status === "failed" && item.acknowledgedAt)
-        .length,
+      running: items.filter(
+        (item) => item.status === "running" && !isDeployStatusSyncNotice(item),
+      ).length,
+      failed: items.filter(
+        (item) =>
+          item.status === "failed" &&
+          !item.acknowledgedAt &&
+          !isDeployStatusSyncNotice(item),
+      ).length,
+      handled: items.filter(
+        (item) =>
+          item.status === "failed" &&
+          item.acknowledgedAt &&
+          !isDeployStatusSyncNotice(item),
+      ).length,
       success: items.filter((item) => item.status === "success").length,
       total: items.length,
     }),
@@ -246,11 +300,14 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
     );
   }, [persist]);
 
-  const syncStoredDeployStatuses = useCallback(async (sourceItems: ActivityEntry[]) => {
+  const syncStoredDeployStatuses = useCallback(async (
+    sourceItems: ActivityEntry[],
+    options: DeployStatusSyncOptions = {},
+  ) => {
     const targets = sourceItems
       .map((item) => ({
         item,
-        request: deployActivityStatusRequest(item),
+        request: deployActivityStatusRequest(item, options),
       }))
       .filter(
         (target): target is { item: ActivityEntry; request: { queueUrl: string | null; buildUrl: string | null } } =>
@@ -263,13 +320,6 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
     }
 
     for (const { item, request } of targets) {
-      patchStoredActivity(item.id, {
-        status: "running",
-        summary: "正在同步 Jenkins 状态",
-        detail: item.detail ?? null,
-        resource: item.resource ?? null,
-      });
-
       try {
         const result = await invoke<BuildStatusResponse>("refresh_build_status", {
           request,
@@ -279,22 +329,28 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
           summary: `${result.stateLabel} · ${result.detail}`,
           detail: result.buildUrl || result.queueUrl || item.detail || null,
           resource: buildRecordResource(result) || item.resource || null,
+          syncFailureCount: 0,
           acknowledgedAt: null,
         });
       } catch (reason) {
+        const failureCount = Math.min(
+          deploySyncFailureCount(item) + 1,
+          DEPLOY_STATUS_SYNC_MAX_FAILURES,
+        );
         patchStoredActivity(item.id, {
           status: "failed",
-          summary: "状态同步失败 · 保留上次状态",
+          summary: syncFailureSummary(failureCount),
           detail: compactSyncError(reason),
           resource: item.resource ?? null,
-          acknowledgedAt: null,
+          syncFailureCount: failureCount,
+          acknowledgedAt: item.acknowledgedAt || new Date().toISOString(),
         });
       }
     }
   }, [patchStoredActivity]);
 
-  const refreshDeployActivities = useCallback(async () => {
-    await syncStoredDeployStatuses(itemsRef.current);
+  const refreshDeployActivities = useCallback(async (options: DeployStatusSyncOptions = {}) => {
+    await syncStoredDeployStatuses(itemsRef.current, options);
   }, [syncStoredDeployStatuses]);
 
   useEffect(() => {
@@ -307,7 +363,6 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
         const normalized = normalizeActivityList(stored);
         itemsRef.current = normalized;
         setItems(normalized);
-        void syncStoredDeployStatuses(normalized);
       })
       .catch((reason) => {
         if (!cancelled) {

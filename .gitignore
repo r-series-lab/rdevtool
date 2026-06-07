@@ -11,3 +11,7 @@ projects.toml
 workspace.toml
 navigation.toml
 *.state.toml
+
+# Local design and generated preview artifacts
+/activity-center-pagination-preview.jpeg
+/design-previews/

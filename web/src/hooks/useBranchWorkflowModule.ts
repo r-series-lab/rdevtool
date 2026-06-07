@@ -15,6 +15,7 @@ import type {
   ActivityRecorder,
   ActivityUpdater,
 } from "../lib/activityCenter";
+import { stableActivityJson } from "../lib/activityCenter";
 import { deleteStoredJson, getStoredJson, setStoredJson } from "../lib/storage";
 import {
   createBranchTaskSignals,
@@ -49,6 +50,13 @@ type UseBranchWorkflowModuleOptions = {
   emitWorkflowSignals: (signals: WorkflowSignal[]) => Promise<void>;
   recordActivity?: ActivityRecorder;
   updateActivity?: ActivityUpdater;
+};
+
+type BranchTaskRunOptions = {
+  force?: boolean;
+  chainId?: string | null;
+  parentId?: string | null;
+  stepLabel?: string | null;
 };
 
 function normalizeValues(values: string[]): string[] {
@@ -186,6 +194,13 @@ function branchActivityTitle(command: BranchTaskReplayCommand) {
   return "合并分支";
 }
 
+function branchActivityExecutionKey(
+  command: BranchTaskReplayCommand,
+  request: Record<string, unknown>,
+) {
+  return `branch:${command}:${stableActivityJson(request)}`;
+}
+
 function branchResultResource(result: BranchTaskResponse): ActivityResource | null {
   const outputPath = result.items.find((item) => item.outputPath)?.outputPath?.trim();
   if (!outputPath) {
@@ -228,6 +243,7 @@ export function useBranchWorkflowModule({
   const [pushStatusUpdatedAtMs, setPushStatusUpdatedAtMs] = useState(0);
   const [branchTaskResult, setBranchTaskResult] = useState<BranchTaskResponse | null>(null);
   const [branchTaskHistory, setBranchTaskHistory] = useState<BranchTaskHistoryEntry[]>([]);
+  const lastBranchActivityIdRef = useRef("");
   const defaultKeysRef = useRef({
     syncSource: "",
     syncTargets: "",
@@ -429,8 +445,9 @@ export function useBranchWorkflowModule({
     command: BranchTaskReplayCommand,
     request: Record<string, unknown>,
     replay = makeReplayRequest(command, busyText, request),
+    options: BranchTaskRunOptions = {},
   ) {
-    if (!enabled) {
+    if (!enabled && !options.force) {
       return null;
     }
     setBusy(busyText);
@@ -446,6 +463,11 @@ export function useBranchWorkflowModule({
         status: "running",
         title: branchActivityTitle(command),
         summary: busyText,
+        executionKey: branchActivityExecutionKey(command, request),
+        chainId: options.chainId ?? null,
+        parentId: options.parentId ?? null,
+        stepLabel: options.stepLabel ?? branchActivityTitle(command),
+        chainLabel: options.chainId ? "联动链路" : null,
         projectKey: requestedProject,
         projectName: requestedProjectName,
         target: {
@@ -454,6 +476,7 @@ export function useBranchWorkflowModule({
           branchMode: taskKind,
         },
       }) || "";
+    lastBranchActivityIdRef.current = activityId;
     try {
       const result = await invoke<BranchTaskResponse>(command, { request });
       setBranchTaskResult(result);
@@ -468,6 +491,10 @@ export function useBranchWorkflowModule({
           status: result.success ? "success" : "failed",
           summary: result.summary,
           detail: result.detail,
+          chainId: options.chainId ?? undefined,
+          parentId: options.parentId ?? undefined,
+          stepLabel: options.stepLabel ?? branchActivityTitle(command),
+          chainLabel: options.chainId ? "联动链路" : undefined,
           projectKey: resultProjectKey,
           projectName: resultProjectName,
           resource: branchResultResource(result),
@@ -495,8 +522,11 @@ export function useBranchWorkflowModule({
     }
   }
 
-  async function handleReplayBranchTaskHistory(item: BranchTaskHistoryEntry) {
-    if (!enabled || !item.replay) {
+  async function handleReplayBranchTaskHistory(
+    item: BranchTaskHistoryEntry,
+    options: BranchTaskRunOptions = {},
+  ) {
+    if ((!enabled && !options.force) || !item.replay) {
       return;
     }
     const result = await runBranchTask(
@@ -504,6 +534,10 @@ export function useBranchWorkflowModule({
       item.replay.command,
       item.replay.request,
       item.replay,
+      {
+        ...options,
+        stepLabel: options.stepLabel ?? branchActivityTitle(item.replay.command),
+      },
     );
     if (
       item.replay.command === "execute_branch_push_task" ||
@@ -516,7 +550,11 @@ export function useBranchWorkflowModule({
         setPushCommitMessage("");
       }
     }
-    await emitBranchTaskWorkflowSignals(result, item);
+    await emitBranchTaskWorkflowSignals(result, item, {
+      sourceActivityId: lastBranchActivityIdRef.current,
+      sourceStepLabel: options.stepLabel ?? branchActivityTitle(item.replay.command),
+      chainId: options.chainId ?? undefined,
+    });
   }
 
   async function loadPushStatus(projectKey = selectedProject) {
@@ -596,6 +634,11 @@ export function useBranchWorkflowModule({
   async function emitBranchTaskWorkflowSignals(
     result: BranchTaskResponse | null,
     entry?: BranchTaskHistoryEntry,
+    chain?: {
+      sourceActivityId?: string;
+      sourceStepLabel?: string;
+      chainId?: string;
+    },
   ) {
     if (!result?.success) {
       return;
@@ -614,8 +657,8 @@ export function useBranchWorkflowModule({
     );
 
     try {
-      await emitWorkflowSignals(
-        createBranchTaskSignals({
+      const nextChainId = chain?.chainId || (chain?.sourceActivityId ? `chain:${chain.sourceActivityId}` : "");
+      const signals = createBranchTaskSignals({
           broadcasts: workflowBroadcastRules,
           replay: entry ? workflowReplayFromBranchHistory(entry) : null,
           projectKey,
@@ -623,8 +666,18 @@ export function useBranchWorkflowModule({
           sourceBranch,
           targetBranches,
           result,
-        }),
-      );
+          chainId: nextChainId,
+          parentActivityId: chain?.sourceActivityId,
+          sourceStepLabel: chain?.sourceStepLabel,
+        });
+      if (signals.length > 0 && chain?.sourceActivityId && nextChainId) {
+        updateActivity?.(chain.sourceActivityId, {
+          chainId: nextChainId,
+          stepLabel: chain.sourceStepLabel || "分支操作",
+          chainLabel: "联动链路",
+        });
+      }
+      await emitWorkflowSignals(signals);
     } catch (reason) {
       setError(String(reason));
     }
@@ -641,7 +694,10 @@ export function useBranchWorkflowModule({
       "execute_branch_sync_task",
       request,
     );
-    await emitBranchTaskWorkflowSignals(result);
+    await emitBranchTaskWorkflowSignals(result, undefined, {
+      sourceActivityId: lastBranchActivityIdRef.current,
+      sourceStepLabel: "合并分支",
+    });
   }
 
   async function handleExecuteCreate() {
@@ -650,7 +706,10 @@ export function useBranchWorkflowModule({
       sourceBranch: createSource,
       targetBranch: createTarget,
     });
-    await emitBranchTaskWorkflowSignals(result);
+    await emitBranchTaskWorkflowSignals(result, undefined, {
+      sourceActivityId: lastBranchActivityIdRef.current,
+      sourceStepLabel: "创建分支",
+    });
   }
 
   async function handleExecuteCheckout() {
@@ -659,7 +718,10 @@ export function useBranchWorkflowModule({
       sourceBranch: checkoutSource,
       destinationDir: checkoutDestinationDir,
     });
-    await emitBranchTaskWorkflowSignals(result);
+    await emitBranchTaskWorkflowSignals(result, undefined, {
+      sourceActivityId: lastBranchActivityIdRef.current,
+      sourceStepLabel: "克隆分支",
+    });
   }
 
   async function handleExecuteSwitch() {
@@ -683,7 +745,10 @@ export function useBranchWorkflowModule({
       ),
     );
     await loadPushStatus(selectedProject);
-    await emitBranchTaskWorkflowSignals(result);
+    await emitBranchTaskWorkflowSignals(result, undefined, {
+      sourceActivityId: lastBranchActivityIdRef.current,
+      sourceStepLabel: "切换分支",
+    });
   }
 
   async function handleExecutePush() {
@@ -715,7 +780,10 @@ export function useBranchWorkflowModule({
     if (result?.success && pushAction === "commitAndPush") {
       setPushCommitMessage("");
     }
-    await emitBranchTaskWorkflowSignals(result);
+    await emitBranchTaskWorkflowSignals(result, undefined, {
+      sourceActivityId: lastBranchActivityIdRef.current,
+      sourceStepLabel: pushAction === "commitAndPush" ? "提交并推送" : "推送分支",
+    });
   }
 
   async function handleOpenTaskOutput(path: string) {

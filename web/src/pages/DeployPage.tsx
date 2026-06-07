@@ -42,10 +42,14 @@ import {
   OpenExternalIcon,
   RefreshIcon,
   ReplayIcon,
+  StarIcon,
   TrashIcon,
 } from "../components/AppIcons";
 import { groupConsecutiveBy, stableStringify } from "../lib/historyGroups";
 import { shouldHandlePrimaryEnter } from "../lib/keyboard";
+import type { TrayPinnedAction } from "../lib/trayPins";
+import { useTrayPinnedActions } from "../hooks/useTrayPinnedActions";
+import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 import type {
   DeployParamMeta,
   DeployPlan,
@@ -91,6 +95,52 @@ function deployHistorySignature(item: DeployHistoryEntry) {
     branch: item.branch,
     params: item.params ?? {},
   });
+}
+
+function normalizeDeployHistoryParams(params?: Record<string, string> | null) {
+  const normalized: Record<string, string> = {};
+  for (const [key, value] of Object.entries(params ?? {})) {
+    normalized[key] = value == null ? "" : String(value);
+  }
+  return normalized;
+}
+
+function deployTrayDedupeKeyFromHistory(item: DeployHistoryEntry) {
+  return `deploy.replay:${stableStringify({
+    historyKey: item.historyKey,
+    projectKey: item.projectKey,
+    mode: item.mode || "",
+    params: normalizeDeployHistoryParams(item.params),
+  })}`;
+}
+
+function deployLegacyTrayDedupeKeyFromHistory(item: DeployHistoryEntry) {
+  return `deploy.replay:${stableStringify({
+    projectKey: item.projectKey,
+    mode: item.mode || "",
+    params: normalizeDeployHistoryParams(item.params),
+  })}`;
+}
+
+function deployTrayActionFromHistory(
+  item: DeployHistoryEntry,
+  targetLabel: string,
+): TrayPinnedAction {
+  const params = normalizeDeployHistoryParams(item.params);
+  return {
+    kind: "deploy.replay",
+    label: `部署：${item.projectName} / ${targetLabel || item.mode || "默认配置"}`,
+    detail: [item.env, item.branch].filter(Boolean).join(" · ") || item.stateLabel,
+    projectKey: item.projectKey,
+    entry: null,
+    payload: {
+      project: item.projectKey,
+      target: item.mode || null,
+      params,
+    },
+    dedupeKey: deployTrayDedupeKeyFromHistory(item),
+    updatedAtMs: Date.now(),
+  };
 }
 
 function groupWorkflowReceiveRules(
@@ -584,12 +634,15 @@ export type DeployPageProps = {
   workflowReceiveRules: WorkflowReceiveRule[];
   workflowSignalIdsForDeployReplay: (entry: DeployHistoryEntry) => string[];
   workflowSignalOptions: string[];
+  workflowSignalSummaries: WorkflowSignalSummary[];
   onWorkflowDeployReplayReceiversChange: (
     entry: DeployHistoryEntry,
     signalIds: string[],
   ) => void;
   onWorkflowReceiveRulesEnabledChange: (ruleIds: string[], enabled: boolean) => void;
   onWorkflowReceiveRulesDelete: (ruleIds: string[]) => void;
+  onWorkflowSignalDelete: (signalId: string) => void;
+  onWorkflowSignalsClear: () => void;
   onRefreshDeployHistory: () => void;
   onClearDeployHistory: () => void;
   formatRelativeTime: (value?: string) => string;
@@ -626,9 +679,12 @@ export function DeployPage({
   workflowReceiveRules,
   workflowSignalIdsForDeployReplay,
   workflowSignalOptions,
+  workflowSignalSummaries,
   onWorkflowDeployReplayReceiversChange,
   onWorkflowReceiveRulesEnabledChange,
   onWorkflowReceiveRulesDelete,
+  onWorkflowSignalDelete,
+  onWorkflowSignalsClear,
   onRefreshDeployHistory,
   onClearDeployHistory,
   formatRelativeTime,
@@ -643,6 +699,99 @@ export function DeployPage({
   const [copiedResultField, setCopiedResultField] = useState("");
   const [expandedHistoryGroups, setExpandedHistoryGroups] = useState<Set<string>>(
     () => new Set(),
+  );
+  const {
+    scopedActions: pinnedDeployActions,
+    togglePinned,
+    removePinned,
+    replacePinnedActions,
+  } = useTrayPinnedActions("deploy.replay");
+  const deployHistoryByPinnedKey = useMemo(() => {
+    const next = new Map<string, DeployHistoryEntry>();
+    for (const item of deployHistory) {
+      const key = deployTrayDedupeKeyFromHistory(item);
+      if (!next.has(key)) {
+        next.set(key, item);
+      }
+    }
+    return next;
+  }, [deployHistory]);
+  const deployLegacyHistoryByPinnedKey = useMemo(() => {
+    const next = new Map<string, DeployHistoryEntry>();
+    for (const item of deployHistory) {
+      const key = deployLegacyTrayDedupeKeyFromHistory(item);
+      if (!next.has(key)) {
+        next.set(key, item);
+      }
+    }
+    return next;
+  }, [deployHistory]);
+  const deploySpecificLegacyPinnedKeys = useMemo(() => {
+    const next = new Set<string>();
+    for (const action of pinnedDeployActions) {
+      const item = deployHistoryByPinnedKey.get(action.dedupeKey);
+      if (item) {
+        next.add(deployLegacyTrayDedupeKeyFromHistory(item));
+      }
+    }
+    return next;
+  }, [deployHistoryByPinnedKey, pinnedDeployActions]);
+  const duplicateLegacyDeployPinnedKeys = useMemo(
+    () =>
+      pinnedDeployActions
+        .filter(
+          (action) =>
+            deployLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
+            deploySpecificLegacyPinnedKeys.has(action.dedupeKey),
+        )
+        .map((action) => action.dedupeKey)
+        .sort(),
+    [deployLegacyHistoryByPinnedKey, deploySpecificLegacyPinnedKeys, pinnedDeployActions],
+  );
+  const duplicateLegacyDeployPinnedKeySignature =
+    duplicateLegacyDeployPinnedKeys.join("\n");
+  useEffect(() => {
+    if (!duplicateLegacyDeployPinnedKeySignature) {
+      return;
+    }
+    const duplicateKeys = new Set(duplicateLegacyDeployPinnedKeySignature.split("\n"));
+    replacePinnedActions((actions) =>
+      actions.filter((action) => !duplicateKeys.has(action.dedupeKey)),
+    ).catch((error) => {
+      console.error("failed to prune legacy deploy pinned actions", error);
+    });
+  }, [duplicateLegacyDeployPinnedKeySignature, replacePinnedActions]);
+  const displayPinnedDeployActions = useMemo(
+    () =>
+      pinnedDeployActions.filter((action) => {
+        if (deployHistoryByPinnedKey.has(action.dedupeKey)) {
+          return true;
+        }
+        return (
+          deployLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
+          !deploySpecificLegacyPinnedKeys.has(action.dedupeKey)
+        );
+      }),
+    [
+      deployHistoryByPinnedKey,
+      deployLegacyHistoryByPinnedKey,
+      deploySpecificLegacyPinnedKeys,
+      pinnedDeployActions,
+    ],
+  );
+  const pinnedActionOrder = useMemo(
+    () =>
+      new Map(
+        displayPinnedDeployActions.map((action, index) => [action.dedupeKey, index]),
+      ),
+    [displayPinnedDeployActions],
+  );
+  const pinnedActionByKey = useMemo(
+    () =>
+      new Map(
+        displayPinnedDeployActions.map((action) => [action.dedupeKey, action]),
+      ),
+    [displayPinnedDeployActions],
   );
   const sourceBranchEntryMap = useMemo(
     () => new Map(sourceBranchEntries.map((item) => [item.name, item])),
@@ -676,14 +825,97 @@ export function DeployPage({
       ),
     [deployHistory],
   );
-  const historyPageCount = Math.max(1, Math.ceil(groupedDeployHistory.length / HISTORY_PAGE_SIZE));
+  function pinnedOrderForDeployGroup(group: (typeof groupedDeployHistory)[number]) {
+    let order: number | undefined;
+    for (const item of group.items) {
+      const itemOrder = pinnedActionOrder.get(deployTrayDedupeKeyFromHistory(item));
+      if (itemOrder !== undefined) {
+        order = order === undefined ? itemOrder : Math.min(order, itemOrder);
+      }
+    }
+    if (order !== undefined) {
+      return order;
+    }
+    return pinnedActionOrder.get(deployLegacyTrayDedupeKeyFromHistory(group.latest));
+  }
+
+  const sortedDeployHistoryGroups = useMemo(() => {
+    const originalOrder = new Map(
+      groupedDeployHistory.map((group, index) => [group.id, index]),
+    );
+    return [...groupedDeployHistory].sort((left, right) => {
+      const leftPinnedOrder = pinnedOrderForDeployGroup(left);
+      const rightPinnedOrder = pinnedOrderForDeployGroup(right);
+      const leftPinned = leftPinnedOrder !== undefined;
+      const rightPinned = rightPinnedOrder !== undefined;
+
+      if (leftPinned && rightPinned) {
+        return (
+          (leftPinnedOrder ?? 0) - (rightPinnedOrder ?? 0) ||
+          (originalOrder.get(left.id) ?? 0) - (originalOrder.get(right.id) ?? 0)
+        );
+      }
+      if (leftPinned !== rightPinned) {
+        return leftPinned ? -1 : 1;
+      }
+      return (originalOrder.get(left.id) ?? 0) - (originalOrder.get(right.id) ?? 0);
+    });
+  }, [groupedDeployHistory, pinnedActionOrder]);
+  const pinnedDeployHistoryGroups = useMemo(
+    () =>
+      sortedDeployHistoryGroups.filter(
+        (group) => pinnedOrderForDeployGroup(group) !== undefined,
+      ),
+    [pinnedActionOrder, sortedDeployHistoryGroups],
+  );
+  const unpinnedDeployHistoryGroups = useMemo(
+    () =>
+      sortedDeployHistoryGroups.filter(
+        (group) => pinnedOrderForDeployGroup(group) === undefined,
+      ),
+    [pinnedActionOrder, sortedDeployHistoryGroups],
+  );
+  function pinnedActionForDeployGroup(group: (typeof groupedDeployHistory)[number]) {
+    let pinnedAction: TrayPinnedAction | null = null;
+    let pinnedOrder = Number.POSITIVE_INFINITY;
+    for (const item of group.items) {
+      const key = deployTrayDedupeKeyFromHistory(item);
+      const order = pinnedActionOrder.get(key);
+      const action = pinnedActionByKey.get(key);
+      if (action && order !== undefined && order < pinnedOrder) {
+        pinnedAction = action;
+        pinnedOrder = order;
+      }
+    }
+    if (pinnedAction) {
+      return pinnedAction;
+    }
+    const legacyKey = deployLegacyTrayDedupeKeyFromHistory(group.latest);
+    return pinnedActionByKey.get(legacyKey) ?? null;
+  }
+  function pinnedDeployChipLabel(action: TrayPinnedAction) {
+    const item =
+      deployHistoryByPinnedKey.get(action.dedupeKey) ??
+      deployLegacyHistoryByPinnedKey.get(action.dedupeKey) ??
+      null;
+    const label = action.label.replace(/^部署：/, "");
+    return item ? `${label} · ${formatRelativeTime(item.updatedAt)}` : label;
+  }
+  const historyPageCount = Math.max(
+    1,
+    Math.ceil(unpinnedDeployHistoryGroups.length / HISTORY_PAGE_SIZE),
+  );
   const pagedDeployHistoryGroups = useMemo(
     () =>
-      groupedDeployHistory.slice(
+      unpinnedDeployHistoryGroups.slice(
         (historyPage - 1) * HISTORY_PAGE_SIZE,
         historyPage * HISTORY_PAGE_SIZE,
       ),
-    [groupedDeployHistory, historyPage],
+    [historyPage, unpinnedDeployHistoryGroups],
+  );
+  const visibleDeployHistoryGroups = useMemo(
+    () => [...pinnedDeployHistoryGroups, ...pagedDeployHistoryGroups],
+    [pagedDeployHistoryGroups, pinnedDeployHistoryGroups],
   );
   const workflowReceiveGroups = useMemo(
     () => groupWorkflowReceiveRules(workflowReceiveRules),
@@ -696,11 +928,11 @@ export function DeployPage({
 
   useEffect(() => {
     setExpandedHistoryGroups((current) => {
-      const visibleIds = new Set(groupedDeployHistory.map((group) => group.id));
+      const visibleIds = new Set(sortedDeployHistoryGroups.map((group) => group.id));
       const next = new Set([...current].filter((id) => visibleIds.has(id)));
       return next.size === current.size ? current : next;
     });
-  }, [groupedDeployHistory]);
+  }, [sortedDeployHistoryGroups]);
 
   useEffect(() => {
     if (!buildResultUpdatedAtMs) {
@@ -736,6 +968,22 @@ export function DeployPage({
   function openWorkflowReceiveDialog(entry: DeployHistoryEntry) {
     setWorkflowEntry(entry);
     setWorkflowOpen(true);
+  }
+
+  function handleTogglePinned(action: TrayPinnedAction) {
+    togglePinned(action)
+      .then(() => setHistoryPage(1))
+      .catch((error) => {
+        console.error("failed to update tray pinned action", error);
+      });
+  }
+
+  function handleRemovePinned(dedupeKey: string) {
+    removePinned(dedupeKey)
+      .then(() => setHistoryPage(1))
+      .catch((error) => {
+        console.error("failed to remove tray pinned action", error);
+      });
   }
 
   async function copyResultValue(
@@ -1183,12 +1431,44 @@ export function DeployPage({
           <Collapse in={historyExpanded} timeout="auto" unmountOnExit>
             {deployHistory.length > 0 ? (
               <Stack spacing={1} minWidth={0}>
-                {pagedDeployHistoryGroups.map((group) => {
+                {displayPinnedDeployActions.length > 0 ? (
+                  <Stack direction="row" flexWrap="wrap" gap={0.55} alignItems="center">
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ fontWeight: 800, mr: 0.1 }}
+                    >
+                      置顶
+                    </Typography>
+                    {displayPinnedDeployActions.map((action) => (
+                      <Chip
+                        key={action.dedupeKey}
+                        size="small"
+                        icon={<StarIcon />}
+                        label={pinnedDeployChipLabel(action)}
+                        onDelete={() => handleRemovePinned(action.dedupeKey)}
+                        sx={{
+                          maxWidth: "100%",
+                          borderRadius: "999px",
+                          fontWeight: 800,
+                          "& .MuiChip-label": {
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
+                          },
+                        }}
+                      />
+                    ))}
+                  </Stack>
+                ) : null}
+                {visibleDeployHistoryGroups.map((group) => {
                   const item = group.latest;
                   const isGrouped = group.items.length > 1;
                   const groupExpanded = expandedHistoryGroups.has(group.id);
                   const workflowSignalIds = workflowSignalIdsForDeployReplay(item);
                   const targetLabel = targetMetaByKey.get(item.mode)?.label ?? item.mode;
+                  const trayAction = deployTrayActionFromHistory(item, targetLabel);
+                  const groupPinnedAction = pinnedActionForDeployGroup(group);
+                  const pinned = Boolean(groupPinnedAction);
                   const paramMetaLabels = buildDeployHistoryParamMetaLabels(
                     item,
                     paramMetaByKey,
@@ -1199,6 +1479,7 @@ export function DeployPage({
                       key={group.id}
                       title={`${item.projectName} / ${targetLabel || "默认配置"}`}
                       subtitle={`${item.stateLabel} · ${formatRelativeTime(item.updatedAt)}`}
+                      pinned={pinned}
                       badge={
                         <Stack
                           direction="row"
@@ -1245,6 +1526,31 @@ export function DeployPage({
                               )}
                             </IconButton>
                           ) : null}
+                          <IconButton
+                            size="small"
+                            onClick={() =>
+                              groupPinnedAction
+                                ? handleRemovePinned(groupPinnedAction.dedupeKey)
+                                : handleTogglePinned(trayAction)
+                            }
+                            color={pinned ? "primary" : "default"}
+                            aria-label={pinned ? "取消置顶到托盘" : "置顶到托盘"}
+                            title={pinned ? "取消置顶到托盘" : "置顶到托盘"}
+                            sx={
+                              pinned
+                                ? {
+                                    bgcolor: "primary.main",
+                                    color: "primary.contrastText",
+                                    borderColor: "primary.main",
+                                    "&:hover": {
+                                      bgcolor: "primary.dark",
+                                    },
+                                  }
+                                : undefined
+                            }
+                          >
+                            <StarIcon fontSize="small" />
+                          </IconButton>
                         </Stack>
                       }
                       detail={item.detail}
@@ -1351,7 +1657,10 @@ export function DeployPage({
         }
         broadcastSignalIds={[]}
         signalOptions={workflowSignalOptions}
+        signalSummaries={workflowSignalSummaries}
         showBroadcast={false}
+        onDeleteSignal={onWorkflowSignalDelete}
+        onClearSignals={onWorkflowSignalsClear}
         onClose={() => setWorkflowOpen(false)}
         onSave={({ receiveSignalIds }) => {
           if (workflowEntry) {
@@ -1369,6 +1678,12 @@ export function DeployPage({
           onWorkflowReceiveRulesEnabledChange(item.ruleIds, enabled)
         }
         onDelete={(item) => onWorkflowReceiveRulesDelete(item.ruleIds)}
+        onClearAll={(items) => {
+          const ruleIds = items.flatMap((item) => item.ruleIds);
+          if (ruleIds.length > 0) {
+            onWorkflowReceiveRulesDelete(ruleIds);
+          }
+        }}
       />
     </Box>
   );

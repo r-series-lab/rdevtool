@@ -4,7 +4,6 @@ import {
   Button,
   Checkbox,
   Chip,
-  Divider,
   FormControlLabel,
   MenuItem,
   Stack,
@@ -17,9 +16,16 @@ import type {
   DeployParamConfigKind,
   DeployParamConfigSummary,
   DeployTargetConfigSummary,
+  NavigationEditorCategory,
+  NavigationEditorEntry,
+  NavigationEditorEntryKind,
+  NavigationEditorState,
+  ProjectBranchRulesDraft,
   ProjectCommandConfigDraft,
   ProjectConfigDraft,
   ProjectConfigEditorState,
+  ProjectDebugLocalFileDraft,
+  ProjectDebugProfileDraft,
 } from "../app-types";
 import type { AppStyleMode } from "../theme";
 import {
@@ -46,12 +52,20 @@ type SettingsPanelProps = {
   onClose: () => void;
 };
 
+type SettingsConfirmState = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  tone?: "normal" | "danger";
+  onConfirm: () => void | Promise<void>;
+};
+
 const SECTION_ITEMS: Array<{ key: SettingsSection; label: string }> = [
   { key: "general", label: "全局" },
   { key: "projects", label: "项目" },
-  { key: "finder", label: "访达" },
   { key: "branch", label: "分支" },
   { key: "deploy", label: "部署" },
+  { key: "finder", label: "访达" },
 ];
 
 const DEPLOY_PARAM_KIND_OPTIONS: Array<{ value: DeployParamConfigKind; label: string }> = [
@@ -62,8 +76,53 @@ const DEPLOY_PARAM_KIND_OPTIONS: Array<{ value: DeployParamConfigKind; label: st
   { value: "hidden", label: "隐藏" },
 ];
 
+const NAVIGATION_ENTRY_KIND_OPTIONS: Array<{
+  value: NavigationEditorEntryKind;
+  label: string;
+}> = [
+  { value: "url", label: "网站" },
+  { value: "app", label: "应用" },
+  { value: "script", label: "脚本" },
+];
+
+const CUSTOM_NAVIGATION_BROWSER_VALUE = "__custom_browser__";
+const NAVIGATION_BROWSER_OPTIONS = [
+  { value: "current_chrome", label: "当前 Chrome 窗口" },
+  { value: "system", label: "系统默认浏览器" },
+  { value: "Google Chrome", label: "Google Chrome" },
+  { value: "Microsoft Edge", label: "Microsoft Edge" },
+  { value: "Safari", label: "Safari" },
+  { value: "Arc", label: "Arc" },
+] as const;
+
+const DEBUG_LOCAL_FILE_MODE_OPTIONS = [
+  { value: "overwrite", label: "覆盖文件" },
+  { value: "append_block", label: "标记区块" },
+] as const;
+
 function commandValue(command: ProjectCommandConfigDraft | undefined) {
   return command ?? { command: "", cwd: null, outputDir: null, envCount: 0 };
+}
+
+function emptyDebugLocalFile(): ProjectDebugLocalFileDraft {
+  return {
+    path: ".env.local",
+    mode: "overwrite",
+    content: "",
+    enabled: true,
+  };
+}
+
+function emptyDebugProfile(existingKeys: string[]): ProjectDebugProfileDraft {
+  const key = uniqueConfigKey("debug", existingKeys);
+  return {
+    key,
+    label: "本地调试",
+    envText: "",
+    localFiles: [],
+    browser: null,
+    browserProfile: null,
+  };
 }
 
 function uniqueConfigKey(prefix: string, existingKeys: string[]) {
@@ -107,6 +166,63 @@ function parseKeywordList(value: string) {
     .filter(Boolean);
 }
 
+function navigationBrowserSelectValue(browser?: string | null) {
+  const normalized = browser?.trim() ?? "";
+  if (!normalized) {
+    return "current_chrome";
+  }
+  return NAVIGATION_BROWSER_OPTIONS.some((item) => item.value === normalized)
+    ? normalized
+    : CUSTOM_NAVIGATION_BROWSER_VALUE;
+}
+
+function navigationBrowserSupportsProfile(browser?: string | null) {
+  const normalized = browser?.trim().toLowerCase() ?? "";
+  return (
+    normalized.includes("chrome") ||
+    normalized.includes("edge") ||
+    normalized.includes("chromium") ||
+    normalized.includes("brave")
+  );
+}
+
+function navigationBrowserLabel(entry: NavigationEditorEntry) {
+  const browser = entry.browser?.trim();
+  if (!browser || browser === "current_chrome") {
+    return "当前 Chrome";
+  }
+  if (browser === "system") {
+    return "系统默认";
+  }
+  return entry.browserProfile ? `${browser} · ${entry.browserProfile}` : browser;
+}
+
+function emptyNavigationEntry(kind: NavigationEditorEntryKind = "url"): NavigationEditorEntry {
+  return {
+    name: "新入口",
+    kind,
+    url: "",
+    browser: null,
+    browserProfile: null,
+    bundleId: null,
+    appName: null,
+    script: null,
+    cwd: null,
+    note: null,
+  };
+}
+
+function uniqueNavigationCategoryTitle(categories: NavigationEditorCategory[]) {
+  const existing = new Set(categories.map((category) => category.title.trim()));
+  let index = categories.length + 1;
+  let title = `新分类 ${index}`;
+  while (existing.has(title)) {
+    index += 1;
+    title = `新分类 ${index}`;
+  }
+  return title;
+}
+
 function sectionForPage(page: PageKey): SettingsSection {
   if (page === "deploy") {
     return "deploy";
@@ -135,29 +251,46 @@ export function SettingsPanel({
     sectionForPage(activePage),
   );
   const [editorState, setEditorState] = useState<ProjectConfigEditorState | null>(null);
+  const [navigationEditor, setNavigationEditor] = useState<NavigationEditorState | null>(null);
   const [selectedKey, setSelectedKey] = useState(selectedProjectKey);
   const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(() => new Set());
   const [dirtyDeployProjectKeys, setDirtyDeployProjectKeys] = useState<Set<string>>(
     () => new Set(),
   );
+  const [defaultBranchRulesDirty, setDefaultBranchRulesDirty] = useState(false);
   const [selectedDeployTargetIndex, setSelectedDeployTargetIndex] = useState(0);
+  const [selectedDebugProfileIndex, setSelectedDebugProfileIndex] = useState(0);
+  const [selectedNavigationCategoryIndex, setSelectedNavigationCategoryIndex] = useState(0);
+  const [navigationDirty, setNavigationDirty] = useState(false);
   const [newProjectKey, setNewProjectKey] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
   const [loading, setLoading] = useState(false);
+  const [navigationLoading, setNavigationLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [confirmState, setConfirmState] = useState<SettingsConfirmState | null>(null);
 
   const selectedProject = useMemo(
     () => editorState?.projects.find((project) => project.key === selectedKey) ?? null,
     [editorState, selectedKey],
   );
   const jenkinsProfileOptions = editorState?.jenkinsProfiles ?? [];
+  const defaultBranchRules = editorState?.defaultBranchRules ?? {
+    sourceKeywords: [],
+    targetKeywords: [],
+  };
+  const selectedDebugProfile =
+    selectedProject?.debugProfiles?.[selectedDebugProfileIndex] ?? null;
   const hasDirtySelectedProject = Boolean(selectedProject && dirtyKeys.has(selectedProject.key));
   const hasDirtySelectedDeployProject = Boolean(
     selectedProject && dirtyDeployProjectKeys.has(selectedProject.key),
   );
-  const hasUnsavedChanges = dirtyKeys.size > 0 || dirtyDeployProjectKeys.size > 0;
+  const hasUnsavedChanges =
+    dirtyKeys.size > 0 ||
+    dirtyDeployProjectKeys.size > 0 ||
+    defaultBranchRulesDirty ||
+    navigationDirty;
 
   async function loadProjectConfig(preferredKey = selectedKey || selectedProjectKey) {
     setLoading(true);
@@ -168,6 +301,7 @@ export function SettingsPanel({
       setEditorState(nextState);
       setDirtyKeys(new Set());
       setDirtyDeployProjectKeys(new Set());
+      setDefaultBranchRulesDirty(false);
       const preferred =
         (preferredKey && nextState.projects.find((project) => project.key === preferredKey)?.key) ||
         (selectedProjectKey &&
@@ -182,8 +316,38 @@ export function SettingsPanel({
     }
   }
 
+  async function loadNavigationEditor() {
+    setNavigationLoading(true);
+    setError("");
+    try {
+      const nextState = await invoke<NavigationEditorState>("get_navigation_editor");
+      setNavigationEditor(nextState);
+      setNavigationDirty(false);
+      const preferredIndex = nextState.preferredCategory
+        ? nextState.categories.findIndex(
+            (category) => category.title === nextState.preferredCategory,
+          )
+        : -1;
+      setSelectedNavigationCategoryIndex(preferredIndex >= 0 ? preferredIndex : 0);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setNavigationLoading(false);
+    }
+  }
+
   useEffect(() => {
     void loadProjectConfig();
+    void loadNavigationEditor();
+  }, []);
+
+  useEffect(() => {
+    document.documentElement.classList.add("settings-scroll-lock");
+    document.body.classList.add("settings-scroll-lock");
+    return () => {
+      document.documentElement.classList.remove("settings-scroll-lock");
+      document.body.classList.remove("settings-scroll-lock");
+    };
   }, []);
 
   useEffect(() => {
@@ -195,6 +359,7 @@ export function SettingsPanel({
 
   useEffect(() => {
     setSelectedDeployTargetIndex(0);
+    setSelectedDebugProfileIndex(0);
   }, [selectedProject?.key]);
 
   useEffect(() => {
@@ -209,21 +374,62 @@ export function SettingsPanel({
   }, [selectedProject?.deployTargets.length]);
 
   useEffect(() => {
+    const profileCount = selectedProject?.debugProfiles?.length ?? 0;
+    if (profileCount === 0) {
+      setSelectedDebugProfileIndex(0);
+      return;
+    }
+    setSelectedDebugProfileIndex((current) =>
+      Math.min(Math.max(current, 0), profileCount - 1),
+    );
+  }, [selectedProject?.debugProfiles?.length]);
+
+  useEffect(() => {
+    const categoryCount = navigationEditor?.categories.length ?? 0;
+    if (categoryCount === 0) {
+      setSelectedNavigationCategoryIndex(0);
+      return;
+    }
+    setSelectedNavigationCategoryIndex((current) =>
+      Math.min(Math.max(current, 0), categoryCount - 1),
+    );
+  }, [navigationEditor?.categories.length]);
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (confirmState) {
+          setConfirmState(null);
+          return;
+        }
         requestClose();
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [hasUnsavedChanges, onClose]);
+  }, [confirmState, hasUnsavedChanges, onClose]);
 
   function requestClose() {
-    if (hasUnsavedChanges && !window.confirm("有未保存的配置修改，确定关闭？")) {
+    if (hasUnsavedChanges) {
+      setConfirmState({
+        title: "关闭设置？",
+        message: "当前有未保存的配置修改，关闭后这些修改不会生效。",
+        confirmLabel: "关闭",
+        onConfirm: onClose,
+      });
       return;
     }
     onClose();
+  }
+
+  async function runConfirmAction() {
+    const action = confirmState?.onConfirm;
+    if (!action) {
+      return;
+    }
+    setConfirmState(null);
+    await action();
   }
 
   function markDirty(key: string) {
@@ -240,6 +446,14 @@ export function SettingsPanel({
       next.add(projectKey);
       return next;
     });
+  }
+
+  function applyProjectEditorState(nextState: ProjectConfigEditorState) {
+    setEditorState((current) =>
+      defaultBranchRulesDirty && current
+        ? { ...nextState, defaultBranchRules: current.defaultBranchRules }
+        : nextState,
+    );
   }
 
   function updateSelectedProject(updater: (project: ProjectConfigDraft) => ProjectConfigDraft) {
@@ -260,6 +474,43 @@ export function SettingsPanel({
     markDirty(selectedProject.key);
   }
 
+  function updateDefaultBranchRules(patch: Partial<ProjectBranchRulesDraft>) {
+    setEditorState((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        defaultBranchRules: {
+          ...current.defaultBranchRules,
+          ...patch,
+        },
+      };
+    });
+    setDefaultBranchRulesDirty(true);
+  }
+
+  function updateSelectedProjectBranchRules(patch: Partial<ProjectBranchRulesDraft>) {
+    updateSelectedProject((project) => ({
+      ...project,
+      branchRules: {
+        ...project.branchRules,
+        ...patch,
+      },
+    }));
+  }
+
+  function useDefaultBranchRulesForProject() {
+    updateSelectedProject((project) => ({
+      ...project,
+      branchRules: {
+        sourceKeywords: [],
+        targetKeywords: [],
+      },
+    }));
+    setStatus("当前项目将继承默认分支规则，保存后生效");
+  }
+
   function updateCommand(
     commandKey: "dev" | "build",
     patch: Partial<ProjectCommandConfigDraft>,
@@ -270,6 +521,225 @@ export function SettingsPanel({
         ...commandValue(project[commandKey]),
         ...patch,
       },
+    }));
+  }
+
+  function updateDebugProfiles(
+    updater: (profiles: ProjectDebugProfileDraft[]) => ProjectDebugProfileDraft[],
+  ) {
+    updateSelectedProject((project) => ({
+      ...project,
+      debugProfiles: updater(project.debugProfiles ?? []),
+    }));
+  }
+
+  function addDebugProfile() {
+    if (!selectedProject) {
+      return;
+    }
+    const profiles = selectedProject.debugProfiles ?? [];
+    const nextProfile = emptyDebugProfile(profiles.map((profile) => profile.key));
+    updateDebugProfiles((current) => [...current, nextProfile]);
+    setSelectedDebugProfileIndex(profiles.length);
+    setStatus("已新增调试档案，保存后生效");
+  }
+
+  function updateDebugProfileAt(
+    profileIndex: number,
+    patch: Partial<ProjectDebugProfileDraft>,
+  ) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) =>
+        index === profileIndex ? { ...profile, ...patch } : profile,
+      ),
+    );
+  }
+
+  function deleteDebugProfileAt(profileIndex: number) {
+    const profiles = selectedProject?.debugProfiles ?? [];
+    const nextIndex = Math.max(0, Math.min(profileIndex, profiles.length - 2));
+    updateDebugProfiles((current) => current.filter((_, index) => index !== profileIndex));
+    setSelectedDebugProfileIndex(nextIndex);
+  }
+
+  function addDebugLocalFile(profileIndex: number) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) =>
+        index === profileIndex
+          ? {
+              ...profile,
+              localFiles: [...(profile.localFiles ?? []), emptyDebugLocalFile()],
+            }
+          : profile,
+      ),
+    );
+  }
+
+  function updateDebugLocalFileAt(
+    profileIndex: number,
+    fileIndex: number,
+    patch: Partial<ProjectDebugLocalFileDraft>,
+  ) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) =>
+        index === profileIndex
+          ? {
+              ...profile,
+              localFiles: (profile.localFiles ?? []).map((file, nextFileIndex) =>
+                nextFileIndex === fileIndex ? { ...file, ...patch } : file,
+              ),
+            }
+          : profile,
+      ),
+    );
+  }
+
+  function deleteDebugLocalFileAt(profileIndex: number, fileIndex: number) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) =>
+        index === profileIndex
+          ? {
+              ...profile,
+              localFiles: (profile.localFiles ?? []).filter(
+                (_, nextFileIndex) => nextFileIndex !== fileIndex,
+              ),
+            }
+          : profile,
+      ),
+    );
+  }
+
+  function updateNavigationEditor(
+    updater: (current: NavigationEditorState) => NavigationEditorState,
+  ) {
+    setNavigationEditor((current) => {
+      if (!current) {
+        return current;
+      }
+      return updater(current);
+    });
+    setNavigationDirty(true);
+  }
+
+  function updateNavigationCategoryAt(
+    categoryIndex: number,
+    patch: Partial<NavigationEditorCategory>,
+  ) {
+    updateNavigationEditor((current) => ({
+      ...current,
+      categories: current.categories.map((category, index) =>
+        index === categoryIndex ? { ...category, ...patch } : category,
+      ),
+    }));
+  }
+
+  function addNavigationCategory() {
+    const categories = navigationEditor?.categories ?? [];
+    const title = uniqueNavigationCategoryTitle(categories);
+    const nextIndex = categories.length;
+    updateNavigationEditor((current) => ({
+      ...current,
+      preferredCategory: current.preferredCategory || title,
+      categories: [
+        ...current.categories,
+        {
+          title,
+          shortLabel: "入口",
+          entries: [emptyNavigationEntry()],
+        },
+      ],
+    }));
+    setSelectedNavigationCategoryIndex(nextIndex);
+  }
+
+  function deleteNavigationCategoryAt(categoryIndex: number) {
+    const category = navigationEditor?.categories[categoryIndex];
+    if (!category) {
+      return;
+    }
+    if (category.entries.length > 0) {
+      setConfirmState({
+        title: "删除访达分类？",
+        message: `将删除「${category.title || "未命名"}」以及里面的入口。`,
+        confirmLabel: "删除",
+        tone: "danger",
+        onConfirm: () => deleteNavigationCategoryConfirmed(categoryIndex),
+      });
+      return;
+    }
+    deleteNavigationCategoryConfirmed(categoryIndex);
+  }
+
+  function deleteNavigationCategoryConfirmed(categoryIndex: number) {
+    const nextIndex = Math.max(
+      0,
+      Math.min(categoryIndex, (navigationEditor?.categories.length ?? 1) - 2),
+    );
+    updateNavigationEditor((current) => {
+      const categories = current.categories.filter((_, index) => index !== categoryIndex);
+      const preferredCategory = categories.some(
+        (item) => item.title === current.preferredCategory,
+      )
+        ? current.preferredCategory
+        : categories[0]?.title ?? null;
+      return {
+        ...current,
+        preferredCategory,
+        categories,
+      };
+    });
+    setSelectedNavigationCategoryIndex(nextIndex);
+  }
+
+  function addNavigationEntry(
+    categoryIndex: number,
+    kind: NavigationEditorEntryKind = "url",
+  ) {
+    updateNavigationEditor((current) => ({
+      ...current,
+      categories: current.categories.map((category, index) =>
+        index === categoryIndex
+          ? {
+              ...category,
+              entries: [...category.entries, emptyNavigationEntry(kind)],
+            }
+          : category,
+      ),
+    }));
+  }
+
+  function updateNavigationEntryAt(
+    categoryIndex: number,
+    entryIndex: number,
+    patch: Partial<NavigationEditorEntry>,
+  ) {
+    updateNavigationEditor((current) => ({
+      ...current,
+      categories: current.categories.map((category, index) => {
+        if (index !== categoryIndex) {
+          return category;
+        }
+        return {
+          ...category,
+          entries: category.entries.map((entry, nextEntryIndex) =>
+            nextEntryIndex === entryIndex ? { ...entry, ...patch } : entry,
+          ),
+        };
+      }),
+    }));
+  }
+
+  function deleteNavigationEntryAt(categoryIndex: number, entryIndex: number) {
+    updateNavigationEditor((current) => ({
+      ...current,
+      categories: current.categories.map((category, index) =>
+        index === categoryIndex
+          ? {
+              ...category,
+              entries: category.entries.filter((_, nextEntryIndex) => nextEntryIndex !== entryIndex),
+            }
+          : category,
+      ),
     }));
   }
 
@@ -391,6 +861,25 @@ export function SettingsPanel({
     setSelectedDeployTargetIndex(nextIndex);
   }
 
+  function setDeployTargetAsDefault(targetIndex: number) {
+    if (targetIndex <= 0) {
+      return;
+    }
+    updateDeployTargets((deployTargets) => {
+      const target = deployTargets[targetIndex];
+      if (!target) {
+        return deployTargets;
+      }
+      return [
+        target,
+        ...deployTargets.slice(0, targetIndex),
+        ...deployTargets.slice(targetIndex + 1),
+      ];
+    });
+    setSelectedDeployTargetIndex(0);
+    setStatus("已设为默认部署配置，保存后生效");
+  }
+
   function addDeployParam(targetIndex: number) {
     const target = selectedProject?.deployTargets[targetIndex];
     if (!target) {
@@ -445,9 +934,12 @@ export function SettingsPanel({
     setStatus("");
     try {
       const nextState = await invoke<ProjectConfigEditorState>("save_project_config_basics", {
-        request: selectedProject,
+        request: {
+          ...selectedProject,
+          debugProfiles: selectedProject.debugProfiles ?? [],
+        },
       });
-      setEditorState(nextState);
+      applyProjectEditorState(nextState);
       setDirtyKeys((current) => {
         const next = new Set(current);
         next.delete(selectedProject.key);
@@ -456,6 +948,27 @@ export function SettingsPanel({
       setSelectedKey(selectedProject.key);
       await onProjectConfigSaved();
       setStatus("已保存项目配置");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function saveDefaultBranchRules() {
+    setSaving(true);
+    setError("");
+    setStatus("");
+    try {
+      const nextState = await invoke<ProjectConfigEditorState>("save_default_branch_rules", {
+        request: {
+          branchRules: defaultBranchRules,
+        },
+      });
+      setEditorState(nextState);
+      setDefaultBranchRulesDirty(false);
+      await onProjectConfigSaved();
+      setStatus("已保存默认分支规则");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -477,7 +990,7 @@ export function SettingsPanel({
       const nextState = await invoke<ProjectConfigEditorState>("add_project_config", {
         request: { key, name },
       });
-      setEditorState(nextState);
+      applyProjectEditorState(nextState);
       setDirtyKeys(new Set());
       setDirtyDeployProjectKeys(new Set());
       setSelectedKey(key);
@@ -496,8 +1009,18 @@ export function SettingsPanel({
     if (!selectedProject) {
       return;
     }
-    const confirmed = window.confirm(`删除项目配置 ${selectedProject.name || selectedProject.key}？`);
-    if (!confirmed) {
+    const projectName = selectedProject.name || selectedProject.key;
+    setConfirmState({
+      title: "删除项目配置？",
+      message: `将删除「${projectName}」的项目配置。`,
+      confirmLabel: "删除",
+      tone: "danger",
+      onConfirm: deleteSelectedProjectConfirmed,
+    });
+  }
+
+  async function deleteSelectedProjectConfirmed() {
+    if (!selectedProject) {
       return;
     }
     setSaving(true);
@@ -508,7 +1031,7 @@ export function SettingsPanel({
       const nextState = await invoke<ProjectConfigEditorState>("delete_project_config", {
         request: { key: deletedKey },
       });
-      setEditorState(nextState);
+      applyProjectEditorState(nextState);
       setDirtyKeys(new Set());
       setDirtyDeployProjectKeys(new Set());
       setSelectedKey(nextState.projects[0]?.key ?? "");
@@ -536,7 +1059,7 @@ export function SettingsPanel({
           deployTargets: selectedProject.deployTargets,
         },
       });
-      setEditorState(nextState);
+      applyProjectEditorState(nextState);
       setDirtyDeployProjectKeys((current) => {
         const next = new Set(current);
         next.delete(projectKey);
@@ -552,62 +1075,136 @@ export function SettingsPanel({
     }
   }
 
+  async function saveNavigationEditor() {
+    if (!navigationEditor) {
+      return;
+    }
+    setSaving(true);
+    setError("");
+    setStatus("");
+    try {
+      await invoke("save_navigation_editor", {
+        data: navigationEditor,
+      });
+      const nextState = await invoke<NavigationEditorState>("get_navigation_editor");
+      setNavigationEditor(nextState);
+      setNavigationDirty(false);
+      await onProjectConfigSaved();
+      setStatus("已保存访达配置");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function renderGeneralSection() {
     return (
-      <Stack spacing={1.4}>
-        <div className="settings-row">
-          <span>换肤</span>
-          <div className="settings-segment">
-            <button
-              type="button"
-              className={styleMode === "light" ? "is-active" : ""}
-              onClick={() => onStyleModeChange("light")}
-            >
-              亮色
-            </button>
-            <button
-              type="button"
-              className={styleMode === "mono" ? "is-active" : ""}
-              onClick={() => onStyleModeChange("mono")}
-            >
-              暗色
-            </button>
+      <Stack className="settings-overview" spacing={1.15}>
+        <section
+          className="settings-list-section settings-list-section--appearance"
+          aria-labelledby="settings-appearance-title"
+        >
+          <header className="settings-list-head">
+            <Typography id="settings-appearance-title" variant="subtitle2">
+              外观
+            </Typography>
+            <Typography variant="caption">当前窗口偏好</Typography>
+          </header>
+          <div className="settings-list-row settings-list-row--split">
+            <div className="settings-overview-copy">
+              <Typography variant="subtitle2">换肤</Typography>
+              <Typography variant="caption">选择当前窗口的视觉风格。</Typography>
+            </div>
+            <div className="settings-style-choice" role="group" aria-label="换肤">
+              <button
+                type="button"
+                className={styleMode === "light" ? "is-active" : ""}
+                aria-pressed={styleMode === "light"}
+                onClick={() => onStyleModeChange("light")}
+              >
+                <span className="settings-style-swatch settings-style-swatch--light" />
+                <span>亮色</span>
+              </button>
+              <button
+                type="button"
+                className={styleMode === "mono" ? "is-active" : ""}
+                aria-pressed={styleMode === "mono"}
+                onClick={() => onStyleModeChange("mono")}
+              >
+                <span className="settings-style-swatch settings-style-swatch--mono" />
+                <span>暗色</span>
+              </button>
+            </div>
           </div>
-        </div>
-        <Divider />
-        <div className="settings-shortcut-note">
-          <div>
-            <Typography variant="subtitle2">命令面板</Typography>
-            <Typography variant="caption">搜索页面、项目、快捷入口和常用动作</Typography>
+        </section>
+
+        <section className="settings-list-section" aria-labelledby="settings-access-title">
+          <header className="settings-list-head">
+            <Typography id="settings-access-title" variant="subtitle2">
+              快捷入口
+            </Typography>
+            <Typography variant="caption">命令与配置文件</Typography>
+          </header>
+          <div className="settings-list">
+            <div className="settings-list-row">
+              <div className="settings-list-icon">
+                <span>⌘</span>
+              </div>
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">命令面板</Typography>
+                <Typography variant="caption">搜索页面、项目、快捷入口和常用动作。</Typography>
+              </div>
+              <kbd>Cmd/Ctrl&nbsp;K</kbd>
+            </div>
+
+            <Button
+              className="settings-list-row settings-list-button"
+              variant="outlined"
+              color="inherit"
+              onClick={onOpenConfigDir}
+            >
+              <span className="settings-list-icon">
+                <FolderIcon fontSize="small" />
+              </span>
+              <span className="settings-overview-copy">
+                <Typography component="span" variant="subtitle2">配置文件夹</Typography>
+                <Typography component="span" variant="caption">打开当前配置目录</Typography>
+              </span>
+              <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
+            </Button>
+            <Button
+              className="settings-list-row settings-list-button"
+              variant="outlined"
+              color="inherit"
+              onClick={onOpenConfigFile}
+            >
+              <span className="settings-list-icon">
+                <OpenExternalIcon fontSize="small" />
+              </span>
+              <span className="settings-overview-copy">
+                <Typography component="span" variant="subtitle2">projects.toml</Typography>
+                <Typography component="span" variant="caption">项目与部署配置</Typography>
+              </span>
+              <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
+            </Button>
+            <Button
+              className="settings-list-row settings-list-button"
+              variant="outlined"
+              color="inherit"
+              onClick={onOpenNavigationConfigFile}
+            >
+              <span className="settings-list-icon">
+                <OpenExternalIcon fontSize="small" />
+              </span>
+              <span className="settings-overview-copy">
+                <Typography component="span" variant="subtitle2">navigation.toml</Typography>
+                <Typography component="span" variant="caption">访达快捷入口</Typography>
+              </span>
+              <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
+            </Button>
           </div>
-          <kbd>Cmd/Ctrl K</kbd>
-        </div>
-        <div className="settings-action-grid">
-          <Button
-            variant="outlined"
-            color="inherit"
-            startIcon={<FolderIcon fontSize="small" />}
-            onClick={onOpenConfigDir}
-          >
-            配置文件夹
-          </Button>
-          <Button
-            variant="outlined"
-            color="inherit"
-            startIcon={<OpenExternalIcon fontSize="small" />}
-            onClick={onOpenConfigFile}
-          >
-            projects.toml
-          </Button>
-          <Button
-            variant="outlined"
-            color="inherit"
-            startIcon={<OpenExternalIcon fontSize="small" />}
-            onClick={onOpenNavigationConfigFile}
-          >
-            navigation.toml
-          </Button>
-        </div>
+        </section>
       </Stack>
     );
   }
@@ -673,6 +1270,226 @@ export function SettingsPanel({
           />
         </div>
       </div>
+    );
+  }
+
+  function renderDebugProfilesBlock() {
+    const profiles = selectedProject?.debugProfiles ?? [];
+    return renderProjectSectionBlock(
+      "调试档案",
+      "启动前应用 env 和 gitignored 本地覆盖文件",
+      <Stack spacing={1}>
+        <div className="settings-deploy-switcher settings-debug-profile-switcher">
+          {profiles.map((profile, index) => (
+            <button
+              key={profile.key || index}
+              type="button"
+              className={index === selectedDebugProfileIndex ? "is-active" : ""}
+              onClick={() => setSelectedDebugProfileIndex(index)}
+            >
+              <Typography variant="caption">
+                {profile.label || profile.key || `档案 ${index + 1}`}
+              </Typography>
+              <Typography variant="caption">
+                {(profile.localFiles ?? []).filter((file) => file.enabled).length} 文件
+              </Typography>
+            </button>
+          ))}
+          <Button
+            variant="outlined"
+            color="inherit"
+            onClick={addDebugProfile}
+            disabled={saving}
+          >
+            新增档案
+          </Button>
+        </div>
+
+        {profiles.length === 0 ? (
+          <div className="settings-empty-row">
+            暂无调试档案。新增后可在访达项目卡片里选择并启动。
+          </div>
+        ) : null}
+
+        {selectedDebugProfile ? (
+          <div className="settings-sub-block">
+            <div className="settings-form-block-head">
+              <div>
+                <Typography variant="subtitle2">
+                  {selectedDebugProfile.label || selectedDebugProfile.key}
+                </Typography>
+                <Typography variant="caption">保存后会写入 projects.toml</Typography>
+              </div>
+              <Button
+                variant="outlined"
+                color="inherit"
+                startIcon={<TrashIcon fontSize="small" />}
+                onClick={() => deleteDebugProfileAt(selectedDebugProfileIndex)}
+                disabled={saving}
+              >
+                删除档案
+              </Button>
+            </div>
+
+            <div className="settings-form-grid">
+              <TextField
+                size="small"
+                label="Key"
+                value={selectedDebugProfile.key}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    key: event.target.value,
+                  })
+                }
+              />
+              <TextField
+                size="small"
+                label="名称"
+                value={selectedDebugProfile.label}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    label: event.target.value,
+                  })
+                }
+              />
+              <TextField
+                size="small"
+                label="浏览器"
+                value={selectedDebugProfile.browser ?? ""}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    browser: event.target.value,
+                  })
+                }
+                placeholder="Google Chrome"
+              />
+              <TextField
+                size="small"
+                label="浏览器 Profile"
+                value={selectedDebugProfile.browserProfile ?? ""}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    browserProfile: event.target.value,
+                  })
+                }
+                placeholder="Profile 2"
+              />
+              <TextField
+                className="settings-form-grid-wide"
+                size="small"
+                label="环境变量"
+                value={selectedDebugProfile.envText}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    envText: event.target.value,
+                  })
+                }
+                placeholder={"VITE_ENV=uat3\nVITE_SKIP_SENTRY=true"}
+                multiline
+                minRows={3}
+              />
+            </div>
+
+            <div className="settings-param-list" aria-label="本地覆盖文件">
+              <div className="settings-param-list-head">
+                <Typography variant="caption">
+                  {(selectedDebugProfile.localFiles ?? []).length} 个本地文件
+                </Typography>
+                <Button
+                  variant="outlined"
+                  color="inherit"
+                  onClick={() => addDebugLocalFile(selectedDebugProfileIndex)}
+                  disabled={saving}
+                >
+                  新增文件
+                </Button>
+              </div>
+              {(selectedDebugProfile.localFiles ?? []).length === 0 ? (
+                <div className="settings-empty-row">暂无本地覆盖文件</div>
+              ) : (
+                (selectedDebugProfile.localFiles ?? []).map((file, fileIndex) => (
+                  <div
+                    key={`${selectedDebugProfile.key || selectedDebugProfileIndex}-${fileIndex}`}
+                    className="settings-param-editor"
+                  >
+                    <div className="settings-param-editor-head">
+                      <FormControlLabel
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={file.enabled}
+                            onChange={(event) =>
+                              updateDebugLocalFileAt(selectedDebugProfileIndex, fileIndex, {
+                                enabled: event.target.checked,
+                              })
+                            }
+                          />
+                        }
+                        label="启用"
+                      />
+                      <Button
+                        variant="outlined"
+                        color="inherit"
+                        startIcon={<TrashIcon fontSize="small" />}
+                        onClick={() =>
+                          deleteDebugLocalFileAt(selectedDebugProfileIndex, fileIndex)
+                        }
+                        disabled={saving}
+                      >
+                        删除文件
+                      </Button>
+                    </div>
+                    <div className="settings-form-grid settings-form-grid-tight">
+                      <TextField
+                        size="small"
+                        label="路径"
+                        value={file.path}
+                        onChange={(event) =>
+                          updateDebugLocalFileAt(selectedDebugProfileIndex, fileIndex, {
+                            path: event.target.value,
+                          })
+                        }
+                        placeholder=".env.local"
+                      />
+                      <TextField
+                        select
+                        size="small"
+                        label="写入方式"
+                        value={file.mode || "overwrite"}
+                        onChange={(event) =>
+                          updateDebugLocalFileAt(selectedDebugProfileIndex, fileIndex, {
+                            mode: event.target.value,
+                          })
+                        }
+                      >
+                        {DEBUG_LOCAL_FILE_MODE_OPTIONS.map((mode) => (
+                          <MenuItem key={mode.value} value={mode.value}>
+                            {mode.label}
+                          </MenuItem>
+                        ))}
+                      </TextField>
+                      <TextField
+                        className="settings-form-grid-wide"
+                        size="small"
+                        label="内容"
+                        value={file.content}
+                        onChange={(event) =>
+                          updateDebugLocalFileAt(selectedDebugProfileIndex, fileIndex, {
+                            content: event.target.value,
+                          })
+                        }
+                        placeholder="写入这个本地文件的内容"
+                        multiline
+                        minRows={4}
+                      />
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        ) : null}
+      </Stack>,
     );
   }
 
@@ -779,7 +1596,7 @@ export function SettingsPanel({
         {renderNewProjectBlock()}
         {renderProjectSectionBlock(
           "项目身份",
-          "访达、分支、部署共用这组项目名称与分类",
+          "分支、部署和本地运行共用这组项目基础信息",
           <div className="settings-form-grid">
             <TextField size="small" label="Key" value={selectedProject.key} disabled />
             <TextField
@@ -798,77 +1615,36 @@ export function SettingsPanel({
                 updateSelectedProject((project) => ({ ...project, category: event.target.value }))
               }
             />
-          </div>,
-        )}
-        {renderProjectSaveRow(true)}
-      </Stack>
-    );
-  }
-
-  function renderFinderSection() {
-    if (loading && !editorState) {
-      return <Alert severity="info">正在读取访达配置</Alert>;
-    }
-    if (!selectedProject) {
-      return (
-        <Stack spacing={1.3}>
-          <Alert severity="warning">暂无项目配置</Alert>
-          {renderNewProjectBlock()}
-        </Stack>
-      );
-    }
-
-    return (
-      <Stack spacing={1.3}>
-        {renderProjectSelector()}
-        {renderProjectSectionBlock(
-          "快捷入口",
-          "访达页的网站、应用、脚本入口来自 navigation.toml",
-          <div className="settings-action-grid">
-            <Button
-              variant="outlined"
-              color="inherit"
-              startIcon={<OpenExternalIcon fontSize="small" />}
-              onClick={onOpenNavigationConfigFile}
-            >
-              navigation.toml
-            </Button>
-            <Button
-              variant="outlined"
-              color="inherit"
-              startIcon={<FolderIcon fontSize="small" />}
-              onClick={onOpenConfigDir}
-            >
-              配置文件夹
-            </Button>
+            <TextField
+              size="small"
+              label="Git URL"
+              value={selectedProject.gitUrl}
+              onChange={(event) =>
+                updateSelectedProject((project) => ({ ...project, gitUrl: event.target.value }))
+              }
+            />
+            <TextField
+              size="small"
+              label="仓库路径"
+              value={selectedProject.repoPath ?? ""}
+              onChange={(event) =>
+                updateSelectedProject((project) => ({ ...project, repoPath: event.target.value }))
+              }
+            />
           </div>,
         )}
         {renderProjectSectionBlock(
-          "仓库与本地命令",
-          "访达页打开目录、启动运行和构建时使用",
+          "本地运行",
+          "项目页启动 dev 服务和本地构建时使用",
           <Stack spacing={1}>
-            <div className="settings-sub-block">
-              <div className="settings-form-grid">
-                <TextField
-                  size="small"
-                  label="仓库路径"
-                  value={selectedProject.repoPath ?? ""}
-                  onChange={(event) =>
-                    updateSelectedProject((project) => ({
-                      ...project,
-                      repoPath: event.target.value,
-                    }))
-                  }
-                />
-              </div>
-            </div>
-            {renderCommandFields("dev", "本地运行")}
+            {renderCommandFields("dev", "dev 服务")}
             {renderCommandFields("build", "本地构建")}
           </Stack>,
         )}
+        {renderDebugProfilesBlock()}
         {renderProjectSectionBlock(
           "聚焦",
-          "访达页唤起运行中的项目时使用",
+          "项目页唤起运行中的项目时使用",
           <div className="settings-form-grid">
             <TextField
               size="small"
@@ -892,9 +1668,477 @@ export function SettingsPanel({
                 }))
               }
             />
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={Boolean(selectedProject.focus.autoOnStart)}
+                  onChange={(event) =>
+                    updateSelectedProject((project) => ({
+                      ...project,
+                      focus: {
+                        ...project.focus,
+                        autoOnStart: event.target.checked,
+                      },
+                    }))
+                  }
+                />
+              }
+              label="启动成功后自动唤起"
+              sx={{ alignSelf: "center" }}
+            />
           </div>,
         )}
-        {renderProjectSaveRow()}
+        {renderProjectSaveRow(true)}
+      </Stack>
+    );
+  }
+
+  function renderNavigationEntryTargetFields(
+    entry: NavigationEditorEntry,
+    categoryIndex: number,
+    entryIndex: number,
+  ) {
+    if (entry.kind === "app") {
+      return (
+        <>
+          <TextField
+            size="small"
+            label="Bundle ID"
+            value={entry.bundleId ?? ""}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                bundleId: event.target.value,
+              })
+            }
+          />
+          <TextField
+            size="small"
+            label="应用名"
+            value={entry.appName ?? ""}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                appName: event.target.value,
+              })
+            }
+          />
+        </>
+      );
+    }
+
+    if (entry.kind === "script") {
+      return (
+        <>
+          <TextField
+            size="small"
+            label="脚本路径"
+            value={entry.script ?? ""}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                script: event.target.value,
+              })
+            }
+          />
+          <TextField
+            size="small"
+            label="工作目录"
+            value={entry.cwd ?? ""}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                cwd: event.target.value,
+              })
+            }
+          />
+        </>
+      );
+    }
+
+    const browserSelectValue = navigationBrowserSelectValue(entry.browser);
+    const browserSupportsProfile = navigationBrowserSupportsProfile(entry.browser);
+    const isCustomBrowser = browserSelectValue === CUSTOM_NAVIGATION_BROWSER_VALUE;
+
+    return (
+      <>
+        <TextField
+          className="settings-form-grid-wide"
+          size="small"
+          label="URL"
+          value={entry.url ?? ""}
+          onChange={(event) =>
+            updateNavigationEntryAt(categoryIndex, entryIndex, {
+              url: event.target.value,
+            })
+          }
+        />
+        <div className="settings-browser-route settings-form-grid-wide">
+          <div className="settings-browser-route-head">
+            <div>
+              <Typography variant="caption">打开方式</Typography>
+              <Typography variant="caption">
+                默认沿用当前 Chrome；指定 Chrome / Edge 时可填写 Profile。
+              </Typography>
+            </div>
+            <Chip size="small" label={navigationBrowserLabel(entry)} variant="outlined" />
+          </div>
+          <div className="settings-form-grid settings-form-grid-tight">
+            <TextField
+              select
+              size="small"
+              label="浏览器"
+              value={browserSelectValue}
+              onChange={(event) => {
+                const nextValue = event.target.value;
+                if (nextValue === "current_chrome") {
+                  updateNavigationEntryAt(categoryIndex, entryIndex, {
+                    browser: null,
+                    browserProfile: null,
+                  });
+                  return;
+                }
+                if (nextValue === CUSTOM_NAVIGATION_BROWSER_VALUE) {
+                  updateNavigationEntryAt(categoryIndex, entryIndex, {
+                    browser:
+                      isCustomBrowser
+                        ? entry.browser
+                        : "",
+                    browserProfile: null,
+                  });
+                  return;
+                }
+                updateNavigationEntryAt(categoryIndex, entryIndex, {
+                  browser: nextValue,
+                  browserProfile: navigationBrowserSupportsProfile(nextValue)
+                    ? entry.browserProfile
+                    : null,
+                });
+              }}
+            >
+              {NAVIGATION_BROWSER_OPTIONS.map((item) => (
+                <MenuItem key={item.value} value={item.value}>
+                  {item.label}
+                </MenuItem>
+              ))}
+              <MenuItem value={CUSTOM_NAVIGATION_BROWSER_VALUE}>自定义应用名</MenuItem>
+            </TextField>
+            {isCustomBrowser ? (
+              <TextField
+                size="small"
+                label="浏览器应用"
+                value={entry.browser ?? ""}
+                onChange={(event) =>
+                  updateNavigationEntryAt(categoryIndex, entryIndex, {
+                    browser: event.target.value,
+                    browserProfile: navigationBrowserSupportsProfile(event.target.value)
+                      ? entry.browserProfile
+                      : null,
+                  })
+                }
+              />
+            ) : null}
+            {browserSupportsProfile ? (
+              <TextField
+                size="small"
+                label="Profile"
+                value={entry.browserProfile ?? ""}
+                helperText="例如 Default 或 Profile 2"
+                onChange={(event) =>
+                  updateNavigationEntryAt(categoryIndex, entryIndex, {
+                    browserProfile: event.target.value,
+                  })
+                }
+              />
+            ) : null}
+          </div>
+        </div>
+      </>
+    );
+  }
+
+  function renderNavigationEntryEditor(
+    categoryIndex: number,
+    entry: NavigationEditorEntry,
+    entryIndex: number,
+  ) {
+    const kindLabel =
+      NAVIGATION_ENTRY_KIND_OPTIONS.find((item) => item.value === entry.kind)?.label ?? "入口";
+
+    return (
+      <div className="settings-param-editor settings-finder-entry" key={`entry-${categoryIndex}-${entryIndex}`}>
+        <div className="settings-param-editor-head">
+          <div className="settings-finder-entry-title">
+            <Typography variant="caption">{entry.name || "未命名入口"}</Typography>
+            <Chip size="small" label={kindLabel} variant="outlined" />
+          </div>
+          <Button
+            variant="outlined"
+            color="inherit"
+            startIcon={<TrashIcon fontSize="small" />}
+            onClick={() => deleteNavigationEntryAt(categoryIndex, entryIndex)}
+            disabled={saving}
+          >
+            删除
+          </Button>
+        </div>
+        <div className="settings-form-grid settings-form-grid-tight">
+          <TextField
+            size="small"
+            label="名称"
+            value={entry.name}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                name: event.target.value,
+              })
+            }
+          />
+          <TextField
+            select
+            size="small"
+            label="类型"
+            value={entry.kind}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                kind: event.target.value as NavigationEditorEntryKind,
+              })
+            }
+          >
+            {NAVIGATION_ENTRY_KIND_OPTIONS.map((item) => (
+              <MenuItem key={item.value} value={item.value}>
+                {item.label}
+              </MenuItem>
+            ))}
+          </TextField>
+          {renderNavigationEntryTargetFields(entry, categoryIndex, entryIndex)}
+          <TextField
+            className="settings-form-grid-wide"
+            size="small"
+            label="备注"
+            value={entry.note ?? ""}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                note: event.target.value,
+              })
+            }
+          />
+        </div>
+      </div>
+    );
+  }
+
+  function renderFinderSection() {
+    if (navigationLoading && !navigationEditor) {
+      return <Alert severity="info">正在读取访达配置</Alert>;
+    }
+    if (!navigationEditor) {
+      return (
+        <Stack spacing={1.3}>
+          <Alert severity="warning">暂无访达配置</Alert>
+          <div className="settings-action-grid">
+            <Button
+              variant="outlined"
+              color="inherit"
+              startIcon={<RefreshIcon fontSize="small" />}
+              onClick={() => void loadNavigationEditor()}
+              disabled={navigationLoading}
+            >
+              重新读取
+            </Button>
+            <Button
+              variant="outlined"
+              color="inherit"
+              startIcon={<OpenExternalIcon fontSize="small" />}
+              onClick={onOpenNavigationConfigFile}
+            >
+              navigation.toml
+            </Button>
+          </div>
+        </Stack>
+      );
+    }
+
+    const categoryCount = navigationEditor.categories.length;
+    const activeCategoryIndex =
+      categoryCount === 0
+        ? 0
+        : Math.min(selectedNavigationCategoryIndex, categoryCount - 1);
+    const activeCategory = navigationEditor.categories[activeCategoryIndex] ?? null;
+    const preferredCategoryValue = navigationEditor.categories.some(
+      (category) => category.title === navigationEditor.preferredCategory,
+    )
+      ? (navigationEditor.preferredCategory ?? "")
+      : "";
+
+    return (
+      <Stack spacing={1.3}>
+        {renderProjectSectionBlock(
+          "访达配置",
+          "管理访达页的网站、应用和脚本入口",
+          <>
+            <div className="settings-finder-toolbar">
+              <TextField
+                select
+                size="small"
+                label="默认分类"
+                value={preferredCategoryValue}
+                onChange={(event) =>
+                  updateNavigationEditor((current) => ({
+                    ...current,
+                    preferredCategory: event.target.value,
+                  }))
+                }
+                disabled={categoryCount === 0}
+              >
+                <MenuItem value="" disabled>
+                  选择默认分类
+                </MenuItem>
+                {navigationEditor.categories.map((category) => (
+                  <MenuItem key={category.title} value={category.title}>
+                    {category.title || "未命名分类"}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <div className="settings-inline-actions">
+                <Button
+                  variant="outlined"
+                  color="inherit"
+                  onClick={addNavigationCategory}
+                  disabled={saving}
+                >
+                  新增分类
+                </Button>
+                <Button
+                  variant="outlined"
+                  color="inherit"
+                  startIcon={<RefreshIcon fontSize="small" />}
+                  onClick={() => void loadNavigationEditor()}
+                  disabled={navigationLoading || saving}
+                >
+                  刷新
+                </Button>
+              </div>
+            </div>
+            {categoryCount === 0 ? (
+              <div className="settings-empty-row">暂无分类，先新增一个访达分类</div>
+            ) : (
+              <div className="settings-deploy-switcher settings-finder-switcher" role="tablist" aria-label="访达分类">
+                {navigationEditor.categories.map((category, categoryIndex) => (
+                  <button
+                    key={`${category.title}-${categoryIndex}`}
+                    type="button"
+                    className={activeCategoryIndex === categoryIndex ? "is-active" : ""}
+                    onClick={() => setSelectedNavigationCategoryIndex(categoryIndex)}
+                    aria-selected={activeCategoryIndex === categoryIndex}
+                  >
+                    <span>{category.title || "未命名分类"}</span>
+                    <small>{category.entries.length} 个入口</small>
+                  </button>
+                ))}
+              </div>
+            )}
+          </>,
+        )}
+
+        {activeCategory ? (
+          <div className="settings-form-block">
+            <div className="settings-form-block-head">
+              <div>
+                <Typography variant="subtitle2">{activeCategory.title || "未命名分类"}</Typography>
+                <Typography variant="caption">
+                  {activeCategory.entries.length} 个入口 · {activeCategory.shortLabel || "无短名"}
+                </Typography>
+              </div>
+              <div className="settings-inline-actions">
+                <Button
+                  variant="outlined"
+                  color="inherit"
+                  startIcon={<TrashIcon fontSize="small" />}
+                  onClick={() => deleteNavigationCategoryAt(activeCategoryIndex)}
+                  disabled={saving}
+                >
+                  删除分类
+                </Button>
+              </div>
+            </div>
+            <div className="settings-form-grid">
+              <TextField
+                size="small"
+                label="分类名称"
+                value={activeCategory.title}
+                onChange={(event) => {
+                  const nextTitle = event.target.value;
+                  const previousTitle = activeCategory.title;
+                  updateNavigationEditor((current) => ({
+                    ...current,
+                    preferredCategory:
+                      current.preferredCategory === previousTitle
+                        ? nextTitle
+                        : current.preferredCategory,
+                    categories: current.categories.map((category, index) =>
+                      index === activeCategoryIndex
+                        ? { ...category, title: nextTitle }
+                        : category,
+                    ),
+                  }));
+                }}
+              />
+              <TextField
+                size="small"
+                label="短名"
+                value={activeCategory.shortLabel}
+                onChange={(event) =>
+                  updateNavigationCategoryAt(activeCategoryIndex, {
+                    shortLabel: event.target.value,
+                  })
+                }
+              />
+            </div>
+            <div className="settings-param-list">
+              <div className="settings-param-list-head">
+                <Typography variant="caption">入口</Typography>
+                <div className="settings-inline-actions">
+                  {NAVIGATION_ENTRY_KIND_OPTIONS.map((item) => (
+                    <Button
+                      key={item.value}
+                      variant="outlined"
+                      color="inherit"
+                      onClick={() => addNavigationEntry(activeCategoryIndex, item.value)}
+                      disabled={saving}
+                    >
+                      新增{item.label}
+                    </Button>
+                  ))}
+                </div>
+              </div>
+              {activeCategory.entries.length === 0 ? (
+                <div className="settings-empty-row">暂无入口</div>
+              ) : (
+                activeCategory.entries.map((entry, entryIndex) =>
+                  renderNavigationEntryEditor(activeCategoryIndex, entry, entryIndex),
+                )
+              )}
+            </div>
+          </div>
+        ) : null}
+
+        <div className="settings-save-row">
+          <Typography variant="caption">{navigationEditor.filePath}</Typography>
+          <div className="settings-inline-actions">
+            <Button
+              variant="outlined"
+              color="inherit"
+              startIcon={<OpenExternalIcon fontSize="small" />}
+              onClick={onOpenNavigationConfigFile}
+            >
+              打开文件
+            </Button>
+            <Button
+              variant="contained"
+              startIcon={<CheckIcon fontSize="small" />}
+              onClick={() => void saveNavigationEditor()}
+              disabled={!navigationDirty || saving}
+            >
+              保存
+            </Button>
+          </div>
+        </div>
       </Stack>
     );
   }
@@ -903,9 +2147,61 @@ export function SettingsPanel({
     if (loading && !editorState) {
       return <Alert severity="info">正在读取分支配置</Alert>;
     }
+    const projectOverridesSourceRules = Boolean(
+      selectedProject?.branchRules.sourceKeywords.length,
+    );
+    const projectOverridesTargetRules = Boolean(
+      selectedProject?.branchRules.targetKeywords.length,
+    );
+    const projectOverridesBranchRules =
+      projectOverridesSourceRules || projectOverridesTargetRules;
+    const projectSourceKeywords = projectOverridesSourceRules
+      ? selectedProject?.branchRules.sourceKeywords ?? []
+      : defaultBranchRules.sourceKeywords;
+    const projectTargetKeywords = projectOverridesTargetRules
+      ? selectedProject?.branchRules.targetKeywords ?? []
+      : defaultBranchRules.targetKeywords;
+
     if (!selectedProject) {
       return (
         <Stack spacing={1.3}>
+          {renderProjectSectionBlock(
+            "默认分支规则",
+            "所有项目默认使用这组规则，项目额外配置会覆盖它",
+            <div className="settings-form-grid">
+              <TextField
+                size="small"
+                label="默认源分支关键词"
+                value={defaultBranchRules.sourceKeywords.join(", ")}
+                onChange={(event) =>
+                  updateDefaultBranchRules({
+                    sourceKeywords: parseKeywordList(event.target.value),
+                  })
+                }
+              />
+              <TextField
+                size="small"
+                label="默认目标分支关键词"
+                value={defaultBranchRules.targetKeywords.join(", ")}
+                onChange={(event) =>
+                  updateDefaultBranchRules({
+                    targetKeywords: parseKeywordList(event.target.value),
+                  })
+                }
+              />
+            </div>,
+          )}
+          <div className="settings-save-row">
+            <Typography variant="caption">{editorState?.configPath}</Typography>
+            <Button
+              variant="contained"
+              startIcon={<CheckIcon fontSize="small" />}
+              onClick={() => void saveDefaultBranchRules()}
+              disabled={!defaultBranchRulesDirty || saving}
+            >
+              保存默认
+            </Button>
+          </div>
           <Alert severity="warning">暂无项目配置</Alert>
           {renderNewProjectBlock()}
         </Stack>
@@ -914,56 +2210,95 @@ export function SettingsPanel({
 
     return (
       <Stack spacing={1.3}>
-        {renderProjectSelector()}
         {renderProjectSectionBlock(
-          "Git 与分支规则",
-          "分支页同步、创建、检出和推送时使用",
+          "默认分支规则",
+          "所有项目默认使用这组规则，项目额外配置会覆盖它",
           <div className="settings-form-grid">
             <TextField
               size="small"
-              label="Git URL"
-              value={selectedProject.gitUrl}
+              label="默认源分支关键词"
+              value={defaultBranchRules.sourceKeywords.join(", ")}
               onChange={(event) =>
-                updateSelectedProject((project) => ({ ...project, gitUrl: event.target.value }))
+                updateDefaultBranchRules({
+                  sourceKeywords: parseKeywordList(event.target.value),
+                })
               }
             />
             <TextField
               size="small"
-              label="仓库路径"
-              value={selectedProject.repoPath ?? ""}
+              label="默认目标分支关键词"
+              value={defaultBranchRules.targetKeywords.join(", ")}
               onChange={(event) =>
-                updateSelectedProject((project) => ({ ...project, repoPath: event.target.value }))
-              }
-            />
-            <TextField
-              size="small"
-              label="源分支关键词"
-              value={selectedProject.branchRules.sourceKeywords.join(", ")}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  branchRules: {
-                    ...project.branchRules,
-                    sourceKeywords: parseKeywordList(event.target.value),
-                  },
-                }))
-              }
-            />
-            <TextField
-              size="small"
-              label="目标分支关键词"
-              value={selectedProject.branchRules.targetKeywords.join(", ")}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  branchRules: {
-                    ...project.branchRules,
-                    targetKeywords: parseKeywordList(event.target.value),
-                  },
-                }))
+                updateDefaultBranchRules({
+                  targetKeywords: parseKeywordList(event.target.value),
+                })
               }
             />
           </div>,
+        )}
+        <div className="settings-save-row">
+          <Typography variant="caption">{editorState?.configPath}</Typography>
+          <Button
+            variant="contained"
+            startIcon={<CheckIcon fontSize="small" />}
+            onClick={() => void saveDefaultBranchRules()}
+            disabled={!defaultBranchRulesDirty || saving}
+          >
+            保存默认
+          </Button>
+        </div>
+        {renderProjectSelector()}
+        {renderProjectSectionBlock(
+          "项目分支规则",
+          "留空继承默认规则；当前项目填写后会优先使用项目规则",
+          <Stack spacing={1}>
+            <div className="settings-inline-actions">
+              <Chip
+                size="small"
+                label={projectOverridesBranchRules ? "项目覆盖默认" : "继承默认设置"}
+                color={projectOverridesBranchRules ? "primary" : "default"}
+                variant={projectOverridesBranchRules ? "filled" : "outlined"}
+              />
+              <Button
+                variant="outlined"
+                color="inherit"
+                onClick={useDefaultBranchRulesForProject}
+                disabled={!projectOverridesBranchRules || saving}
+              >
+                使用默认设置
+              </Button>
+            </div>
+            <div className="settings-form-grid">
+              <TextField
+                size="small"
+                label={
+                  projectOverridesSourceRules
+                    ? "源分支关键词"
+                    : "源分支关键词（继承默认）"
+                }
+                value={projectSourceKeywords.join(", ")}
+                onChange={(event) =>
+                  updateSelectedProjectBranchRules({
+                    sourceKeywords: parseKeywordList(event.target.value),
+                  })
+                }
+              />
+              <TextField
+                size="small"
+                label={
+                  projectOverridesTargetRules
+                    ? "目标分支关键词"
+                    : "目标分支关键词（继承默认）"
+                }
+                value={projectTargetKeywords.join(", ")}
+                onChange={(event) =>
+                  updateSelectedProjectBranchRules({
+                    targetKeywords: parseKeywordList(event.target.value),
+                  })
+                }
+              />
+            </div>
+          </Stack>,
         )}
         {renderProjectSaveRow()}
       </Stack>
@@ -979,7 +2314,7 @@ export function SettingsPanel({
     const showBooleanValues = param.kind === "boolean";
 
     return (
-      <div className="settings-param-editor" key={`${param.key}-${paramIndex}`}>
+      <div className="settings-param-editor" key={`deploy-param-${targetIndex}-${paramIndex}`}>
         <div className="settings-param-editor-head">
           <Typography variant="caption">{param.label || param.key}</Typography>
           <Button
@@ -1145,7 +2480,10 @@ export function SettingsPanel({
                   aria-selected={activeDeployTargetIndex === targetIndex}
                 >
                   <span>{target.label || target.key || "未命名"}</span>
-                  <small>{target.key || "new"}</small>
+                  <small>
+                    {targetIndex === 0 ? "默认 · " : ""}
+                    {target.key || "new"}
+                  </small>
                 </button>
               ))}
             </div>
@@ -1160,7 +2498,25 @@ export function SettingsPanel({
                   </Typography>
                 </div>
                 <div className="settings-inline-actions">
-                  <Chip size="small" label={activeDeployTarget.key || "new"} variant="outlined" />
+                  <Chip
+                    size="small"
+                    label={
+                      activeDeployTargetIndex === 0
+                        ? `默认 · ${activeDeployTarget.key || "new"}`
+                        : activeDeployTarget.key || "new"
+                    }
+                    color={activeDeployTargetIndex === 0 ? "primary" : "default"}
+                    variant="outlined"
+                  />
+                  <Button
+                    variant="outlined"
+                    color="inherit"
+                    startIcon={<CheckIcon fontSize="small" />}
+                    onClick={() => setDeployTargetAsDefault(activeDeployTargetIndex)}
+                    disabled={saving || activeDeployTargetIndex === 0}
+                  >
+                    设为默认
+                  </Button>
                   <Button
                     variant="outlined"
                     color="inherit"
@@ -1332,6 +2688,40 @@ export function SettingsPanel({
           </div>
         </div>
       </div>
+      {confirmState ? (
+        <div
+          className="settings-confirm-layer"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setConfirmState(null);
+            }
+          }}
+        >
+          <div
+            className="settings-confirm-card"
+            role="alertdialog"
+            aria-modal="true"
+            aria-label={confirmState.title}
+            onMouseDown={(event) => event.stopPropagation()}
+          >
+            <Typography variant="subtitle2">{confirmState.title}</Typography>
+            <Typography variant="body2">{confirmState.message}</Typography>
+            <div className="settings-confirm-actions">
+              <Button variant="outlined" color="inherit" onClick={() => setConfirmState(null)}>
+                取消
+              </Button>
+              <Button
+                variant="contained"
+                color={confirmState.tone === "danger" ? "error" : "primary"}
+                onClick={() => void runConfirmAction()}
+              >
+                {confirmState.confirmLabel}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

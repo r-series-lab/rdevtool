@@ -95,6 +95,7 @@ export const APP_MODULES = [
       workflowSignalIdsForDeployReplay: (entry) =>
         workflowSignals.signalIdsForReplay(workflowReplayFromDeployHistory(entry)),
       workflowSignalOptions: workflowSignals.signalOptions,
+      workflowSignalSummaries: workflowSignals.signalSummaries,
       onWorkflowDeployReplayReceiversChange: (entry, signalIds) =>
         void workflowSignals.setReceiveRulesForReplay(
           workflowReplayFromDeployHistory(entry),
@@ -104,6 +105,9 @@ export const APP_MODULES = [
         void workflowSignals.setReceiveRulesEnabled(ruleIds, enabled),
       onWorkflowReceiveRulesDelete: (ruleIds) =>
         void workflowSignals.deleteReceiveRules(ruleIds),
+      onWorkflowSignalDelete: (signalId) =>
+        void workflowSignals.deleteWorkflowSignal(signalId),
+      onWorkflowSignalsClear: () => void workflowSignals.clearWorkflowSignals(),
       onRefreshDeployHistory: () =>
         void deployModule.refreshDeployHistoryStatuses(),
       onClearDeployHistory: () =>
@@ -207,6 +211,7 @@ export const APP_MODULES = [
         return replay ? workflowSignals.signalIdsForBroadcastReplay(replay) : [];
       },
       workflowSignalOptions: workflowSignals.signalOptions,
+      workflowSignalSummaries: workflowSignals.signalSummaries,
       onWorkflowBranchReplayRulesChange: (entry, value) => {
         const replay = workflowReplayFromBranchHistory(entry);
         if (replay) {
@@ -225,6 +230,9 @@ export const APP_MODULES = [
         void workflowSignals.setBroadcastRulesEnabled(ruleIds, enabled),
       onWorkflowBroadcastRulesDelete: (ruleIds) =>
         void workflowSignals.deleteBroadcastRules(ruleIds),
+      onWorkflowSignalDelete: (signalId) =>
+        void workflowSignals.deleteWorkflowSignal(signalId),
+      onWorkflowSignalsClear: () => void workflowSignals.clearWorkflowSignals(),
       onRefreshBranchTaskHistory: () => void mergeModule.loadBranchTaskHistory(),
       onClearBranchTaskHistory: () =>
         void (async () => {
@@ -277,6 +285,7 @@ export const APP_MODULES = [
       recentProjectKeys: projectsModule.recentProjectKeys,
       favoriteShortcutKeys: projectsModule.favoriteShortcutKeys,
       recentShortcutKeys: projectsModule.recentShortcutKeys,
+      selectedDebugProfileKeys: projectsModule.selectedDebugProfileKeys,
       branchProjectKeys: appShell.enabledPages.includes("merge")
         ? appShell.branchProjects.map((item) => item.key)
         : [],
@@ -290,6 +299,7 @@ export const APP_MODULES = [
         (rule) => rule.replay?.target === "project.replay",
       ),
       workflowSignalOptions: workflowSignals.signalOptions,
+      workflowSignalSummaries: workflowSignals.signalSummaries,
       workflowReceiveSignalIdsForProjectReplay: (entry, action) =>
         workflowSignals.signalIdsForReplay(workflowReplayFromProjectRuntime(entry, action)),
       workflowBroadcastSignalIdsForProjectReplay: (entry, action) =>
@@ -311,8 +321,12 @@ export const APP_MODULES = [
         void workflowSignals.setBroadcastRulesEnabled(ruleIds, enabled),
       onWorkflowBroadcastRulesDelete: (ruleIds) =>
         void workflowSignals.deleteBroadcastRules(ruleIds),
+      onWorkflowSignalDelete: (signalId) =>
+        void workflowSignals.deleteWorkflowSignal(signalId),
+      onWorkflowSignalsClear: () => void workflowSignals.clearWorkflowSignals(),
       onToggleProjectFavorite: projectsModule.toggleProjectFavorite,
       onToggleShortcutFavorite: projectsModule.toggleShortcutFavorite,
+      onProjectDebugProfileChange: projectsModule.setProjectDebugProfile,
       onMarkShortcutUsed: projectsModule.markShortcutUsed,
       onOpenProjectBranch: (projectKey) => {
         appShell.setSelectedProject(projectKey);
@@ -325,8 +339,12 @@ export const APP_MODULES = [
       onRefresh: () => void projectsModule.loadFinderData({ force: true }),
       onOpenFinderEntry: (entry) =>
         projectsModule.handleOpenFinderEntry(entry),
-      onStartRuntime: (projectKey) =>
-        void projectsModule.handleStartRuntime(projectKey),
+      onStartRuntime: (projectKey, debugProfileKey, envOverrides) =>
+        void projectsModule.handleStartRuntime(
+          projectKey,
+          debugProfileKey,
+          envOverrides,
+        ),
       onStopRuntime: (projectKey) =>
         void projectsModule.handleStopRuntime(projectKey),
       onRunBuild: (projectKey) =>
