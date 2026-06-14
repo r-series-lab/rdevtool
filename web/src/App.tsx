@@ -160,6 +160,7 @@ function App() {
     emitWorkflowSignals: workflowSignals.emitWorkflowSignals,
     recordActivity: activityCenter.recordActivity,
     updateActivity: activityCenter.updateActivity,
+    syncActivities: activityCenter.syncActivities,
   });
   const moduleRuntime = useMemo(
     () => ({
@@ -403,6 +404,10 @@ function App() {
         visibleNavItems={appShell.visibleNavItems}
         activePage={appShell.page}
         onPageChange={appShell.setPage}
+        enabledPages={appShell.enabledPages}
+        onEnabledPagesChange={appShell.setEnabledPages}
+        defaultPage={appShell.defaultPage}
+        onDefaultPageChange={appShell.setDefaultPage}
         styleMode={appShell.styleMode}
         onStyleModeChange={appShell.setStyleMode}
         selectedProjectKey={appShell.selectedProject}

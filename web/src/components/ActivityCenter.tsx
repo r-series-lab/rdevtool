@@ -93,7 +93,8 @@ type ActivityCenterProps = {
 };
 
 const ACTIVITY_REFRESH_INTERVAL_MS = 10000;
-const ACTIVITY_LIST_PAGE_SIZE = 6;
+const ACTIVITY_LIST_PAGE_SIZE = 5;
+const ACTIVITY_EXECUTION_PREVIEW_LIMIT = 3;
 
 const KIND_LABELS: Record<ActivityKind, string> = {
   runtime: "运行",
@@ -111,8 +112,8 @@ const STATUS_LABELS: Record<ActivityStatus, string> = {
 };
 
 const activityActionIconSx = {
-  width: 28,
-  height: 28,
+  width: 26,
+  height: 26,
   borderRadius: "999px",
   border: "1px solid var(--line-soft)",
   bgcolor: "transparent",
@@ -125,8 +126,8 @@ const activityActionIconSx = {
 };
 
 const activityHeaderIconSx = {
-  width: 32,
-  height: 32,
+  width: 30,
+  height: 30,
   color: "var(--muted)",
   "&:hover": {
     color: "var(--accent)",
@@ -135,12 +136,12 @@ const activityHeaderIconSx = {
 };
 
 const activityChipSx = {
-  height: 20,
+  height: 19,
   borderRadius: "999px",
   borderColor: "var(--line-soft)",
   "& .MuiChip-label": {
-    px: 0.65,
-    fontSize: "0.66rem",
+    px: 0.58,
+    fontSize: "0.64rem",
     fontWeight: 780,
   },
 };
@@ -771,6 +772,12 @@ export function ActivityCenter({
   );
   const visibleQueueGroups = queueGroups.slice(0, 4);
   const hiddenQueueCount = Math.max(0, queueGroups.length - visibleQueueGroups.length);
+  const handleAcknowledgeAllFailed = () => {
+    if (failedItems.length === 0) {
+      return;
+    }
+    onAcknowledgeEntries(failedItems);
+  };
   const handleClearConfirmed = () => {
     onClear();
     setClearConfirmOpen(false);
@@ -781,7 +788,7 @@ export function ActivityCenter({
       <Box
         className="activity-center-surface"
         sx={{
-          p: { xs: 1.6, sm: 1.85 },
+          p: { xs: 1.35, sm: 1.45 },
           display: "flex",
           flexDirection: "column",
           height: "100%",
@@ -811,6 +818,19 @@ export function ActivityCenter({
             </Typography>
           </Box>
           <Stack direction="row" spacing={0.5}>
+            <Tooltip title="处理全部失败">
+              <span>
+                <IconButton
+                  size="small"
+                  onClick={handleAcknowledgeAllFailed}
+                  disabled={failedItems.length === 0}
+                  aria-label="处理全部失败"
+                  sx={activityHeaderIconSx}
+                >
+                  <CheckIcon fontSize="small" />
+                </IconButton>
+              </span>
+            </Tooltip>
             <Tooltip title="刷新活动状态">
               <span>
                 <IconButton
@@ -853,8 +873,8 @@ export function ActivityCenter({
         {queueGroups.length > 0 ? (
           <Box
             sx={{
-              mt: 1.2,
-              pb: 0.85,
+              mt: 0.95,
+              pb: 0.7,
               borderBottom: "1px solid var(--line)",
             }}
           >
@@ -884,20 +904,20 @@ export function ActivityCenter({
               />
             </Stack>
 
-            <Stack spacing={0.65} sx={{ mt: 0.8 }}>
+            <Stack spacing={0.55} sx={{ mt: 0.7 }}>
               {visibleQueueGroups.map((group) => (
                 <Box
                   key={group.id}
                   sx={{
-                    px: 1,
-                    py: 0.85,
+                    px: 0.85,
+                    py: 0.72,
                     borderRadius: 1.5,
                     border: "1px solid var(--line-soft)",
                     bgcolor: "var(--panel)",
                     boxShadow: "0 1px 0 rgba(20,31,50,0.025)",
                   }}
                 >
-                  <Stack direction="row" spacing={0.8} alignItems="flex-start">
+                  <Stack direction="row" spacing={0.65} alignItems="flex-start">
                     <Box
                       sx={{
                         width: 3,
@@ -917,7 +937,7 @@ export function ActivityCenter({
                         <Stack
                           direction="row"
                           alignItems="center"
-                          spacing={0.6}
+                          spacing={0.48}
                           flexWrap="wrap"
                           rowGap={0.5}
                           minWidth={0}
@@ -1052,11 +1072,11 @@ export function ActivityCenter({
 
         <Stack
           direction="row"
-          spacing={0.55}
+          spacing={0.45}
           useFlexGap
           sx={{
-            mt: queueGroups.length > 0 ? 1.05 : 1.15,
-            mb: 1.05,
+            mt: queueGroups.length > 0 ? 0.85 : 0.95,
+            mb: 0.85,
             flexWrap: "wrap",
             rowGap: 0.55,
           }}
@@ -1070,13 +1090,13 @@ export function ActivityCenter({
               color={filter === item.key ? "primary" : "default"}
               onClick={() => setFilter(item.key as ActivityFilter)}
               sx={{
-                height: 23,
+                height: 22,
                 borderRadius: "999px",
                 borderColor: "var(--line)",
                 bgcolor: filter === item.key ? undefined : "var(--panel)",
                 "& .MuiChip-label": {
-                  px: 0.75,
-                  fontSize: "0.66rem",
+                  px: 0.65,
+                  fontSize: "0.64rem",
                   fontWeight: 760,
                 },
               }}
@@ -1087,42 +1107,47 @@ export function ActivityCenter({
         <Divider sx={{ borderColor: "var(--line)" }} />
 
         <Stack
-          spacing={0.9}
+          className="activity-list-scroll"
+          spacing={0.7}
           sx={{
-            mt: 0.85,
-            mb: 0.7,
-            p: 0.65,
+            mt: 0.7,
+            mb: 0.55,
+            p: 0.5,
             flex: 1,
             minHeight: 0,
             overflowY: "auto",
             overscrollBehavior: "contain",
+            scrollbarGutter: "auto",
             border: "1px solid var(--line-soft)",
             borderRadius: 1.6,
             bgcolor: "rgba(42,82,132,0.025)",
             scrollbarWidth: "thin",
-            scrollbarColor: "transparent transparent",
+            scrollbarColor:
+              "color-mix(in srgb, var(--muted) 34%, transparent) color-mix(in srgb, var(--muted) 8%, transparent)",
             transition: "scrollbar-color 140ms ease",
             "&:hover": {
-              scrollbarColor: "color-mix(in srgb, var(--muted) 28%, transparent) transparent",
+              scrollbarColor:
+                "color-mix(in srgb, var(--muted) 48%, transparent) color-mix(in srgb, var(--muted) 8%, transparent)",
             },
             "&::-webkit-scrollbar": {
-              width: 7,
-              height: 7,
+              width: 6,
+              height: 6,
             },
             "&::-webkit-scrollbar-track": {
-              background: "transparent",
+              background: "color-mix(in srgb, var(--muted) 8%, transparent)",
+              borderRadius: "999px",
             },
             "&::-webkit-scrollbar-thumb": {
-              backgroundColor: "transparent",
+              backgroundColor: "color-mix(in srgb, var(--muted) 34%, transparent)",
               borderRadius: "999px",
               border: "2px solid transparent",
               backgroundClip: "padding-box",
             },
             "&:hover::-webkit-scrollbar-thumb": {
-              backgroundColor: "color-mix(in srgb, var(--muted) 28%, transparent)",
+              backgroundColor: "color-mix(in srgb, var(--muted) 48%, transparent)",
             },
             "&:hover::-webkit-scrollbar-thumb:hover": {
-              backgroundColor: "color-mix(in srgb, var(--muted) 42%, transparent)",
+              backgroundColor: "color-mix(in srgb, var(--muted) 56%, transparent)",
             },
           }}
         >
@@ -1156,8 +1181,8 @@ export function ActivityCenter({
                     sx={{
                       border: "1px solid var(--line-soft)",
                       borderRadius: 1.5,
-                      px: 1.05,
-                      py: 0.95,
+                      px: 0.9,
+                      py: 0.78,
                       bgcolor: "var(--panel)",
                       boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
                       transition: "border-color 120ms ease, background-color 120ms ease",
@@ -1167,12 +1192,12 @@ export function ActivityCenter({
                       },
                     }}
                   >
-                    <Stack direction="row" alignItems="flex-start" spacing={0.75}>
+                    <Stack direction="row" alignItems="flex-start" spacing={0.62}>
                       <Box
                         sx={{
                           width: 3,
                           alignSelf: "stretch",
-                          minHeight: 68,
+                          minHeight: 58,
                           borderRadius: 999,
                           bgcolor: statusColor(group.status),
                           flexShrink: 0,
@@ -1183,11 +1208,11 @@ export function ActivityCenter({
                           direction="row"
                           alignItems="center"
                           justifyContent="space-between"
-                          spacing={0.8}
+                          spacing={0.62}
                         >
                           <ActivityTitleCluster item={headlineItem} />
                           {group.targetItem || group.resourceItem || group.failedItems.length > 0 ? (
-                            <Stack direction="row" spacing={0.35} flexShrink={0}>
+                            <Stack direction="row" spacing={0.25} flexShrink={0}>
                               {group.resourceItem ? (
                                 <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
                                   <IconButton
@@ -1232,10 +1257,10 @@ export function ActivityCenter({
                           color="text.secondary"
                           sx={{
                             display: "block",
-                            mt: 0.35,
+                            mt: 0.28,
                             overflowWrap: "anywhere",
-                            fontSize: "0.68rem",
-                            lineHeight: 1.35,
+                            fontSize: "0.66rem",
+                            lineHeight: 1.32,
                           }}
                         >
                           {[group.primary.projectName || group.primary.projectKey, formatActivityTime(group.latest.updatedAt)]
@@ -1246,7 +1271,7 @@ export function ActivityCenter({
                         <Stack
                           spacing={0.35}
                           sx={{
-                            mt: 0.65,
+                            mt: 0.5,
                             pl: 0.2,
                           }}
                         >
@@ -1255,8 +1280,8 @@ export function ActivityCenter({
                               key={item.id}
                               sx={{
                                 display: "grid",
-                                gridTemplateColumns: "74px minmax(0, 1fr)",
-                                gap: 0.7,
+                                gridTemplateColumns: "68px minmax(0, 1fr)",
+                                gap: 0.55,
                                 alignItems: "baseline",
                               }}
                             >
@@ -1265,7 +1290,7 @@ export function ActivityCenter({
                                 noWrap
                                 sx={{
                                   color: statusColor(item.status),
-                                  fontSize: "0.62rem",
+                                  fontSize: "0.6rem",
                                   fontWeight: 800,
                                 }}
                               >
@@ -1276,8 +1301,8 @@ export function ActivityCenter({
                                 sx={{
                                   color: "var(--muted)",
                                   overflowWrap: "anywhere",
-                                  fontSize: "0.64rem",
-                                  lineHeight: 1.35,
+                                  fontSize: "0.62rem",
+                                  lineHeight: 1.32,
                                 }}
                               >
                                 {displayActivitySummary(item) || item.detail || STATUS_LABELS[item.status]}
@@ -1304,8 +1329,8 @@ export function ActivityCenter({
                     sx={{
                       border: "1px solid var(--line-soft)",
                       borderRadius: 1.5,
-                      px: 1.05,
-                      py: 0.95,
+                      px: 0.9,
+                      py: 0.78,
                       bgcolor: "var(--panel)",
                       boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
                       transition: "border-color 120ms ease, background-color 120ms ease",
@@ -1315,12 +1340,12 @@ export function ActivityCenter({
                       },
                     }}
                   >
-                    <Stack direction="row" alignItems="flex-start" spacing={0.75}>
+                    <Stack direction="row" alignItems="flex-start" spacing={0.62}>
                       <Box
                         sx={{
                           width: 3,
                           alignSelf: "stretch",
-                          minHeight: 68,
+                          minHeight: 58,
                           borderRadius: 999,
                           bgcolor: statusColor(group.status),
                           flexShrink: 0,
@@ -1331,10 +1356,10 @@ export function ActivityCenter({
                           direction="row"
                           alignItems="center"
                           justifyContent="space-between"
-                          spacing={0.8}
+                          spacing={0.62}
                         >
                           <ActivityTitleCluster item={headlineItem} />
-                          <Stack direction="row" spacing={0.35} flexShrink={0}>
+                          <Stack direction="row" spacing={0.25} flexShrink={0}>
                             <Chip
                               size="small"
                               label={`执行 ${group.executionCount} 次`}
@@ -1384,10 +1409,10 @@ export function ActivityCenter({
                           color="text.secondary"
                           sx={{
                             display: "block",
-                            mt: 0.35,
+                            mt: 0.28,
                             overflowWrap: "anywhere",
-                            fontSize: "0.68rem",
-                            lineHeight: 1.35,
+                            fontSize: "0.66rem",
+                            lineHeight: 1.32,
                           }}
                         >
                           {[group.latest.projectName || group.latest.projectKey, formatActivityTime(group.latest.updatedAt)]
@@ -1399,13 +1424,13 @@ export function ActivityCenter({
                             variant="caption"
                             sx={{
                               display: "-webkit-box",
-                              mt: 0.35,
+                              mt: 0.3,
                               color: "var(--text)",
                               overflow: "hidden",
                               overflowWrap: "anywhere",
                               WebkitBoxOrient: "vertical",
                               WebkitLineClamp: 2,
-                              fontSize: "0.74rem",
+                              fontSize: "0.72rem",
                               fontWeight: 720,
                               lineHeight: 1.42,
                             }}
@@ -1416,17 +1441,19 @@ export function ActivityCenter({
                         <Stack
                           spacing={0.35}
                           sx={{
-                            mt: 0.65,
+                            mt: 0.5,
                             pl: 0.2,
                           }}
                         >
-                          {group.items.map((item, index) => (
+                          {group.items
+                            .slice(0, ACTIVITY_EXECUTION_PREVIEW_LIMIT)
+                            .map((item, index) => (
                             <Box
                               key={item.id}
                               sx={{
                                 display: "grid",
                                 gridTemplateColumns: "54px minmax(0, 1fr)",
-                                gap: 0.7,
+                                gap: 0.55,
                                 alignItems: "baseline",
                               }}
                             >
@@ -1435,7 +1462,7 @@ export function ActivityCenter({
                                 noWrap
                                 sx={{
                                   color: statusColor(item.status),
-                                  fontSize: "0.62rem",
+                                  fontSize: "0.6rem",
                                   fontWeight: 800,
                                 }}
                               >
@@ -1446,8 +1473,8 @@ export function ActivityCenter({
                                 sx={{
                                   color: "var(--muted)",
                                   overflowWrap: "anywhere",
-                                  fontSize: "0.64rem",
-                                  lineHeight: 1.35,
+                                  fontSize: "0.62rem",
+                                  lineHeight: 1.32,
                                 }}
                               >
                                 {[
@@ -1462,6 +1489,19 @@ export function ActivityCenter({
                               </Typography>
                             </Box>
                           ))}
+                          {group.items.length > ACTIVITY_EXECUTION_PREVIEW_LIMIT ? (
+                            <Typography
+                              variant="caption"
+                              sx={{
+                                color: "var(--muted)",
+                                fontSize: "0.62rem",
+                                fontWeight: 760,
+                                pl: "54px",
+                              }}
+                            >
+                              还有 {group.items.length - ACTIVITY_EXECUTION_PREVIEW_LIMIT} 次记录
+                            </Typography>
+                          ) : null}
                         </Stack>
                       </Box>
                     </Stack>
@@ -1470,33 +1510,33 @@ export function ActivityCenter({
               }
               const item = unit.item;
               return (
-              <Box
-                key={item.id}
-                    sx={{
-                      border: "1px solid var(--line-soft)",
-                      borderRadius: 1.5,
-                      px: 1.05,
-                      py: 0.95,
-                      bgcolor: "var(--panel)",
-                      boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
-                  transition: "border-color 120ms ease, background-color 120ms ease",
-                  "&:hover": {
-                    borderColor: "var(--accent-border)",
-                    bgcolor: "var(--panel-strong)",
-                  },
-                }}
-              >
-                <Stack direction="row" alignItems="flex-start" spacing={0.75}>
+                <Box
+                  key={item.id}
+                  sx={{
+                    border: "1px solid var(--line-soft)",
+                    borderRadius: 1.5,
+                    px: 0.9,
+                    py: 0.78,
+                    bgcolor: "var(--panel)",
+                    boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
+                    transition: "border-color 120ms ease, background-color 120ms ease",
+                    "&:hover": {
+                      borderColor: "var(--accent-border)",
+                      bgcolor: "var(--panel-strong)",
+                    },
+                  }}
+                >
+                <Stack direction="row" alignItems="flex-start" spacing={0.62}>
                   <Box minWidth={0} flex={1}>
                     <Stack
                       direction="row"
                       alignItems="center"
                       justifyContent="space-between"
-                      spacing={0.8}
+                      spacing={0.62}
                     >
                       <ActivityTitleCluster item={item} />
                       {item.target || item.resource || isUnhandledFailure(item) ? (
-                        <Stack direction="row" spacing={0.35} flexShrink={0}>
+                        <Stack direction="row" spacing={0.25} flexShrink={0}>
                           {item.resource ? (
                             <Tooltip title={item.resource.label}>
                               <IconButton
@@ -1541,10 +1581,10 @@ export function ActivityCenter({
                       color="text.secondary"
                       sx={{
                         display: "block",
-                        mt: 0.35,
+                        mt: 0.28,
                         overflowWrap: "anywhere",
-                        fontSize: "0.65rem",
-                        lineHeight: 1.35,
+                        fontSize: "0.63rem",
+                        lineHeight: 1.32,
                       }}
                     >
                       {[item.projectName || item.projectKey, formatActivityTime(item.updatedAt)]
@@ -1556,13 +1596,13 @@ export function ActivityCenter({
                         variant="caption"
                         sx={{
                           display: "-webkit-box",
-                          mt: 0.35,
+                          mt: 0.3,
                           color: "var(--text)",
                           overflow: "hidden",
                           overflowWrap: "anywhere",
                           WebkitBoxOrient: "vertical",
                           WebkitLineClamp: 2,
-                          fontSize: "0.74rem",
+                          fontSize: "0.72rem",
                           fontWeight: 720,
                           lineHeight: 1.42,
                         }}
@@ -1576,13 +1616,13 @@ export function ActivityCenter({
                         color="text.secondary"
                         sx={{
                           display: "-webkit-box",
-                          mt: 0.35,
+                          mt: 0.3,
                           overflow: "hidden",
                           overflowWrap: "anywhere",
                           WebkitBoxOrient: "vertical",
                           WebkitLineClamp: 2,
-                          fontSize: "0.65rem",
-                          lineHeight: 1.4,
+                          fontSize: "0.63rem",
+                          lineHeight: 1.34,
                         }}
                         title={item.detail ?? undefined}
                       >
@@ -1604,7 +1644,7 @@ export function ActivityCenter({
             spacing={1}
             sx={{
               px: 0.2,
-              py: 0.72,
+              py: 0.55,
               borderTop: "1px solid var(--line)",
               flexShrink: 0,
             }}
@@ -1626,10 +1666,10 @@ export function ActivityCenter({
                 onChange={(_, nextPage) => setListPage(nextPage)}
                 sx={{
                   "& .MuiPaginationItem-root": {
-                    minWidth: 28,
-                    height: 28,
-                    borderRadius: "10px",
-                    fontSize: "0.72rem",
+                    minWidth: 26,
+                    height: 26,
+                    borderRadius: "9px",
+                    fontSize: "0.7rem",
                     fontWeight: 820,
                   },
                 }}
@@ -1721,7 +1761,7 @@ export function ActivityCenter({
       PaperProps={{
         className: "activity-drawer-paper",
         sx: {
-          width: { xs: "min(420px, 100vw)", sm: 420 },
+          width: { xs: "min(380px, 100vw)", sm: "clamp(360px, 42vw, 380px)" },
           maxWidth: "100vw",
           top: drawerTopOffset,
           right: 0,

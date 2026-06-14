@@ -353,8 +353,8 @@ export const APP_MODULES = [
         void projectsModule.handleStopBuild(projectKey),
       onOpenBuildOutput: (projectKey) =>
         void projectsModule.handleOpenBuildOutput(projectKey),
-      onFocusRuntime: (projectKey) =>
-        void projectsModule.handleFocusRuntime(projectKey),
+      onFocusRuntime: (projectKey, debugProfileKey) =>
+        void projectsModule.handleFocusRuntime(projectKey, debugProfileKey),
       onOpenProjectDirectory: (projectKey) =>
         void projectsModule.handleOpenProjectDirectory(projectKey),
     }),

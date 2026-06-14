@@ -10,6 +10,23 @@ base_url = "http://127.0.0.1:8080"
 username = ""
 password_env = "JENKINS_PASSWORD"
 
+# [[defaults.runtime_profiles]]
+# key = "local-browser"
+# label = "本地浏览器"
+# browser = "Google Chrome"
+# browser_user_data_dir = "/tmp/rdevtool-local-browser"
+# proxy_url = "http://127.0.0.1:7897"
+# proxy_bypass = "localhost;127.0.0.1;::1;app.example.test"
+# host_resolver_rules = [
+#   "MAP app.example.test 127.0.0.1",
+# ]
+#
+# [defaults.runtime_profiles.network_proxy]
+# enabled = true
+# proxy_url = "http://127.0.0.1:7897"
+# inject_env = true
+# node_hook = false
+
 [[projects]]
 key = "example-web"
 name = "示例项目"
@@ -26,6 +43,39 @@ command = "npm run dev"
 [projects.focus]
 # bundle_id = "com.example.webapp"
 # url = "http://127.0.0.1:3000"
+
+# [[projects.debug_profiles]]
+# key = "local-chrome"
+# label = "本地联调"
+# runtime_profile = "local-browser"
+# [projects.debug_profiles.local_proxy]
+# enabled = true
+# listen = "127.0.0.1:3000"
+# frontend_url = "http://127.0.0.1:3001"
+# upstream_proxy = "http://127.0.0.1:7897"
+#
+# [[projects.debug_profiles.local_proxy.routes]]
+# match_prefix = "/api"
+# target = "http://api.example.internal"
+# rewrite_prefix = ""
+# headers = { sso = "debug-user" }
+#
+# [projects.debug_profiles.local_proxy.auth_helper]
+# enabled = true
+# path = "/__auth-helper"
+# redirect_path = "/#/"
+#
+# [[projects.debug_profiles.local_proxy.auth_helper.items]]
+# storage = "localStorage"
+# key = "token"
+# from_json_path = "$.token"
+#
+# [[projects.debug_profiles.local_proxy.auth_helper.items]]
+# storage = "cookie"
+# key = "SESSION"
+# from_json_path = "$.session"
+# cookie_path = "/"
+# cookie_same_site = "Lax"
 
 [projects.build]
 command = "npm run build"

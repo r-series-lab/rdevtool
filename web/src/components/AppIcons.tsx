@@ -161,6 +161,33 @@ export function CheckIcon(props: SvgIconProps) {
   );
 }
 
+export function PlusIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
+export function EditIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M16.8 4.2a2.2 2.2 0 0 1 3.1 3.1l-9.8 9.8-4.2 1.1 1.1-4.2 9.8-9.8Zm-8 10.8-.4 1.5 1.5-.4 7.9-7.9-1.1-1.1L8.8 15Z"
+        fill="currentColor"
+      />
+      <path
+        d="M5 20h14v-2H5v2Z"
+        fill="currentColor"
+        opacity=".45"
+      />
+    </SvgIcon>
+  );
+}
+
 export function StarIcon(props: SvgIconProps) {
   return (
     <SvgIcon viewBox="0 0 24 24" {...props}>

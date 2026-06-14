@@ -136,13 +136,77 @@ export type ProjectDebugLocalFileDraft = {
   enabled: boolean;
 };
 
+export type ProjectNetworkProxyDraft = {
+  enabled: boolean;
+  proxyUrl: string;
+  injectEnv: boolean;
+  nodeHook: boolean;
+  noProxy: string;
+};
+
+export type RuntimeProfileDraft = {
+  key: string;
+  label: string;
+  browser?: string | null;
+  browserProfile?: string | null;
+  browserUserDataDir?: string | null;
+  webActionsEnabled: boolean;
+  webActionsPort: number;
+  webActionsUserDataDir?: string | null;
+  browserArgsText: string;
+  proxyUrl: string;
+  proxyBypass: string;
+  hostResolverRulesText: string;
+  networkProxy: ProjectNetworkProxyDraft;
+};
+
+export type ProjectLocalProxyRouteDraft = {
+  enabled: boolean;
+  matchPrefix: string;
+  target: string;
+  rewritePrefix: string;
+  headersText: string;
+};
+
+export type ProjectAuthHelperItemDraft = {
+  enabled: boolean;
+  storage: "localStorage" | "sessionStorage" | "cookie" | string;
+  key: string;
+  fromJsonPath: string;
+  value: string;
+  cookiePath: string;
+  cookieMaxAgeSeconds?: number | null;
+  cookieSameSite: string;
+};
+
+export type ProjectAuthHelperDraft = {
+  enabled: boolean;
+  path: string;
+  redirectPath: string;
+  items: ProjectAuthHelperItemDraft[];
+};
+
+export type ProjectLocalProxyDraft = {
+  enabled: boolean;
+  listen: string;
+  frontendUrl: string;
+  upstreamProxy: string;
+  routes: ProjectLocalProxyRouteDraft[];
+  authHelper: ProjectAuthHelperDraft;
+};
+
 export type ProjectDebugProfileDraft = {
   key: string;
   label: string;
+  runtimeProfile?: string | null;
   envText: string;
   localFiles: ProjectDebugLocalFileDraft[];
   browser?: string | null;
   browserProfile?: string | null;
+  browserUserDataDir?: string | null;
+  browserArgsText: string;
+  networkProxy: ProjectNetworkProxyDraft;
+  localProxy: ProjectLocalProxyDraft;
 };
 
 export type DeployParamConfigKind = "select" | "boolean" | "branch" | "text" | "hidden";
@@ -184,18 +248,28 @@ export type ProjectConfigEditorState = {
   configPath: string;
   jenkinsProfiles: string[];
   defaultBranchRules: ProjectBranchRulesDraft;
+  runtimeProfiles: RuntimeProfileDraft[];
   projects: ProjectConfigDraft[];
 };
 
 export type ProjectDebugProfileSummary = {
   key: string;
   label: string;
+  runtimeProfile?: string | null;
   env: Record<string, string>;
   envCount: number;
   localFileCount: number;
   browser?: string | null;
   browserProfile?: string | null;
+  browserUserDataDir?: string | null;
+  browserArgs: string[];
+  networkProxy: ProjectNetworkProxySummary;
+  localProxy: ProjectLocalProxySummary;
 };
+
+export type ProjectNetworkProxySummary = ProjectNetworkProxyDraft;
+
+export type ProjectLocalProxySummary = ProjectLocalProxyDraft;
 
 export type ProjectRuntimeEntry = {
   key: string;
@@ -245,6 +319,7 @@ export type FinderEntry = {
   url?: string | null;
   browser?: string | null;
   browserProfile?: string | null;
+  runtimeProfile?: string | null;
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
@@ -306,6 +381,7 @@ export type NavigationEditorEntry = {
   url?: string | null;
   browser?: string | null;
   browserProfile?: string | null;
+  runtimeProfile?: string | null;
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;

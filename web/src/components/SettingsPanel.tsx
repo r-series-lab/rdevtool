@@ -11,7 +11,7 @@ import {
   Typography,
 } from "@mui/material";
 import { invoke } from "@tauri-apps/api/core";
-import type { PageKey } from "../app-shell";
+import { ALL_PAGE_KEYS, NAV_ITEM_MAP, type PageKey } from "../app-shell";
 import type {
   DeployParamConfigKind,
   DeployParamConfigSummary,
@@ -24,8 +24,13 @@ import type {
   ProjectCommandConfigDraft,
   ProjectConfigDraft,
   ProjectConfigEditorState,
+  ProjectAuthHelperDraft,
+  ProjectAuthHelperItemDraft,
   ProjectDebugLocalFileDraft,
   ProjectDebugProfileDraft,
+  ProjectLocalProxyDraft,
+  ProjectLocalProxyRouteDraft,
+  ProjectNetworkProxyDraft,
 } from "../app-types";
 import type { AppStyleMode } from "../theme";
 import {
@@ -48,6 +53,10 @@ type SettingsPanelProps = {
   onOpenConfigFile: () => void;
   onOpenNavigationConfigFile: () => void;
   activePage: PageKey;
+  enabledPages: PageKey[];
+  onEnabledPagesChange: (pages: PageKey[]) => void;
+  defaultPage: PageKey;
+  onDefaultPageChange: (page: PageKey) => void;
   onProjectConfigSaved: () => Promise<void> | void;
   onClose: () => void;
 };
@@ -100,6 +109,12 @@ const DEBUG_LOCAL_FILE_MODE_OPTIONS = [
   { value: "append_block", label: "标记区块" },
 ] as const;
 
+const AUTH_HELPER_STORAGE_OPTIONS = [
+  { value: "localStorage", label: "localStorage" },
+  { value: "sessionStorage", label: "sessionStorage" },
+  { value: "cookie", label: "Cookie" },
+] as const;
+
 function commandValue(command: ProjectCommandConfigDraft | undefined) {
   return command ?? { command: "", cwd: null, outputDir: null, envCount: 0 };
 }
@@ -113,15 +128,73 @@ function emptyDebugLocalFile(): ProjectDebugLocalFileDraft {
   };
 }
 
+function emptyNetworkProxy(): ProjectNetworkProxyDraft {
+  return {
+    enabled: false,
+    proxyUrl: "",
+    injectEnv: true,
+    nodeHook: false,
+    noProxy: "localhost,127.0.0.1,::1",
+  };
+}
+
+function emptyLocalProxy(): ProjectLocalProxyDraft {
+  return {
+    enabled: false,
+    listen: "127.0.0.1:3000",
+    frontendUrl: "http://127.0.0.1:3001",
+    upstreamProxy: "",
+    routes: [],
+    authHelper: emptyAuthHelper(),
+  };
+}
+
+function emptyLocalProxyRoute(): ProjectLocalProxyRouteDraft {
+  return {
+    enabled: true,
+    matchPrefix: "/api",
+    target: "http://127.0.0.1:8080",
+    rewritePrefix: "",
+    headersText: "",
+  };
+}
+
+function emptyAuthHelper(): ProjectAuthHelperDraft {
+  return {
+    enabled: false,
+    path: "/__auth-helper",
+    redirectPath: "/#/",
+    items: [],
+  };
+}
+
+function emptyAuthHelperItem(): ProjectAuthHelperItemDraft {
+  return {
+    enabled: true,
+    storage: "localStorage",
+    key: "token",
+    fromJsonPath: "$.token",
+    value: "",
+    cookiePath: "/",
+    cookieMaxAgeSeconds: null,
+    cookieSameSite: "Lax",
+  };
+}
+
 function emptyDebugProfile(existingKeys: string[]): ProjectDebugProfileDraft {
   const key = uniqueConfigKey("debug", existingKeys);
   return {
     key,
-    label: "本地调试",
+    label: "项目运行配置",
+    runtimeProfile: null,
     envText: "",
     localFiles: [],
     browser: null,
     browserProfile: null,
+    browserUserDataDir: null,
+    browserArgsText: "",
+    networkProxy: emptyNetworkProxy(),
+    localProxy: emptyLocalProxy(),
   };
 }
 
@@ -166,6 +239,27 @@ function parseKeywordList(value: string) {
     .filter(Boolean);
 }
 
+function debugProfileMeta(profile: ProjectDebugProfileDraft) {
+  const enabledFiles = (profile.localFiles ?? []).filter((file) => file.enabled).length;
+  const envCount = profile.envText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"))
+    .length;
+  const parts = [
+    profile.runtimeProfile ? `继承 ${profile.runtimeProfile}` : "",
+    envCount > 0 ? `${envCount} env` : "",
+    enabledFiles > 0 ? `${enabledFiles} 文件` : "",
+    profile.browserUserDataDir || profile.browserArgsText?.trim()
+      ? "浏览器参数"
+      : "",
+    profile.networkProxy?.enabled ? "代理" : "",
+    profile.localProxy?.enabled ? "本地代理" : "",
+    profile.localProxy?.authHelper?.enabled ? "Token Helper" : "",
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : "默认";
+}
+
 function navigationBrowserSelectValue(browser?: string | null) {
   const normalized = browser?.trim() ?? "";
   if (!normalized) {
@@ -187,6 +281,9 @@ function navigationBrowserSupportsProfile(browser?: string | null) {
 }
 
 function navigationBrowserLabel(entry: NavigationEditorEntry) {
+  if (entry.runtimeProfile?.trim()) {
+    return `运行配置 ${entry.runtimeProfile.trim()}`;
+  }
   const browser = entry.browser?.trim();
   if (!browser || browser === "current_chrome") {
     return "当前 Chrome";
@@ -204,6 +301,7 @@ function emptyNavigationEntry(kind: NavigationEditorEntryKind = "url"): Navigati
     url: "",
     browser: null,
     browserProfile: null,
+    runtimeProfile: null,
     bundleId: null,
     appName: null,
     script: null,
@@ -244,6 +342,10 @@ export function SettingsPanel({
   onOpenConfigFile,
   onOpenNavigationConfigFile,
   activePage,
+  enabledPages,
+  onEnabledPagesChange,
+  defaultPage,
+  onDefaultPageChange,
   onProjectConfigSaved,
   onClose,
 }: SettingsPanelProps) {
@@ -276,6 +378,7 @@ export function SettingsPanel({
     [editorState, selectedKey],
   );
   const jenkinsProfileOptions = editorState?.jenkinsProfiles ?? [];
+  const runtimeProfiles = editorState?.runtimeProfiles ?? [];
   const defaultBranchRules = editorState?.defaultBranchRules ?? {
     sourceKeywords: [],
     targetKeywords: [],
@@ -449,11 +552,17 @@ export function SettingsPanel({
   }
 
   function applyProjectEditorState(nextState: ProjectConfigEditorState) {
-    setEditorState((current) =>
-      defaultBranchRulesDirty && current
-        ? { ...nextState, defaultBranchRules: current.defaultBranchRules }
-        : nextState,
-    );
+    setEditorState((current) => {
+      if (!current) {
+        return nextState;
+      }
+      return {
+        ...nextState,
+        defaultBranchRules: defaultBranchRulesDirty
+          ? current.defaultBranchRules
+          : nextState.defaultBranchRules,
+      };
+    });
   }
 
   function updateSelectedProject(updater: (project: ProjectConfigDraft) => ProjectConfigDraft) {
@@ -541,7 +650,7 @@ export function SettingsPanel({
     const nextProfile = emptyDebugProfile(profiles.map((profile) => profile.key));
     updateDebugProfiles((current) => [...current, nextProfile]);
     setSelectedDebugProfileIndex(profiles.length);
-    setStatus("已新增调试档案，保存后生效");
+    setStatus("已新增项目运行配置，保存后生效");
   }
 
   function updateDebugProfileAt(
@@ -552,6 +661,233 @@ export function SettingsPanel({
       profiles.map((profile, index) =>
         index === profileIndex ? { ...profile, ...patch } : profile,
       ),
+    );
+  }
+
+  function updateDebugProfileNetworkProxy(
+    profileIndex: number,
+    patch: Partial<ProjectNetworkProxyDraft>,
+  ) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) =>
+        index === profileIndex
+          ? {
+              ...profile,
+              networkProxy: {
+                ...emptyNetworkProxy(),
+                ...(profile.networkProxy ?? {}),
+                ...patch,
+              },
+            }
+          : profile,
+      ),
+    );
+  }
+
+  function updateDebugProfileLocalProxy(
+    profileIndex: number,
+    patch: Partial<ProjectLocalProxyDraft>,
+  ) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) =>
+        index === profileIndex
+          ? {
+              ...profile,
+              localProxy: {
+                ...emptyLocalProxy(),
+                ...(profile.localProxy ?? {}),
+                ...patch,
+              },
+            }
+          : profile,
+      ),
+    );
+  }
+
+  function updateDebugProfileAuthHelper(
+    profileIndex: number,
+    patch: Partial<ProjectAuthHelperDraft>,
+  ) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) => {
+        if (index !== profileIndex) {
+          return profile;
+        }
+        const localProxy = {
+          ...emptyLocalProxy(),
+          ...(profile.localProxy ?? {}),
+        };
+        return {
+          ...profile,
+          localProxy: {
+            ...localProxy,
+            authHelper: {
+              ...emptyAuthHelper(),
+              ...(localProxy.authHelper ?? {}),
+              ...patch,
+            },
+          },
+        };
+      }),
+    );
+  }
+
+  function addLocalProxyRoute(profileIndex: number) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) => {
+        if (index !== profileIndex) {
+          return profile;
+        }
+        const localProxy = {
+          ...emptyLocalProxy(),
+          ...(profile.localProxy ?? {}),
+        };
+        return {
+          ...profile,
+          localProxy: {
+            ...localProxy,
+            routes: [...(localProxy.routes ?? []), emptyLocalProxyRoute()],
+          },
+        };
+      }),
+    );
+  }
+
+  function updateLocalProxyRouteAt(
+    profileIndex: number,
+    routeIndex: number,
+    patch: Partial<ProjectLocalProxyRouteDraft>,
+  ) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) => {
+        if (index !== profileIndex) {
+          return profile;
+        }
+        const localProxy = {
+          ...emptyLocalProxy(),
+          ...(profile.localProxy ?? {}),
+        };
+        return {
+          ...profile,
+          localProxy: {
+            ...localProxy,
+            routes: (localProxy.routes ?? []).map((route, nextRouteIndex) =>
+              nextRouteIndex === routeIndex ? { ...route, ...patch } : route,
+            ),
+          },
+        };
+      }),
+    );
+  }
+
+  function deleteLocalProxyRouteAt(profileIndex: number, routeIndex: number) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) => {
+        if (index !== profileIndex) {
+          return profile;
+        }
+        const localProxy = {
+          ...emptyLocalProxy(),
+          ...(profile.localProxy ?? {}),
+        };
+        return {
+          ...profile,
+          localProxy: {
+            ...localProxy,
+            routes: (localProxy.routes ?? []).filter((_, index) => index !== routeIndex),
+          },
+        };
+      }),
+    );
+  }
+
+  function addAuthHelperItem(profileIndex: number) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) => {
+        if (index !== profileIndex) {
+          return profile;
+        }
+        const localProxy = {
+          ...emptyLocalProxy(),
+          ...(profile.localProxy ?? {}),
+        };
+        const authHelper = {
+          ...emptyAuthHelper(),
+          ...(localProxy.authHelper ?? {}),
+        };
+        return {
+          ...profile,
+          localProxy: {
+            ...localProxy,
+            authHelper: {
+              ...authHelper,
+              items: [...(authHelper.items ?? []), emptyAuthHelperItem()],
+            },
+          },
+        };
+      }),
+    );
+  }
+
+  function updateAuthHelperItemAt(
+    profileIndex: number,
+    itemIndex: number,
+    patch: Partial<ProjectAuthHelperItemDraft>,
+  ) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) => {
+        if (index !== profileIndex) {
+          return profile;
+        }
+        const localProxy = {
+          ...emptyLocalProxy(),
+          ...(profile.localProxy ?? {}),
+        };
+        const authHelper = {
+          ...emptyAuthHelper(),
+          ...(localProxy.authHelper ?? {}),
+        };
+        return {
+          ...profile,
+          localProxy: {
+            ...localProxy,
+            authHelper: {
+              ...authHelper,
+              items: (authHelper.items ?? []).map((item, nextItemIndex) =>
+                nextItemIndex === itemIndex ? { ...item, ...patch } : item,
+              ),
+            },
+          },
+        };
+      }),
+    );
+  }
+
+  function deleteAuthHelperItemAt(profileIndex: number, itemIndex: number) {
+    updateDebugProfiles((profiles) =>
+      profiles.map((profile, index) => {
+        if (index !== profileIndex) {
+          return profile;
+        }
+        const localProxy = {
+          ...emptyLocalProxy(),
+          ...(profile.localProxy ?? {}),
+        };
+        const authHelper = {
+          ...emptyAuthHelper(),
+          ...(localProxy.authHelper ?? {}),
+        };
+        return {
+          ...profile,
+          localProxy: {
+            ...localProxy,
+            authHelper: {
+              ...authHelper,
+              items: (authHelper.items ?? []).filter((_, index) => index !== itemIndex),
+            },
+          },
+        };
+      }),
     );
   }
 
@@ -1098,9 +1434,99 @@ export function SettingsPanel({
     }
   }
 
+  function handleMenuEnabledChange(page: PageKey, enabled: boolean) {
+    const nextEnabledPages = ALL_PAGE_KEYS.filter((item) =>
+      item === page ? enabled : enabledPages.includes(item),
+    );
+    if (nextEnabledPages.length === 0) {
+      return;
+    }
+    onEnabledPagesChange(nextEnabledPages);
+    if (!nextEnabledPages.includes(defaultPage)) {
+      onDefaultPageChange(nextEnabledPages[0]);
+    }
+  }
+
   function renderGeneralSection() {
     return (
       <Stack className="settings-overview" spacing={1.15}>
+        <section className="settings-list-section" aria-labelledby="settings-menu-title">
+          <header className="settings-list-head">
+            <Typography id="settings-menu-title" variant="subtitle2">
+              菜单
+            </Typography>
+            <Typography variant="caption">未启用的菜单不会展示</Typography>
+          </header>
+          <div className="settings-list">
+            <div className="settings-list-row settings-list-row--split">
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">展示菜单</Typography>
+                <Typography variant="caption">至少保留一个工作台菜单。</Typography>
+              </div>
+              <Stack
+                direction="row"
+                spacing={0.4}
+                useFlexGap
+                flexWrap="wrap"
+                justifyContent="flex-end"
+              >
+                {ALL_PAGE_KEYS.map((page) => {
+                  const checked = enabledPages.includes(page);
+                  return (
+                    <FormControlLabel
+                      key={page}
+                      control={
+                        <Checkbox
+                          size="small"
+                          checked={checked}
+                          disabled={checked && enabledPages.length === 1}
+                          onChange={(event) =>
+                            handleMenuEnabledChange(page, event.target.checked)
+                          }
+                        />
+                      }
+                      label={NAV_ITEM_MAP[page].shortLabel}
+                      sx={{
+                        m: 0,
+                        pr: 0.65,
+                        borderRadius: "9px",
+                        border: "1px solid var(--line-soft)",
+                        bgcolor: "rgba(255,255,255,0.018)",
+                        "& .MuiFormControlLabel-label": {
+                          fontSize: "0.76rem",
+                          fontWeight: 700,
+                        },
+                      }}
+                    />
+                  );
+                })}
+              </Stack>
+            </div>
+            <div className="settings-list-row settings-list-row--split">
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">默认菜单</Typography>
+                <Typography variant="caption">应用启动后优先进入此菜单。</Typography>
+              </div>
+              <TextField
+                select
+                size="small"
+                value={defaultPage}
+                onChange={(event) =>
+                  onDefaultPageChange(event.target.value as PageKey)
+                }
+                sx={{ width: 156, flexShrink: 0 }}
+                inputProps={{ "aria-label": "默认菜单" }}
+              >
+                {enabledPages.map((page) => (
+                  <MenuItem key={page} value={page}>
+                    {NAV_ITEM_MAP[page].label}
+                  </MenuItem>
+                ))}
+              </TextField>
+            </div>
+          </div>
+        </section>
+
         <section
           className="settings-list-section settings-list-section--appearance"
           aria-labelledby="settings-appearance-title"
@@ -1275,9 +1701,25 @@ export function SettingsPanel({
 
   function renderDebugProfilesBlock() {
     const profiles = selectedProject?.debugProfiles ?? [];
+    const selectedNetworkProxy = selectedDebugProfile
+      ? {
+          ...emptyNetworkProxy(),
+          ...(selectedDebugProfile.networkProxy ?? {}),
+        }
+      : emptyNetworkProxy();
+    const selectedLocalProxy = selectedDebugProfile
+      ? {
+          ...emptyLocalProxy(),
+          ...(selectedDebugProfile.localProxy ?? {}),
+        }
+      : emptyLocalProxy();
+    const selectedAuthHelper = {
+      ...emptyAuthHelper(),
+      ...(selectedLocalProxy.authHelper ?? {}),
+    };
     return renderProjectSectionBlock(
-      "调试档案",
-      "启动前应用 env 和 gitignored 本地覆盖文件",
+      "项目运行配置",
+      "启动前应用项目环境、API 代理、Token Helper 和本地覆盖文件",
       <Stack spacing={1}>
         <div className="settings-deploy-switcher settings-debug-profile-switcher">
           {profiles.map((profile, index) => (
@@ -1290,9 +1732,7 @@ export function SettingsPanel({
               <Typography variant="caption">
                 {profile.label || profile.key || `档案 ${index + 1}`}
               </Typography>
-              <Typography variant="caption">
-                {(profile.localFiles ?? []).filter((file) => file.enabled).length} 文件
-              </Typography>
+              <Typography variant="caption">{debugProfileMeta(profile)}</Typography>
             </button>
           ))}
           <Button
@@ -1307,7 +1747,7 @@ export function SettingsPanel({
 
         {profiles.length === 0 ? (
           <div className="settings-empty-row">
-            暂无调试档案。新增后可在访达项目卡片里选择并启动。
+            暂无项目运行配置。新增后可在项目卡片里选择并启动。
           </div>
         ) : null}
 
@@ -1353,6 +1793,24 @@ export function SettingsPanel({
                 }
               />
               <TextField
+                select
+                size="small"
+                label="继承运行配置"
+                value={selectedDebugProfile.runtimeProfile ?? ""}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    runtimeProfile: event.target.value || null,
+                  })
+                }
+              >
+                <MenuItem value="">不继承</MenuItem>
+                {runtimeProfiles.map((profile) => (
+                  <MenuItem key={profile.key} value={profile.key}>
+                    {profile.label || profile.key}
+                  </MenuItem>
+                ))}
+              </TextField>
+              <TextField
                 size="small"
                 label="浏览器"
                 value={selectedDebugProfile.browser ?? ""}
@@ -1375,6 +1833,34 @@ export function SettingsPanel({
                 placeholder="Profile 2"
               />
               <TextField
+                size="small"
+                label="浏览器数据目录"
+                value={selectedDebugProfile.browserUserDataDir ?? ""}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    browserUserDataDir: event.target.value,
+                  })
+                }
+                placeholder="/tmp/rdevtool-browser-profile"
+              />
+              <TextField
+                className="settings-form-grid-wide"
+                size="small"
+                label="浏览器参数"
+                value={selectedDebugProfile.browserArgsText ?? ""}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    browserArgsText: event.target.value,
+                  })
+                }
+                placeholder={
+                  "--host-resolver-rules=MAP app.example.test 127.0.0.1"
+                }
+                helperText="每行一个 Chrome 参数；参数值不要额外包 shell 引号。"
+                multiline
+                minRows={2}
+              />
+              <TextField
                 className="settings-form-grid-wide"
                 size="small"
                 label="环境变量"
@@ -1384,10 +1870,535 @@ export function SettingsPanel({
                     envText: event.target.value,
                   })
                 }
-                placeholder={"VITE_ENV=uat3\nVITE_SKIP_SENTRY=true"}
+                placeholder={"APP_ENV=local\nFEATURE_FLAG=true"}
                 multiline
                 minRows={3}
               />
+            </div>
+
+            <div
+              className={`settings-param-editor settings-network-proxy${
+                selectedNetworkProxy.enabled ? " is-enabled" : ""
+              }`}
+              aria-label="网络代理"
+            >
+              <div className="settings-param-editor-head">
+                <FormControlLabel
+                  className="settings-checkbox-row"
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={selectedNetworkProxy.enabled}
+                      onChange={(event) =>
+                        updateDebugProfileNetworkProxy(selectedDebugProfileIndex, {
+                          enabled: event.target.checked,
+                        })
+                      }
+                    />
+                  }
+                  label="启用网络代理"
+                />
+                <Chip
+                  size="small"
+                  label={
+                    selectedNetworkProxy.enabled
+                      ? selectedNetworkProxy.nodeHook
+                        ? "env + Node Hook"
+                        : "env"
+                      : "直连"
+                  }
+                  variant="outlined"
+                />
+              </div>
+              <div className="settings-form-grid settings-form-grid-tight">
+                <TextField
+                  className="settings-form-grid-wide"
+                  size="small"
+                  label="代理地址"
+                  value={selectedNetworkProxy.proxyUrl}
+                  onChange={(event) =>
+                    updateDebugProfileNetworkProxy(selectedDebugProfileIndex, {
+                      proxyUrl: event.target.value,
+                    })
+                  }
+                  placeholder="http://127.0.0.1:7897"
+                  disabled={!selectedNetworkProxy.enabled}
+                />
+                <TextField
+                  size="small"
+                  label="NO_PROXY"
+                  value={selectedNetworkProxy.noProxy}
+                  onChange={(event) =>
+                    updateDebugProfileNetworkProxy(selectedDebugProfileIndex, {
+                      noProxy: event.target.value,
+                    })
+                  }
+                  placeholder="localhost,127.0.0.1,::1"
+                  disabled={!selectedNetworkProxy.enabled || !selectedNetworkProxy.injectEnv}
+                />
+                <div className="settings-network-proxy-toggles">
+                  <FormControlLabel
+                    className="settings-checkbox-row"
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={selectedNetworkProxy.injectEnv}
+                        onChange={(event) =>
+                          updateDebugProfileNetworkProxy(selectedDebugProfileIndex, {
+                            injectEnv: event.target.checked,
+                          })
+                        }
+                        disabled={!selectedNetworkProxy.enabled}
+                      />
+                    }
+                    label="注入 env"
+                  />
+                  <FormControlLabel
+                    className="settings-checkbox-row"
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={selectedNetworkProxy.nodeHook}
+                        onChange={(event) =>
+                          updateDebugProfileNetworkProxy(selectedDebugProfileIndex, {
+                            nodeHook: event.target.checked,
+                          })
+                        }
+                        disabled={!selectedNetworkProxy.enabled}
+                      />
+                    }
+                    label="Node Hook"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div
+              className={`settings-param-editor settings-network-proxy${
+                selectedLocalProxy.enabled ? " is-enabled" : ""
+              }`}
+              aria-label="本地 API 代理"
+            >
+              <div className="settings-param-editor-head">
+                <FormControlLabel
+                  className="settings-checkbox-row"
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={selectedLocalProxy.enabled}
+                      onChange={(event) =>
+                        updateDebugProfileLocalProxy(selectedDebugProfileIndex, {
+                          enabled: event.target.checked,
+                        })
+                      }
+                    />
+                  }
+                  label="启用本地 API 代理"
+                />
+                <Chip
+                  size="small"
+                  label={selectedLocalProxy.enabled ? selectedLocalProxy.listen : "关闭"}
+                  variant="outlined"
+                />
+              </div>
+              <div className="settings-form-grid settings-form-grid-tight">
+                <TextField
+                  size="small"
+                  label="监听地址"
+                  value={selectedLocalProxy.listen}
+                  onChange={(event) =>
+                    updateDebugProfileLocalProxy(selectedDebugProfileIndex, {
+                      listen: event.target.value,
+                    })
+                  }
+                  placeholder="127.0.0.1:3000"
+                  disabled={!selectedLocalProxy.enabled}
+                />
+                <TextField
+                  size="small"
+                  label="前端地址"
+                  value={selectedLocalProxy.frontendUrl}
+                  onChange={(event) =>
+                    updateDebugProfileLocalProxy(selectedDebugProfileIndex, {
+                      frontendUrl: event.target.value,
+                    })
+                  }
+                  placeholder="http://127.0.0.1:3001"
+                  disabled={!selectedLocalProxy.enabled}
+                />
+                <TextField
+                  className="settings-form-grid-wide"
+                  size="small"
+                  label="上游 HTTP 代理"
+                  value={selectedLocalProxy.upstreamProxy}
+                  onChange={(event) =>
+                    updateDebugProfileLocalProxy(selectedDebugProfileIndex, {
+                      upstreamProxy: event.target.value,
+                    })
+                  }
+                  placeholder="http://127.0.0.1:7897"
+                  disabled={!selectedLocalProxy.enabled}
+                  helperText="内网 API 需要走代理时填写；留空表示直连。"
+                />
+              </div>
+
+              <div className="settings-param-list" aria-label="本地 API 代理路由">
+                <div className="settings-param-list-head">
+                  <Typography variant="caption">
+                    {(selectedLocalProxy.routes ?? []).length} 条路由
+                  </Typography>
+                  <Button
+                    variant="outlined"
+                    color="inherit"
+                    onClick={() => addLocalProxyRoute(selectedDebugProfileIndex)}
+                    disabled={saving || !selectedLocalProxy.enabled}
+                  >
+                    添加路由
+                  </Button>
+                </div>
+                {(selectedLocalProxy.routes ?? []).length === 0 ? (
+                  <div className="settings-empty-row">暂无 API 路由</div>
+                ) : (
+                  (selectedLocalProxy.routes ?? []).map((route, routeIndex) => (
+                    <div
+                      key={`local-proxy-route-${selectedDebugProfileIndex}-${routeIndex}`}
+                      className="settings-param-editor"
+                    >
+                      <div className="settings-param-editor-head">
+                        <FormControlLabel
+                          className="settings-checkbox-row"
+                          control={
+                            <Checkbox
+                              size="small"
+                              checked={route.enabled}
+                              onChange={(event) =>
+                                updateLocalProxyRouteAt(
+                                  selectedDebugProfileIndex,
+                                  routeIndex,
+                                  { enabled: event.target.checked },
+                                )
+                              }
+                              disabled={!selectedLocalProxy.enabled}
+                            />
+                          }
+                          label="启用"
+                        />
+                        <Button
+                          variant="outlined"
+                          color="inherit"
+                          startIcon={<TrashIcon fontSize="small" />}
+                          onClick={() =>
+                            deleteLocalProxyRouteAt(selectedDebugProfileIndex, routeIndex)
+                          }
+                          disabled={saving}
+                        >
+                          删除路由
+                        </Button>
+                      </div>
+                      <div className="settings-form-grid settings-form-grid-tight">
+                        <TextField
+                          size="small"
+                          label="匹配前缀"
+                          value={route.matchPrefix}
+                          onChange={(event) =>
+                            updateLocalProxyRouteAt(
+                              selectedDebugProfileIndex,
+                              routeIndex,
+                              { matchPrefix: event.target.value },
+                            )
+                          }
+                          placeholder="/api"
+                          disabled={!selectedLocalProxy.enabled || !route.enabled}
+                        />
+                        <TextField
+                          size="small"
+                          label="目标地址"
+                          value={route.target}
+                          onChange={(event) =>
+                            updateLocalProxyRouteAt(
+                              selectedDebugProfileIndex,
+                              routeIndex,
+                              { target: event.target.value },
+                            )
+                          }
+                          placeholder="http://nginx-api.example.com"
+                          disabled={!selectedLocalProxy.enabled || !route.enabled}
+                        />
+                        <TextField
+                          size="small"
+                          label="改写前缀"
+                          value={route.rewritePrefix}
+                          onChange={(event) =>
+                            updateLocalProxyRouteAt(
+                              selectedDebugProfileIndex,
+                              routeIndex,
+                              { rewritePrefix: event.target.value },
+                            )
+                          }
+                          placeholder="/api-v2"
+                          disabled={!selectedLocalProxy.enabled || !route.enabled}
+                        />
+                        <TextField
+                          className="settings-form-grid-wide"
+                          size="small"
+                          label="注入 Header"
+                          value={route.headersText}
+                          onChange={(event) =>
+                            updateLocalProxyRouteAt(
+                              selectedDebugProfileIndex,
+                              routeIndex,
+                              { headersText: event.target.value },
+                            )
+                          }
+                          placeholder={"x-debug-user=example\nx-debug=true"}
+                          multiline
+                          minRows={2}
+                          disabled={!selectedLocalProxy.enabled || !route.enabled}
+                        />
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <div className="settings-param-list" aria-label="Token Helper">
+                <div className="settings-param-list-head">
+                  <FormControlLabel
+                    className="settings-checkbox-row"
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={selectedAuthHelper.enabled}
+                        onChange={(event) =>
+                          updateDebugProfileAuthHelper(selectedDebugProfileIndex, {
+                            enabled: event.target.checked,
+                          })
+                        }
+                        disabled={!selectedLocalProxy.enabled}
+                      />
+                    }
+                    label="启用 Token Helper"
+                  />
+                  <Button
+                    variant="outlined"
+                    color="inherit"
+                    onClick={() => addAuthHelperItem(selectedDebugProfileIndex)}
+                    disabled={
+                      saving || !selectedLocalProxy.enabled || !selectedAuthHelper.enabled
+                    }
+                  >
+                    添加写入项
+                  </Button>
+                </div>
+                <div className="settings-form-grid settings-form-grid-tight">
+                  <TextField
+                    size="small"
+                    label="Helper 路径"
+                    value={selectedAuthHelper.path}
+                    onChange={(event) =>
+                      updateDebugProfileAuthHelper(selectedDebugProfileIndex, {
+                        path: event.target.value,
+                      })
+                    }
+                    placeholder="/__auth-helper"
+                    disabled={!selectedLocalProxy.enabled || !selectedAuthHelper.enabled}
+                  />
+                  <TextField
+                    size="small"
+                    label="写入后跳转"
+                    value={selectedAuthHelper.redirectPath}
+                    onChange={(event) =>
+                      updateDebugProfileAuthHelper(selectedDebugProfileIndex, {
+                        redirectPath: event.target.value,
+                      })
+                    }
+                    placeholder="/#/"
+                    disabled={!selectedLocalProxy.enabled || !selectedAuthHelper.enabled}
+                  />
+                </div>
+                {(selectedAuthHelper.items ?? []).length === 0 ? (
+                  <div className="settings-empty-row">暂无写入项</div>
+                ) : (
+                  (selectedAuthHelper.items ?? []).map((item, itemIndex) => (
+                    <div
+                      key={`auth-helper-item-${selectedDebugProfileIndex}-${itemIndex}`}
+                      className="settings-param-editor"
+                    >
+                      <div className="settings-param-editor-head">
+                        <FormControlLabel
+                          className="settings-checkbox-row"
+                          control={
+                            <Checkbox
+                              size="small"
+                              checked={item.enabled}
+                              onChange={(event) =>
+                                updateAuthHelperItemAt(
+                                  selectedDebugProfileIndex,
+                                  itemIndex,
+                                  { enabled: event.target.checked },
+                                )
+                              }
+                              disabled={!selectedLocalProxy.enabled || !selectedAuthHelper.enabled}
+                            />
+                          }
+                          label="启用"
+                        />
+                        <Button
+                          variant="outlined"
+                          color="inherit"
+                          startIcon={<TrashIcon fontSize="small" />}
+                          onClick={() =>
+                            deleteAuthHelperItemAt(selectedDebugProfileIndex, itemIndex)
+                          }
+                          disabled={saving}
+                        >
+                          删除写入项
+                        </Button>
+                      </div>
+                      <div className="settings-form-grid settings-form-grid-tight">
+                        <TextField
+                          select
+                          size="small"
+                          label="存储位置"
+                          value={item.storage}
+                          onChange={(event) =>
+                            updateAuthHelperItemAt(
+                              selectedDebugProfileIndex,
+                              itemIndex,
+                              { storage: event.target.value },
+                            )
+                          }
+                          disabled={
+                            !selectedLocalProxy.enabled ||
+                            !selectedAuthHelper.enabled ||
+                            !item.enabled
+                          }
+                        >
+                          {AUTH_HELPER_STORAGE_OPTIONS.map((storage) => (
+                            <MenuItem key={storage.value} value={storage.value}>
+                              {storage.label}
+                            </MenuItem>
+                          ))}
+                        </TextField>
+                        <TextField
+                          size="small"
+                          label="Key"
+                          value={item.key}
+                          onChange={(event) =>
+                            updateAuthHelperItemAt(
+                              selectedDebugProfileIndex,
+                              itemIndex,
+                              { key: event.target.value },
+                            )
+                          }
+                          placeholder="token"
+                          disabled={
+                            !selectedLocalProxy.enabled ||
+                            !selectedAuthHelper.enabled ||
+                            !item.enabled
+                          }
+                        />
+                        <TextField
+                          size="small"
+                          label="JSON 路径"
+                          value={item.fromJsonPath}
+                          onChange={(event) =>
+                            updateAuthHelperItemAt(
+                              selectedDebugProfileIndex,
+                              itemIndex,
+                              { fromJsonPath: event.target.value },
+                            )
+                          }
+                          placeholder="$.token"
+                          disabled={
+                            !selectedLocalProxy.enabled ||
+                            !selectedAuthHelper.enabled ||
+                            !item.enabled
+                          }
+                        />
+                        <TextField
+                          size="small"
+                          label="固定值"
+                          value={item.value}
+                          onChange={(event) =>
+                            updateAuthHelperItemAt(
+                              selectedDebugProfileIndex,
+                              itemIndex,
+                              { value: event.target.value },
+                            )
+                          }
+                          placeholder="留空则从 JSON 路径读取"
+                          disabled={
+                            !selectedLocalProxy.enabled ||
+                            !selectedAuthHelper.enabled ||
+                            !item.enabled
+                          }
+                        />
+                        <TextField
+                          size="small"
+                          label="Cookie Path"
+                          value={item.cookiePath}
+                          onChange={(event) =>
+                            updateAuthHelperItemAt(
+                              selectedDebugProfileIndex,
+                              itemIndex,
+                              { cookiePath: event.target.value },
+                            )
+                          }
+                          disabled={
+                            item.storage !== "cookie" ||
+                            !selectedLocalProxy.enabled ||
+                            !selectedAuthHelper.enabled ||
+                            !item.enabled
+                          }
+                        />
+                        <TextField
+                          size="small"
+                          type="number"
+                          label="Cookie Max-Age"
+                          value={item.cookieMaxAgeSeconds ?? ""}
+                          onChange={(event) =>
+                            updateAuthHelperItemAt(
+                              selectedDebugProfileIndex,
+                              itemIndex,
+                              {
+                                cookieMaxAgeSeconds: event.target.value
+                                  ? Number(event.target.value)
+                                  : null,
+                              },
+                            )
+                          }
+                          disabled={
+                            item.storage !== "cookie" ||
+                            !selectedLocalProxy.enabled ||
+                            !selectedAuthHelper.enabled ||
+                            !item.enabled
+                          }
+                        />
+                        <TextField
+                          size="small"
+                          label="Cookie SameSite"
+                          value={item.cookieSameSite}
+                          onChange={(event) =>
+                            updateAuthHelperItemAt(
+                              selectedDebugProfileIndex,
+                              itemIndex,
+                              { cookieSameSite: event.target.value },
+                            )
+                          }
+                          placeholder="Lax"
+                          disabled={
+                            item.storage !== "cookie" ||
+                            !selectedLocalProxy.enabled ||
+                            !selectedAuthHelper.enabled ||
+                            !item.enabled
+                          }
+                        />
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
             </div>
 
             <div className="settings-param-list" aria-label="本地覆盖文件">
@@ -1780,6 +2791,24 @@ export function SettingsPanel({
             <Chip size="small" label={navigationBrowserLabel(entry)} variant="outlined" />
           </div>
           <div className="settings-form-grid settings-form-grid-tight">
+            <TextField
+              select
+              size="small"
+              label="运行配置"
+              value={entry.runtimeProfile ?? ""}
+              onChange={(event) =>
+                updateNavigationEntryAt(categoryIndex, entryIndex, {
+                  runtimeProfile: event.target.value || null,
+                })
+              }
+            >
+              <MenuItem value="">不使用</MenuItem>
+              {runtimeProfiles.map((profile) => (
+                <MenuItem key={profile.key} value={profile.key}>
+                  {profile.label || profile.key}
+                </MenuItem>
+              ))}
+            </TextField>
             <TextField
               select
               size="small"

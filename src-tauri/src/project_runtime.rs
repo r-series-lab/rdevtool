@@ -1,8 +1,11 @@
 use rdevtool_core::config::{
-    AppConfig, ProjectCommandConfig, ProjectConfig, ProjectDebugProfileConfig, default_config_dir,
+    AppConfig, ProjectAuthHelperConfig, ProjectAuthHelperItemConfig, ProjectCommandConfig,
+    ProjectConfig, ProjectDebugProfileConfig, ProjectLocalProxyConfig,
+    ProjectLocalProxyRouteConfig, RuntimeProfileConfig, default_config_dir,
 };
 use rdevtool_core::navigation::open_in_current_chrome;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -57,6 +60,64 @@ pub struct ProjectDebugProfileSummary {
     pub local_file_count: usize,
     pub browser: Option<String>,
     pub browser_profile: Option<String>,
+    pub browser_user_data_dir: Option<String>,
+    pub browser_args: Vec<String>,
+    pub network_proxy: ProjectNetworkProxySummary,
+    pub local_proxy: ProjectLocalProxySummary,
+    pub runtime_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectNetworkProxySummary {
+    pub enabled: bool,
+    pub proxy_url: String,
+    pub inject_env: bool,
+    pub node_hook: bool,
+    pub no_proxy: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLocalProxySummary {
+    pub enabled: bool,
+    pub listen: String,
+    pub frontend_url: String,
+    pub upstream_proxy: String,
+    pub routes: Vec<ProjectLocalProxyRouteSummary>,
+    pub auth_helper: ProjectAuthHelperSummary,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLocalProxyRouteSummary {
+    pub enabled: bool,
+    pub match_prefix: String,
+    pub target: String,
+    pub rewrite_prefix: String,
+    pub headers_text: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAuthHelperSummary {
+    pub enabled: bool,
+    pub path: String,
+    pub redirect_path: String,
+    pub items: Vec<ProjectAuthHelperItemSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectAuthHelperItemSummary {
+    pub enabled: bool,
+    pub storage: String,
+    pub key: String,
+    pub from_json_path: String,
+    pub value: String,
+    pub cookie_path: String,
+    pub cookie_max_age_seconds: Option<i64>,
+    pub cookie_same_site: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -116,6 +177,13 @@ struct RunningProjectProcess {
     child: Child,
     pid: u32,
     started_at_ms: u64,
+    local_proxy: Option<RunningLocalProxyProcess>,
+}
+
+struct RunningLocalProxyProcess {
+    child: Child,
+    pid: u32,
+    listen: String,
 }
 
 #[derive(Clone)]
@@ -169,6 +237,404 @@ enum ProjectCommandKind {
     Build,
 }
 
+const NODE_PROXY_HOOK_FILENAME: &str = "rdevtool-node-proxy-hook.cjs";
+const LOCAL_PROXY_SCRIPT_FILENAME: &str = "rdevtool-local-proxy.cjs";
+const NODE_PROXY_HOOK: &str = r#"'use strict';
+
+const http = require('http');
+const { URL } = require('url');
+
+const proxyRaw = process.env.RDEVTOOL_NETWORK_PROXY_URL || process.env.HTTP_PROXY || process.env.http_proxy || '';
+let proxyUrl = null;
+try {
+  proxyUrl = proxyRaw ? new URL(proxyRaw) : null;
+} catch (_) {
+  proxyUrl = null;
+}
+
+if (proxyUrl && proxyUrl.protocol === 'http:') {
+  const originalRequest = http.request;
+  const originalGet = http.get;
+  const noProxy = (process.env.RDEVTOOL_NETWORK_PROXY_NO_PROXY || process.env.NO_PROXY || process.env.no_proxy || '')
+    .split(',')
+    .map((item) => item.trim().toLowerCase())
+    .filter(Boolean);
+
+  function stripPort(hostname) {
+    return String(hostname || '').replace(/^\[/, '').replace(/\]$/, '').replace(/:\d+$/, '').toLowerCase();
+  }
+
+  function shouldBypass(hostname) {
+    const host = stripPort(hostname);
+    if (!host) return false;
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
+    return noProxy.some((rule) => {
+      if (rule === '*') return true;
+      const normalized = rule.replace(/^\./, '');
+      return host === normalized || host.endsWith(`.${normalized}`);
+    });
+  }
+
+  function optionsToUrl(options) {
+    const protocol = options.protocol || 'http:';
+    const host = options.hostname || options.host || 'localhost';
+    const port = options.port && !String(host).includes(':') ? `:${options.port}` : '';
+    const path = options.path || `${options.pathname || '/'}${options.search || ''}`;
+    return new URL(path, `${protocol}//${host}${port}`);
+  }
+
+  function normalizeArgs(args) {
+    const parts = Array.prototype.slice.call(args);
+    const callback = typeof parts[parts.length - 1] === 'function' ? parts.pop() : undefined;
+    let url;
+    let options = {};
+
+    if (typeof parts[0] === 'string' || parts[0] instanceof URL) {
+      url = new URL(parts[0].toString());
+      options = Object.assign({}, parts[1] || {});
+    } else {
+      options = Object.assign({}, parts[0] || {});
+      url = optionsToUrl(options);
+    }
+
+    return { url, options, callback };
+  }
+
+  function applyProxyAuth(headers) {
+    if (!proxyUrl.username && !proxyUrl.password) return headers;
+    const username = decodeURIComponent(proxyUrl.username || '');
+    const password = decodeURIComponent(proxyUrl.password || '');
+    return Object.assign({}, headers, {
+      'Proxy-Authorization': `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`,
+    });
+  }
+
+  function requestWithProxy() {
+    const normalized = normalizeArgs(arguments);
+    if (normalized.url.protocol !== 'http:' || shouldBypass(normalized.url.hostname)) {
+      return originalRequest.apply(http, arguments);
+    }
+
+    const headers = Object.assign({}, normalized.options.headers || {});
+    if (!headers.Host && !headers.host) {
+      headers.Host = normalized.url.host;
+    }
+
+    const proxyOptions = Object.assign({}, normalized.options, {
+      protocol: 'http:',
+      hostname: proxyUrl.hostname,
+      host: proxyUrl.hostname,
+      port: proxyUrl.port || 80,
+      path: normalized.url.href,
+      headers: applyProxyAuth(headers),
+    });
+    delete proxyOptions.href;
+    delete proxyOptions.origin;
+
+    return originalRequest.call(http, proxyOptions, normalized.callback);
+  }
+
+  http.request = requestWithProxy;
+  http.get = function getWithProxy() {
+    const req = requestWithProxy.apply(http, arguments);
+    req.end();
+    return req;
+  };
+}
+"#;
+
+const LOCAL_PROXY_SCRIPT: &str = r#"'use strict';
+
+const fs = require('fs');
+const http = require('http');
+const https = require('https');
+const net = require('net');
+const { URL } = require('url');
+
+const configPath = process.argv[2];
+if (!configPath) {
+  throw new Error('missing local proxy config path');
+}
+
+const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+const proxyConfig = config.proxy || {};
+const routes = (proxyConfig.routes || [])
+  .filter((route) => route && route.enabled !== false && route.match_prefix && route.target);
+const frontendUrl = new URL(proxyConfig.frontend_url || 'http://127.0.0.1:3001');
+const upstreamProxy = parseOptionalUrl(proxyConfig.upstream_proxy);
+const authHelper = proxyConfig.auth_helper || {};
+const helperPath = ensurePath(authHelper.path || '/__auth-helper');
+const listen = parseListen(proxyConfig.listen || '127.0.0.1:3000');
+
+function parseOptionalUrl(value) {
+  const text = String(value || '').trim();
+  if (!text) return null;
+  return new URL(text);
+}
+
+function parseListen(value) {
+  const text = String(value || '').trim();
+  if (text.startsWith('[')) {
+    const end = text.indexOf(']');
+    const host = text.slice(1, end);
+    const port = Number(text.slice(end + 2));
+    return { host, port };
+  }
+  const splitAt = text.lastIndexOf(':');
+  if (splitAt < 0) {
+    return { host: '127.0.0.1', port: Number(text) };
+  }
+  const host = text.slice(0, splitAt) || '127.0.0.1';
+  const port = Number(text.slice(splitAt + 1));
+  return { host, port };
+}
+
+function ensurePath(value) {
+  const text = String(value || '').trim();
+  if (!text) return '/';
+  return text.startsWith('/') ? text : `/${text}`;
+}
+
+function pickRoute(pathname) {
+  return routes.find((route) => pathname.startsWith(route.match_prefix));
+}
+
+function appendPath(basePath, nextPath) {
+  const base = basePath && basePath !== '/' ? basePath.replace(/\/+$/, '') : '';
+  const next = ensurePath(nextPath).replace(/\/{2,}/g, '/');
+  return `${base}${next}` || '/';
+}
+
+function routeTargetUrl(route, requestUrl) {
+  const target = new URL(route.target);
+  const suffix = requestUrl.pathname.slice(route.match_prefix.length);
+  const mappedPath = route.rewrite_prefix
+    ? `${ensurePath(route.rewrite_prefix)}${suffix}`
+    : requestUrl.pathname;
+  target.pathname = appendPath(target.pathname, mappedPath);
+  target.search = requestUrl.search;
+  return target;
+}
+
+function frontendTargetUrl(rawUrl) {
+  const target = new URL(rawUrl || '/', frontendUrl);
+  target.protocol = frontendUrl.protocol;
+  target.hostname = frontendUrl.hostname;
+  target.port = frontendUrl.port;
+  if (frontendUrl.pathname && frontendUrl.pathname !== '/') {
+    target.pathname = appendPath(frontendUrl.pathname, target.pathname);
+  }
+  return target;
+}
+
+function prepareHeaders(req, target, extraHeaders) {
+  const headers = Object.assign({}, req.headers);
+  delete headers.host;
+  delete headers.connection;
+  delete headers['accept-encoding'];
+  Object.assign(headers, extraHeaders || {});
+  headers.host = target.host;
+  return headers;
+}
+
+function proxyHttpRequest(req, res, target, extraHeaders, useUpstreamProxy) {
+  const viaProxy = useUpstreamProxy && upstreamProxy && target.protocol === 'http:';
+  const headers = prepareHeaders(req, target, extraHeaders);
+  const transport = viaProxy ? http : target.protocol === 'https:' ? https : http;
+  const options = viaProxy
+    ? {
+        protocol: 'http:',
+        hostname: upstreamProxy.hostname,
+        port: upstreamProxy.port || 80,
+        method: req.method,
+        path: target.href,
+        headers,
+      }
+    : {
+        protocol: target.protocol,
+        hostname: target.hostname,
+        port: target.port || (target.protocol === 'https:' ? 443 : 80),
+        method: req.method,
+        path: `${target.pathname}${target.search}`,
+        headers,
+      };
+
+  const proxyReq = transport.request(options, (proxyRes) => {
+    const responseHeaders = Object.assign({}, proxyRes.headers);
+    delete responseHeaders['content-encoding'];
+    res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on('error', (error) => {
+    if (!res.headersSent) {
+      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
+    }
+    res.end(`local proxy request failed: ${error.message}`);
+  });
+
+  req.pipe(proxyReq);
+}
+
+function rawHeaderBlock(headers) {
+  return Object.entries(headers)
+    .filter(([, value]) => value !== undefined)
+    .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}`)
+    .join('\r\n');
+}
+
+function proxyUpgrade(req, socket, head, target) {
+  if (target.protocol !== 'http:') {
+    socket.destroy();
+    return;
+  }
+
+  const headers = prepareHeaders(req, target, {});
+  headers.connection = 'Upgrade';
+  headers.upgrade = req.headers.upgrade || 'websocket';
+  const requestHead = [
+    `${req.method} ${target.pathname}${target.search} HTTP/${req.httpVersion}`,
+    rawHeaderBlock(headers),
+    '',
+    '',
+  ].join('\r\n');
+  const targetSocket = net.connect(target.port || 80, target.hostname, () => {
+    targetSocket.write(requestHead);
+    if (head && head.length > 0) {
+      targetSocket.write(head);
+    }
+    socket.pipe(targetSocket);
+    targetSocket.pipe(socket);
+  });
+  targetSocket.on('error', () => socket.destroy());
+  socket.on('error', () => targetSocket.destroy());
+}
+
+function htmlEscape(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function serveAuthHelper(_req, res) {
+  const payload = JSON.stringify(authHelper);
+  const title = `${config.project_key || 'project'} / ${config.profile_key || 'debug'} Auth Helper`;
+  const rows = (authHelper.items || [])
+    .filter((item) => item && item.enabled !== false)
+    .map((item) => `<li><code>${htmlEscape(item.storage || 'localStorage')}.${htmlEscape(item.key || '')}</code> ${htmlEscape(item.from_json_path || item.value || '')}</li>`)
+    .join('');
+  const html = `<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${htmlEscape(title)}</title>
+  <style>
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f7f5; color: #202124; }
+    main { max-width: 760px; margin: 40px auto; padding: 0 20px; }
+    textarea { box-sizing: border-box; width: 100%; min-height: 260px; padding: 12px; border: 1px solid #d7d7d2; border-radius: 8px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; background: #fff; }
+    button { height: 36px; padding: 0 14px; border: 0; border-radius: 6px; background: #1a73e8; color: #fff; font-weight: 600; cursor: pointer; }
+    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .row { display: flex; gap: 10px; align-items: center; margin: 12px 0; }
+    .status { min-height: 22px; color: #166534; }
+    .error { color: #b91c1c; }
+    ul { padding-left: 18px; color: #5f6368; }
+  </style>
+</head>
+<body>
+  <main>
+    <h2>${htmlEscape(title)}</h2>
+    <ul>${rows || '<li>未配置写入项</li>'}</ul>
+    <textarea id="payload" spellcheck="false" placeholder="粘贴登录返回 JSON；固定 value 的写入项可留空"></textarea>
+    <div class="row">
+      <button id="apply" type="button">写入并跳转</button>
+      <span id="status" class="status"></span>
+    </div>
+  </main>
+  <script>
+    const AUTH_HELPER = ${payload};
+    function getByPath(source, path) {
+      const text = String(path || '').trim().replace(/^\\$\\.?/, '');
+      if (!text) return source;
+      return text.split('.').filter(Boolean).reduce((value, key) => value == null ? undefined : value[key], source);
+    }
+    function stringifyValue(value) {
+      if (value == null) return '';
+      if (typeof value === 'string') return value;
+      return JSON.stringify(value);
+    }
+    function setCookie(item, value) {
+      let cookie = encodeURIComponent(item.key) + '=' + encodeURIComponent(value);
+      cookie += '; Path=' + (item.cookie_path || '/');
+      if (Number.isFinite(Number(item.cookie_max_age_seconds))) cookie += '; Max-Age=' + Number(item.cookie_max_age_seconds);
+      if (item.cookie_same_site) cookie += '; SameSite=' + item.cookie_same_site;
+      if (location.protocol === 'https:') cookie += '; Secure';
+      document.cookie = cookie;
+    }
+    document.getElementById('apply').addEventListener('click', () => {
+      const status = document.getElementById('status');
+      status.className = 'status';
+      try {
+        const text = document.getElementById('payload').value.trim();
+        const data = text ? JSON.parse(text) : {};
+        const misses = [];
+        for (const item of AUTH_HELPER.items || []) {
+          if (!item || item.enabled === false) continue;
+          const raw = item.value !== undefined && item.value !== '' ? item.value : getByPath(data, item.from_json_path);
+          if (raw === undefined || raw === null || raw === '') {
+            misses.push(item.key);
+            continue;
+          }
+          const value = stringifyValue(raw);
+          if (item.storage === 'sessionStorage') sessionStorage.setItem(item.key, value);
+          else if (item.storage === 'cookie') setCookie(item, value);
+          else localStorage.setItem(item.key, value);
+        }
+        if (misses.length) throw new Error('缺少字段: ' + misses.join(', '));
+        status.textContent = '写入完成，正在跳转...';
+        setTimeout(() => { location.href = AUTH_HELPER.redirect_path || '/#/'; }, 400);
+      } catch (error) {
+        status.className = 'status error';
+        status.textContent = error.message || String(error);
+      }
+    });
+  </script>
+</body>
+</html>`;
+  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+  res.end(html);
+}
+
+const server = http.createServer((req, res) => {
+  const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  if (authHelper.enabled && requestUrl.pathname === helperPath) {
+    serveAuthHelper(req, res);
+    return;
+  }
+
+  const route = pickRoute(requestUrl.pathname);
+  if (route) {
+    proxyHttpRequest(req, res, routeTargetUrl(route, requestUrl), route.headers || {}, true);
+    return;
+  }
+
+  proxyHttpRequest(req, res, frontendTargetUrl(req.url || '/'), {}, false);
+});
+
+server.on('upgrade', (req, socket, head) => {
+  const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
+  const route = pickRoute(requestUrl.pathname);
+  const target = route ? routeTargetUrl(route, requestUrl) : frontendTargetUrl(req.url || '/');
+  proxyUpgrade(req, socket, head, target);
+});
+
+server.listen(listen.port, listen.host, () => {
+  console.log(`rdevtool local proxy listening on ${listen.host}:${listen.port}`);
+});
+"#;
+
 impl ProjectRuntimeLogKind {
     fn command_kind(&self) -> ProjectCommandKind {
         match self {
@@ -182,10 +648,10 @@ impl Drop for ProjectRuntimeRegistry {
     fn drop(&mut self) {
         if let Ok(mut store) = self.state.lock() {
             for (_, mut process) in store.running.drain() {
-                let _ = terminate_process(&mut process.child, process.pid);
+                let _ = terminate_running_project_process(&mut process);
             }
             for (_, mut process) in store.running_builds.drain() {
-                let _ = terminate_process(&mut process.child, process.pid);
+                let _ = terminate_running_project_process(&mut process);
             }
         }
     }
@@ -238,16 +704,23 @@ impl ProjectRuntimeState {
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
         let debug_profile = selected_debug_profile(project, debug_profile_key)?;
+        let inherited_runtime_profile = debug_profile
+            .as_ref()
+            .map(|profile| selected_runtime_profile(config, profile))
+            .transpose()?
+            .flatten();
         if let Some(profile) = debug_profile.as_ref() {
             apply_debug_profile_local_files(project, profile)?;
         }
         let mut resolved = resolve_project_command(project, ProjectCommandKind::Dev)?;
-        if let Some(env_overrides) = env_overrides {
-            for (key, value) in env_overrides {
+        if let Some(profile) = debug_profile.as_ref() {
+            for (key, value) in &profile.env {
                 resolved.env.insert(key.clone(), value.clone());
             }
-        } else if let Some(profile) = debug_profile.as_ref() {
-            for (key, value) in &profile.env {
+            apply_network_proxy_env(&mut resolved, profile, inherited_runtime_profile.as_ref())?;
+        }
+        if let Some(env_overrides) = env_overrides {
+            for (key, value) in env_overrides {
                 resolved.env.insert(key.clone(), value.clone());
             }
         }
@@ -277,6 +750,12 @@ impl ProjectRuntimeState {
             return snapshot_for_project(&mut store, project);
         }
 
+        let local_proxy = debug_profile
+            .as_ref()
+            .filter(|profile| profile.local_proxy.enabled)
+            .map(|profile| start_local_proxy(project, profile))
+            .transpose()?;
+
         {
             let (running, last_results) = store.dev_parts();
             launch_project_command(
@@ -285,6 +764,7 @@ impl ProjectRuntimeState {
                 project,
                 launch_resolved,
                 ProjectCommandKind::Dev,
+                local_proxy,
             )?;
         }
 
@@ -340,6 +820,7 @@ impl ProjectRuntimeState {
                 project,
                 launch_resolved,
                 ProjectCommandKind::Build,
+                None,
             )?;
         }
 
@@ -380,7 +861,7 @@ impl ProjectRuntimeState {
                 "stop requested key={} pid={}",
                 project.key, process.pid
             ));
-            terminate_process(&mut process.child, process.pid)?;
+            terminate_running_project_process(&mut process)?;
             store.last_results.insert(
                 project.key.clone(),
                 ProjectTaskLastState {
@@ -419,7 +900,7 @@ impl ProjectRuntimeState {
                 "build stop requested key={} pid={}",
                 project.key, process.pid
             ));
-            terminate_process(&mut process.child, process.pid)?;
+            terminate_running_project_process(&mut process)?;
             store.last_build_results.insert(
                 project.key.clone(),
                 ProjectTaskLastState {
@@ -471,10 +952,17 @@ impl ProjectRuntimeState {
         &self,
         config: &AppConfig,
         project_key: &str,
+        debug_profile_key: Option<&str>,
     ) -> Result<ProjectRuntimeSnapshot, String> {
         let project = config
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
+        let debug_profile = selected_debug_profile(project, debug_profile_key)?;
+        let inherited_runtime_profile = debug_profile
+            .as_ref()
+            .map(|profile| selected_runtime_profile(config, profile))
+            .transpose()?
+            .flatten();
 
         match resolve_focus_target(project) {
             Some(ProjectFocusTarget::AppBundle(bundle_id)) => {
@@ -486,8 +974,12 @@ impl ProjectRuntimeState {
             }
             Some(ProjectFocusTarget::Url(url)) => {
                 log_project_runtime_event(format!("focus runtime key={} url={}", project.key, url));
-                open_in_current_chrome(&url)
-                    .map_err(|error| format!("打开项目页面失败: {}", error))?;
+                open_focus_url(
+                    &url,
+                    debug_profile.as_ref(),
+                    inherited_runtime_profile.as_ref(),
+                )
+                .map_err(|error| format!("打开项目页面失败: {}", error))?;
             }
             None => return Err("当前项目未配置可唤起目标".to_string()),
         }
@@ -605,6 +1097,7 @@ fn snapshot_for_project(
             .map(|profile| ProjectDebugProfileSummary {
                 key: profile.key.clone(),
                 label: profile.label.clone(),
+                runtime_profile: profile.runtime_profile.clone(),
                 env: profile.env.clone(),
                 env_count: profile.env.len(),
                 local_file_count: profile
@@ -614,9 +1107,75 @@ fn snapshot_for_project(
                     .count(),
                 browser: profile.browser.clone(),
                 browser_profile: profile.browser_profile.clone(),
+                browser_user_data_dir: profile
+                    .browser_user_data_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                browser_args: profile.browser_args.clone(),
+                network_proxy: ProjectNetworkProxySummary {
+                    enabled: profile.network_proxy.enabled,
+                    proxy_url: profile.network_proxy.proxy_url.clone(),
+                    inject_env: profile.network_proxy.inject_env,
+                    node_hook: profile.network_proxy.node_hook,
+                    no_proxy: profile.network_proxy.no_proxy.clone(),
+                },
+                local_proxy: local_proxy_summary(&profile.local_proxy),
             })
             .collect(),
     })
+}
+
+fn local_proxy_summary(proxy: &ProjectLocalProxyConfig) -> ProjectLocalProxySummary {
+    ProjectLocalProxySummary {
+        enabled: proxy.enabled,
+        listen: proxy.listen.clone(),
+        frontend_url: proxy.frontend_url.clone(),
+        upstream_proxy: proxy.upstream_proxy.clone(),
+        routes: proxy.routes.iter().map(local_proxy_route_summary).collect(),
+        auth_helper: auth_helper_summary(&proxy.auth_helper),
+    }
+}
+
+fn local_proxy_route_summary(
+    route: &ProjectLocalProxyRouteConfig,
+) -> ProjectLocalProxyRouteSummary {
+    ProjectLocalProxyRouteSummary {
+        enabled: route.enabled,
+        match_prefix: route.match_prefix.clone(),
+        target: route.target.clone(),
+        rewrite_prefix: route.rewrite_prefix.clone(),
+        headers_text: map_to_editor_text(&route.headers),
+    }
+}
+
+fn auth_helper_summary(helper: &ProjectAuthHelperConfig) -> ProjectAuthHelperSummary {
+    ProjectAuthHelperSummary {
+        enabled: helper.enabled,
+        path: helper.path.clone(),
+        redirect_path: helper.redirect_path.clone(),
+        items: helper.items.iter().map(auth_helper_item_summary).collect(),
+    }
+}
+
+fn auth_helper_item_summary(item: &ProjectAuthHelperItemConfig) -> ProjectAuthHelperItemSummary {
+    ProjectAuthHelperItemSummary {
+        enabled: item.enabled,
+        storage: item.storage.clone(),
+        key: item.key.clone(),
+        from_json_path: item.from_json_path.clone(),
+        value: item.value.clone(),
+        cookie_path: item.cookie_path.clone(),
+        cookie_max_age_seconds: item.cookie_max_age_seconds,
+        cookie_same_site: item.cookie_same_site.clone(),
+    }
+}
+
+fn map_to_editor_text(values: &BTreeMap<String, String>) -> String {
+    values
+        .iter()
+        .map(|(key, value)| format!("{}={}", key, value))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn task_state_for_project(
@@ -717,7 +1276,9 @@ fn task_running_state(
     }
 
     if let Some(code) = remove_exited {
-        running.remove(&project.key);
+        if let Some(mut process) = running.remove(&project.key) {
+            terminate_local_proxy(&mut process.local_proxy);
+        }
         last_results.insert(project.key.clone(), kind.finished_state(code));
     }
 
@@ -730,7 +1291,9 @@ fn launch_project_command(
     project: &ProjectConfig,
     resolved: ResolvedProjectCommand,
     kind: ProjectCommandKind,
+    local_proxy: Option<RunningLocalProxyProcess>,
 ) -> Result<(), String> {
+    let mut local_proxy = local_proxy;
     let mut log_file = open_task_log(project, &resolved, kind)?;
     let stdout = log_file
         .try_clone()
@@ -759,9 +1322,18 @@ fn launch_project_command(
         command.process_group(0);
     }
 
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("{} {} 失败: {}", kind.action_label(), project.name, error))?;
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            terminate_local_proxy(&mut local_proxy);
+            return Err(format!(
+                "{} {} 失败: {}",
+                kind.action_label(),
+                project.name,
+                error
+            ));
+        }
+    };
     let pid = child.id();
     let started_at_ms = now_ms();
 
@@ -769,6 +1341,7 @@ fn launch_project_command(
     match child.try_wait().map_err(|error| error.to_string())? {
         Some(status) => {
             let _ = writeln!(log_file, "[{}] exited quickly status={}", now_ms(), status);
+            terminate_local_proxy(&mut local_proxy);
             last_results.insert(project.key.clone(), kind.quick_exit_state(status.code()));
         }
         None => {
@@ -779,6 +1352,7 @@ fn launch_project_command(
                     child,
                     pid,
                     started_at_ms,
+                    local_proxy,
                 },
             );
             last_results.remove(&project.key);
@@ -786,6 +1360,137 @@ fn launch_project_command(
     }
 
     Ok(())
+}
+
+fn start_local_proxy(
+    project: &ProjectConfig,
+    profile: &ProjectDebugProfileConfig,
+) -> Result<RunningLocalProxyProcess, String> {
+    let proxy = &profile.local_proxy;
+    let script_path = ensure_local_proxy_script()?;
+    let config_path = write_local_proxy_config(project, profile)?;
+    let mut log_file = open_local_proxy_log(project, profile)?;
+    let stdout = log_file
+        .try_clone()
+        .map_err(|error| format!("创建本地代理日志失败: {}", error))?;
+    let stderr = log_file
+        .try_clone()
+        .map_err(|error| format!("创建本地代理日志失败: {}", error))?;
+    let mut command = Command::new("node");
+    command
+        .arg(&script_path)
+        .arg(&config_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    scrub_launcher_env(&mut command);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("启动本地 API 代理失败: {}", error))?;
+    let pid = child.id();
+    thread::sleep(Duration::from_millis(180));
+    match child.try_wait().map_err(|error| error.to_string())? {
+        Some(status) => {
+            let _ = writeln!(
+                log_file,
+                "[{}] local proxy exited quickly status={}",
+                now_ms(),
+                status
+            );
+            Err(format!("本地 API 代理启动后立即退出: {}", status))
+        }
+        None => {
+            let _ = writeln!(
+                log_file,
+                "[{}] local proxy running pid={} listen={}",
+                now_ms(),
+                pid,
+                proxy.listen
+            );
+            log_project_runtime_event(format!(
+                "local proxy launched key={} profile={} pid={} listen={}",
+                project.key, profile.key, pid, proxy.listen
+            ));
+            Ok(RunningLocalProxyProcess {
+                child,
+                pid,
+                listen: proxy.listen.clone(),
+            })
+        }
+    }
+}
+
+fn ensure_local_proxy_script() -> Result<PathBuf, String> {
+    let script_path = std::env::temp_dir().join(LOCAL_PROXY_SCRIPT_FILENAME);
+    let needs_write = fs::read_to_string(&script_path)
+        .map(|content| content != LOCAL_PROXY_SCRIPT)
+        .unwrap_or(true);
+    if needs_write {
+        fs::write(&script_path, LOCAL_PROXY_SCRIPT)
+            .map_err(|error| format!("写入本地 API 代理脚本失败: {}", error))?;
+    }
+    Ok(script_path)
+}
+
+fn write_local_proxy_config(
+    project: &ProjectConfig,
+    profile: &ProjectDebugProfileConfig,
+) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("rdevtool-local-proxy");
+    fs::create_dir_all(&dir).map_err(|error| format!("创建本地代理配置目录失败: {}", error))?;
+    let config_path = dir.join(format!(
+        "{}-{}.json",
+        sanitize_log_name(&project.key),
+        sanitize_log_name(&profile.key)
+    ));
+    let payload = json!({
+        "project_key": &project.key,
+        "profile_key": &profile.key,
+        "proxy": &profile.local_proxy,
+    });
+    let content = serde_json::to_vec_pretty(&payload)
+        .map_err(|error| format!("生成本地代理配置失败: {}", error))?;
+    fs::write(&config_path, content).map_err(|error| format!("写入本地代理配置失败: {}", error))?;
+    Ok(config_path)
+}
+
+fn open_local_proxy_log(
+    project: &ProjectConfig,
+    profile: &ProjectDebugProfileConfig,
+) -> Result<File, String> {
+    let path = default_config_dir().join("runtime-logs").join(format!(
+        "{}-{}-local-proxy.log",
+        sanitize_log_name(&project.key),
+        sanitize_log_name(&profile.key)
+    ));
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| format!("创建日志目录失败: {}", error))?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| format!("打开本地代理日志失败: {}", error))?;
+    writeln!(
+        file,
+        "\n[{}] local proxy start key={} profile={} listen={} frontend={} upstream={}",
+        now_ms(),
+        project.key,
+        profile.key,
+        profile.local_proxy.listen,
+        profile.local_proxy.frontend_url,
+        profile.local_proxy.upstream_proxy
+    )
+    .map_err(|error| format!("写入本地代理日志失败: {}", error))?;
+    Ok(file)
 }
 
 fn open_task_log(
@@ -932,6 +1637,382 @@ fn selected_debug_profile(
         .cloned()
         .map(Some)
         .ok_or_else(|| format!("调试档案不存在: {}", profile_key))
+}
+
+fn selected_runtime_profile(
+    config: &AppConfig,
+    profile: &ProjectDebugProfileConfig,
+) -> Result<Option<RuntimeProfileConfig>, String> {
+    let Some(runtime_profile_key) = profile
+        .runtime_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    config
+        .defaults
+        .runtime_profiles
+        .iter()
+        .find(|runtime_profile| runtime_profile.key == runtime_profile_key)
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| format!("运行配置不存在: {}", runtime_profile_key))
+}
+
+fn apply_network_proxy_env(
+    resolved: &mut ResolvedProjectCommand,
+    profile: &ProjectDebugProfileConfig,
+    runtime_profile: Option<&RuntimeProfileConfig>,
+) -> Result<(), String> {
+    let proxy = if profile.network_proxy.enabled {
+        &profile.network_proxy
+    } else if let Some(runtime_profile) = runtime_profile {
+        &runtime_profile.network_proxy
+    } else {
+        &profile.network_proxy
+    };
+    if !proxy.enabled {
+        return Ok(());
+    }
+
+    let proxy_url = proxy.proxy_url.trim();
+    if proxy_url.is_empty() {
+        return Err(format!("调试档案 {} 的代理地址为空", profile.key));
+    }
+
+    let no_proxy = normalize_network_proxy_no_proxy(&proxy.no_proxy);
+    if proxy.inject_env {
+        for key in [
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        ] {
+            resolved.env.insert(key.to_string(), proxy_url.to_string());
+        }
+        resolved
+            .env
+            .insert("NO_PROXY".to_string(), no_proxy.clone());
+        resolved
+            .env
+            .insert("no_proxy".to_string(), no_proxy.clone());
+    }
+
+    if proxy.node_hook {
+        if !proxy_url.to_lowercase().starts_with("http://") {
+            return Err(format!(
+                "调试档案 {} 的 Node Hook 当前只支持 http:// 代理",
+                profile.key
+            ));
+        }
+        let hook_path = ensure_node_proxy_hook()?;
+        let hook_path = hook_path.display().to_string();
+        resolved.env.insert(
+            "RDEVTOOL_NETWORK_PROXY_URL".to_string(),
+            proxy_url.to_string(),
+        );
+        resolved
+            .env
+            .insert("RDEVTOOL_NETWORK_PROXY_NO_PROXY".to_string(), no_proxy);
+        let node_options = merge_node_require_option(
+            resolved.env.get("NODE_OPTIONS").map(String::as_str),
+            &hook_path,
+        );
+        resolved
+            .env
+            .insert("NODE_OPTIONS".to_string(), node_options);
+    }
+
+    Ok(())
+}
+
+fn normalize_network_proxy_no_proxy(value: &str) -> String {
+    let value = value.trim();
+    if value.is_empty() {
+        "localhost,127.0.0.1,::1".to_string()
+    } else {
+        value.to_string()
+    }
+}
+
+fn open_focus_url(
+    url: &str,
+    profile: Option<&ProjectDebugProfileConfig>,
+    runtime_profile: Option<&RuntimeProfileConfig>,
+) -> Result<(), String> {
+    if !debug_profile_has_browser_config(profile, runtime_profile) {
+        open_in_current_chrome(url)
+            .map(|_| ())
+            .map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+
+    let browser = profile
+        .and_then(|profile| optional_trimmed(profile.browser.as_deref()))
+        .or_else(|| {
+            runtime_profile
+                .and_then(|runtime_profile| optional_trimmed(runtime_profile.browser.as_deref()))
+        });
+    let browser_profile = profile
+        .and_then(|profile| optional_trimmed(profile.browser_profile.as_deref()))
+        .or_else(|| {
+            runtime_profile.and_then(|runtime_profile| {
+                optional_trimmed(runtime_profile.browser_profile.as_deref())
+            })
+        });
+    let browser_user_data_dir = profile
+        .and_then(|profile| profile.browser_user_data_dir.as_ref())
+        .map(Clone::clone)
+        .or_else(|| runtime_profile_browser_user_data_dir(runtime_profile));
+    let mut browser_args = runtime_profile
+        .map(runtime_profile_browser_args)
+        .unwrap_or_default();
+    browser_args.extend(profile.into_iter().flat_map(|profile| {
+        profile
+            .browser_args
+            .iter()
+            .filter_map(|arg| normalize_browser_arg(arg))
+    }));
+
+    let browser_args = browser_args
+        .iter()
+        .filter_map(|arg| normalize_browser_arg(arg))
+        .collect::<Vec<_>>();
+
+    let has_chromium_args =
+        browser_profile.is_some() || browser_user_data_dir.is_some() || !browser_args.is_empty();
+    if !has_chromium_args {
+        match browser.map(normalize_browser_choice) {
+            None | Some(ProjectBrowserChoice::CurrentChrome) => {
+                open_in_current_chrome(url)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())?;
+            }
+            Some(ProjectBrowserChoice::System) => open_system_browser(url)?,
+            Some(ProjectBrowserChoice::App(app_name)) => open_browser_app(app_name, url)?,
+        }
+        return Ok(());
+    }
+
+    let app_name = match browser.map(normalize_browser_choice) {
+        Some(ProjectBrowserChoice::App(app_name)) => app_name.to_string(),
+        _ => "Google Chrome".to_string(),
+    };
+    open_chromium_browser_instance(
+        &app_name,
+        browser_profile,
+        browser_user_data_dir.as_ref(),
+        &browser_args,
+        url,
+    )
+}
+
+fn debug_profile_has_browser_config(
+    profile: Option<&ProjectDebugProfileConfig>,
+    runtime_profile: Option<&RuntimeProfileConfig>,
+) -> bool {
+    profile.is_some_and(|profile| {
+        optional_trimmed(profile.browser.as_deref()).is_some()
+            || optional_trimmed(profile.browser_profile.as_deref()).is_some()
+            || profile.browser_user_data_dir.is_some()
+            || profile
+                .browser_args
+                .iter()
+                .any(|arg| !arg.trim().is_empty())
+    }) || runtime_profile.is_some_and(|runtime_profile| {
+        optional_trimmed(runtime_profile.browser.as_deref()).is_some()
+            || optional_trimmed(runtime_profile.browser_profile.as_deref()).is_some()
+            || runtime_profile.browser_user_data_dir.is_some()
+            || !runtime_profile.proxy_url.trim().is_empty()
+            || !runtime_profile.proxy_bypass.trim().is_empty()
+            || runtime_profile
+                .host_resolver_rules
+                .iter()
+                .any(|rule| !rule.trim().is_empty())
+            || runtime_profile
+                .browser_args
+                .iter()
+                .any(|arg| !arg.trim().is_empty())
+    })
+}
+
+enum ProjectBrowserChoice<'a> {
+    CurrentChrome,
+    System,
+    App(&'a str),
+}
+
+fn normalize_browser_choice(value: &str) -> ProjectBrowserChoice<'_> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "current_chrome" | "current chrome" | "chrome_current" | "chrome-current" => {
+            ProjectBrowserChoice::CurrentChrome
+        }
+        "system" | "default" | "system_default" | "default_browser" => ProjectBrowserChoice::System,
+        _ => ProjectBrowserChoice::App(value.trim()),
+    }
+}
+
+fn optional_trimmed(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn normalize_browser_arg(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let Some((key, raw_value)) = value.split_once('=') else {
+        return Some(value.to_string());
+    };
+    let raw_value = raw_value.trim();
+    if raw_value.len() >= 2 && raw_value.starts_with('"') && raw_value.ends_with('"') {
+        return Some(format!(
+            "{}={}",
+            key.trim(),
+            &raw_value[1..raw_value.len() - 1]
+        ));
+    }
+    Some(value.to_string())
+}
+
+fn runtime_profile_browser_args(profile: &RuntimeProfileConfig) -> Vec<String> {
+    let mut args = Vec::new();
+    if profile.web_actions_enabled {
+        args.push(format!(
+            "--remote-debugging-port={}",
+            profile.web_actions_port
+        ));
+    }
+    let proxy_url = profile.proxy_url.trim();
+    if !proxy_url.is_empty() {
+        args.push(format!("--proxy-server={proxy_url}"));
+    }
+    let proxy_bypass = profile.proxy_bypass.trim();
+    if !proxy_bypass.is_empty() {
+        args.push(format!("--proxy-bypass-list={proxy_bypass}"));
+    }
+    let host_resolver_rules = profile
+        .host_resolver_rules
+        .iter()
+        .map(|rule| rule.trim())
+        .filter(|rule| !rule.is_empty())
+        .collect::<Vec<_>>();
+    if !host_resolver_rules.is_empty() {
+        args.push(format!(
+            "--host-resolver-rules={}",
+            host_resolver_rules.join(", ")
+        ));
+    }
+    args.extend(profile.browser_args.iter().filter_map(|arg| {
+        let arg = normalize_browser_arg(arg)?;
+        if profile.web_actions_enabled
+            && arg
+                .to_ascii_lowercase()
+                .starts_with("--remote-debugging-port")
+        {
+            None
+        } else {
+            Some(arg)
+        }
+    }));
+    args
+}
+
+fn runtime_profile_browser_user_data_dir(
+    profile: Option<&RuntimeProfileConfig>,
+) -> Option<PathBuf> {
+    profile.and_then(|profile| {
+        profile
+            .web_actions_user_data_dir
+            .clone()
+            .or_else(|| profile.browser_user_data_dir.clone())
+            .or_else(|| {
+                profile
+                    .web_actions_enabled
+                    .then(|| default_config_dir().join("chrome-cdp-profile"))
+            })
+    })
+}
+
+fn open_system_browser(url: &str) -> Result<(), String> {
+    let status = Command::new("open")
+        .arg(url)
+        .status()
+        .map_err(|error| format!("调用系统浏览器失败: {}", error))?;
+    if !status.success() {
+        return Err("系统浏览器打开失败".to_string());
+    }
+    Ok(())
+}
+
+fn open_browser_app(app_name: &str, url: &str) -> Result<(), String> {
+    let status = Command::new("open")
+        .arg("-a")
+        .arg(app_name)
+        .arg(url)
+        .status()
+        .map_err(|error| format!("调用浏览器失败: {}", error))?;
+    if !status.success() {
+        return Err(format!("{} 打开失败", app_name));
+    }
+    Ok(())
+}
+
+fn open_chromium_browser_instance(
+    app_name: &str,
+    browser_profile: Option<&str>,
+    browser_user_data_dir: Option<&PathBuf>,
+    browser_args: &[String],
+    url: &str,
+) -> Result<(), String> {
+    let mut command = Command::new("open");
+    command.arg("-na").arg(app_name).arg("--args");
+    if let Some(profile) = browser_profile {
+        command.arg(format!("--profile-directory={profile}"));
+    }
+    if let Some(user_data_dir) = browser_user_data_dir {
+        command.arg(format!("--user-data-dir={}", user_data_dir.display()));
+    }
+    for arg in browser_args {
+        command.arg(arg);
+    }
+    command.arg(url);
+
+    let status = command
+        .status()
+        .map_err(|error| format!("启动浏览器实例失败: {}", error))?;
+    if !status.success() {
+        return Err(format!("{} 浏览器实例启动失败", app_name));
+    }
+    Ok(())
+}
+
+fn ensure_node_proxy_hook() -> Result<PathBuf, String> {
+    let hook_path = std::env::temp_dir().join(NODE_PROXY_HOOK_FILENAME);
+    let needs_write = fs::read_to_string(&hook_path)
+        .map(|content| content != NODE_PROXY_HOOK)
+        .unwrap_or(true);
+    if needs_write {
+        fs::write(&hook_path, NODE_PROXY_HOOK)
+            .map_err(|error| format!("写入 Node 代理 Hook 失败: {}", error))?;
+    }
+    Ok(hook_path)
+}
+
+fn merge_node_require_option(existing: Option<&str>, hook_path: &str) -> String {
+    let require_option = format!("--require={}", hook_path);
+    let existing = existing.map(str::trim).unwrap_or("");
+    if existing.is_empty() {
+        return require_option;
+    }
+    if existing.contains(hook_path) {
+        return existing.to_string();
+    }
+    format!("{} {}", require_option, existing)
 }
 
 fn apply_debug_profile_local_files(
@@ -1297,15 +2378,7 @@ impl ProjectCommandKind {
 
     fn quick_exit_state(self, code: Option<i32>) -> ProjectTaskLastState {
         match self {
-            Self::Dev => ProjectTaskLastState {
-                status_key: "exited".to_string(),
-                status_label: "已退出".to_string(),
-                detail: match code {
-                    Some(value) => format!("启动命令很快退出，退出码 {}", value),
-                    None => "启动命令已退出".to_string(),
-                },
-                updated_at_ms: now_ms(),
-            },
+            Self::Dev => dev_exit_state(code, true),
             Self::Build => {
                 if code == Some(0) {
                     ProjectTaskLastState {
@@ -1331,15 +2404,7 @@ impl ProjectCommandKind {
 
     fn finished_state(self, code: Option<i32>) -> ProjectTaskLastState {
         match self {
-            Self::Dev => ProjectTaskLastState {
-                status_key: "exited".to_string(),
-                status_label: "已退出".to_string(),
-                detail: match code {
-                    Some(value) => format!("最近一次 dev 服务已退出，退出码 {}", value),
-                    None => "最近一次 dev 服务已退出".to_string(),
-                },
-                updated_at_ms: now_ms(),
-            },
+            Self::Dev => dev_exit_state(code, false),
             Self::Build => {
                 if code == Some(0) {
                     ProjectTaskLastState {
@@ -1361,6 +2426,33 @@ impl ProjectCommandKind {
                 }
             }
         }
+    }
+}
+
+fn dev_exit_state(code: Option<i32>, quick_exit: bool) -> ProjectTaskLastState {
+    if code == Some(0) {
+        return ProjectTaskLastState {
+            status_key: "stopped".to_string(),
+            status_label: "未启动".to_string(),
+            detail: if quick_exit {
+                "启动命令已正常退出".to_string()
+            } else {
+                "dev 服务已正常退出".to_string()
+            },
+            updated_at_ms: now_ms(),
+        };
+    }
+
+    ProjectTaskLastState {
+        status_key: "exited".to_string(),
+        status_label: "已退出".to_string(),
+        detail: match (quick_exit, code) {
+            (true, Some(value)) => format!("启动命令很快退出，退出码 {}", value),
+            (true, None) => "启动命令已退出".to_string(),
+            (false, Some(value)) => format!("最近一次 dev 服务已退出，退出码 {}", value),
+            (false, None) => "最近一次 dev 服务已退出".to_string(),
+        },
+        updated_at_ms: now_ms(),
     }
 }
 
@@ -1451,6 +2543,22 @@ fn terminate_process(child: &mut Child, _pid: u32) -> Result<(), String> {
         .wait()
         .map_err(|error| format!("等待进程退出失败: {}", error))?;
     Ok(())
+}
+
+fn terminate_running_project_process(process: &mut RunningProjectProcess) -> Result<(), String> {
+    terminate_local_proxy(&mut process.local_proxy);
+    terminate_process(&mut process.child, process.pid)
+}
+
+fn terminate_local_proxy(local_proxy: &mut Option<RunningLocalProxyProcess>) {
+    if let Some(proxy) = local_proxy.as_mut() {
+        log_project_runtime_event(format!(
+            "local proxy stopping pid={} listen={}",
+            proxy.pid, proxy.listen
+        ));
+        let _ = terminate_process(&mut proxy.child, proxy.pid);
+    }
+    *local_proxy = None;
 }
 
 fn now_ms() -> u64 {

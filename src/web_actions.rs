@@ -10,7 +10,8 @@ use std::thread;
 use std::time::Duration;
 use tungstenite::{Message, connect};
 
-use crate::config::default_config_dir;
+use crate::config::{RuntimeProfileConfig, default_config_dir};
+use crate::navigation::{NavigationEntry, runtime_profile_browser_args};
 
 const DEFAULT_CDP_PORT: u16 = 9223;
 const DEFAULT_WEB_ACTIONS_TEMPLATE: &str = r#"[browser]
@@ -80,6 +81,29 @@ struct WebActionsBrowserConfig {
     chrome_path: Option<PathBuf>,
     #[serde(default)]
     user_data_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct EffectiveWebActionsBrowserConfig {
+    port: u16,
+    chrome_path: Option<PathBuf>,
+    browser_app: Option<String>,
+    browser_profile: Option<String>,
+    user_data_dir: Option<PathBuf>,
+    browser_args: Vec<String>,
+}
+
+impl EffectiveWebActionsBrowserConfig {
+    fn from_config(browser: &WebActionsBrowserConfig) -> Self {
+        Self {
+            port: browser.port,
+            chrome_path: browser.chrome_path.clone(),
+            browser_app: None,
+            browser_profile: None,
+            user_data_dir: browser.user_data_dir.clone(),
+            browser_args: Vec::new(),
+        }
+    }
 }
 
 impl Default for WebActionsBrowserConfig {
@@ -217,10 +241,33 @@ pub fn list_web_actions(scope: Option<&str>, url: Option<&str>) -> Result<WebAct
 pub fn open_web_action_target(url: &str) -> Result<WebActionTarget> {
     let normalized_url = normalize_http_url(url)?;
     let config = load_web_actions_config()?;
-    ensure_cdp_browser(&config.browser, Some(normalized_url))?;
+    let browser = EffectiveWebActionsBrowserConfig::from_config(&config.browser);
+    open_web_action_target_with_browser(&browser, normalized_url)
+}
+
+pub fn open_web_action_navigation_target(
+    entry: &NavigationEntry,
+    runtime_profiles: &[RuntimeProfileConfig],
+) -> Result<WebActionTarget> {
+    let url = entry
+        .url
+        .as_deref()
+        .ok_or_else(|| anyhow!("网站入口缺少 URL"))?;
+    let normalized_url = normalize_http_url(url)?;
+    let config = load_web_actions_config()?;
+    let browser =
+        effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
+    open_web_action_target_with_browser(&browser, normalized_url)
+}
+
+fn open_web_action_target_with_browser(
+    browser: &EffectiveWebActionsBrowserConfig,
+    normalized_url: &str,
+) -> Result<WebActionTarget> {
+    ensure_cdp_browser(browser, Some(normalized_url))?;
 
     for _ in 0..20 {
-        let targets = list_web_action_targets()?;
+        let targets = list_web_action_targets_for_browser(browser)?;
         if let Some(target) = targets
             .iter()
             .find(|target| target.url == normalized_url && target.target_type == "page")
@@ -231,15 +278,116 @@ pub fn open_web_action_target(url: &str) -> Result<WebActionTarget> {
         thread::sleep(Duration::from_millis(120));
     }
 
-    list_web_action_targets()?
+    list_web_action_targets_for_browser(browser)?
         .into_iter()
         .find(|target| target.target_type == "page" && target.url.starts_with("http"))
         .ok_or_else(|| anyhow!("受控 Chrome 未返回可用页面"))
 }
 
+fn effective_browser_for_navigation_entry(
+    base: &WebActionsBrowserConfig,
+    entry: &NavigationEntry,
+    runtime_profiles: &[RuntimeProfileConfig],
+) -> Result<EffectiveWebActionsBrowserConfig> {
+    let runtime_profile =
+        resolve_runtime_profile(entry.runtime_profile.as_deref(), runtime_profiles)?;
+    let browser_app = entry
+        .browser
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            runtime_profile
+                .and_then(|profile| profile.browser.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .and_then(controlled_browser_app_name);
+    let browser_profile = entry
+        .browser_profile
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            runtime_profile
+                .and_then(|profile| profile.browser_profile.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(ToString::to_string);
+    let port = runtime_profile
+        .filter(|profile| profile.web_actions_enabled)
+        .map(|profile| profile.web_actions_port)
+        .unwrap_or(base.port);
+    let user_data_dir = runtime_profile
+        .and_then(|profile| {
+            profile
+                .web_actions_user_data_dir
+                .clone()
+                .or_else(|| profile.browser_user_data_dir.clone())
+                .or_else(|| {
+                    profile
+                        .web_actions_enabled
+                        .then(|| default_config_dir().join("chrome-cdp-profile"))
+                })
+        })
+        .or_else(|| base.user_data_dir.clone());
+    let browser_args = runtime_profile
+        .map(runtime_profile_browser_args)
+        .unwrap_or_default();
+
+    Ok(EffectiveWebActionsBrowserConfig {
+        port,
+        chrome_path: base.chrome_path.clone(),
+        browser_app,
+        browser_profile,
+        user_data_dir,
+        browser_args,
+    })
+}
+
+fn resolve_runtime_profile<'a>(
+    key: Option<&str>,
+    runtime_profiles: &'a [RuntimeProfileConfig],
+) -> Result<Option<&'a RuntimeProfileConfig>> {
+    let Some(key) = key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    runtime_profiles
+        .iter()
+        .find(|profile| profile.key == key)
+        .map(Some)
+        .ok_or_else(|| anyhow!("运行配置不存在: {}", key))
+}
+
+fn controlled_browser_app_name(value: &str) -> Option<String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "current_chrome" | "current chrome" | "chrome_current" | "chrome-current"
+        | "system" | "default" | "system_default" | "default_browser" => None,
+        _ => Some(value.trim().to_string()),
+    }
+}
+
 pub fn list_web_action_targets() -> Result<Vec<WebActionTarget>> {
     let config = load_web_actions_config()?;
-    match list_cdp_targets(config.browser.port) {
+    let browser = EffectiveWebActionsBrowserConfig::from_config(&config.browser);
+    list_web_action_targets_for_browser(&browser)
+}
+
+pub fn list_web_action_navigation_targets(
+    entry: &NavigationEntry,
+    runtime_profiles: &[RuntimeProfileConfig],
+) -> Result<Vec<WebActionTarget>> {
+    let config = load_web_actions_config()?;
+    let browser =
+        effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
+    list_web_action_targets_for_browser(&browser)
+}
+
+fn list_web_action_targets_for_browser(
+    browser: &EffectiveWebActionsBrowserConfig,
+) -> Result<Vec<WebActionTarget>> {
+    match list_cdp_targets(browser.port) {
         Ok(targets) => Ok(targets
             .into_iter()
             .filter(|target| target.target_type == "page")
@@ -250,6 +398,26 @@ pub fn list_web_action_targets() -> Result<Vec<WebActionTarget>> {
 
 pub fn run_web_action(request: WebActionRunRequest) -> Result<WebActionRunResult> {
     let config = load_web_actions_config()?;
+    let browser = EffectiveWebActionsBrowserConfig::from_config(&config.browser);
+    run_web_action_with_browser(&config, &browser, request)
+}
+
+pub fn run_web_action_navigation(
+    entry: &NavigationEntry,
+    runtime_profiles: &[RuntimeProfileConfig],
+    request: WebActionRunRequest,
+) -> Result<WebActionRunResult> {
+    let config = load_web_actions_config()?;
+    let browser =
+        effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
+    run_web_action_with_browser(&config, &browser, request)
+}
+
+fn run_web_action_with_browser(
+    config: &WebActionsFileConfig,
+    browser: &EffectiveWebActionsBrowserConfig,
+    request: WebActionRunRequest,
+) -> Result<WebActionRunResult> {
     let action = config
         .actions
         .iter()
@@ -257,7 +425,7 @@ pub fn run_web_action(request: WebActionRunRequest) -> Result<WebActionRunResult
         .cloned()
         .ok_or_else(|| anyhow!("网页动作不存在: {}", request.action_key))?;
 
-    let target = resolve_action_target(&config.browser, &action, &request)?;
+    let target = resolve_action_target(browser, &action, &request)?;
     if !action_matches_context(&action, request.scope.as_deref(), Some(&target.url)) {
         bail!(
             "当前页面不匹配动作范围：{} 不在 {:?}",
@@ -283,6 +451,26 @@ pub fn run_web_action(request: WebActionRunRequest) -> Result<WebActionRunResult
 }
 
 pub fn run_web_action_script(request: WebActionScriptRunRequest) -> Result<WebActionRunResult> {
+    let config = load_web_actions_config()?;
+    let browser = EffectiveWebActionsBrowserConfig::from_config(&config.browser);
+    run_web_action_script_with_browser(&browser, request)
+}
+
+pub fn run_web_action_navigation_script(
+    entry: &NavigationEntry,
+    runtime_profiles: &[RuntimeProfileConfig],
+    request: WebActionScriptRunRequest,
+) -> Result<WebActionRunResult> {
+    let config = load_web_actions_config()?;
+    let browser =
+        effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
+    run_web_action_script_with_browser(&browser, request)
+}
+
+fn run_web_action_script_with_browser(
+    browser: &EffectiveWebActionsBrowserConfig,
+    request: WebActionScriptRunRequest,
+) -> Result<WebActionRunResult> {
     let script = request.script.trim();
     if script.is_empty() {
         bail!("临时脚本不能为空");
@@ -291,9 +479,8 @@ pub fn run_web_action_script(request: WebActionScriptRunRequest) -> Result<WebAc
     if target_id.is_empty() {
         bail!("未选择受控页面");
     }
-    let config = load_web_actions_config()?;
-    ensure_cdp_browser(&config.browser, None)?;
-    let target = list_cdp_targets(config.browser.port)?
+    let target = list_cdp_targets(browser.port)
+        .context("无法连接受控 Chrome，请先通过“打开页面”创建受控页面")?
         .into_iter()
         .find(|target| target.id == target_id && target.target_type == "page")
         .ok_or_else(|| anyhow!("未找到受控页面: {}", request.target_id))?;
@@ -430,12 +617,12 @@ fn normalize_http_url(url: &str) -> Result<&str> {
 }
 
 fn resolve_action_target(
-    browser: &WebActionsBrowserConfig,
+    browser: &EffectiveWebActionsBrowserConfig,
     action: &WebActionConfig,
     request: &WebActionRunRequest,
 ) -> Result<WebActionTarget> {
-    ensure_cdp_browser(browser, request.url.as_deref())?;
-    let targets = list_cdp_targets(browser.port)?;
+    let targets = list_cdp_targets(browser.port)
+        .context("无法连接受控 Chrome，请先通过“打开页面”创建受控页面")?;
     if let Some(target_id) = request
         .target_id
         .as_deref()
@@ -457,7 +644,7 @@ fn resolve_action_target(
         .ok_or_else(|| anyhow!("未找到匹配网页动作的受控页面"))
 }
 
-fn ensure_cdp_browser(browser: &WebActionsBrowserConfig, url: Option<&str>) -> Result<()> {
+fn ensure_cdp_browser(browser: &EffectiveWebActionsBrowserConfig, url: Option<&str>) -> Result<()> {
     if cdp_version(browser.port).is_ok() {
         if let Some(url) = url {
             if !list_cdp_targets(browser.port)?
@@ -528,7 +715,7 @@ fn cdp_http_client() -> Result<reqwest::blocking::Client> {
         .context("failed to build CDP HTTP client")
 }
 
-fn launch_chrome(browser: &WebActionsBrowserConfig, url: Option<&str>) -> Result<()> {
+fn launch_chrome(browser: &EffectiveWebActionsBrowserConfig, url: Option<&str>) -> Result<()> {
     let chrome_path = resolve_chrome_path(browser)?;
     let user_data_dir = browser
         .user_data_dir
@@ -551,6 +738,12 @@ fn launch_chrome(browser: &WebActionsBrowserConfig, url: Option<&str>) -> Result
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    if let Some(profile) = browser.browser_profile.as_deref() {
+        command.arg(format!("--profile-directory={profile}"));
+    }
+    for arg in browser.browser_args.iter().filter(|arg| !is_managed_browser_arg(arg)) {
+        command.arg(arg);
+    }
     if let Some(url) = url {
         command.arg(url);
     }
@@ -560,9 +753,22 @@ fn launch_chrome(browser: &WebActionsBrowserConfig, url: Option<&str>) -> Result
     Ok(())
 }
 
-fn resolve_chrome_path(browser: &WebActionsBrowserConfig) -> Result<PathBuf> {
+fn is_managed_browser_arg(arg: &&String) -> bool {
+    let normalized = arg.trim().to_ascii_lowercase();
+    normalized.starts_with("--remote-debugging-port")
+        || normalized.starts_with("--user-data-dir")
+}
+
+fn resolve_chrome_path(browser: &EffectiveWebActionsBrowserConfig) -> Result<PathBuf> {
     if let Some(path) = browser.chrome_path.as_ref().filter(|path| path.exists()) {
         return Ok(path.clone());
+    }
+    if let Some(path) = browser
+        .browser_app
+        .as_deref()
+        .and_then(resolve_browser_app_executable)
+    {
+        return Ok(path);
     }
     if let Ok(path) = std::env::var("RDEVTOOL_CHROME_PATH") {
         let path = PathBuf::from(path);
@@ -617,6 +823,69 @@ fn resolve_chrome_path(browser: &WebActionsBrowserConfig) -> Result<PathBuf> {
     bail!("未找到 Chrome，可在 web_actions.toml 的 [browser].chrome_path 配置路径")
 }
 
+fn resolve_browser_app_executable(app_name: &str) -> Option<PathBuf> {
+    let app_name = app_name.trim();
+    if app_name.is_empty() {
+        return None;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let aliases: Vec<&str> = match app_name.to_ascii_lowercase().as_str() {
+            "chrome" | "google chrome" => vec!["Google Chrome"],
+            "edge" | "microsoft edge" => vec!["Microsoft Edge"],
+            "chromium" => vec!["Chromium"],
+            "brave" | "brave browser" => vec!["Brave Browser"],
+            "arc" => vec!["Arc"],
+            _ => vec![app_name],
+        };
+        for alias in aliases {
+            let path = PathBuf::from(format!(
+                "/Applications/{alias}.app/Contents/MacOS/{alias}"
+            ));
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if Command::new("which")
+            .arg(app_name)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+        {
+            return Some(PathBuf::from(app_name));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let aliases: &[&str] = match app_name.to_ascii_lowercase().as_str() {
+            "chrome" | "google chrome" => &[
+                r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+                r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            ],
+            "edge" | "microsoft edge" => &[
+                r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+                r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+            ],
+            _ => &[],
+        };
+        for alias in aliases {
+            let path = PathBuf::from(alias);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
 struct EvaluateResult {
     value: Option<Value>,
     text: String,
@@ -634,8 +903,15 @@ fn evaluate_action_script(
         params_json, script
     );
     let (mut socket, _) = connect(ws_url).context("failed to connect CDP WebSocket")?;
-    let request = json!({
+    let focus_request = json!({
         "id": 1,
+        "method": "Page.bringToFront"
+    });
+    socket
+        .send(Message::Text(focus_request.to_string()))
+        .context("failed to focus CDP target")?;
+    let request = json!({
+        "id": 2,
         "method": "Runtime.evaluate",
         "params": {
             "expression": expression,
@@ -654,7 +930,7 @@ fn evaluate_action_script(
             continue;
         };
         let value: Value = serde_json::from_str(&text).context("failed to parse CDP response")?;
-        if value.get("id").and_then(Value::as_i64) != Some(1) {
+        if value.get("id").and_then(Value::as_i64) != Some(2) {
             continue;
         }
         return parse_evaluate_response(value);

@@ -893,14 +893,6 @@ export function DeployPage({
     const legacyKey = deployLegacyTrayDedupeKeyFromHistory(group.latest);
     return pinnedActionByKey.get(legacyKey) ?? null;
   }
-  function pinnedDeployChipLabel(action: TrayPinnedAction) {
-    const item =
-      deployHistoryByPinnedKey.get(action.dedupeKey) ??
-      deployLegacyHistoryByPinnedKey.get(action.dedupeKey) ??
-      null;
-    const label = action.label.replace(/^部署：/, "");
-    return item ? `${label} · ${formatRelativeTime(item.updatedAt)}` : label;
-  }
   const historyPageCount = Math.max(
     1,
     Math.ceil(unpinnedDeployHistoryGroups.length / HISTORY_PAGE_SIZE),
@@ -1431,35 +1423,6 @@ export function DeployPage({
           <Collapse in={historyExpanded} timeout="auto" unmountOnExit>
             {deployHistory.length > 0 ? (
               <Stack spacing={1} minWidth={0}>
-                {displayPinnedDeployActions.length > 0 ? (
-                  <Stack direction="row" flexWrap="wrap" gap={0.55} alignItems="center">
-                    <Typography
-                      variant="caption"
-                      color="text.secondary"
-                      sx={{ fontWeight: 800, mr: 0.1 }}
-                    >
-                      置顶
-                    </Typography>
-                    {displayPinnedDeployActions.map((action) => (
-                      <Chip
-                        key={action.dedupeKey}
-                        size="small"
-                        icon={<StarIcon />}
-                        label={pinnedDeployChipLabel(action)}
-                        onDelete={() => handleRemovePinned(action.dedupeKey)}
-                        sx={{
-                          maxWidth: "100%",
-                          borderRadius: "999px",
-                          fontWeight: 800,
-                          "& .MuiChip-label": {
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                          },
-                        }}
-                      />
-                    ))}
-                  </Stack>
-                ) : null}
                 {visibleDeployHistoryGroups.map((group) => {
                   const item = group.latest;
                   const isGrouped = group.items.length > 1;
@@ -1512,20 +1475,6 @@ export function DeployPage({
                               <OpenExternalIcon fontSize="small" />
                             </IconButton>
                           ) : null}
-                          {isGrouped ? (
-                            <IconButton
-                              size="small"
-                              onClick={() => toggleHistoryGroup(group.id)}
-                              aria-label={groupExpanded ? "收起同参数部署" : "展开同参数部署"}
-                              title={groupExpanded ? "收起同参数部署" : "展开同参数部署"}
-                            >
-                              {groupExpanded ? (
-                                <CollapseIcon fontSize="small" />
-                              ) : (
-                                <ExpandIcon fontSize="small" />
-                              )}
-                            </IconButton>
-                          ) : null}
                           <IconButton
                             size="small"
                             onClick={() =>
@@ -1534,8 +1483,8 @@ export function DeployPage({
                                 : handleTogglePinned(trayAction)
                             }
                             color={pinned ? "primary" : "default"}
-                            aria-label={pinned ? "取消置顶到托盘" : "置顶到托盘"}
-                            title={pinned ? "取消置顶到托盘" : "置顶到托盘"}
+                            aria-label={pinned ? "取消标记" : "标记记录"}
+                            title={pinned ? "取消标记" : "标记记录"}
                             sx={
                               pinned
                                 ? {
@@ -1551,6 +1500,20 @@ export function DeployPage({
                           >
                             <StarIcon fontSize="small" />
                           </IconButton>
+                          {isGrouped ? (
+                            <IconButton
+                              size="small"
+                              onClick={() => toggleHistoryGroup(group.id)}
+                              aria-label={groupExpanded ? "收起同参数部署" : "展开同参数部署"}
+                              title={groupExpanded ? "收起同参数部署" : "展开同参数部署"}
+                            >
+                              {groupExpanded ? (
+                                <CollapseIcon fontSize="small" />
+                              ) : (
+                                <ExpandIcon fontSize="small" />
+                              )}
+                            </IconButton>
+                          ) : null}
                         </Stack>
                       }
                       detail={item.detail}

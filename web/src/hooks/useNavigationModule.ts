@@ -8,6 +8,7 @@ type NavigationEntry = {
   url?: string | null;
   browser?: string | null;
   browserProfile?: string | null;
+  runtimeProfile?: string | null;
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;

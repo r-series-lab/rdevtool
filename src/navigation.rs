@@ -8,7 +8,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use crate::config::default_config_dir;
+use crate::config::{RuntimeProfileConfig, default_config_dir};
 
 const DEFAULT_NAVIGATION_TEMPLATE: &str = include_str!("../navigation.template.toml");
 const LEGACY_NAVIGATION_MARKDOWN_PATH: &str = "navigation.md";
@@ -30,6 +30,7 @@ pub struct NavigationEntry {
     pub url: Option<String>,
     pub browser: Option<String>,
     pub browser_profile: Option<String>,
+    pub runtime_profile: Option<String>,
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub script: Option<String>,
@@ -61,6 +62,7 @@ pub struct NavigationEditorEntry {
     pub url: Option<String>,
     pub browser: Option<String>,
     pub browser_profile: Option<String>,
+    pub runtime_profile: Option<String>,
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub script: Option<String>,
@@ -130,6 +132,8 @@ struct NavigationEntryConfig {
     browser: Option<String>,
     #[serde(default)]
     browser_profile: Option<String>,
+    #[serde(default)]
+    runtime_profile: Option<String>,
     #[serde(default)]
     bundle_id: Option<String>,
     #[serde(default)]
@@ -314,6 +318,7 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
     let url = normalize_non_empty(entry.url);
     let browser = normalize_optional_text(entry.browser);
     let browser_profile = normalize_optional_text(entry.browser_profile);
+    let runtime_profile = normalize_optional_text(entry.runtime_profile);
     let bundle_id = normalize_optional_text(entry.bundle_id);
     let app_name = normalize_optional_text(entry.app_name);
     let script = normalize_optional_text(entry.script);
@@ -353,6 +358,11 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
         } else {
             None
         },
+        runtime_profile: if matches!(kind, NavigationEntryKind::Url) {
+            runtime_profile
+        } else {
+            None
+        },
         bundle_id,
         app_name,
         script,
@@ -368,6 +378,7 @@ fn navigation_entry_config_from_entry(entry: &NavigationEntry) -> NavigationEntr
         url: entry.url.clone().unwrap_or_default(),
         browser: entry.browser.clone(),
         browser_profile: entry.browser_profile.clone(),
+        runtime_profile: entry.runtime_profile.clone(),
         bundle_id: entry.bundle_id.clone(),
         app_name: entry.app_name.clone(),
         script: entry.script.clone(),
@@ -410,6 +421,7 @@ fn navigation_editor_entry_from_config(entry: NavigationEntryConfig) -> Navigati
         url: normalize_optional_text(Some(entry.url)),
         browser: normalize_optional_text(entry.browser),
         browser_profile: normalize_optional_text(entry.browser_profile),
+        runtime_profile: normalize_optional_text(entry.runtime_profile),
         bundle_id: normalize_optional_text(entry.bundle_id),
         app_name: normalize_optional_text(entry.app_name),
         script: normalize_optional_text(entry.script),
@@ -459,6 +471,7 @@ fn navigation_editor_entry_is_blank(entry: &NavigationEditorEntry) -> bool {
         entry.url.as_deref().unwrap_or(""),
         entry.browser.as_deref().unwrap_or(""),
         entry.browser_profile.as_deref().unwrap_or(""),
+        entry.runtime_profile.as_deref().unwrap_or(""),
         entry.bundle_id.as_deref().unwrap_or(""),
         entry.app_name.as_deref().unwrap_or(""),
         entry.script.as_deref().unwrap_or(""),
@@ -481,6 +494,7 @@ fn navigation_entry_config_from_editor_entry(
     let url = normalize_optional_text(entry.url);
     let browser = normalize_optional_text(entry.browser);
     let browser_profile = normalize_optional_text(entry.browser_profile);
+    let runtime_profile = normalize_optional_text(entry.runtime_profile);
     let bundle_id = normalize_optional_text(entry.bundle_id);
     let app_name = normalize_optional_text(entry.app_name);
     let script = normalize_optional_text(entry.script);
@@ -517,6 +531,7 @@ fn navigation_entry_config_from_editor_entry(
         url: url.unwrap_or_default(),
         browser: if is_url { browser } else { None },
         browser_profile: if is_url { browser_profile } else { None },
+        runtime_profile: if is_url { runtime_profile } else { None },
         bundle_id,
         app_name,
         script,
@@ -604,30 +619,75 @@ fn parse_navigation_markdown(content: &str, file_path: String) -> NavigationData
 }
 
 pub fn open_navigation_entry(entry: &NavigationEntry) -> Result<NavigationOpenResult> {
+    open_navigation_entry_with_runtime_profiles(entry, &[])
+}
+
+pub fn open_navigation_entry_with_runtime_profiles(
+    entry: &NavigationEntry,
+    runtime_profiles: &[RuntimeProfileConfig],
+) -> Result<NavigationOpenResult> {
     match entry_kind(entry)? {
-        NavigationEntryKind::Url => open_navigation_url(entry),
+        NavigationEntryKind::Url => open_navigation_url(entry, runtime_profiles),
         NavigationEntryKind::App => open_navigation_app(entry),
         NavigationEntryKind::Script => open_navigation_script(entry),
     }
 }
 
-fn open_navigation_url(entry: &NavigationEntry) -> Result<NavigationOpenResult> {
+fn open_navigation_url(
+    entry: &NavigationEntry,
+    runtime_profiles: &[RuntimeProfileConfig],
+) -> Result<NavigationOpenResult> {
     let url = entry
         .url
         .as_deref()
         .ok_or_else(|| anyhow!("missing url for url shortcut"))?;
+    let runtime_profile =
+        resolve_runtime_profile(entry.runtime_profile.as_deref(), runtime_profiles)?;
     let browser = entry
         .browser
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            runtime_profile
+                .and_then(|profile| profile.browser.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
     let profile = entry
         .browser_profile
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty());
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            runtime_profile
+                .and_then(|profile| profile.browser_profile.as_deref())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        });
+    let browser_user_data_dir = runtime_profile_browser_user_data_dir(runtime_profile);
+    let browser_args = runtime_profile
+        .map(runtime_profile_browser_args)
+        .unwrap_or_default();
 
-    match browser.map(normalize_browser_choice) {
+    let has_chromium_args =
+        profile.is_some() || browser_user_data_dir.is_some() || !browser_args.is_empty();
+    if has_chromium_args {
+        let app_name = match browser.map(normalize_browser_choice) {
+            Some(NavigationBrowserChoice::App(app_name)) => app_name.to_string(),
+            _ => "Google Chrome".to_string(),
+        };
+        let result = open_chromium_instance(
+            &app_name,
+            profile,
+            browser_user_data_dir.as_deref(),
+            &browser_args,
+            url,
+        )?;
+        return Ok(with_runtime_profile_detail(result, runtime_profile));
+    }
+
+    let result = match browser.map(normalize_browser_choice) {
         None | Some(NavigationBrowserChoice::CurrentChrome) => open_in_current_chrome(url),
         Some(NavigationBrowserChoice::System) => open_system_browser(url),
         Some(NavigationBrowserChoice::App(app_name)) => {
@@ -637,7 +697,40 @@ fn open_navigation_url(entry: &NavigationEntry) -> Result<NavigationOpenResult> 
                 open_browser_app(&app_name, url)
             }
         }
+    }?;
+    Ok(with_runtime_profile_detail(result, runtime_profile))
+}
+
+fn resolve_runtime_profile<'a>(
+    key: Option<&str>,
+    runtime_profiles: &'a [RuntimeProfileConfig],
+) -> Result<Option<&'a RuntimeProfileConfig>> {
+    let Some(key) = key.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    runtime_profiles
+        .iter()
+        .find(|profile| profile.key == key)
+        .map(Some)
+        .ok_or_else(|| anyhow!("运行配置不存在: {}", key))
+}
+
+fn with_runtime_profile_detail(
+    mut result: NavigationOpenResult,
+    runtime_profile: Option<&RuntimeProfileConfig>,
+) -> NavigationOpenResult {
+    if let Some(profile) = runtime_profile {
+        result.detail = format!(
+            "{} · 运行配置 {}",
+            result.detail,
+            if profile.label.trim().is_empty() {
+                profile.key.as_str()
+            } else {
+                profile.label.as_str()
+            }
+        );
     }
+    result
 }
 
 enum NavigationBrowserChoice<'a> {
@@ -745,6 +838,104 @@ fn open_chromium_profile(app_name: &str, profile: &str, url: &str) -> Result<Nav
     Ok(NavigationOpenResult {
         url: url.to_string(),
         detail: format!("已使用 {} · {} 打开入口", app_name, profile),
+    })
+}
+
+fn open_chromium_instance(
+    app_name: &str,
+    profile: Option<&str>,
+    user_data_dir: Option<&Path>,
+    browser_args: &[String],
+    url: &str,
+) -> Result<NavigationOpenResult> {
+    if !browser_supports_profile(app_name) {
+        anyhow::bail!("{} 暂不支持运行配置打开方式", app_name);
+    }
+
+    let mut command = Command::new("open");
+    command.arg("-na").arg(app_name).arg("--args");
+    if let Some(profile) = profile {
+        command.arg(format!("--profile-directory={profile}"));
+    }
+    if let Some(user_data_dir) = user_data_dir {
+        command.arg(format!("--user-data-dir={}", user_data_dir.display()));
+    }
+    for arg in browser_args {
+        command.arg(arg);
+    }
+    command.arg(url);
+
+    let status = command
+        .status()
+        .map_err(|error| anyhow!("failed to open browser runtime profile: {error}"))?;
+    if !status.success() {
+        anyhow::bail!("failed to open {} runtime profile", app_name);
+    }
+
+    Ok(NavigationOpenResult {
+        url: url.to_string(),
+        detail: format!("已使用 {} 运行配置打开入口", app_name),
+    })
+}
+
+pub(crate) fn runtime_profile_browser_args(profile: &RuntimeProfileConfig) -> Vec<String> {
+    let mut args = Vec::new();
+    if profile.web_actions_enabled {
+        args.push(format!(
+            "--remote-debugging-port={}",
+            profile.web_actions_port
+        ));
+    }
+    let proxy_url = profile.proxy_url.trim();
+    if !proxy_url.is_empty() {
+        args.push(format!("--proxy-server={proxy_url}"));
+    }
+    let proxy_bypass = profile.proxy_bypass.trim();
+    if !proxy_bypass.is_empty() {
+        args.push(format!("--proxy-bypass-list={proxy_bypass}"));
+    }
+    let host_resolver_rules = profile
+        .host_resolver_rules
+        .iter()
+        .map(|rule| rule.trim())
+        .filter(|rule| !rule.is_empty())
+        .collect::<Vec<_>>();
+    if !host_resolver_rules.is_empty() {
+        args.push(format!(
+            "--host-resolver-rules={}",
+            host_resolver_rules.join(", ")
+        ));
+    }
+    args.extend(
+        profile
+            .browser_args
+            .iter()
+            .map(|arg| arg.trim())
+            .filter(|arg| {
+                !arg.is_empty()
+                    && (!profile.web_actions_enabled
+                        || !arg
+                            .to_ascii_lowercase()
+                            .starts_with("--remote-debugging-port"))
+            })
+            .map(ToString::to_string),
+    );
+    args
+}
+
+pub(crate) fn runtime_profile_browser_user_data_dir(
+    profile: Option<&RuntimeProfileConfig>,
+) -> Option<PathBuf> {
+    profile.and_then(|profile| {
+        profile
+            .web_actions_user_data_dir
+            .clone()
+            .or_else(|| profile.browser_user_data_dir.clone())
+            .or_else(|| {
+                profile
+                    .web_actions_enabled
+                    .then(|| default_config_dir().join("chrome-cdp-profile"))
+            })
     })
 }
 
@@ -951,6 +1142,7 @@ fn parse_nav_entry(cells: &[String]) -> Option<NavigationEntry> {
         url: Some(url),
         browser: None,
         browser_profile: None,
+        runtime_profile: None,
         bundle_id: None,
         app_name: None,
         script: None,

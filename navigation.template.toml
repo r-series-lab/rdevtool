@@ -10,6 +10,7 @@ kind = "url"
 url = "https://example.com/"
 # browser = "system" # system default, Google Chrome, Microsoft Edge, Safari, Arc, or custom app name
 # browser_profile = "Profile 1" # Chrome, Edge, Chromium, and Brave only
+# runtime_profile = "local-browser" # optional: reuse defaults.runtime_profiles from projects.toml
 note = "Replace with your team's internal platform entry."
 
 [[categories.entries]]

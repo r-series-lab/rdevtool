@@ -81,6 +81,8 @@ pub struct Defaults {
     pub gitlab_token: Option<String>,
     #[serde(default = "empty_branch_rules")]
     pub branch_rules: BranchRules,
+    #[serde(default)]
+    pub runtime_profiles: Vec<RuntimeProfileConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -159,6 +161,8 @@ pub struct ProjectDebugProfileConfig {
     pub key: String,
     pub label: String,
     #[serde(default)]
+    pub runtime_profile: Option<String>,
+    #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub local_files: Vec<ProjectDebugLocalFileConfig>,
@@ -166,6 +170,179 @@ pub struct ProjectDebugProfileConfig {
     pub browser: Option<String>,
     #[serde(default)]
     pub browser_profile: Option<String>,
+    #[serde(default)]
+    pub browser_user_data_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub browser_args: Vec<String>,
+    #[serde(default)]
+    pub network_proxy: ProjectNetworkProxyConfig,
+    #[serde(default)]
+    pub local_proxy: ProjectLocalProxyConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct RuntimeProfileConfig {
+    pub key: String,
+    pub label: String,
+    #[serde(default)]
+    pub browser: Option<String>,
+    #[serde(default)]
+    pub browser_profile: Option<String>,
+    #[serde(default)]
+    pub browser_user_data_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub web_actions_enabled: bool,
+    #[serde(default = "default_runtime_profile_web_actions_port")]
+    pub web_actions_port: u16,
+    #[serde(default)]
+    pub web_actions_user_data_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub browser_args: Vec<String>,
+    #[serde(default)]
+    pub proxy_url: String,
+    #[serde(default)]
+    pub proxy_bypass: String,
+    #[serde(default)]
+    pub host_resolver_rules: Vec<String>,
+    #[serde(default)]
+    pub network_proxy: ProjectNetworkProxyConfig,
+}
+
+fn default_runtime_profile_web_actions_port() -> u16 {
+    9223
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectNetworkProxyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub proxy_url: String,
+    #[serde(default = "default_true")]
+    pub inject_env: bool,
+    #[serde(default)]
+    pub node_hook: bool,
+    #[serde(default = "default_network_proxy_no_proxy")]
+    pub no_proxy: String,
+}
+
+impl Default for ProjectNetworkProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            proxy_url: String::new(),
+            inject_env: true,
+            node_hook: false,
+            no_proxy: default_network_proxy_no_proxy(),
+        }
+    }
+}
+
+fn default_network_proxy_no_proxy() -> String {
+    "localhost,127.0.0.1,::1".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectLocalProxyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_local_proxy_listen")]
+    pub listen: String,
+    #[serde(default)]
+    pub frontend_url: String,
+    #[serde(default)]
+    pub upstream_proxy: String,
+    #[serde(default)]
+    pub routes: Vec<ProjectLocalProxyRouteConfig>,
+    #[serde(default)]
+    pub auth_helper: ProjectAuthHelperConfig,
+}
+
+impl Default for ProjectLocalProxyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: default_local_proxy_listen(),
+            frontend_url: String::new(),
+            upstream_proxy: String::new(),
+            routes: Vec::new(),
+            auth_helper: ProjectAuthHelperConfig::default(),
+        }
+    }
+}
+
+fn default_local_proxy_listen() -> String {
+    "127.0.0.1:3000".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectLocalProxyRouteConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub match_prefix: String,
+    pub target: String,
+    #[serde(default)]
+    pub rewrite_prefix: String,
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectAuthHelperConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_auth_helper_path")]
+    pub path: String,
+    #[serde(default = "default_auth_helper_redirect_path")]
+    pub redirect_path: String,
+    #[serde(default)]
+    pub items: Vec<ProjectAuthHelperItemConfig>,
+}
+
+impl Default for ProjectAuthHelperConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: default_auth_helper_path(),
+            redirect_path: default_auth_helper_redirect_path(),
+            items: Vec::new(),
+        }
+    }
+}
+
+fn default_auth_helper_path() -> String {
+    "/__auth-helper".to_string()
+}
+
+fn default_auth_helper_redirect_path() -> String {
+    "/#/".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectAuthHelperItemConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_auth_helper_storage")]
+    pub storage: String,
+    pub key: String,
+    #[serde(default)]
+    pub from_json_path: String,
+    #[serde(default)]
+    pub value: String,
+    #[serde(default = "default_auth_helper_cookie_path")]
+    pub cookie_path: String,
+    #[serde(default)]
+    pub cookie_max_age_seconds: Option<i64>,
+    #[serde(default)]
+    pub cookie_same_site: String,
+}
+
+fn default_auth_helper_storage() -> String {
+    "localStorage".to_string()
+}
+
+fn default_auth_helper_cookie_path() -> String {
+    "/".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

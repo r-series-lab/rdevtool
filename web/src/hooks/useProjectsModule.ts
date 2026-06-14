@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { ProjectRuntimeEntry, ProjectWorkflowAction } from "../app-types";
 import type {
   ActivityResource,
+  ActivityBulkUpdater,
   ActivityRecorder,
   ActivityStatus,
   ActivityUpdater,
@@ -24,10 +25,11 @@ type UseProjectsModuleOptions = {
   emitWorkflowSignals: (signals: WorkflowSignal[]) => Promise<void>;
   recordActivity?: ActivityRecorder;
   updateActivity?: ActivityUpdater;
+  syncActivities?: ActivityBulkUpdater;
 };
 
 type FinderType = "项目" | "网站" | "应用" | "脚本";
-type FinderQuickFilter = "全部" | "收藏" | "最近";
+type FinderQuickFilter = "全部" | "最近";
 
 type NavigationEntry = {
   name: string;
@@ -62,7 +64,7 @@ export type FinderShortcutItem = {
 };
 
 const FINDER_TYPE_OPTIONS = ["项目", "网站", "应用", "脚本"] as const;
-const FINDER_QUICK_FILTER_OPTIONS = ["全部", "收藏", "最近"] as const;
+const FINDER_QUICK_FILTER_OPTIONS = ["全部", "最近"] as const;
 const FINDER_STORAGE_NAMESPACE = "projects";
 const FINDER_PREFERENCES_STORAGE_KEY = "finder-preferences";
 const FINDER_DATA_CACHE_TTL_MS = 15_000;
@@ -302,6 +304,10 @@ function touchRecentKey(values: string[], key: string): string[] {
   );
 }
 
+function compareMarkedFirst(leftMarked: boolean, rightMarked: boolean) {
+  return Number(rightMarked) - Number(leftMarked);
+}
+
 function kind_from_finder_type(value: FinderType): string | null {
   switch (value) {
     case "网站":
@@ -456,7 +462,7 @@ export type ProjectsModuleState = {
   handleRunBuild: (projectKey: string) => Promise<void>;
   handleStopBuild: (projectKey: string) => Promise<void>;
   handleOpenBuildOutput: (projectKey: string) => Promise<void>;
-  handleFocusRuntime: (projectKey: string) => Promise<void>;
+  handleFocusRuntime: (projectKey: string, debugProfileKey?: string) => Promise<void>;
   handleOpenProjectDirectory: (projectKey: string) => Promise<void>;
   handleReplayProjectWorkflow: (
     replay: WorkflowProjectReplay,
@@ -472,6 +478,7 @@ export function useProjectsModule({
   emitWorkflowSignals,
   recordActivity,
   updateActivity,
+  syncActivities,
 }: UseProjectsModuleOptions): ProjectsModuleState {
   const [finderType, setFinderType] = useState<FinderType>("项目");
   const [finderQuickFilter, setFinderQuickFilter] =
@@ -592,8 +599,6 @@ export function useProjectsModule({
     if (finderType === "项目") {
       return {
         全部: runtimeItems.length,
-        收藏: runtimeItems.filter((item) => favoriteProjectKeySet.has(item.key))
-          .length,
         最近: runtimeItems.filter((item) => recentProjectKeySet.has(item.key))
           .length,
       };
@@ -601,16 +606,11 @@ export function useProjectsModule({
 
     return {
       全部: shortcutEntriesInCategory.length,
-      收藏: shortcutEntriesInCategory.filter((item) =>
-        favoriteShortcutKeySet.has(buildFinderShortcutKey(item)),
-      ).length,
       最近: shortcutEntriesInCategory.filter((item) =>
         recentShortcutKeySet.has(buildFinderShortcutKey(item)),
       ).length,
     };
   }, [
-    favoriteProjectKeySet,
-    favoriteShortcutKeySet,
     finderType,
     recentProjectKeySet,
     recentShortcutKeySet,
@@ -653,9 +653,6 @@ export function useProjectsModule({
       if (finderType !== "项目") {
         return false;
       }
-      if (finderQuickFilter === "收藏" && !favoriteProjectKeySet.has(item.key)) {
-        return false;
-      }
       if (finderQuickFilter === "最近" && !recentProjectKeySet.has(item.key)) {
         return false;
       }
@@ -664,14 +661,17 @@ export function useProjectsModule({
       }
       return buildRuntimeHaystack(item).includes(keyword);
     });
-    if (finderQuickFilter === "最近") {
-      return [...filtered].sort(
-        (a, b) =>
-          (recentOrder.get(a.key) ?? Number.MAX_SAFE_INTEGER) -
-          (recentOrder.get(b.key) ?? Number.MAX_SAFE_INTEGER),
-      );
-    }
-    return filtered;
+    return [...filtered].sort(
+      (a, b) =>
+        compareMarkedFirst(
+          favoriteProjectKeySet.has(a.key),
+          favoriteProjectKeySet.has(b.key),
+        ) ||
+        (finderQuickFilter === "最近"
+          ? (recentOrder.get(a.key) ?? Number.MAX_SAFE_INTEGER) -
+            (recentOrder.get(b.key) ?? Number.MAX_SAFE_INTEGER)
+          : 0),
+    );
   }, [
     favoriteProjectKeySet,
     finderQuery,
@@ -695,9 +695,6 @@ export function useProjectsModule({
       if (finderCategory !== "全部" && finderCategory && item.categoryTitle !== finderCategory) {
         return false;
       }
-      if (finderQuickFilter === "收藏" && !favoriteShortcutKeySet.has(shortcutKey)) {
-        return false;
-      }
       if (finderQuickFilter === "最近" && !recentShortcutKeySet.has(shortcutKey)) {
         return false;
       }
@@ -706,14 +703,22 @@ export function useProjectsModule({
       }
       return buildShortcutHaystack(item).includes(keyword);
     });
-    if (finderQuickFilter === "最近") {
-      return [...filtered].sort(
-        (a, b) =>
-          (recentOrder.get(buildFinderShortcutKey(a)) ?? Number.MAX_SAFE_INTEGER) -
-          (recentOrder.get(buildFinderShortcutKey(b)) ?? Number.MAX_SAFE_INTEGER),
-      );
-    }
-    return filtered;
+    return [...filtered].sort(
+      (a, b) => {
+        const aKey = buildFinderShortcutKey(a);
+        const bKey = buildFinderShortcutKey(b);
+        return (
+          compareMarkedFirst(
+            favoriteShortcutKeySet.has(aKey),
+            favoriteShortcutKeySet.has(bKey),
+          ) ||
+          (finderQuickFilter === "最近"
+            ? (recentOrder.get(aKey) ?? Number.MAX_SAFE_INTEGER) -
+              (recentOrder.get(bKey) ?? Number.MAX_SAFE_INTEGER)
+            : 0)
+        );
+      },
+    );
   }, [
     favoriteShortcutKeySet,
     finderCategory,
@@ -1365,6 +1370,10 @@ export function useProjectsModule({
         project: projectKey,
       });
       replaceRuntimeEntry(projectKey, updated);
+      syncActivities?.(
+        { kind: "runtime", status: "failed", projectKey },
+        { acknowledgedAt: new Date().toISOString() },
+      );
       touchProjectUsage(projectKey);
       await emitProjectWorkflowSignals(
         projectWorkflowReplay(projectKey, "project.runtime.stop"),
@@ -1598,11 +1607,13 @@ export function useProjectsModule({
     }
   }
 
-  async function handleFocusRuntime(projectKey: string) {
+  async function handleFocusRuntime(projectKey: string, debugProfileKey?: string) {
     if (!enabled) {
       return;
     }
 
+    const selectedDebugProfile =
+      (debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey] ?? "").trim();
     setBusy("正在唤起运行中的项目");
     setError("");
     const activityId =
@@ -1610,8 +1621,14 @@ export function useProjectsModule({
         kind: "runtime",
         status: "running",
         title: "唤起项目",
-        summary: runtimeProjectName(projectKey),
-        executionKey: projectActivityExecutionKey("project.runtime.focus", projectKey),
+        summary: selectedDebugProfile
+          ? `${runtimeProjectName(projectKey)} · ${selectedDebugProfile}`
+          : runtimeProjectName(projectKey),
+        executionKey: projectActivityExecutionKey(
+          "project.runtime.focus",
+          projectKey,
+          selectedDebugProfile || "default",
+        ),
         ...projectWorkflowChainFields("唤起项目"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
@@ -1620,6 +1637,7 @@ export function useProjectsModule({
     try {
       const updated = await invoke<ProjectRuntimeEntry>("focus_project_runtime", {
         project: projectKey,
+        debugProfile: selectedDebugProfile || null,
       });
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);

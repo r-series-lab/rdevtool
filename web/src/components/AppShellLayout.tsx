@@ -20,6 +20,10 @@ type AppShellLayoutProps = {
   visibleNavItems: NavItem[];
   activePage: PageKey;
   onPageChange: (page: PageKey) => void;
+  enabledPages: PageKey[];
+  onEnabledPagesChange: (pages: PageKey[]) => void;
+  defaultPage: PageKey;
+  onDefaultPageChange: (page: PageKey) => void;
   styleMode: AppStyleMode;
   onStyleModeChange: (mode: AppStyleMode) => void;
   selectedProjectKey: string;
@@ -56,6 +60,10 @@ export function AppShellLayout({
   visibleNavItems,
   activePage,
   onPageChange,
+  enabledPages,
+  onEnabledPagesChange,
+  defaultPage,
+  onDefaultPageChange,
   styleMode,
   onStyleModeChange,
   selectedProjectKey,
@@ -166,6 +174,10 @@ export function AppShellLayout({
           onOpenConfigFile={onOpenConfigFile}
           onOpenNavigationConfigFile={onOpenNavigationConfigFile}
           activePage={activePage}
+          enabledPages={enabledPages}
+          onEnabledPagesChange={onEnabledPagesChange}
+          defaultPage={defaultPage}
+          onDefaultPageChange={onDefaultPageChange}
           onProjectConfigSaved={onProjectConfigSaved}
           onClose={closeSettings}
         />

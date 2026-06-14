@@ -111,7 +111,7 @@ export function HistoryCard({
                       fontWeight: 820,
                     })}
                   >
-                    已置顶
+                    已标记
                   </Box>
                 ) : null}
                 <Typography variant="subtitle2" sx={{ minWidth: 0, fontWeight: 700 }} noWrap>

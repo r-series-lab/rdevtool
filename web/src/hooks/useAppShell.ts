@@ -36,6 +36,7 @@ type UseAppShellOptions = {
 export function useAppShell({ setError }: UseAppShellOptions) {
   const [page, setPage] = useState<PageKey>("projects");
   const [enabledPages, setEnabledPages] = useState<PageKey[]>(normalizeEnabledPages(undefined));
+  const [defaultPage, setDefaultPage] = useState<PageKey>("projects");
   const [styleMode, setStyleMode] = useState<AppStyleMode>("light");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selectedProject, setSelectedProject] = useState("");
@@ -68,7 +69,10 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     if (!visibleNavItems.some((item) => item.key === page)) {
       setPage(visibleNavItems[0].key);
     }
-  }, [page, visibleNavItems]);
+    if (!enabledPages.includes(defaultPage)) {
+      setDefaultPage(visibleNavItems[0].key);
+    }
+  }, [defaultPage, enabledPages, page, visibleNavItems]);
 
   useEffect(() => {
     if (!storageHydrated) {
@@ -77,13 +81,13 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     void invoke("save_workspace_app_preferences", {
       preferences: {
         styleMode,
-        defaultPage: page,
+        defaultPage,
         enabledPages,
       },
     }).catch((reason) => {
       setError(String(reason));
     });
-  }, [enabledPages, page, setError, storageHydrated, styleMode]);
+  }, [defaultPage, enabledPages, setError, storageHydrated, styleMode]);
 
   useEffect(() => {
     if (!storageHydrated) {
@@ -210,9 +214,8 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       nextDefaultPage && nextEnabledPages.includes(nextDefaultPage)
         ? nextDefaultPage
         : fallbackPage;
-    setPage(
-      initialPage,
-    );
+    setDefaultPage(initialPage);
+    setPage(initialPage);
     setStorageHydrated(true);
 
     if (!storedBranchCache && Object.keys(nextBranchCache).length > 0) {
@@ -237,6 +240,9 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     page,
     setPage,
     enabledPages,
+    setEnabledPages,
+    defaultPage,
+    setDefaultPage,
     styleMode,
     setStyleMode,
     projects,

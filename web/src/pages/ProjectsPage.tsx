@@ -7,13 +7,14 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
-  Drawer,
+  FormControlLabel,
   IconButton,
   ListItemIcon,
   ListItemText,
   Menu,
   MenuItem,
   Stack,
+  Switch,
   TextField,
   Tooltip,
   Typography,
@@ -23,23 +24,30 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   FinderEntry,
   FinderShortcutItem,
+  NavigationEditorEntry,
+  NavigationEditorState,
+  ProjectConfigEditorState,
   ProjectDebugProfileSummary,
   ProjectWorkflowAction,
   ProjectRuntimeEntry,
   ProjectRuntimeLogKind,
   ProjectRuntimeLogResponse,
+  RuntimeProfileDraft,
 } from "../app-types";
 import {
   AppWindowIcon,
   CheckIcon,
   ClearIcon,
   CopyIcon,
+  EditIcon,
   FolderIcon,
   MoreIcon,
   OpenExternalIcon,
   PackageIcon,
   PlayIcon,
+  PlusIcon,
   RefreshIcon,
+  SettingsIcon,
   StarIcon,
   StopIcon,
   TerminalIcon,
@@ -53,7 +61,8 @@ import {
 } from "../components/WorkflowLinksDialog";
 import { WorkflowRulesConfigDialog } from "../components/WorkflowRulesConfigDialog";
 import {
-  WebActionsDialog,
+  RuntimePanelDrawer,
+  WebActionsPanel,
   type WebActionsDialogContext,
 } from "../components/WebActionsDialog";
 import {
@@ -66,7 +75,8 @@ import {
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 
 type FinderType = "项目" | "网站" | "应用" | "脚本";
-type FinderQuickFilter = "全部" | "收藏" | "最近";
+type FinderQuickFilter = "全部" | "最近";
+type RuntimePanelTab = "overview" | "config" | "logs" | "webActions";
 
 type RuntimeLogState = {
   projectKey: string;
@@ -147,7 +157,7 @@ export type ProjectsPageProps = {
   onRunBuild: (projectKey: string) => void;
   onStopBuild: (projectKey: string) => void;
   onOpenBuildOutput: (projectKey: string) => void;
-  onFocusRuntime: (projectKey: string) => void;
+  onFocusRuntime: (projectKey: string, debugProfileKey?: string) => void;
   onOpenProjectDirectory: (projectKey: string) => void;
 };
 
@@ -167,6 +177,12 @@ const PROJECT_WORKFLOW_ACTIONS: ProjectWorkflowAction[] = [
 type RuntimeEnvParseResult = {
   values: Record<string, string>;
   error: string;
+};
+
+type RuntimeProfileDialogState = {
+  mode: "create" | "edit";
+  index: number;
+  draft: RuntimeProfileDraft;
 };
 
 function formatRuntimeEnvText(env?: Record<string, string> | null) {
@@ -208,6 +224,42 @@ function parseRuntimeEnvText(text: string): RuntimeEnvParseResult {
     values[key] = value;
   }
   return { values, error: "" };
+}
+
+function uniqueRuntimeProfileKey(profiles: RuntimeProfileDraft[]) {
+  const existing = new Set(profiles.map((profile) => profile.key.trim()));
+  let index = profiles.length + 1;
+  let key = `runtime-${index}`;
+  while (existing.has(key)) {
+    index += 1;
+    key = `runtime-${index}`;
+  }
+  return key;
+}
+
+function emptyRuntimeProfileDraft(profiles: RuntimeProfileDraft[]): RuntimeProfileDraft {
+  const key = uniqueRuntimeProfileKey(profiles);
+  return {
+    key,
+    label: "通用运行配置",
+    browser: "Google Chrome",
+    browserProfile: null,
+    browserUserDataDir: "",
+    webActionsEnabled: false,
+    webActionsPort: 9223,
+    webActionsUserDataDir: "",
+    browserArgsText: "",
+    proxyUrl: "",
+    proxyBypass: "localhost;127.0.0.1;::1",
+    hostResolverRulesText: "MAP app.example.test 127.0.0.1",
+    networkProxy: {
+      enabled: false,
+      proxyUrl: "",
+      injectEnv: true,
+      nodeHook: false,
+      noProxy: "localhost,127.0.0.1,::1",
+    },
+  };
 }
 
 function projectSelectedProfileKey(
@@ -566,12 +618,72 @@ function buildFinderEntryDetails(item: FinderShortcutItem): string[] {
   addDetail("地址", entry.url);
   addDetail("浏览器", entry.browser);
   addDetail("Profile", entry.browserProfile);
+  addDetail("运行配置", entry.runtimeProfile);
   addDetail("Bundle ID", entry.bundleId);
   addDetail("应用", entry.appName);
   addDetail("脚本", entry.script);
   addDetail("目录", entry.cwd);
 
   return detailLines;
+}
+
+function navigationEditorEntryMatchesShortcut(
+  entry: NavigationEditorEntry,
+  item: FinderShortcutItem,
+) {
+  if (entry.kind !== item.entry.kind || entry.name !== item.entry.name) {
+    return false;
+  }
+  if (item.entry.kind === "url") {
+    return (entry.url ?? "").trim() === (item.entry.url ?? "").trim();
+  }
+  if (item.entry.kind === "app") {
+    return (
+      (entry.bundleId ?? "").trim() === (item.entry.bundleId ?? "").trim() &&
+      (entry.appName ?? "").trim() === (item.entry.appName ?? "").trim()
+    );
+  }
+  return (entry.script ?? "").trim() === (item.entry.script ?? "").trim();
+}
+
+function withShortcutRuntimeProfile(
+  data: NavigationEditorState,
+  item: FinderShortcutItem,
+  runtimeProfile: string | null,
+): NavigationEditorState | null {
+  let updated = false;
+  const patchEntry = (entry: NavigationEditorEntry) => {
+    if (updated || !navigationEditorEntryMatchesShortcut(entry, item)) {
+      return entry;
+    }
+    updated = true;
+    return { ...entry, runtimeProfile };
+  };
+  const patchCategory = (categoryOnly: boolean) =>
+    data.categories.map((category) => {
+      if (categoryOnly && category.title !== item.categoryTitle) {
+        return category;
+      }
+      return {
+        ...category,
+        entries: category.entries.map(patchEntry),
+      };
+    });
+
+  const preferredCategories = patchCategory(true);
+  if (updated) {
+    return { ...data, categories: preferredCategories };
+  }
+  const fallbackCategories = patchCategory(false);
+  return updated ? { ...data, categories: fallbackCategories } : null;
+}
+
+function runtimeProfileLabel(profile: RuntimeProfileDraft | null | undefined) {
+  return profile?.label?.trim() || profile?.key || "";
+}
+
+function runtimeProfileHasCdp(profile: RuntimeProfileDraft | null | undefined) {
+  return Boolean(profile?.webActionsEnabled);
 }
 
 function buildFinderShortcutKey(item: FinderShortcutItem): string {
@@ -740,6 +852,28 @@ export function ProjectsPage({
   const theme = useTheme();
   const mono = theme.palette.mode === "dark";
   const tone = buildProjectsTone(mono);
+  const runtimePanelActionButtonSx = {
+    width: 32,
+    height: 32,
+    flex: "0 0 32px",
+    borderRadius: "999px",
+    bgcolor: tone.stopButtonBg,
+    color: tone.stopButtonColor,
+    border: `1px solid ${tone.stopButtonBorder}`,
+    transition: "none",
+    "&:hover": {
+      bgcolor: tone.stopButtonBg,
+    },
+    "&.Mui-disabled": {
+      bgcolor: tone.stopButtonBg,
+      color: tone.stopButtonDisabledColor,
+      borderColor: tone.stopButtonBorder,
+      opacity: 0.58,
+    },
+    "& .MuiTouchRipple-root": {
+      display: "none",
+    },
+  };
   const [confirmedShortcutKey, setConfirmedShortcutKey] = useState<string | null>(
     null,
   );
@@ -749,12 +883,17 @@ export function ProjectsPage({
   const [shortcutMenuAnchor, setShortcutMenuAnchor] =
     useState<HTMLElement | null>(null);
   const [shortcutMenuKey, setShortcutMenuKey] = useState("");
-  const [webActionsContext, setWebActionsContext] =
-    useState<WebActionsDialogContext | null>(null);
-  const [runtimeOptionsProjectKey, setRuntimeOptionsProjectKey] = useState("");
+  const [shortcutRuntimePanelItem, setShortcutRuntimePanelItem] =
+    useState<FinderShortcutItem | null>(null);
+  const [shortcutPanelTab, setShortcutPanelTab] =
+    useState<RuntimePanelTab>("webActions");
+  const [shortcutRuntimeSaving, setShortcutRuntimeSaving] = useState(false);
+  const [shortcutRuntimeError, setShortcutRuntimeError] = useState("");
   const [runtimeOptionsProfileKey, setRuntimeOptionsProfileKey] = useState("");
   const [runtimeOptionsEnvText, setRuntimeOptionsEnvText] = useState("");
   const [detailsProjectKey, setDetailsProjectKey] = useState("");
+  const [detailsPanelTab, setDetailsPanelTab] =
+    useState<RuntimePanelTab>("overview");
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [workflowListOpen, setWorkflowListOpen] = useState(false);
   const [workflowProjectKey, setWorkflowProjectKey] = useState("");
@@ -773,6 +912,15 @@ export function ProjectsPage({
     error: "",
   });
   const [runtimeLogRefreshKey, setRuntimeLogRefreshKey] = useState(0);
+  const [runtimeProfileDrafts, setRuntimeProfileDrafts] = useState<RuntimeProfileDraft[]>([]);
+  const [runtimeProfileIndex, setRuntimeProfileIndex] = useState(0);
+  const [runtimeProfilesLoaded, setRuntimeProfilesLoaded] = useState(false);
+  const [runtimeProfilesLoading, setRuntimeProfilesLoading] = useState(false);
+  const [runtimeProfilesSaving, setRuntimeProfilesSaving] = useState(false);
+  const [runtimeProfilesError, setRuntimeProfilesError] = useState("");
+  const [runtimeProfileDialog, setRuntimeProfileDialog] =
+    useState<RuntimeProfileDialogState | null>(null);
+  const runtimeProfilesLoadingRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const confirmTimerRef = useRef<number | null>(null);
@@ -799,8 +947,13 @@ export function ProjectsPage({
   const shortcutMenuItem =
     shortcutEntries.find((item) => buildFinderShortcutKey(item) === shortcutMenuKey) ??
     null;
-  const runtimeOptionsEntry =
-    runtimeEntries.find((item) => item.key === runtimeOptionsProjectKey) ?? null;
+  const shortcutRuntimePanelKey = shortcutRuntimePanelItem
+    ? buildFinderShortcutKey(shortcutRuntimePanelItem)
+    : "";
+  const shortcutRuntimePanelCurrentItem = shortcutRuntimePanelKey
+    ? shortcutEntries.find((item) => buildFinderShortcutKey(item) === shortcutRuntimePanelKey) ??
+      shortcutRuntimePanelItem
+    : null;
   const detailsProjectEntry =
     runtimeEntries.find((item) => item.key === detailsProjectKey) ?? null;
   const workflowProjectEntry =
@@ -814,15 +967,45 @@ export function ProjectsPage({
   const shortcutMenuFavorite = shortcutMenuItem
     ? favoriteShortcutKeySet.has(buildFinderShortcutKey(shortcutMenuItem))
     : false;
+  const runtimeOptionsEntry = detailsProjectEntry;
   const runtimeOptionsProfiles = runtimeOptionsEntry?.debugProfiles ?? [];
   const runtimeOptionsSelectedProfile =
     findDebugProfile(runtimeOptionsProfiles, runtimeOptionsProfileKey) ?? null;
+  const runtimePanelProfile = runtimeProfileDrafts[runtimeProfileIndex] ?? null;
   const runtimeOptionsParseResult = useMemo(
     () => parseRuntimeEnvText(runtimeOptionsEnvText),
     [runtimeOptionsEnvText],
   );
   const detailsProjectPath =
     detailsProjectEntry?.cwd || detailsProjectEntry?.repoPath || "";
+  const detailsWebActionsContext = useMemo<WebActionsDialogContext | null>(() => {
+    const url = detailsProjectEntry?.focusUrl?.trim();
+    if (!detailsProjectEntry || !url) {
+      return null;
+    }
+    return {
+      title: detailsProjectEntry.name,
+      scope: `project:${detailsProjectEntry.key}`,
+      url,
+    };
+  }, [detailsProjectEntry?.focusUrl, detailsProjectEntry?.key, detailsProjectEntry?.name]);
+  const shortcutRuntimeProfileKey =
+    shortcutRuntimePanelCurrentItem?.entry.runtimeProfile?.trim() ?? "";
+  const shortcutRuntimeProfile =
+    runtimeProfileDrafts.find((profile) => profile.key === shortcutRuntimeProfileKey) ??
+    null;
+  const shortcutWebActionsContext = useMemo<WebActionsDialogContext | null>(() => {
+    const url = shortcutRuntimePanelCurrentItem?.entry.url?.trim();
+    if (!shortcutRuntimePanelCurrentItem || !url) {
+      return null;
+    }
+    return {
+      title: shortcutRuntimePanelCurrentItem.entry.name,
+      scope: webActionScopeForShortcut(shortcutRuntimePanelCurrentItem),
+      url,
+      entry: shortcutRuntimePanelCurrentItem.entry,
+    };
+  }, [shortcutRuntimePanelCurrentItem]);
   const showQuickFilters =
     (finderIsProjects ? runtimeEntries.length : shortcutEntries.length) > 0;
   const workflowReceiveGroups = useMemo(
@@ -864,8 +1047,78 @@ export function ProjectsPage({
   useEffect(() => {
     if (detailsProjectKey && !detailsProjectEntry) {
       setDetailsProjectKey("");
+      setDetailsPanelTab("overview");
     }
   }, [detailsProjectEntry, detailsProjectKey]);
+
+  useEffect(() => {
+    if (!detailsProjectEntry) {
+      setRuntimeOptionsProfileKey("");
+      setRuntimeOptionsEnvText("");
+      return;
+    }
+    const profileKey = projectSelectedProfileKey(
+      detailsProjectEntry,
+      selectedDebugProfileKeys,
+    );
+    const profile = findDebugProfile(detailsProjectEntry.debugProfiles ?? [], profileKey);
+    setRuntimeOptionsProfileKey(profileKey);
+    setRuntimeOptionsEnvText(formatRuntimeEnvText(profile?.env));
+  }, [detailsProjectEntry?.key]);
+
+  useEffect(() => {
+    if (detailsPanelTab === "webActions" && !detailsWebActionsContext) {
+      setDetailsPanelTab("overview");
+    }
+  }, [detailsPanelTab, detailsWebActionsContext]);
+
+  useEffect(() => {
+    if (!shortcutRuntimePanelKey) {
+      return;
+    }
+    const exists = shortcutEntries.some(
+      (item) => buildFinderShortcutKey(item) === shortcutRuntimePanelKey,
+    );
+    if (!exists) {
+      setShortcutRuntimePanelItem(null);
+      setShortcutPanelTab("webActions");
+    }
+  }, [shortcutEntries, shortcutRuntimePanelKey]);
+
+  useEffect(() => {
+    if (
+      detailsPanelTab !== "config" ||
+      !detailsProjectEntry ||
+      runtimeProfilesLoaded ||
+      runtimeProfilesLoading
+    ) {
+      return;
+    }
+    void loadRuntimeProfiles(runtimeOptionsSelectedProfile?.runtimeProfile);
+  }, [
+    detailsPanelTab,
+    detailsProjectEntry?.key,
+    runtimeOptionsSelectedProfile?.runtimeProfile,
+    runtimeProfilesLoaded,
+    runtimeProfilesLoading,
+  ]);
+
+  useEffect(() => {
+    if (
+      !shortcutRuntimePanelCurrentItem ||
+      shortcutPanelTab !== "config" ||
+      runtimeProfilesLoaded ||
+      runtimeProfilesLoading
+    ) {
+      return;
+    }
+    void loadRuntimeProfiles(shortcutRuntimePanelCurrentItem.entry.runtimeProfile);
+  }, [
+    shortcutPanelTab,
+    shortcutRuntimePanelCurrentItem,
+    runtimeProfilesLoaded,
+    runtimeProfilesLoading,
+  ]);
 
   useEffect(() => {
     if (!detailsProjectEntry) {
@@ -1035,42 +1288,226 @@ export function ProjectsPage({
     setShortcutMenuKey("");
   }
 
-  function openProjectWebActions(item: ProjectRuntimeEntry) {
-    const url = item.focusUrl?.trim();
-    if (!url) {
+  function selectRuntimeProfileIndex(profileKey?: string | null) {
+    const key = profileKey?.trim();
+    if (!key) {
+      setRuntimeProfileIndex(0);
       return;
     }
-    setWebActionsContext({
-      title: item.name,
-      scope: `project:${item.key}`,
-      url,
-    });
+    const nextIndex = runtimeProfileDrafts.findIndex((profile) => profile.key === key);
+    setRuntimeProfileIndex(nextIndex >= 0 ? nextIndex : 0);
   }
 
-  function openShortcutWebActions(item: FinderShortcutItem) {
+  function openShortcutRuntimePanel(item: FinderShortcutItem) {
     const url = item.entry.url?.trim();
     if (!url) {
       return;
     }
-    setWebActionsContext({
-      title: item.entry.name,
-      scope: webActionScopeForShortcut(item),
-      url,
+    setShortcutRuntimePanelItem(item);
+    setShortcutPanelTab("webActions");
+    setShortcutRuntimeError("");
+    if (runtimeProfilesLoaded) {
+      selectRuntimeProfileIndex(item.entry.runtimeProfile);
+    } else {
+      void loadRuntimeProfiles(item.entry.runtimeProfile);
+    }
+  }
+
+  function closeShortcutRuntimePanel() {
+    setShortcutRuntimePanelItem(null);
+    setShortcutPanelTab("webActions");
+    setShortcutRuntimeError("");
+  }
+
+  async function saveShortcutRuntimeProfile(profileKey: string) {
+    if (!shortcutRuntimePanelCurrentItem) {
+      return;
+    }
+    const nextRuntimeProfile = profileKey.trim() || null;
+    setShortcutRuntimeSaving(true);
+    setShortcutRuntimeError("");
+    try {
+      const editor = await invoke<NavigationEditorState>("get_navigation_editor");
+      const nextEditor = withShortcutRuntimeProfile(
+        editor,
+        shortcutRuntimePanelCurrentItem,
+        nextRuntimeProfile,
+      );
+      if (!nextEditor) {
+        throw new Error("未找到可更新的访达入口");
+      }
+      await invoke("save_navigation_editor", { data: nextEditor });
+      const nextItem: FinderShortcutItem = {
+        ...shortcutRuntimePanelCurrentItem,
+        entry: {
+          ...shortcutRuntimePanelCurrentItem.entry,
+          runtimeProfile: nextRuntimeProfile,
+        },
+      };
+      setShortcutRuntimePanelItem(nextItem);
+      selectRuntimeProfileIndex(nextRuntimeProfile);
+      onRefresh();
+    } catch (reason) {
+      setShortcutRuntimeError(String(reason));
+    } finally {
+      setShortcutRuntimeSaving(false);
+    }
+  }
+
+  function openRuntimePanel(item: ProjectRuntimeEntry, tab: RuntimePanelTab = "overview") {
+    setDetailsProjectKey(item.key);
+    setDetailsPanelTab(tab);
+  }
+
+  function closeRuntimePanel() {
+    setDetailsProjectKey("");
+    setDetailsPanelTab("overview");
+  }
+
+  async function loadRuntimeProfiles(preferredKey?: string | null) {
+    if (runtimeProfilesLoadingRef.current) {
+      return;
+    }
+    runtimeProfilesLoadingRef.current = true;
+    setRuntimeProfilesLoading(true);
+    setRuntimeProfilesError("");
+    try {
+      const state = await invoke<ProjectConfigEditorState>("get_project_config_editor");
+      const profiles = state.runtimeProfiles ?? [];
+      setRuntimeProfileDrafts(profiles);
+      const preferredIndex = preferredKey
+        ? profiles.findIndex((profile) => profile.key === preferredKey)
+        : -1;
+      setRuntimeProfileIndex(preferredIndex >= 0 ? preferredIndex : 0);
+    } catch (reason) {
+      setRuntimeProfilesError(String(reason));
+    } finally {
+      setRuntimeProfilesLoaded(true);
+      runtimeProfilesLoadingRef.current = false;
+      setRuntimeProfilesLoading(false);
+    }
+  }
+
+  function addRuntimePanelProfile() {
+    setRuntimeProfileDialog({
+      mode: "create",
+      index: -1,
+      draft: emptyRuntimeProfileDraft(runtimeProfileDrafts),
     });
+    setRuntimeProfilesError("");
   }
 
-  function openRuntimeOptionsDialog(item: ProjectRuntimeEntry) {
-    const profileKey = projectSelectedProfileKey(item, selectedDebugProfileKeys);
-    const profile = findDebugProfile(item.debugProfiles ?? [], profileKey);
-    setRuntimeOptionsProjectKey(item.key);
-    setRuntimeOptionsProfileKey(profileKey);
-    setRuntimeOptionsEnvText(formatRuntimeEnvText(profile?.env));
+  function editRuntimePanelProfile() {
+    if (!runtimePanelProfile) {
+      return;
+    }
+    setRuntimeProfileDialog({
+      mode: "edit",
+      index: runtimeProfileIndex,
+      draft: {
+        ...runtimePanelProfile,
+        networkProxy: { ...runtimePanelProfile.networkProxy },
+      },
+    });
+    setRuntimeProfilesError("");
   }
 
-  function closeRuntimeOptionsDialog() {
-    setRuntimeOptionsProjectKey("");
-    setRuntimeOptionsProfileKey("");
-    setRuntimeOptionsEnvText("");
+  function editRuntimePanelProfileByKey(profileKey?: string | null) {
+    const key = profileKey?.trim();
+    if (!key) {
+      return;
+    }
+    const index = runtimeProfileDrafts.findIndex((profile) => profile.key === key);
+    const profile = index >= 0 ? runtimeProfileDrafts[index] : null;
+    if (!profile) {
+      return;
+    }
+    setRuntimeProfileIndex(index);
+    setRuntimeProfileDialog({
+      mode: "edit",
+      index,
+      draft: {
+        ...profile,
+        networkProxy: { ...profile.networkProxy },
+      },
+    });
+    setRuntimeProfilesError("");
+  }
+
+  function updateRuntimeProfileDialog(patch: Partial<RuntimeProfileDraft>) {
+    setRuntimeProfileDialog((current) =>
+      current
+        ? {
+            ...current,
+            draft: {
+              ...current.draft,
+              ...patch,
+            },
+          }
+        : current,
+    );
+  }
+
+  async function persistRuntimePanelProfiles(
+    profiles: RuntimeProfileDraft[],
+    selectedKey?: string,
+  ) {
+    setRuntimeProfilesSaving(true);
+    setRuntimeProfilesError("");
+    try {
+      const state = await invoke<ProjectConfigEditorState>("save_runtime_profiles", {
+        request: {
+          runtimeProfiles: profiles,
+        },
+      });
+      const savedProfiles = state.runtimeProfiles ?? [];
+      const nextIndex = selectedKey
+        ? savedProfiles.findIndex((profile) => profile.key === selectedKey)
+        : -1;
+      const fallbackIndex = savedProfiles.length
+        ? Math.min(runtimeProfileIndex, savedProfiles.length - 1)
+        : 0;
+      setRuntimeProfileDrafts(savedProfiles);
+      setRuntimeProfileIndex(nextIndex >= 0 ? nextIndex : fallbackIndex);
+      await onRefresh();
+      return true;
+    } catch (reason) {
+      setRuntimeProfilesError(String(reason));
+      return false;
+    } finally {
+      setRuntimeProfilesSaving(false);
+    }
+  }
+
+  async function saveRuntimeProfileDialog() {
+    if (!runtimeProfileDialog) {
+      return;
+    }
+    const draft = {
+      ...runtimeProfileDialog.draft,
+      key: runtimeProfileDialog.draft.key.trim(),
+      label: runtimeProfileDialog.draft.label.trim(),
+    };
+    const duplicate = runtimeProfileDrafts.some(
+      (profile, index) =>
+        profile.key.trim() === draft.key &&
+        (runtimeProfileDialog.mode !== "edit" ||
+          index !== runtimeProfileDialog.index),
+    );
+    if (duplicate) {
+      setRuntimeProfilesError("运行配置 Key 已存在");
+      return;
+    }
+    const nextProfiles =
+      runtimeProfileDialog.mode === "edit" && runtimeProfileDialog.index >= 0
+        ? runtimeProfileDrafts.map((profile, index) =>
+            index === runtimeProfileDialog.index ? draft : profile,
+          )
+        : [...runtimeProfileDrafts, draft];
+    const saved = await persistRuntimePanelProfiles(nextProfiles, draft.key);
+    if (saved) {
+      setRuntimeProfileDialog(null);
+    }
   }
 
   function handleRuntimeOptionsProfileChange(profileKey: string) {
@@ -1091,7 +1528,7 @@ export function ProjectsPage({
       runtimeOptionsProfileKey || undefined,
       runtimeOptionsParseResult.values,
     );
-    closeRuntimeOptionsDialog();
+    setDetailsPanelTab("logs");
   }
 
   async function handleCopyProjectValue(value: string, label: string) {
@@ -1739,7 +2176,10 @@ export function ProjectsPage({
                           ) {
                             return;
                           }
-                          onFocusRuntime(item.key);
+                          onFocusRuntime(
+                            item.key,
+                            selectedDebugProfileKey || undefined,
+                          );
                         }}
                         sx={{
                           position: "relative",
@@ -2089,54 +2529,12 @@ export function ProjectsPage({
                 }}
               >
                 <MenuItem
-                  disabled={!projectMenuEntry?.command}
-                  onClick={() => {
-                    if (!projectMenuEntry) {
-                      return;
-                    }
-                    openRuntimeOptionsDialog(projectMenuEntry);
-                    closeProjectMenu();
-                  }}
-                >
-                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    <PlayIcon fontSize="small" />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary="项目配置"
-                    primaryTypographyProps={{
-                      fontSize: "0.82rem",
-                      fontWeight: 650,
-                    }}
-                  />
-                </MenuItem>
-                <MenuItem
-                  disabled={!projectMenuEntry?.focusUrl}
-                  onClick={() => {
-                    if (!projectMenuEntry) {
-                      return;
-                    }
-                    openProjectWebActions(projectMenuEntry);
-                    closeProjectMenu();
-                  }}
-                >
-                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    <WebsiteIcon fontSize="small" />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary="网页动作"
-                    primaryTypographyProps={{
-                      fontSize: "0.82rem",
-                      fontWeight: 650,
-                    }}
-                  />
-                </MenuItem>
-                <MenuItem
                   disabled={!projectMenuEntry}
                   onClick={() => {
                     if (!projectMenuEntry) {
                       return;
                     }
-                    setDetailsProjectKey(projectMenuEntry.key);
+                    openRuntimePanel(projectMenuEntry);
                     closeProjectMenu();
                   }}
                 >
@@ -2144,7 +2542,7 @@ export function ProjectsPage({
                     <AppWindowIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary="运行日志"
+                    primary="运行面板"
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -2172,7 +2570,7 @@ export function ProjectsPage({
                     <StarIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary={projectMenuFavorite ? "取消收藏" : "收藏项目"}
+                    primary={projectMenuFavorite ? "取消标记" : "标记项目"}
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -2282,469 +2680,51 @@ export function ProjectsPage({
                 </MenuItem>
               </Menu>
 
-              <Dialog
-                open={Boolean(runtimeOptionsEntry)}
-                onClose={closeRuntimeOptionsDialog}
-                fullWidth
-                maxWidth="sm"
-                PaperProps={{
-                  sx: {
-                    bgcolor: "var(--panel-strong)",
-                    color: tone.outerColor,
-                    borderRadius: "18px",
-                    border: `1px solid ${tone.outerBorder}`,
-                    boxShadow: tone.outerShadow,
-                    overflow: "hidden",
-                  },
-                }}
-                slotProps={{
-                  backdrop: {
-                    sx: {
-                      bgcolor: mono
-                        ? "rgba(3, 8, 15, 0.56)"
-                        : "rgba(220, 230, 242, 0.42)",
-                      backdropFilter: "blur(2px)",
-                    },
-                  },
-                }}
-              >
-                {runtimeOptionsEntry ? (
-                  <>
-                    <DialogTitle
-                      sx={{
-                        px: 2.2,
-                        pt: 1.8,
-                        pb: 0.8,
-                        background: mono
-                          ? "linear-gradient(180deg, rgba(255,255,255,0.018), transparent)"
-                          : "linear-gradient(180deg, rgba(255,255,255,0.46), transparent)",
-                      }}
+              {detailsProjectEntry ? (
+                <RuntimePanelDrawer
+                  open
+                  onClose={closeRuntimePanel}
+                  title={detailsProjectEntry.name}
+                  subtitle={detailsProjectEntry.key}
+                  statusDotColor={
+                    buildStatusPalette(detailsProjectEntry.statusKey, mono).dot
+                  }
+                  statusDotShadow={
+                    detailsProjectEntry.statusKey === "running"
+                      ? tone.runningDotHalo
+                      : "none"
+                  }
+                  headerActions={
+                    <Tooltip
+                      title={
+                        detailsProjectPath ? "打开项目目录" : "未配置项目目录"
+                      }
                     >
-                      <Stack spacing={1}>
-                        <Stack
-                          direction="row"
-                          alignItems="center"
-                          justifyContent="space-between"
-                          spacing={1}
-                        >
-                          <Typography
-                            variant="h6"
-                            sx={{
-                              fontSize: "1.02rem",
-                              fontWeight: 850,
-                              lineHeight: 1.2,
-                            }}
-                          >
-                            项目配置
-                          </Typography>
-                          <Chip
-                            size="small"
-                            label={runtimeOptionsEntry.key}
-                            variant="outlined"
-                            sx={{
-                              height: 24,
-                              borderColor: tone.actionGroupBorder,
-                              color: tone.rowHint,
-                              fontWeight: 700,
-                            }}
-                          />
-                        </Stack>
-                        <Typography
-                          variant="body2"
-                          sx={{
-                            minWidth: 0,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                            color: tone.rowMeta,
-                            fontWeight: 750,
-                            lineHeight: 1.2,
-                          }}
-                        >
-                          {runtimeOptionsEntry.name}
-                        </Typography>
-                      </Stack>
-                    </DialogTitle>
-                    <DialogContent sx={{ px: 2.2, pt: 0.85, pb: 1.5 }}>
-                      <Stack spacing={1.2}>
-                        <Box
-                          sx={{
-                            p: 1.2,
-                            borderRadius: "14px",
-                            border: `1px solid ${tone.actionGroupBorder}`,
-                            bgcolor: mono
-                              ? "rgba(255,255,255,0.018)"
-                              : "rgba(255,255,255,0.58)",
-                            boxShadow: mono
-                              ? "inset 0 1px 0 rgba(255,255,255,0.012)"
-                              : "inset 0 1px 0 rgba(255,255,255,0.58)",
-                          }}
-                        >
-                          <Stack spacing={0.85}>
-                            <Typography
-                              variant="caption"
-                              sx={{
-                                color: tone.rowHint,
-                                fontWeight: 850,
-                                letterSpacing: "0.04em",
-                              }}
-                            >
-                              运行入口
-                            </Typography>
-                            {[
-                              {
-                                icon: <FolderIcon fontSize="small" />,
-                                label: "工作目录",
-                                value:
-                                  runtimeOptionsEntry.cwd ||
-                                  runtimeOptionsEntry.repoPath ||
-                                  "未配置目录",
-                              },
-                              {
-                                icon: <TerminalIcon fontSize="small" />,
-                                label: "启动命令",
-                                value: runtimeOptionsEntry.command || "未配置命令",
-                              },
-                            ].map((row) => (
-                              <Stack
-                                key={row.label}
-                                direction="row"
-                                spacing={0.8}
-                                alignItems="flex-start"
-                                minWidth={0}
-                              >
-                                <Box
-                                  sx={{
-                                    display: "grid",
-                                    placeItems: "center",
-                                    width: 22,
-                                    height: 22,
-                                    mt: 0.1,
-                                    color: tone.rowHint,
-                                    flexShrink: 0,
-                                  }}
-                                >
-                                  {row.icon}
-                                </Box>
-                                <Box minWidth={0}>
-                                  <Typography
-                                    variant="caption"
-                                    sx={{
-                                      display: "block",
-                                      color: tone.rowMeta,
-                                      fontWeight: 750,
-                                      lineHeight: 1.15,
-                                      mb: 0.18,
-                                    }}
-                                  >
-                                    {row.label}
-                                  </Typography>
-                                  <Typography
-                                    variant="caption"
-                                    sx={{
-                                      display: "block",
-                                      color: tone.rowHint,
-                                      fontFamily:
-                                        '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                                      lineHeight: 1.45,
-                                      overflowWrap: "anywhere",
-                                    }}
-                                  >
-                                    {row.value}
-                                  </Typography>
-                                </Box>
-                              </Stack>
-                            ))}
-                          </Stack>
-                        </Box>
-                        <Box
-                          sx={{
-                            p: 1.2,
-                            borderRadius: "14px",
-                            border: `1px solid ${tone.actionGroupBorder}`,
-                            bgcolor: mono
-                              ? "rgba(255,255,255,0.018)"
-                              : "rgba(255,255,255,0.58)",
-                          }}
-                        >
-                          <Stack spacing={1.05}>
-                            <Typography
-                              variant="caption"
-                              sx={{
-                                color: tone.rowHint,
-                                fontWeight: 850,
-                                letterSpacing: "0.04em",
-                              }}
-                            >
-                              启动选项
-                            </Typography>
-                            <Stack spacing={0.55}>
-                              <Typography
-                                variant="caption"
-                                sx={{
-                                  color: tone.rowMeta,
-                                  fontWeight: 750,
-                                }}
-                              >
-                                调试档案
-                              </Typography>
-                              <TextField
-                                select
-                                size="small"
-                                value={
-                                  runtimeOptionsProfileKey ||
-                                  DEFAULT_RUNTIME_PROFILE_VALUE
-                                }
-                                onChange={(event) =>
-                                  handleRuntimeOptionsProfileChange(
-                                    event.target.value,
-                                  )
-                                }
-                                fullWidth
-                                inputProps={{ "aria-label": "调试档案" }}
-                                sx={{
-                                  "& .MuiSelect-select": {
-                                    minHeight: "unset",
-                                    py: 1.05,
-                                    fontSize: "0.92rem",
-                                    fontWeight: 750,
-                                  },
-                                }}
-                              >
-                                <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
-                                  默认启动
-                                </MenuItem>
-                                {runtimeOptionsProfiles.map((profile) => (
-                                  <MenuItem key={profile.key} value={profile.key}>
-                                    {profile.label || profile.key}
-                                    {profile.envCount > 0
-                                      ? ` · ${profile.envCount} env`
-                                      : ""}
-                                    {profile.localFileCount > 0
-                                      ? ` · ${profile.localFileCount} 文件`
-                                      : ""}
-                                  </MenuItem>
-                                ))}
-                              </TextField>
-                            </Stack>
-                            <Stack spacing={0.55}>
-                              <Typography
-                                variant="caption"
-                                sx={{
-                                  color: tone.rowMeta,
-                                  fontWeight: 750,
-                                }}
-                              >
-                                环境变量
-                              </Typography>
-                              <TextField
-                                value={runtimeOptionsEnvText}
-                                onChange={(event) =>
-                                  setRuntimeOptionsEnvText(event.target.value)
-                                }
-                                fullWidth
-                                multiline
-                                minRows={6}
-                                placeholder={"app_env=uat3-vke\nIMOP_PROXY_ENV=uat3"}
-                                error={Boolean(runtimeOptionsParseResult.error)}
-                                helperText={
-                                  runtimeOptionsParseResult.error ||
-                                  "每行 KEY=VALUE；同名变量会覆盖档案默认值，仅本次启动生效。"
-                                }
-                                inputProps={{ "aria-label": "环境变量" }}
-                                sx={{
-                                  "& .MuiInputBase-root": {
-                                    fontFamily:
-                                      '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                                    fontSize: "0.8rem",
-                                    lineHeight: 1.45,
-                                  },
-                                }}
-                              />
-                            </Stack>
-                            {runtimeOptionsSelectedProfile?.browser ||
-                            runtimeOptionsSelectedProfile?.browserProfile ? (
-                              <Stack direction="row" spacing={0.6} flexWrap="wrap" useFlexGap>
-                                {runtimeOptionsSelectedProfile.browser ? (
-                                  <Chip
-                                    size="small"
-                                    label={`浏览器 ${runtimeOptionsSelectedProfile.browser}`}
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimeOptionsSelectedProfile.browserProfile ? (
-                                  <Chip
-                                    size="small"
-                                    label={`Profile ${runtimeOptionsSelectedProfile.browserProfile}`}
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                              </Stack>
-                            ) : null}
-                          </Stack>
-                        </Box>
-                      </Stack>
-                    </DialogContent>
-                    <DialogActions sx={{ px: 2.2, pb: 1.8, pt: 0.4 }}>
-                      <Button
-                        color="inherit"
-                        onClick={() => setRuntimeOptionsEnvText("")}
-                        disabled={!runtimeOptionsEnvText.trim()}
-                      >
-                        清空变量
-                      </Button>
-                      <Box sx={{ flex: 1 }} />
-                      <Button color="inherit" onClick={closeRuntimeOptionsDialog}>
-                        取消
-                      </Button>
-                      <Button
-                        variant="contained"
-                        disabled={
-                          !runtimeOptionsEntry.canStart ||
-                          Boolean(runtimeOptionsParseResult.error)
-                        }
-                        onClick={handleRuntimeOptionsStart}
-                      >
-                        使用此配置启动
-                      </Button>
-                    </DialogActions>
-                  </>
-                ) : null}
-              </Dialog>
-
-              <Drawer
-                anchor="right"
-                open={Boolean(detailsProjectEntry)}
-                onClose={() => setDetailsProjectKey("")}
-                ModalProps={{ keepMounted: true }}
-                slotProps={{
-                  paper: {
-                    sx: {
-                      width: { xs: "100%", sm: 430 },
-                      maxWidth: "100%",
-                      bgcolor: tone.outerBg,
-                      color: tone.outerColor,
-                      borderLeft: `1px solid ${tone.outerBorder}`,
-                      boxShadow: tone.outerShadow,
-                    },
-                  },
-                }}
-              >
-                {detailsProjectEntry ? (
-                  <Box
-                    sx={{
-                      height: "100%",
-                      display: "flex",
-                      flexDirection: "column",
-                      p: 1.5,
-                      gap: 1.2,
-                    }}
-                  >
-                    <Stack
-                      direction="row"
-                      alignItems="flex-start"
-                      justifyContent="space-between"
-                      spacing={1}
-                    >
-                      <Stack spacing={0.7} minWidth={0}>
-                        <Stack
-                          direction="row"
-                          alignItems="center"
-                          spacing={0.8}
-                          minWidth={0}
-                        >
-                          <Box
-                            sx={{
-                              width: 9,
-                              height: 9,
-                              borderRadius: "50%",
-                              flexShrink: 0,
-                              bgcolor: buildStatusPalette(
-                                detailsProjectEntry.statusKey,
-                                mono,
-                              ).dot,
-                              boxShadow:
-                                detailsProjectEntry.statusKey === "running"
-                                  ? tone.runningDotHalo
-                                  : "none",
-                            }}
-                          />
-                          <Typography
-                            variant="h6"
-                            sx={{
-                              minWidth: 0,
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                              fontSize: "1rem",
-                              fontWeight: 750,
-                              color: tone.rowTitle,
-                            }}
-                          >
-                            {detailsProjectEntry.name}
-                          </Typography>
-                        </Stack>
-                        <Typography
-                          variant="caption"
-                          sx={{
-                            color: tone.rowKey,
-                            fontFamily:
-                              '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                          }}
-                        >
-                          {detailsProjectEntry.key}
-                        </Typography>
-                      </Stack>
-                      <Stack direction="row" spacing={0.45}>
-                        <Tooltip
-                          title={
-                            detailsProjectPath
-                              ? "打开项目目录"
-                              : "未配置项目目录"
+                      <span>
+                        <IconButton
+                          aria-label="打开项目目录"
+                          disabled={!detailsProjectPath}
+                          onClick={() =>
+                            onOpenProjectDirectory(detailsProjectEntry.key)
                           }
+                          sx={{
+                            width: 30,
+                            height: 30,
+                            borderRadius: "999px",
+                            bgcolor: tone.stopButtonBg,
+                            color: detailsProjectPath
+                              ? tone.stopButtonColor
+                              : tone.stopButtonDisabledColor,
+                            border: `1px solid ${tone.stopButtonBorder}`,
+                          }}
                         >
-                          <span>
-                            <IconButton
-                              aria-label="打开项目目录"
-                              disabled={!detailsProjectPath}
-                              onClick={() =>
-                                onOpenProjectDirectory(detailsProjectEntry.key)
-                              }
-                              sx={{
-                                width: 30,
-                                height: 30,
-                                borderRadius: "999px",
-                                bgcolor: tone.stopButtonBg,
-                                color: detailsProjectPath
-                                  ? tone.stopButtonColor
-                                  : tone.stopButtonDisabledColor,
-                                border: `1px solid ${tone.stopButtonBorder}`,
-                              }}
-                            >
-                              <FolderIcon fontSize="small" />
-                            </IconButton>
-                          </span>
-                        </Tooltip>
-                        <Tooltip title="关闭">
-                          <IconButton
-                            aria-label="关闭运行详情"
-                            onClick={() => setDetailsProjectKey("")}
-                            sx={{
-                              width: 30,
-                              height: 30,
-                              borderRadius: "999px",
-                              bgcolor: tone.stopButtonBg,
-                              color: tone.stopButtonColor,
-                              border: `1px solid ${tone.stopButtonBorder}`,
-                            }}
-                          >
-                            <ClearIcon fontSize="small" />
-                          </IconButton>
-                        </Tooltip>
-                      </Stack>
-                    </Stack>
-
-                    <Stack direction="row" spacing={0.7} flexWrap="wrap" useFlexGap>
+                          <FolderIcon fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                  }
+                  chips={
+                    <>
                       <Chip
                         size="small"
                         label={detailsProjectEntry.statusLabel}
@@ -2786,151 +2766,546 @@ export function ProjectsPage({
                           }}
                         />
                       ) : null}
-                    </Stack>
+                    </>
+                  }
+                  tabs={[
+                    {
+                      value: "overview",
+                      label: "概览",
+                      icon: <AppWindowIcon fontSize="small" />,
+                    },
+                    {
+                      value: "config",
+                      label: "运行配置",
+                      icon: <SettingsIcon fontSize="small" />,
+                    },
+                    {
+                      value: "logs",
+                      label: "日志",
+                      icon: <TerminalIcon fontSize="small" />,
+                    },
+                    ...(detailsWebActionsContext
+                      ? [
+                          {
+                            value: "webActions" as const,
+                            label: "网页动作",
+                            icon: <WebsiteIcon fontSize="small" />,
+                          },
+                        ]
+                      : []),
+                  ]}
+                  activeTab={detailsPanelTab}
+                  onTabChange={(value) => setDetailsPanelTab(value)}
+                  bodyOverflow={detailsPanelTab === "logs" ? "hidden" : "auto"}
+                >
+                      {detailsPanelTab === "overview" ? (
+                        <>
+                          {[
+                            {
+                              title: "运行",
+                              rows: [
+                                ["状态详情", detailsProjectEntry.detail || "无"],
+                                ["PID", detailsProjectEntry.pid?.toString() || "未运行"],
+                                [
+                                  "启动时间",
+                                  formatDateTime(detailsProjectEntry.startedAtMs),
+                                ],
+                                [
+                                  "运行时长",
+                                  formatElapsedTime(
+                                    detailsProjectEntry.startedAtMs,
+                                    nowMs,
+                                  ),
+                                ],
+                                ["工作目录", detailsProjectEntry.cwd || "未配置"],
+                                ["仓库目录", detailsProjectEntry.repoPath || "未配置"],
+                                ["启动命令", detailsProjectEntry.command || "未配置"],
+                                ["日志路径", detailsProjectEntry.logPath || "未生成"],
+                              ],
+                            },
+                            {
+                              title: "构建",
+                              rows: [
+                                [
+                                  "构建状态",
+                                  detailsProjectEntry.buildStatusLabel || "未配置",
+                                ],
+                                ["构建详情", detailsProjectEntry.buildDetail || "无"],
+                                [
+                                  "构建 PID",
+                                  detailsProjectEntry.buildPid?.toString() || "未运行",
+                                ],
+                                [
+                                  "开始时间",
+                                  formatDateTime(detailsProjectEntry.buildStartedAtMs),
+                                ],
+                                [
+                                  "输出目录",
+                                  detailsProjectEntry.buildOutputDir || "未配置",
+                                ],
+                                [
+                                  "构建命令",
+                                  detailsProjectEntry.buildCommand || "未配置",
+                                ],
+                                [
+                                  "日志路径",
+                                  detailsProjectEntry.buildLogPath || "未生成",
+                                ],
+                              ],
+                            },
+                          ].map((section) => (
+                            <Box
+                              key={section.title}
+                              sx={{
+                                border: `1px solid ${tone.searchWrapBorder}`,
+                                borderRadius: "16px",
+                                bgcolor: tone.searchWrapBg,
+                                boxShadow: tone.searchWrapShadow,
+                                p: 0.9,
+                              }}
+                            >
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  display: "block",
+                                  mb: 0.7,
+                                  color: tone.rowHint,
+                                  fontWeight: 750,
+                                  letterSpacing: "0.07em",
+                                }}
+                              >
+                                {section.title}
+                              </Typography>
+                              <Box sx={{ display: "grid", gap: 0.55 }}>
+                                {section.rows.map(([label, value]) => (
+                                  <Box
+                                    key={`${section.title}-${label}`}
+                                    sx={{
+                                      display: "grid",
+                                      gridTemplateColumns: "74px minmax(0, 1fr)",
+                                      gap: 0.8,
+                                      alignItems: "start",
+                                      px: 0.75,
+                                      py: 0.65,
+                                      borderRadius: "12px",
+                                      bgcolor: mono
+                                        ? "rgba(255,255,255,0.014)"
+                                        : "rgba(255,255,255,0.48)",
+                                      border: `1px solid ${tone.actionGroupBorder}`,
+                                    }}
+                                  >
+                                    <Typography
+                                      variant="caption"
+                                      sx={{
+                                        color: tone.rowKey,
+                                        fontWeight: 700,
+                                      }}
+                                    >
+                                      {label}
+                                    </Typography>
+                                    <Typography
+                                      variant="caption"
+                                      sx={{
+                                        minWidth: 0,
+                                        color: tone.rowMeta,
+                                        overflowWrap: "anywhere",
+                                        fontFamily:
+                                          label.includes("目录") ||
+                                          label.includes("日志") ||
+                                          label.includes("命令") ||
+                                          label.includes("PID")
+                                            ? '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace'
+                                            : undefined,
+                                      }}
+                                    >
+                                      {value}
+                                    </Typography>
+                                  </Box>
+                                ))}
+                              </Box>
+                            </Box>
+                          ))}
+                        </>
+                      ) : null}
 
-                    <Box
-                      sx={{
-                        display: "grid",
-                        gap: 0.85,
-                        overflow: "auto",
-                        pr: 0.2,
-                      }}
-                    >
-                      {[
-                        {
-                          title: "运行",
-                          rows: [
-                            ["状态详情", detailsProjectEntry.detail || "无"],
-                            ["PID", detailsProjectEntry.pid?.toString() || "未运行"],
-                            [
-                              "启动时间",
-                              formatDateTime(detailsProjectEntry.startedAtMs),
-                            ],
-                            [
-                              "运行时长",
-                              formatElapsedTime(
-                                detailsProjectEntry.startedAtMs,
-                                nowMs,
-                              ),
-                            ],
-                            ["工作目录", detailsProjectEntry.cwd || "未配置"],
-                            ["仓库目录", detailsProjectEntry.repoPath || "未配置"],
-                            ["启动命令", detailsProjectEntry.command || "未配置"],
-                            ["日志路径", detailsProjectEntry.logPath || "未生成"],
-                          ],
-                        },
-                        {
-                          title: "构建",
-                          rows: [
-                            [
-                              "构建状态",
-                              detailsProjectEntry.buildStatusLabel || "未配置",
-                            ],
-                            ["构建详情", detailsProjectEntry.buildDetail || "无"],
-                            [
-                              "构建 PID",
-                              detailsProjectEntry.buildPid?.toString() || "未运行",
-                            ],
-                            [
-                              "开始时间",
-                              formatDateTime(detailsProjectEntry.buildStartedAtMs),
-                            ],
-                            [
-                              "输出目录",
-                              detailsProjectEntry.buildOutputDir || "未配置",
-                            ],
-                            [
-                              "构建命令",
-                              detailsProjectEntry.buildCommand || "未配置",
-                            ],
-                            [
-                              "日志路径",
-                              detailsProjectEntry.buildLogPath || "未生成",
-                            ],
-                          ],
-                        },
-                      ].map((section) => (
+                      {detailsPanelTab === "config" && runtimeOptionsEntry ? (
+                        <>
                         <Box
-                          key={section.title}
+                          sx={{
+                            p: 1,
+                            borderRadius: "16px",
+                            border: `1px solid ${tone.searchWrapBorder}`,
+                            bgcolor: tone.searchWrapBg,
+                            boxShadow: tone.searchWrapShadow,
+                            mb: 1,
+                          }}
+                        >
+                          <Stack spacing={1}>
+                            <Stack
+                              direction={{ xs: "column", sm: "row" }}
+                              alignItems={{ xs: "stretch", sm: "flex-start" }}
+                              justifyContent="space-between"
+                              spacing={0.8}
+                            >
+                              <Box sx={{ minWidth: 0 }}>
+                                <Typography
+                                  variant="caption"
+                                  sx={{ color: tone.rowMeta, fontWeight: 750 }}
+                                >
+                                  通用运行配置
+                                </Typography>
+                                <Typography
+                                  variant="caption"
+                                  sx={{
+                                    display: "block",
+                                    color: tone.rowKey,
+                                    mt: 0.15,
+                                    overflowWrap: "anywhere",
+                                  }}
+                                >
+                                  浏览器、代理和域名映射，可被项目和访达复用。
+                                </Typography>
+                              </Box>
+                              <Stack
+                                direction="row"
+                                spacing={0.55}
+                                flexWrap="wrap"
+                                useFlexGap
+                                justifyContent={{ xs: "flex-start", sm: "flex-end" }}
+                              >
+                                <Tooltip title="刷新运行配置">
+                                  <span>
+                                    <IconButton
+                                      aria-label="刷新运行配置"
+                                      disableRipple
+                                      disableFocusRipple
+                                      disabled={runtimeProfilesSaving}
+                                      onClick={() =>
+                                        void loadRuntimeProfiles(
+                                          runtimeOptionsSelectedProfile?.runtimeProfile,
+                                        )
+                                      }
+                                      sx={runtimePanelActionButtonSx}
+                                    >
+                                      <RefreshIcon fontSize="small" />
+                                    </IconButton>
+                                  </span>
+                                </Tooltip>
+                                <Tooltip title="新增运行配置">
+                                  <span>
+                                    <IconButton
+                                      aria-label="新增运行配置"
+                                      disableRipple
+                                      disableFocusRipple
+                                      disabled={runtimeProfilesSaving}
+                                      onClick={addRuntimePanelProfile}
+                                      sx={runtimePanelActionButtonSx}
+                                    >
+                                      <PlusIcon fontSize="small" />
+                                    </IconButton>
+                                  </span>
+                                </Tooltip>
+                                <Tooltip title="编辑运行配置">
+                                  <span>
+                                    <IconButton
+                                      aria-label="编辑运行配置"
+                                      disableRipple
+                                      disableFocusRipple
+                                      disabled={
+                                        !runtimePanelProfile ||
+                                        runtimeProfilesSaving
+                                      }
+                                      onClick={editRuntimePanelProfile}
+                                      sx={runtimePanelActionButtonSx}
+                                    >
+                                      <EditIcon fontSize="small" />
+                                    </IconButton>
+                                  </span>
+                                </Tooltip>
+                              </Stack>
+                            </Stack>
+
+                            {runtimeProfilesError ? (
+                              <Typography
+                                variant="caption"
+                                sx={{ color: "#b91c1c", overflowWrap: "anywhere" }}
+                                aria-live="polite"
+                              >
+                                {runtimeProfilesError}
+                              </Typography>
+                            ) : null}
+
+                            <TextField
+                              select
+                              size="small"
+                              label="运行配置"
+                              value={
+                                runtimePanelProfile?.key ||
+                                DEFAULT_RUNTIME_PROFILE_VALUE
+                              }
+                              onChange={(event) => {
+                                const nextIndex = runtimeProfileDrafts.findIndex(
+                                  (profile) => profile.key === event.target.value,
+                                );
+                                setRuntimeProfileIndex(nextIndex >= 0 ? nextIndex : 0);
+                              }}
+                              disabled={runtimeProfilesLoading || runtimeProfileDrafts.length === 0}
+                              fullWidth
+                              inputProps={{
+                                "aria-label": "通用运行配置",
+                                name: "runtime-profile",
+                                autoComplete: "off",
+                              }}
+                            >
+                              {runtimeProfileDrafts.length === 0 ? (
+                                <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
+                                  暂无运行配置
+                                </MenuItem>
+                              ) : null}
+                              {runtimeProfileDrafts.map((profile) => (
+                                <MenuItem key={profile.key} value={profile.key}>
+                                  {profile.label || profile.key}
+                                </MenuItem>
+                              ))}
+                            </TextField>
+
+                            {runtimePanelProfile ? (
+                              <Stack direction="row" spacing={0.55} flexWrap="wrap" useFlexGap>
+                                {runtimePanelProfile.browser ? (
+                                  <Chip
+                                    size="small"
+                                    label={runtimePanelProfile.browser}
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                                {runtimePanelProfile.browserProfile ? (
+                                  <Chip
+                                    size="small"
+                                    label={`Profile ${runtimePanelProfile.browserProfile}`}
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                                {runtimePanelProfile.browserUserDataDir ? (
+                                  <Chip size="small" label="独立数据目录" variant="outlined" />
+                                ) : null}
+                                {runtimePanelProfile.proxyUrl ? (
+                                  <Chip size="small" label="浏览器代理" variant="outlined" />
+                                ) : null}
+                                {runtimePanelProfile.hostResolverRulesText?.trim() ? (
+                                  <Chip size="small" label="域名映射" variant="outlined" />
+                                ) : null}
+                                {runtimePanelProfile.webActionsEnabled ? (
+                                  <Chip
+                                    size="small"
+                                    label={`受控 ${runtimePanelProfile.webActionsPort || 9223}`}
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                              </Stack>
+                            ) : null}
+                          </Stack>
+                        </Box>
+
+                        <Box
+                          sx={{
+                            p: 1,
+                            borderRadius: "16px",
+                            border: `1px solid ${tone.searchWrapBorder}`,
+                            bgcolor: tone.searchWrapBg,
+                            boxShadow: tone.searchWrapShadow,
+                          }}
+                        >
+                          <Stack spacing={1.05}>
+                            <Stack spacing={0.55}>
+                              <Typography
+                                variant="caption"
+                                sx={{ color: tone.rowMeta, fontWeight: 750 }}
+                              >
+                                项目运行配置
+                              </Typography>
+                              <TextField
+                                select
+                                size="small"
+                                value={
+                                  runtimeOptionsProfileKey ||
+                                  DEFAULT_RUNTIME_PROFILE_VALUE
+                                }
+                                onChange={(event) =>
+                                  handleRuntimeOptionsProfileChange(
+                                    event.target.value,
+                                  )
+                                }
+                                fullWidth
+                                inputProps={{ "aria-label": "项目运行配置" }}
+                                sx={{
+                                  "& .MuiSelect-select": {
+                                    minHeight: "unset",
+                                    py: 1,
+                                    fontSize: "0.82rem",
+                                    fontWeight: 750,
+                                  },
+                                }}
+                              >
+                                <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
+                                  默认启动
+                                </MenuItem>
+                                {runtimeOptionsProfiles.map((profile) => (
+                                  <MenuItem key={profile.key} value={profile.key}>
+                                    {profile.label || profile.key}
+                                    {profile.envCount > 0
+                                      ? ` · ${profile.envCount} env`
+                                      : ""}
+                                    {profile.localFileCount > 0
+                                      ? ` · ${profile.localFileCount} 文件`
+                                      : ""}
+                                  </MenuItem>
+                                ))}
+                              </TextField>
+                            </Stack>
+
+                            <Stack spacing={0.55}>
+                              <Typography
+                                variant="caption"
+                                sx={{ color: tone.rowMeta, fontWeight: 750 }}
+                              >
+                                环境变量
+                              </Typography>
+                              <TextField
+                                value={runtimeOptionsEnvText}
+                                onChange={(event) =>
+                                  setRuntimeOptionsEnvText(event.target.value)
+                                }
+                                fullWidth
+                                multiline
+                                minRows={8}
+                                placeholder={"APP_ENV=local\nFEATURE_FLAG=true"}
+                                error={Boolean(runtimeOptionsParseResult.error)}
+                                helperText={
+                                  runtimeOptionsParseResult.error ||
+                                  "每行 KEY=VALUE；同名变量会覆盖档案默认值，仅本次启动生效。"
+                                }
+                                inputProps={{ "aria-label": "环境变量" }}
+                                sx={{
+                                  "& .MuiInputBase-root": {
+                                    fontFamily:
+                                      '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                    fontSize: "0.74rem",
+                                    lineHeight: 1.45,
+                                  },
+                                  "& .MuiFormHelperText-root": {
+                                    mx: 0.2,
+                                    fontSize: "0.66rem",
+                                  },
+                                }}
+                              />
+                            </Stack>
+
+                            {runtimeOptionsSelectedProfile?.browser ||
+                            runtimeOptionsSelectedProfile?.browserProfile ||
+                            runtimeOptionsSelectedProfile?.browserUserDataDir ||
+                            runtimeOptionsSelectedProfile?.browserArgs?.length ||
+                            runtimeOptionsSelectedProfile?.runtimeProfile ||
+                            runtimeOptionsSelectedProfile?.networkProxy?.enabled ? (
+                              <Stack
+                                direction="row"
+                                spacing={0.55}
+                                flexWrap="wrap"
+                                useFlexGap
+                              >
+                                {runtimeOptionsSelectedProfile.browser ? (
+                                  <Chip
+                                    size="small"
+                                    label={`浏览器 ${runtimeOptionsSelectedProfile.browser}`}
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                                {runtimeOptionsSelectedProfile.browserProfile ? (
+                                  <Chip
+                                    size="small"
+                                    label={`Profile ${runtimeOptionsSelectedProfile.browserProfile}`}
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                                {runtimeOptionsSelectedProfile.browserUserDataDir ? (
+                                  <Chip
+                                    size="small"
+                                    label="独立数据目录"
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                                {runtimeOptionsSelectedProfile.browserArgs?.length ? (
+                                  <Chip
+                                    size="small"
+                                    label={`浏览器参数 ${runtimeOptionsSelectedProfile.browserArgs?.length ?? 0}`}
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                                {runtimeOptionsSelectedProfile.runtimeProfile ? (
+                                  <Chip
+                                    size="small"
+                                    label={`继承 ${runtimeOptionsSelectedProfile.runtimeProfile}`}
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                                {runtimeOptionsSelectedProfile.networkProxy?.enabled ? (
+                                  <Chip
+                                    size="small"
+                                    label={
+                                      runtimeOptionsSelectedProfile.networkProxy.nodeHook
+                                        ? "网络代理 · Node Hook"
+                                        : "网络代理"
+                                    }
+                                    variant="outlined"
+                                  />
+                                ) : null}
+                              </Stack>
+                            ) : null}
+
+                            <Stack
+                              direction="row"
+                              justifyContent="space-between"
+                              spacing={0.8}
+                            >
+                              <Button
+                                size="small"
+                                color="inherit"
+                                onClick={() => setRuntimeOptionsEnvText("")}
+                                disabled={!runtimeOptionsEnvText.trim()}
+                              >
+                                清空变量
+                              </Button>
+                              <Button
+                                size="small"
+                                variant="contained"
+                                startIcon={<PlayIcon fontSize="small" />}
+                                disabled={
+                                  !runtimeOptionsEntry.canStart ||
+                                  Boolean(runtimeOptionsParseResult.error)
+                                }
+                                onClick={handleRuntimeOptionsStart}
+                              >
+                                使用此配置启动
+                              </Button>
+                            </Stack>
+                          </Stack>
+                        </Box>
+                        </>
+                      ) : null}
+
+                      {detailsPanelTab === "logs" ? (
+                        <Box
                           sx={{
                             border: `1px solid ${tone.searchWrapBorder}`,
                             borderRadius: "16px",
                             bgcolor: tone.searchWrapBg,
                             boxShadow: tone.searchWrapShadow,
+                            display: "flex",
+                            flex: 1,
+                            flexDirection: "column",
+                            minHeight: 0,
                             p: 0.9,
                           }}
                         >
-                          <Typography
-                            variant="caption"
-                            sx={{
-                              display: "block",
-                              mb: 0.7,
-                              color: tone.rowHint,
-                              fontWeight: 750,
-                              letterSpacing: "0.07em",
-                            }}
-                          >
-                            {section.title}
-                          </Typography>
-                          <Box sx={{ display: "grid", gap: 0.55 }}>
-                            {section.rows.map(([label, value]) => (
-                              <Box
-                                key={`${section.title}-${label}`}
-                                sx={{
-                                  display: "grid",
-                                  gridTemplateColumns: "74px minmax(0, 1fr)",
-                                  gap: 0.8,
-                                  alignItems: "start",
-                                  px: 0.75,
-                                  py: 0.65,
-                                  borderRadius: "12px",
-                                  bgcolor: mono
-                                    ? "rgba(255,255,255,0.014)"
-                                    : "rgba(255,255,255,0.48)",
-                                  border: `1px solid ${tone.actionGroupBorder}`,
-                                }}
-                              >
-                                <Typography
-                                  variant="caption"
-                                  sx={{
-                                    color: tone.rowKey,
-                                    fontWeight: 700,
-                                  }}
-                                >
-                                  {label}
-                                </Typography>
-                                <Typography
-                                  variant="caption"
-                                  sx={{
-                                    minWidth: 0,
-                                    color: tone.rowMeta,
-                                    overflowWrap: "anywhere",
-                                    fontFamily:
-                                      label.includes("目录") ||
-                                      label.includes("日志") ||
-                                      label.includes("命令") ||
-                                      label.includes("PID")
-                                        ? '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace'
-                                        : undefined,
-                                  }}
-                                >
-                                  {value}
-                                </Typography>
-                              </Box>
-                            ))}
-                          </Box>
-                        </Box>
-                      ))}
-
-                      <Box
-                        sx={{
-                          border: `1px solid ${tone.searchWrapBorder}`,
-                          borderRadius: "16px",
-                          bgcolor: tone.searchWrapBg,
-                          boxShadow: tone.searchWrapShadow,
-                          p: 0.9,
-                        }}
-                      >
                         <Stack
                           direction="row"
                           alignItems="center"
@@ -3066,8 +3441,8 @@ export function ProjectsPage({
 
                         <Box
                           sx={{
-                            minHeight: 144,
-                            maxHeight: 260,
+                            flex: 1,
+                            minHeight: 260,
                             overflow: "auto",
                             borderRadius: "13px",
                             border: `1px solid ${tone.actionGroupBorder}`,
@@ -3093,10 +3468,638 @@ export function ProjectsPage({
                           )}
                         </Box>
                       </Box>
-                    </Box>
-                  </Box>
-                ) : null}
-              </Drawer>
+                      ) : null}
+
+                      {detailsPanelTab === "webActions" &&
+                      detailsWebActionsContext ? (
+                        <WebActionsPanel
+                          active
+                          compact
+                          context={detailsWebActionsContext}
+                        />
+                      ) : null}
+	                </RuntimePanelDrawer>
+	              ) : null}
+
+	              {shortcutRuntimePanelCurrentItem ? (
+	                <RuntimePanelDrawer
+	                  open
+	                  onClose={closeShortcutRuntimePanel}
+	                  title={shortcutRuntimePanelCurrentItem.entry.name}
+	                  subtitle={
+	                    shortcutRuntimePanelCurrentItem.categoryLabel ||
+	                    shortcutRuntimePanelCurrentItem.categoryTitle
+	                  }
+	                  icon={<FinderEntryIcon kind={shortcutRuntimePanelCurrentItem.entry.kind} />}
+	                  statusDotColor={
+	                    shortcutRuntimeProfileKey ? tone.categoryChipActiveColor : tone.rowHint
+	                  }
+	                  statusDotShadow={
+	                    shortcutRuntimeProfileKey
+	                      ? `0 0 0 4px ${tone.categoryChipActiveBg}`
+	                      : undefined
+	                  }
+	                  chips={
+	                    <>
+	                      <Chip
+	                        size="small"
+	                        label={finderEntryKindLabel(
+	                          shortcutRuntimePanelCurrentItem.entry.kind,
+	                        )}
+	                        variant="outlined"
+	                      />
+	                      <Chip
+	                        size="small"
+	                        label={
+	                          shortcutRuntimeProfile
+	                            ? runtimeProfileLabel(shortcutRuntimeProfile)
+	                            : shortcutRuntimeProfileKey || "默认打开"
+	                        }
+	                        variant={shortcutRuntimeProfileKey ? "filled" : "outlined"}
+	                      />
+	                    </>
+	                  }
+	                  tabs={[
+	                    {
+	                      value: "overview",
+	                      label: "概览",
+	                      icon: <AppWindowIcon fontSize="small" />,
+	                    },
+	                    {
+	                      value: "config",
+	                      label: "运行配置",
+	                      icon: <SettingsIcon fontSize="small" />,
+	                    },
+	                    {
+	                      value: "webActions",
+	                      label: "网页动作",
+	                      icon: <WebsiteIcon fontSize="small" />,
+	                    },
+	                  ]}
+	                  activeTab={shortcutPanelTab}
+	                  onTabChange={(value) => setShortcutPanelTab(value)}
+	                >
+	                  {shortcutPanelTab === "overview" ? (
+	                    <Box
+	                      sx={{
+	                        border: `1px solid ${tone.searchWrapBorder}`,
+	                        borderRadius: "16px",
+	                        bgcolor: tone.searchWrapBg,
+	                        boxShadow: tone.searchWrapShadow,
+	                        p: 0.9,
+	                      }}
+	                    >
+	                      <Typography
+	                        variant="caption"
+	                        sx={{
+	                          display: "block",
+	                          mb: 0.7,
+	                          color: tone.rowHint,
+	                          fontWeight: 750,
+	                          letterSpacing: "0.07em",
+	                        }}
+	                      >
+	                        入口
+	                      </Typography>
+	                      <Box sx={{ display: "grid", gap: 0.55 }}>
+	                        {[
+	                          [
+	                            "分类",
+	                            shortcutRuntimePanelCurrentItem.categoryLabel ||
+	                              shortcutRuntimePanelCurrentItem.categoryTitle,
+	                          ],
+	                          ["地址", shortcutRuntimePanelCurrentItem.entry.url || "未配置"],
+	                          [
+	                            "打开方式",
+	                            shortcutRuntimeProfile
+	                              ? runtimeProfileLabel(shortcutRuntimeProfile)
+	                              : shortcutRuntimeProfileKey || "当前 Chrome",
+	                          ],
+	                          [
+	                            "浏览器",
+	                            shortcutRuntimePanelCurrentItem.entry.browser || "当前 Chrome",
+	                          ],
+	                          [
+	                            "Profile",
+	                            shortcutRuntimePanelCurrentItem.entry.browserProfile || "未指定",
+	                          ],
+	                          ["说明", shortcutRuntimePanelCurrentItem.entry.note || "无"],
+	                        ].map(([label, value]) => (
+	                          <Box
+	                            key={label}
+	                            sx={{
+	                              display: "grid",
+	                              gridTemplateColumns: "74px minmax(0, 1fr)",
+	                              gap: 0.8,
+	                              alignItems: "start",
+	                              px: 0.75,
+	                              py: 0.65,
+	                              borderRadius: "12px",
+	                              bgcolor: mono
+	                                ? "rgba(255,255,255,0.014)"
+	                                : "rgba(255,255,255,0.48)",
+	                              border: `1px solid ${tone.actionGroupBorder}`,
+	                            }}
+	                          >
+	                            <Typography
+	                              variant="caption"
+	                              sx={{ color: tone.rowKey, fontWeight: 700 }}
+	                            >
+	                              {label}
+	                            </Typography>
+	                            <Typography
+	                              variant="caption"
+	                              sx={{
+	                                minWidth: 0,
+	                                color: tone.rowMeta,
+	                                overflowWrap: "anywhere",
+	                                fontFamily:
+	                                  label === "地址"
+	                                    ? '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace'
+	                                    : undefined,
+	                              }}
+	                            >
+	                              {value}
+	                            </Typography>
+	                          </Box>
+	                        ))}
+	                      </Box>
+	                    </Box>
+	                  ) : null}
+
+	                  {shortcutPanelTab === "config" ? (
+	                    <Box
+	                      sx={{
+	                        p: 1,
+	                        borderRadius: "16px",
+	                        border: `1px solid ${tone.searchWrapBorder}`,
+	                        bgcolor: tone.searchWrapBg,
+	                        boxShadow: tone.searchWrapShadow,
+	                      }}
+	                    >
+	                      <Stack spacing={1}>
+	                        <Stack
+	                          direction={{ xs: "column", sm: "row" }}
+	                          alignItems={{ xs: "stretch", sm: "flex-start" }}
+	                          justifyContent="space-between"
+	                          spacing={0.8}
+	                        >
+	                          <Box sx={{ minWidth: 0 }}>
+	                            <Typography
+	                              variant="caption"
+	                              sx={{ color: tone.rowMeta, fontWeight: 750 }}
+	                            >
+	                              网站运行配置
+	                            </Typography>
+	                            <Typography
+	                              variant="caption"
+	                              sx={{
+	                                display: "block",
+	                                color: tone.rowKey,
+	                                mt: 0.15,
+	                                overflowWrap: "anywhere",
+	                              }}
+	                            >
+	                              {shortcutRuntimePanelCurrentItem.entry.name}
+	                            </Typography>
+	                          </Box>
+	                          <Stack
+	                            direction="row"
+	                            spacing={0.55}
+	                            flexWrap="wrap"
+	                            useFlexGap
+	                            justifyContent={{ xs: "flex-start", sm: "flex-end" }}
+	                          >
+	                            <Tooltip title="刷新运行配置">
+	                              <span>
+	                                <IconButton
+	                                  aria-label="刷新运行配置"
+	                                  disableRipple
+	                                  disableFocusRipple
+	                                  disabled={runtimeProfilesSaving || shortcutRuntimeSaving}
+	                                  onClick={() =>
+	                                    void loadRuntimeProfiles(shortcutRuntimeProfileKey)
+	                                  }
+	                                  sx={runtimePanelActionButtonSx}
+	                                >
+	                                  <RefreshIcon fontSize="small" />
+	                                </IconButton>
+	                              </span>
+	                            </Tooltip>
+	                            <Tooltip title="新增运行配置">
+	                              <span>
+	                                <IconButton
+	                                  aria-label="新增运行配置"
+	                                  disableRipple
+	                                  disableFocusRipple
+	                                  disabled={runtimeProfilesSaving || shortcutRuntimeSaving}
+	                                  onClick={addRuntimePanelProfile}
+	                                  sx={runtimePanelActionButtonSx}
+	                                >
+	                                  <PlusIcon fontSize="small" />
+	                                </IconButton>
+	                              </span>
+	                            </Tooltip>
+	                            <Tooltip title="编辑运行配置">
+	                              <span>
+	                                <IconButton
+	                                  aria-label="编辑运行配置"
+	                                  disableRipple
+	                                  disableFocusRipple
+	                                  disabled={
+	                                    !shortcutRuntimeProfile ||
+	                                    runtimeProfilesSaving ||
+	                                    shortcutRuntimeSaving
+	                                  }
+	                                  onClick={() =>
+	                                    editRuntimePanelProfileByKey(shortcutRuntimeProfileKey)
+	                                  }
+	                                  sx={runtimePanelActionButtonSx}
+	                                >
+	                                  <EditIcon fontSize="small" />
+	                                </IconButton>
+	                              </span>
+	                            </Tooltip>
+	                          </Stack>
+	                        </Stack>
+
+	                        {shortcutRuntimeError || runtimeProfilesError ? (
+	                          <Typography
+	                            variant="caption"
+	                            sx={{ color: "#b91c1c", overflowWrap: "anywhere" }}
+	                            aria-live="polite"
+	                          >
+	                            {shortcutRuntimeError || runtimeProfilesError}
+	                          </Typography>
+	                        ) : null}
+
+	                        <TextField
+	                          select
+	                          size="small"
+	                          label="入口运行配置"
+	                          value={
+	                            shortcutRuntimeProfileKey || DEFAULT_RUNTIME_PROFILE_VALUE
+	                          }
+	                          onChange={(event) =>
+	                            void saveShortcutRuntimeProfile(
+	                              event.target.value === DEFAULT_RUNTIME_PROFILE_VALUE
+	                                ? ""
+	                                : event.target.value,
+	                            )
+	                          }
+	                          disabled={runtimeProfilesLoading || shortcutRuntimeSaving}
+	                          fullWidth
+	                          inputProps={{
+	                            "aria-label": "入口运行配置",
+	                            name: "shortcut-runtime-profile",
+	                            autoComplete: "off",
+	                          }}
+	                        >
+	                          <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
+	                            不使用运行配置
+	                          </MenuItem>
+	                          {runtimeProfileDrafts.map((profile) => (
+	                            <MenuItem key={profile.key} value={profile.key}>
+	                              {profile.label || profile.key}
+	                            </MenuItem>
+	                          ))}
+	                        </TextField>
+
+	                        {shortcutRuntimeProfile ? (
+	                          <Stack direction="row" spacing={0.55} flexWrap="wrap" useFlexGap>
+	                            {shortcutRuntimeProfile.browser ? (
+	                              <Chip
+	                                size="small"
+	                                label={shortcutRuntimeProfile.browser}
+	                                variant="outlined"
+	                              />
+	                            ) : null}
+	                            {shortcutRuntimeProfile.browserProfile ? (
+	                              <Chip
+	                                size="small"
+	                                label={`Profile ${shortcutRuntimeProfile.browserProfile}`}
+	                                variant="outlined"
+	                              />
+	                            ) : null}
+	                            {shortcutRuntimeProfile.browserUserDataDir ? (
+	                              <Chip size="small" label="独立数据目录" variant="outlined" />
+	                            ) : null}
+	                            {shortcutRuntimeProfile.proxyUrl ? (
+	                              <Chip size="small" label="浏览器代理" variant="outlined" />
+	                            ) : null}
+	                            {shortcutRuntimeProfile.hostResolverRulesText?.trim() ? (
+	                              <Chip size="small" label="域名映射" variant="outlined" />
+	                            ) : null}
+	                            {runtimeProfileHasCdp(shortcutRuntimeProfile) ? (
+	                              <Chip
+	                                size="small"
+	                                label={`受控 ${shortcutRuntimeProfile.webActionsPort || 9223}`}
+	                                variant="outlined"
+	                              />
+	                            ) : null}
+	                          </Stack>
+	                        ) : shortcutRuntimeProfileKey && runtimeProfilesLoaded ? (
+	                          <Typography
+	                            variant="caption"
+	                            sx={{ color: "#b91c1c", overflowWrap: "anywhere" }}
+	                          >
+	                            运行配置不存在：{shortcutRuntimeProfileKey}
+	                          </Typography>
+	                        ) : null}
+
+	                        <Stack direction="row" justifyContent="flex-end">
+	                          <Button
+	                            size="small"
+	                            variant="contained"
+	                            startIcon={<OpenExternalIcon fontSize="small" />}
+	                            disabled={shortcutRuntimeSaving}
+	                            onClick={() =>
+	                              void onOpenFinderEntry(
+	                                shortcutRuntimePanelCurrentItem.entry,
+	                              )
+	                            }
+	                          >
+	                            打开入口
+	                          </Button>
+	                        </Stack>
+	                      </Stack>
+	                    </Box>
+	                  ) : null}
+
+	                  {shortcutPanelTab === "webActions" && shortcutWebActionsContext ? (
+	                    <WebActionsPanel
+	                      active
+	                      compact
+	                      context={shortcutWebActionsContext}
+	                    />
+	                  ) : null}
+	                </RuntimePanelDrawer>
+	              ) : null}
+
+	              <Dialog
+                open={Boolean(runtimeProfileDialog)}
+                onClose={() => {
+                  if (!runtimeProfilesSaving) {
+                    setRuntimeProfileDialog(null);
+                  }
+                }}
+                fullWidth
+                maxWidth="sm"
+                PaperProps={{
+                  sx: {
+                    borderRadius: "18px",
+                    overscrollBehavior: "contain",
+                  },
+                }}
+              >
+                <DialogTitle sx={{ pb: 0.5 }}>
+                  {runtimeProfileDialog?.mode === "create"
+                    ? "新增运行配置"
+                    : "编辑运行配置"}
+                </DialogTitle>
+                <DialogContent sx={{ pt: 1 }}>
+                  {runtimeProfileDialog ? (
+                    <Stack spacing={1.1} sx={{ mt: 0.5 }}>
+                      {runtimeProfilesError ? (
+                        <Typography
+                          variant="caption"
+                          sx={{ color: "#b91c1c", overflowWrap: "anywhere" }}
+                          aria-live="polite"
+                        >
+                          {runtimeProfilesError}
+                        </Typography>
+                      ) : null}
+                      <Box
+                        sx={{
+                          display: "grid",
+                          gridTemplateColumns: {
+                            xs: "1fr",
+                            sm: "repeat(2, minmax(0, 1fr))",
+                          },
+                          gap: 1,
+                        }}
+                      >
+                        <TextField
+                          size="small"
+                          label="Key"
+                          value={runtimeProfileDialog.draft.key}
+                          onChange={(event) =>
+                            updateRuntimeProfileDialog({ key: event.target.value })
+                          }
+                          inputProps={{ name: "runtime-profile-key", autoComplete: "off" }}
+                        />
+                        <TextField
+                          size="small"
+                          label="名称"
+                          value={runtimeProfileDialog.draft.label}
+                          onChange={(event) =>
+                            updateRuntimeProfileDialog({ label: event.target.value })
+                          }
+                          inputProps={{ name: "runtime-profile-label", autoComplete: "off" }}
+                        />
+                        <TextField
+                          size="small"
+                          label="浏览器"
+                          value={runtimeProfileDialog.draft.browser ?? ""}
+                          onChange={(event) =>
+                            updateRuntimeProfileDialog({ browser: event.target.value })
+                          }
+                          placeholder="Google Chrome…"
+                          inputProps={{ name: "runtime-profile-browser", autoComplete: "off" }}
+                        />
+                        <TextField
+                          size="small"
+                          label="Profile"
+                          value={runtimeProfileDialog.draft.browserProfile ?? ""}
+                          onChange={(event) =>
+                            updateRuntimeProfileDialog({
+                              browserProfile: event.target.value,
+                            })
+                          }
+                          placeholder="Default…"
+                          inputProps={{
+                            name: "runtime-profile-browser-profile",
+                            autoComplete: "off",
+                          }}
+                        />
+                        <TextField
+                          size="small"
+                          label="浏览器代理"
+                          value={runtimeProfileDialog.draft.proxyUrl}
+                          onChange={(event) =>
+                            updateRuntimeProfileDialog({ proxyUrl: event.target.value })
+                          }
+                          placeholder="http://127.0.0.1:7897…"
+                          inputProps={{
+                            name: "runtime-profile-browser-proxy",
+                            autoComplete: "off",
+                          }}
+                        />
+                        <TextField
+                          size="small"
+                          label="代理绕过"
+                          value={runtimeProfileDialog.draft.proxyBypass}
+                          onChange={(event) =>
+                            updateRuntimeProfileDialog({ proxyBypass: event.target.value })
+                          }
+                          placeholder="localhost;127.0.0.1;::1…"
+                          inputProps={{
+                            name: "runtime-profile-proxy-bypass",
+                            autoComplete: "off",
+                          }}
+                        />
+                        <TextField
+                          size="small"
+                          label="浏览器数据目录"
+                          value={runtimeProfileDialog.draft.browserUserDataDir ?? ""}
+                          onChange={(event) =>
+                            updateRuntimeProfileDialog({
+                              browserUserDataDir: event.target.value,
+                            })
+                          }
+                          placeholder="/tmp/rdevtool-runtime-profile…"
+                          inputProps={{
+                            name: "runtime-profile-user-data-dir",
+                            autoComplete: "off",
+                          }}
+                          sx={{ gridColumn: { sm: "1 / -1" } }}
+                        />
+                        <Box
+                          sx={{
+                            gridColumn: { sm: "1 / -1" },
+                            display: "grid",
+                            gridTemplateColumns: {
+                              xs: "1fr",
+                              sm: "minmax(0, 1fr) 120px",
+                            },
+                            gap: 1,
+                            p: 1,
+                            borderRadius: "12px",
+                            border: `1px solid ${tone.actionGroupBorder}`,
+                            bgcolor: mono
+                              ? "rgba(255,255,255,0.018)"
+                              : "rgba(255,255,255,0.42)",
+                          }}
+                        >
+                          <FormControlLabel
+                            control={
+                              <Switch
+                                size="small"
+                                checked={runtimeProfileDialog.draft.webActionsEnabled}
+                                onChange={(event) =>
+                                  updateRuntimeProfileDialog({
+                                    webActionsEnabled: event.target.checked,
+                                    webActionsPort:
+                                      runtimeProfileDialog.draft.webActionsPort || 9223,
+                                  })
+                                }
+                              />
+                            }
+                            label="网页动作受控模式"
+                            sx={{
+                              m: 0,
+                              alignSelf: "center",
+                              "& .MuiFormControlLabel-label": {
+                                fontSize: "0.8rem",
+                                fontWeight: 750,
+                              },
+                            }}
+                          />
+                          <TextField
+                            size="small"
+                            type="number"
+                            label="调试端口"
+                            value={runtimeProfileDialog.draft.webActionsPort || 9223}
+                            onChange={(event) =>
+                              updateRuntimeProfileDialog({
+                                webActionsPort: Number(event.target.value) || 0,
+                              })
+                            }
+                            disabled={!runtimeProfileDialog.draft.webActionsEnabled}
+                            inputProps={{
+                              min: 1,
+                              max: 65535,
+                              name: "runtime-profile-web-actions-port",
+                            }}
+                          />
+                          <TextField
+                            size="small"
+                            label="受控数据目录"
+                            value={runtimeProfileDialog.draft.webActionsUserDataDir ?? ""}
+                            onChange={(event) =>
+                              updateRuntimeProfileDialog({
+                                webActionsUserDataDir: event.target.value,
+                              })
+                            }
+                            disabled={!runtimeProfileDialog.draft.webActionsEnabled}
+                            placeholder="空则使用 rDevTool 默认受控目录"
+                            inputProps={{
+                              name: "runtime-profile-web-actions-user-data-dir",
+                              autoComplete: "off",
+                            }}
+                            sx={{ gridColumn: { sm: "1 / -1" } }}
+                          />
+                        </Box>
+                        <TextField
+                          size="small"
+                          label="域名映射"
+                          value={runtimeProfileDialog.draft.hostResolverRulesText}
+                          onChange={(event) =>
+                            updateRuntimeProfileDialog({
+                              hostResolverRulesText: event.target.value,
+                            })
+                          }
+                          placeholder="MAP app.example.test 127.0.0.1…"
+                          multiline
+                          minRows={3}
+                          inputProps={{
+                            name: "runtime-profile-host-rules",
+                            autoComplete: "off",
+                            spellCheck: false,
+                          }}
+                          sx={{ gridColumn: { sm: "1 / -1" } }}
+                        />
+                        <TextField
+                          size="small"
+                          label="浏览器参数"
+                          value={runtimeProfileDialog.draft.browserArgsText}
+                          onChange={(event) =>
+                            updateRuntimeProfileDialog({
+                              browserArgsText: event.target.value,
+                            })
+                          }
+                          placeholder="--disable-web-security…"
+                          multiline
+                          minRows={2}
+                          inputProps={{
+                            name: "runtime-profile-browser-args",
+                            autoComplete: "off",
+                            spellCheck: false,
+                          }}
+                          sx={{ gridColumn: { sm: "1 / -1" } }}
+                        />
+                      </Box>
+                    </Stack>
+                  ) : null}
+                </DialogContent>
+                <DialogActions sx={{ px: 3, pb: 2 }}>
+                  <Button
+                    color="inherit"
+                    onClick={() => setRuntimeProfileDialog(null)}
+                    disabled={runtimeProfilesSaving}
+                  >
+                    取消
+                  </Button>
+                  <Button
+                    variant="contained"
+                    startIcon={<CheckIcon fontSize="small" />}
+                    onClick={() => void saveRuntimeProfileDialog()}
+                    disabled={runtimeProfilesSaving || !runtimeProfileDialog?.draft.key.trim()}
+                  >
+                    保存运行配置
+                  </Button>
+                </DialogActions>
+              </Dialog>
 
               {!finderIsProjects && totalShortcutCount === 0 ? (
                 <Box
@@ -3309,22 +4312,40 @@ export function ProjectsPage({
                             )}
                           </Box>
 
-                          <Typography
-                            variant="body2"
+                          <Stack
+                            direction="row"
+                            alignItems="center"
+                            spacing={0.45}
                             sx={{
                               minWidth: 0,
                               pr: 2.8,
-                              overflow: "hidden",
-                              textOverflow: "ellipsis",
-                              whiteSpace: "nowrap",
-                              fontWeight: 700,
-                              lineHeight: 1.2,
-                              color: tone.rowTitle,
-                              fontSize: { xs: "0.84rem", sm: "0.88rem" },
                             }}
                           >
-                            {shortcutRecent ? `${item.entry.name} · 最近` : item.entry.name}
-                          </Typography>
+                            <Typography
+                              variant="body2"
+                              noWrap
+                              sx={{
+                                minWidth: 0,
+                                fontWeight: 700,
+                                lineHeight: 1.2,
+                                color: tone.rowTitle,
+                                fontSize: { xs: "0.84rem", sm: "0.88rem" },
+                              }}
+                            >
+                              {shortcutRecent ? `${item.entry.name} · 最近` : item.entry.name}
+                            </Typography>
+                            {shortcutFavorite ? (
+                              <StarIcon
+                                sx={{
+                                  width: 13,
+                                  height: 13,
+                                  flexShrink: 0,
+                                  color: tone.categoryChipActiveColor,
+                                  opacity: 0.82,
+                                }}
+                              />
+                            ) : null}
+                          </Stack>
                         </Box>
                       </Tooltip>
                     );
@@ -3391,15 +4412,15 @@ export function ProjectsPage({
                     if (!shortcutMenuItem) {
                       return;
                     }
-                    openShortcutWebActions(shortcutMenuItem);
+                    openShortcutRuntimePanel(shortcutMenuItem);
                     closeShortcutMenu();
                   }}
                 >
                   <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    <WebsiteIcon fontSize="small" />
+                    <AppWindowIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary="网页动作"
+                    primary="运行面板"
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -3416,11 +4437,18 @@ export function ProjectsPage({
                     closeShortcutMenu();
                   }}
                 >
-                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                  <ListItemIcon
+                    sx={{
+                      minWidth: 30,
+                      color: shortcutMenuFavorite
+                        ? tone.categoryChipActiveColor
+                        : "inherit",
+                    }}
+                  >
                     <StarIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary={shortcutMenuFavorite ? "取消收藏" : "收藏入口"}
+                    primary={shortcutMenuFavorite ? "取消标记" : "标记入口"}
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -3428,12 +4456,7 @@ export function ProjectsPage({
                   />
                 </MenuItem>
               </Menu>
-              <WebActionsDialog
-                open={Boolean(webActionsContext)}
-                context={webActionsContext}
-                onClose={() => setWebActionsContext(null)}
-              />
-              <WorkflowRulesConfigDialog
+	              <WorkflowRulesConfigDialog
                 open={workflowOpen}
                 title="联动配置"
                 context={

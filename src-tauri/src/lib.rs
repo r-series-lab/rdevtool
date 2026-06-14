@@ -3,8 +3,10 @@ use project_runtime::{
 };
 use rdevtool_core::config::{
     AppConfig, BranchRules, DeployParamConfig, DeployParamKind, DeployTargetConfig, Jobs,
-    ProjectCommandConfig, ProjectConfig, ProjectDebugLocalFileConfig, ProjectDebugProfileConfig,
-    ProjectFocusConfig, default_config_dir, default_projects_path, default_workspace_path,
+    ProjectAuthHelperConfig, ProjectAuthHelperItemConfig, ProjectCommandConfig, ProjectConfig,
+    ProjectDebugLocalFileConfig, ProjectDebugProfileConfig, ProjectFocusConfig,
+    ProjectLocalProxyConfig, ProjectLocalProxyRouteConfig, ProjectNetworkProxyConfig,
+    RuntimeProfileConfig, default_config_dir, default_projects_path, default_workspace_path,
     ensure_default_configs, load_config, load_workspace_config, save_config, save_workspace_config,
 };
 use rdevtool_core::core::{
@@ -19,19 +21,23 @@ use rdevtool_core::core::{
 use rdevtool_core::core::{MergeRequest, MergeResponse};
 use rdevtool_core::navigation::{
     NavigationData, NavigationEditorData, NavigationEntry, NavigationOpenResult,
-    load_navigation_data, load_navigation_editor_data, navigation_file_path, open_navigation_entry,
-    save_navigation_editor_data,
-};
-use rdevtool_core::web_actions::{
-    WebActionListResponse, WebActionRunRequest, WebActionRunResult, WebActionScriptRunRequest,
-    WebActionTarget,
-    list_web_action_targets as core_list_web_action_targets,
-    list_web_actions as core_list_web_actions, open_web_action_target as core_open_web_action_target,
-    run_web_action as core_run_web_action, run_web_action_script as core_run_web_action_script,
+    load_navigation_data, load_navigation_editor_data, navigation_file_path,
+    open_navigation_entry_with_runtime_profiles, save_navigation_editor_data,
 };
 use rdevtool_core::storage::{
     DeployHistoryEntry, MergeHistoryEntry, SaveDeployHistoryRequest, SaveMergeHistoryRequest,
     Storage, default_storage_path,
+};
+use rdevtool_core::web_actions::{
+    WebActionListResponse, WebActionRunRequest, WebActionRunResult, WebActionScriptRunRequest,
+    WebActionTarget, list_web_action_navigation_targets as core_list_web_action_navigation_targets,
+    list_web_action_targets as core_list_web_action_targets,
+    list_web_actions as core_list_web_actions,
+    open_web_action_navigation_target as core_open_web_action_navigation_target,
+    open_web_action_target as core_open_web_action_target, run_web_action as core_run_web_action,
+    run_web_action_navigation as core_run_web_action_navigation,
+    run_web_action_navigation_script as core_run_web_action_navigation_script,
+    run_web_action_script as core_run_web_action_script,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -47,7 +53,7 @@ use std::time::SystemTime;
 use tauri::{
     AppHandle, Manager, Runtime, WindowEvent,
     image::Image,
-    menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{IconMenuItem, IsMenuItem, Menu, MenuItem, NativeIcon, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 
@@ -85,6 +91,7 @@ struct ProjectConfigEditorState {
     config_path: String,
     jenkins_profiles: Vec<String>,
     default_branch_rules: BranchRulesEditor,
+    runtime_profiles: Vec<RuntimeProfileEditor>,
     projects: Vec<ProjectConfigEditorProject>,
 }
 
@@ -126,10 +133,140 @@ struct ProjectFocusEditor {
 struct ProjectDebugProfileEditor {
     key: String,
     label: String,
+    #[serde(default)]
+    runtime_profile: Option<String>,
     env_text: String,
     local_files: Vec<ProjectDebugLocalFileEditor>,
     browser: Option<String>,
     browser_profile: Option<String>,
+    #[serde(default)]
+    browser_user_data_dir: Option<String>,
+    #[serde(default)]
+    browser_args_text: String,
+    #[serde(default)]
+    network_proxy: ProjectNetworkProxyEditor,
+    #[serde(default)]
+    local_proxy: ProjectLocalProxyEditor,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeProfileEditor {
+    key: String,
+    label: String,
+    browser: Option<String>,
+    browser_profile: Option<String>,
+    #[serde(default)]
+    browser_user_data_dir: Option<String>,
+    #[serde(default)]
+    web_actions_enabled: bool,
+    #[serde(default = "default_web_actions_port")]
+    web_actions_port: u16,
+    #[serde(default)]
+    web_actions_user_data_dir: Option<String>,
+    #[serde(default)]
+    browser_args_text: String,
+    #[serde(default)]
+    proxy_url: String,
+    #[serde(default)]
+    proxy_bypass: String,
+    #[serde(default)]
+    host_resolver_rules_text: String,
+    #[serde(default)]
+    network_proxy: ProjectNetworkProxyEditor,
+}
+
+fn default_web_actions_port() -> u16 {
+    9223
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectNetworkProxyEditor {
+    enabled: bool,
+    proxy_url: String,
+    inject_env: bool,
+    node_hook: bool,
+    no_proxy: String,
+}
+
+impl Default for ProjectNetworkProxyEditor {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            proxy_url: String::new(),
+            inject_env: true,
+            node_hook: false,
+            no_proxy: "localhost,127.0.0.1,::1".to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectLocalProxyEditor {
+    enabled: bool,
+    listen: String,
+    frontend_url: String,
+    upstream_proxy: String,
+    routes: Vec<ProjectLocalProxyRouteEditor>,
+    auth_helper: ProjectAuthHelperEditor,
+}
+
+impl Default for ProjectLocalProxyEditor {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            listen: "127.0.0.1:3000".to_string(),
+            frontend_url: String::new(),
+            upstream_proxy: String::new(),
+            routes: Vec::new(),
+            auth_helper: ProjectAuthHelperEditor::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectLocalProxyRouteEditor {
+    enabled: bool,
+    match_prefix: String,
+    target: String,
+    rewrite_prefix: String,
+    headers_text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectAuthHelperEditor {
+    enabled: bool,
+    path: String,
+    redirect_path: String,
+    items: Vec<ProjectAuthHelperItemEditor>,
+}
+
+impl Default for ProjectAuthHelperEditor {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: "/__auth-helper".to_string(),
+            redirect_path: "/#/".to_string(),
+            items: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectAuthHelperItemEditor {
+    enabled: bool,
+    storage: String,
+    key: String,
+    from_json_path: String,
+    value: String,
+    cookie_path: String,
+    cookie_max_age_seconds: Option<i64>,
+    cookie_same_site: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -190,6 +327,12 @@ struct SaveProjectConfigBasicsRequest {
 #[serde(rename_all = "camelCase")]
 struct SaveDefaultBranchRulesRequest {
     branch_rules: BranchRulesEditor,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveRuntimeProfilesRequest {
+    runtime_profiles: Vec<RuntimeProfileEditor>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -537,10 +680,377 @@ fn env_map_from_editor_text(
     Ok(env)
 }
 
+fn network_proxy_to_editor(proxy: &ProjectNetworkProxyConfig) -> ProjectNetworkProxyEditor {
+    ProjectNetworkProxyEditor {
+        enabled: proxy.enabled,
+        proxy_url: proxy.proxy_url.clone(),
+        inject_env: proxy.inject_env,
+        node_hook: proxy.node_hook,
+        no_proxy: proxy.no_proxy.clone(),
+    }
+}
+
+fn network_proxy_from_editor(
+    profile_key: &str,
+    editor: ProjectNetworkProxyEditor,
+) -> Result<ProjectNetworkProxyConfig, String> {
+    let proxy_url = editor.proxy_url.trim().to_string();
+    let no_proxy = {
+        let value = editor.no_proxy.trim();
+        if value.is_empty() {
+            "localhost,127.0.0.1,::1".to_string()
+        } else {
+            value.to_string()
+        }
+    };
+
+    if editor.enabled {
+        if proxy_url.is_empty() {
+            return Err(format!("调试档案 {} 的代理地址不能为空", profile_key));
+        }
+        let supported = ["http://", "https://", "socks5://", "socks5h://"]
+            .iter()
+            .any(|prefix| proxy_url.to_lowercase().starts_with(prefix));
+        if !supported {
+            return Err(format!(
+                "调试档案 {} 的代理地址需要以 http://、https://、socks5:// 或 socks5h:// 开头",
+                profile_key
+            ));
+        }
+        if editor.node_hook && !proxy_url.to_lowercase().starts_with("http://") {
+            return Err(format!(
+                "调试档案 {} 的 Node Hook 当前只支持 http:// 代理",
+                profile_key
+            ));
+        }
+    }
+
+    Ok(ProjectNetworkProxyConfig {
+        enabled: editor.enabled,
+        proxy_url,
+        inject_env: editor.inject_env,
+        node_hook: editor.node_hook,
+        no_proxy,
+    })
+}
+
+fn local_proxy_to_editor(proxy: &ProjectLocalProxyConfig) -> ProjectLocalProxyEditor {
+    ProjectLocalProxyEditor {
+        enabled: proxy.enabled,
+        listen: proxy.listen.clone(),
+        frontend_url: proxy.frontend_url.clone(),
+        upstream_proxy: proxy.upstream_proxy.clone(),
+        routes: proxy
+            .routes
+            .iter()
+            .map(|route| ProjectLocalProxyRouteEditor {
+                enabled: route.enabled,
+                match_prefix: route.match_prefix.clone(),
+                target: route.target.clone(),
+                rewrite_prefix: route.rewrite_prefix.clone(),
+                headers_text: env_map_to_editor_text(&route.headers),
+            })
+            .collect(),
+        auth_helper: auth_helper_to_editor(&proxy.auth_helper),
+    }
+}
+
+fn auth_helper_to_editor(helper: &ProjectAuthHelperConfig) -> ProjectAuthHelperEditor {
+    ProjectAuthHelperEditor {
+        enabled: helper.enabled,
+        path: helper.path.clone(),
+        redirect_path: helper.redirect_path.clone(),
+        items: helper
+            .items
+            .iter()
+            .map(|item| ProjectAuthHelperItemEditor {
+                enabled: item.enabled,
+                storage: item.storage.clone(),
+                key: item.key.clone(),
+                from_json_path: item.from_json_path.clone(),
+                value: item.value.clone(),
+                cookie_path: item.cookie_path.clone(),
+                cookie_max_age_seconds: item.cookie_max_age_seconds,
+                cookie_same_site: item.cookie_same_site.clone(),
+            })
+            .collect(),
+    }
+}
+
+fn local_proxy_from_editor(
+    profile_key: &str,
+    editor: ProjectLocalProxyEditor,
+) -> Result<ProjectLocalProxyConfig, String> {
+    let listen = editor.listen.trim().to_string();
+    let frontend_url = editor.frontend_url.trim().to_string();
+    let upstream_proxy = editor.upstream_proxy.trim().to_string();
+
+    if editor.enabled {
+        if listen.is_empty() || !listen.contains(':') {
+            return Err(format!(
+                "调试档案 {} 的本地代理监听地址需要形如 127.0.0.1:3000",
+                profile_key
+            ));
+        }
+        if frontend_url.is_empty() {
+            return Err(format!("调试档案 {} 的前端地址不能为空", profile_key));
+        }
+        if !is_http_url(&frontend_url) {
+            return Err(format!(
+                "调试档案 {} 的前端地址需要以 http:// 或 https:// 开头",
+                profile_key
+            ));
+        }
+        if !upstream_proxy.is_empty() && !upstream_proxy.to_lowercase().starts_with("http://") {
+            return Err(format!(
+                "调试档案 {} 的上游代理当前只支持 http://",
+                profile_key
+            ));
+        }
+    }
+
+    let routes = editor
+        .routes
+        .into_iter()
+        .filter_map(|route| {
+            let match_prefix = route.match_prefix.trim().to_string();
+            let target = route.target.trim().to_string();
+            if match_prefix.is_empty() && target.is_empty() {
+                None
+            } else {
+                Some((match_prefix, target, route))
+            }
+        })
+        .map(|(match_prefix, target, route)| {
+            if match_prefix.is_empty() {
+                return Err(format!("调试档案 {} 的代理路由前缀不能为空", profile_key));
+            }
+            if target.is_empty() || !is_http_url(&target) {
+                return Err(format!(
+                    "调试档案 {} 的代理路由目标需要以 http:// 或 https:// 开头",
+                    profile_key
+                ));
+            }
+            Ok(ProjectLocalProxyRouteConfig {
+                enabled: route.enabled,
+                match_prefix,
+                target,
+                rewrite_prefix: route.rewrite_prefix.trim().to_string(),
+                headers: env_map_from_editor_text(&route.headers_text)?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(ProjectLocalProxyConfig {
+        enabled: editor.enabled,
+        listen,
+        frontend_url,
+        upstream_proxy,
+        routes,
+        auth_helper: auth_helper_from_editor(profile_key, editor.auth_helper)?,
+    })
+}
+
+fn auth_helper_from_editor(
+    profile_key: &str,
+    editor: ProjectAuthHelperEditor,
+) -> Result<ProjectAuthHelperConfig, String> {
+    let path = editor.path.trim();
+    let redirect_path = editor.redirect_path.trim();
+    if editor.enabled {
+        if !path.starts_with('/') {
+            return Err(format!(
+                "调试档案 {} 的 Auth Helper 路径需要以 / 开头",
+                profile_key
+            ));
+        }
+        if redirect_path.is_empty() {
+            return Err(format!(
+                "调试档案 {} 的 Auth Helper 跳转路径不能为空",
+                profile_key
+            ));
+        }
+    }
+
+    let items = editor
+        .items
+        .into_iter()
+        .filter_map(|item| {
+            let key = item.key.trim().to_string();
+            if key.is_empty()
+                && item.from_json_path.trim().is_empty()
+                && item.value.trim().is_empty()
+            {
+                None
+            } else {
+                Some((key, item))
+            }
+        })
+        .map(|(key, item)| {
+            if key.is_empty() {
+                return Err(format!(
+                    "调试档案 {} 的 Auth Helper key 不能为空",
+                    profile_key
+                ));
+            }
+            let storage = item.storage.trim();
+            if !matches!(storage, "localStorage" | "sessionStorage" | "cookie") {
+                return Err(format!(
+                    "调试档案 {} 的 Auth Helper storage 不支持: {}",
+                    profile_key, storage
+                ));
+            }
+            Ok(ProjectAuthHelperItemConfig {
+                enabled: item.enabled,
+                storage: storage.to_string(),
+                key,
+                from_json_path: item.from_json_path.trim().to_string(),
+                value: item.value,
+                cookie_path: if item.cookie_path.trim().is_empty() {
+                    "/".to_string()
+                } else {
+                    item.cookie_path.trim().to_string()
+                },
+                cookie_max_age_seconds: item.cookie_max_age_seconds,
+                cookie_same_site: item.cookie_same_site.trim().to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+
+    Ok(ProjectAuthHelperConfig {
+        enabled: editor.enabled,
+        path: if path.is_empty() {
+            "/__auth-helper".to_string()
+        } else {
+            path.to_string()
+        },
+        redirect_path: if redirect_path.is_empty() {
+            "/#/".to_string()
+        } else {
+            redirect_path.to_string()
+        },
+        items,
+    })
+}
+
+fn is_http_url(value: &str) -> bool {
+    let value = value.to_lowercase();
+    value.starts_with("http://") || value.starts_with("https://")
+}
+
+fn runtime_profile_to_editor(profile: &RuntimeProfileConfig) -> RuntimeProfileEditor {
+    RuntimeProfileEditor {
+        key: profile.key.clone(),
+        label: profile.label.clone(),
+        browser: profile.browser.clone(),
+        browser_profile: profile.browser_profile.clone(),
+        browser_user_data_dir: profile
+            .browser_user_data_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        web_actions_enabled: profile.web_actions_enabled,
+        web_actions_port: profile.web_actions_port,
+        web_actions_user_data_dir: profile
+            .web_actions_user_data_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        browser_args_text: profile.browser_args.join("\n"),
+        proxy_url: profile.proxy_url.clone(),
+        proxy_bypass: profile.proxy_bypass.clone(),
+        host_resolver_rules_text: profile.host_resolver_rules.join("\n"),
+        network_proxy: network_proxy_to_editor(&profile.network_proxy),
+    }
+}
+
+fn runtime_profiles_from_editor(
+    profiles: Vec<RuntimeProfileEditor>,
+) -> Result<Vec<RuntimeProfileConfig>, String> {
+    let mut profile_keys = std::collections::BTreeSet::new();
+    let mut next_profiles = Vec::with_capacity(profiles.len());
+
+    for profile in profiles {
+        let key = validate_config_key("运行配置", &profile.key)?;
+        if !profile_keys.insert(key.clone()) {
+            return Err(format!("运行配置 key 重复: {}", key));
+        }
+        let label = profile.label.trim();
+        let profile_label = format!("运行配置 {}", key);
+        let proxy_url = profile.proxy_url.trim().to_string();
+        if !proxy_url.is_empty() && !is_supported_browser_proxy_url(&proxy_url) {
+            return Err(format!(
+                "运行配置 {} 的浏览器代理地址需要以 http://、https://、socks5:// 或 socks5h:// 开头",
+                key
+            ));
+        }
+        if profile.web_actions_enabled && profile.web_actions_port == 0 {
+            return Err(format!("运行配置 {} 的网页动作端口不能为 0", key));
+        }
+        if profile.web_actions_enabled
+            && profile
+                .browser_args_text
+                .lines()
+                .map(str::trim)
+                .any(|line| {
+                    line.to_ascii_lowercase()
+                        .starts_with("--remote-debugging-port")
+                })
+        {
+            return Err(format!(
+                "运行配置 {} 已启用网页动作受控模式，请使用调试端口字段，不要在浏览器参数里填写 --remote-debugging-port",
+                key
+            ));
+        }
+        next_profiles.push(RuntimeProfileConfig {
+            key: key.clone(),
+            label: if label.is_empty() {
+                key.clone()
+            } else {
+                label.to_string()
+            },
+            browser: optional_editor_string(profile.browser),
+            browser_profile: optional_editor_string(profile.browser_profile),
+            browser_user_data_dir: optional_editor_string(profile.browser_user_data_dir)
+                .map(PathBuf::from),
+            web_actions_enabled: profile.web_actions_enabled,
+            web_actions_port: if profile.web_actions_port == 0 {
+                default_web_actions_port()
+            } else {
+                profile.web_actions_port
+            },
+            web_actions_user_data_dir: optional_editor_string(profile.web_actions_user_data_dir)
+                .map(PathBuf::from),
+            browser_args: browser_args_from_editor_text(
+                &profile_label,
+                &profile.browser_args_text,
+            )?,
+            proxy_url,
+            proxy_bypass: profile.proxy_bypass.trim().to_string(),
+            host_resolver_rules: profile
+                .host_resolver_rules_text
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .map(ToString::to_string)
+                .collect(),
+            network_proxy: network_proxy_from_editor(&profile_label, profile.network_proxy)?,
+        });
+    }
+
+    Ok(next_profiles)
+}
+
+fn is_supported_browser_proxy_url(value: &str) -> bool {
+    let value = value.to_lowercase();
+    ["http://", "https://", "socks5://", "socks5h://"]
+        .iter()
+        .any(|prefix| value.starts_with(prefix))
+}
+
 fn debug_profile_to_editor(profile: &ProjectDebugProfileConfig) -> ProjectDebugProfileEditor {
     ProjectDebugProfileEditor {
         key: profile.key.clone(),
         label: profile.label.clone(),
+        runtime_profile: profile.runtime_profile.clone(),
         env_text: env_map_to_editor_text(&profile.env),
         local_files: profile
             .local_files
@@ -554,6 +1064,13 @@ fn debug_profile_to_editor(profile: &ProjectDebugProfileConfig) -> ProjectDebugP
             .collect(),
         browser: profile.browser.clone(),
         browser_profile: profile.browser_profile.clone(),
+        browser_user_data_dir: profile
+            .browser_user_data_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        browser_args_text: profile.browser_args.join("\n"),
+        network_proxy: network_proxy_to_editor(&profile.network_proxy),
+        local_proxy: local_proxy_to_editor(&profile.local_proxy),
     }
 }
 
@@ -606,18 +1123,52 @@ fn debug_profiles_from_editor(
         next_profiles.push(ProjectDebugProfileConfig {
             key: key.clone(),
             label: if label.is_empty() {
-                key
+                key.clone()
             } else {
                 label.to_string()
             },
+            runtime_profile: optional_editor_string(profile.runtime_profile),
             env: env_map_from_editor_text(&profile.env_text)?,
             local_files,
             browser: optional_editor_string(profile.browser),
             browser_profile: optional_editor_string(profile.browser_profile),
+            browser_user_data_dir: optional_editor_string(profile.browser_user_data_dir)
+                .map(PathBuf::from),
+            browser_args: browser_args_from_editor_text(&key, &profile.browser_args_text)?,
+            network_proxy: network_proxy_from_editor(&key, profile.network_proxy)?,
+            local_proxy: local_proxy_from_editor(&key, profile.local_proxy)?,
         });
     }
 
     Ok(next_profiles)
+}
+
+fn browser_args_from_editor_text(profile_key: &str, value: &str) -> Result<Vec<String>, String> {
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            if !line.starts_with("--") {
+                return Err(format!(
+                    "调试档案 {} 的浏览器参数必须以 -- 开头: {}",
+                    profile_key, line
+                ));
+            }
+            Ok(normalize_browser_arg_text(line))
+        })
+        .collect()
+}
+
+fn normalize_browser_arg_text(value: &str) -> String {
+    let Some((key, raw_value)) = value.split_once('=') else {
+        return value.to_string();
+    };
+    let raw_value = raw_value.trim();
+    if raw_value.len() >= 2 && raw_value.starts_with('"') && raw_value.ends_with('"') {
+        return format!("{}={}", key.trim(), &raw_value[1..raw_value.len() - 1]);
+    }
+    value.to_string()
 }
 
 fn project_to_editor(project: &rdevtool_core::config::ProjectConfig) -> ProjectConfigEditorProject {
@@ -682,6 +1233,12 @@ fn load_project_config_editor_state(path: &Path) -> Result<ProjectConfigEditorSt
             source_keywords: config.defaults.branch_rules.source_keywords.clone(),
             target_keywords: config.defaults.branch_rules.target_keywords.clone(),
         },
+        runtime_profiles: config
+            .defaults
+            .runtime_profiles
+            .iter()
+            .map(runtime_profile_to_editor)
+            .collect(),
         projects: config.projects.iter().map(project_to_editor).collect(),
     })
 }
@@ -835,6 +1392,27 @@ async fn save_default_branch_rules(
 
         save_config(&paths.projects, &config).map_err(|error| error.to_string())?;
         config_state.invalidate()?;
+        load_project_config_editor_state(&paths.projects)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn save_runtime_profiles(
+    state: tauri::State<'_, AppState>,
+    request: SaveRuntimeProfilesRequest,
+) -> Result<ProjectConfigEditorState, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let mut config = load_config(&paths.projects).map_err(|error| error.to_string())?;
+
+        config.defaults.runtime_profiles = runtime_profiles_from_editor(request.runtime_profiles)?;
+
+        save_config(&paths.projects, &config).map_err(|error| error.to_string())?;
+        config_state.invalidate()?;
+
         load_project_config_editor_state(&paths.projects)
     })
     .await
@@ -1261,10 +1839,15 @@ async fn save_navigation_editor(data: NavigationEditorData) -> Result<Navigation
 #[tauri::command]
 async fn open_page_navigation_entry(
     app: AppHandle,
+    state: tauri::State<'_, AppState>,
     entry: NavigationEntry,
 ) -> Result<NavigationOpenResult, String> {
+    let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let result = open_navigation_entry(&entry).map_err(|error| error.to_string())?;
+        let config = config_state.load()?;
+        let result =
+            open_navigation_entry_with_runtime_profiles(&entry, &config.defaults.runtime_profiles)
+                .map_err(|error| error.to_string())?;
         let action = tray_action_for_navigation_entry(&entry);
         if let Err(error) = record_tray_replay_action(&app, action) {
             eprintln!("failed to record tray action: {}", error);
@@ -1297,9 +1880,39 @@ async fn open_web_action_target(url: String) -> Result<WebActionTarget, String> 
 }
 
 #[tauri::command]
+async fn open_web_action_navigation_target(
+    state: tauri::State<'_, AppState>,
+    entry: NavigationEntry,
+) -> Result<WebActionTarget, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        core_open_web_action_navigation_target(&entry, &config.defaults.runtime_profiles)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn list_web_action_targets() -> Result<Vec<WebActionTarget>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_list_web_action_targets().map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn list_web_action_navigation_targets(
+    state: tauri::State<'_, AppState>,
+    entry: NavigationEntry,
+) -> Result<Vec<WebActionTarget>, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        core_list_web_action_navigation_targets(&entry, &config.defaults.runtime_profiles)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1315,11 +1928,43 @@ async fn run_web_action(request: WebActionRunRequest) -> Result<WebActionRunResu
 }
 
 #[tauri::command]
+async fn run_web_action_navigation(
+    state: tauri::State<'_, AppState>,
+    entry: NavigationEntry,
+    request: WebActionRunRequest,
+) -> Result<WebActionRunResult, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        core_run_web_action_navigation(&entry, &config.defaults.runtime_profiles, request)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn run_web_action_script(
     request: WebActionScriptRunRequest,
 ) -> Result<WebActionRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         core_run_web_action_script(request).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn run_web_action_navigation_script(
+    state: tauri::State<'_, AppState>,
+    entry: NavigationEntry,
+    request: WebActionScriptRunRequest,
+) -> Result<WebActionRunResult, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        core_run_web_action_navigation_script(&entry, &config.defaults.runtime_profiles, request)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1502,7 +2147,7 @@ async fn start_project_runtime(
             },
         )?;
         if should_auto_focus_project(&config, &project, &updated) {
-            match runtime.focus_runtime(&config, &project) {
+            match runtime.focus_runtime(&config, &project, debug_profile_key.as_deref()) {
                 Ok(next_snapshot) => {
                     updated = next_snapshot;
                 }
@@ -1706,18 +2351,32 @@ async fn focus_project_runtime(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     project: String,
+    debug_profile: Option<String>,
 ) -> Result<ProjectRuntimeSnapshot, String> {
     let runtime = state.project_runtime.clone();
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
-        let updated = runtime.focus_runtime(&config, &project)?;
-        let action = tray_action_for_project(
+        let debug_profile_key = optional_editor_string(debug_profile);
+        let updated = runtime.focus_runtime(&config, &project, debug_profile_key.as_deref())?;
+        let mut action = tray_action_for_project(
             "project.runtime.focus",
             format!("聚焦 {}", updated.name),
             Some(updated.detail.clone()),
             project,
         );
+        if let Some(profile_key) = debug_profile_key.as_ref() {
+            action.detail = Some(match action.detail.as_ref() {
+                Some(detail) => format!("{} · {}", detail, profile_key),
+                None => format!("调试档案 {}", profile_key),
+            });
+            action.dedupe_key = format!(
+                "project.runtime.focus:{}:{}",
+                action.project_key.as_deref().unwrap_or_default(),
+                profile_key
+            );
+            action.payload = Some(json!({ "debugProfile": profile_key }));
+        }
         if let Err(error) = record_tray_replay_action(&app, action) {
             eprintln!("failed to record tray action: {}", error);
         }
@@ -1954,7 +2613,7 @@ fn record_tray_replay_action<R: Runtime>(
 }
 
 fn truncate_menu_label(value: &str) -> String {
-    const MAX_CHARS: usize = 28;
+    const MAX_CHARS: usize = 24;
     let mut chars = value.trim().chars();
     let mut output = String::new();
     for _ in 0..MAX_CHARS {
@@ -1969,6 +2628,31 @@ fn truncate_menu_label(value: &str) -> String {
     output
 }
 
+fn tray_action_menu_meta(action: &TrayReplayAction) -> (&'static str, NativeIcon) {
+    match action.kind.as_str() {
+        "branch.replay" => ("分支", NativeIcon::FollowLinkFreestanding),
+        "deploy.replay" => ("部署", NativeIcon::Network),
+        "finder.shortcut.open" => ("入口", NativeIcon::Bookmarks),
+        "project.runtime.start" => ("启动", NativeIcon::RightFacingTriangle),
+        "project.runtime.focus" => ("聚焦", NativeIcon::RevealFreestanding),
+        "project.build.run" => ("构建", NativeIcon::Advanced),
+        "project.build.openOutput" | "project.openDirectory" => ("打开", NativeIcon::Folder),
+        _ => ("操作", NativeIcon::SmartBadge),
+    }
+}
+
+fn tray_action_menu_label(action: &TrayReplayAction) -> String {
+    let (category, _) = tray_action_menu_meta(action);
+    let label = action
+        .label
+        .trim()
+        .strip_prefix("分支：")
+        .or_else(|| action.label.trim().strip_prefix("部署："))
+        .or_else(|| action.label.trim().strip_prefix("打开 "))
+        .unwrap_or_else(|| action.label.trim());
+    truncate_menu_label(&format!("{} · {}", category, label))
+}
+
 fn create_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let (recent_actions, pinned_actions) = app
         .try_state::<AppState>()
@@ -1980,24 +2664,33 @@ fn create_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         })
         .unwrap_or_default();
 
-    let show_item = MenuItem::with_id(app, TRAY_SHOW_ID, "打开 rDevTool", true, None::<&str>)?;
-    let replay_last_item = MenuItem::with_id(
+    let show_item = IconMenuItem::with_id_and_native_icon(
+        app,
+        TRAY_SHOW_ID,
+        "打开 rDevTool",
+        true,
+        Some(NativeIcon::Computer),
+        None::<&str>,
+    )?;
+    let replay_last_item = IconMenuItem::with_id_and_native_icon(
         app,
         TRAY_REPLAY_LAST_ID,
         recent_actions
             .first()
-            .map(|action| format!("重复上次操作：{}", truncate_menu_label(&action.label)))
+            .map(|action| format!("重复上次：{}", tray_action_menu_label(action)))
             .unwrap_or_else(|| "重复上次操作".to_string()),
         !recent_actions.is_empty(),
+        Some(NativeIcon::RefreshFreestanding),
         None::<&str>,
     )?;
 
     let pinned_menu_items = if pinned_actions.is_empty() {
-        vec![MenuItem::with_id(
+        vec![IconMenuItem::with_id_and_native_icon(
             app,
             "tray_pinned_empty",
-            "暂无置顶操作",
+            "暂无已标记操作",
             false,
+            Some(NativeIcon::Bookmarks),
             None::<&str>,
         )?]
     } else {
@@ -2006,11 +2699,13 @@ fn create_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             .take(TRAY_PINNED_LIMIT)
             .enumerate()
             .map(|(index, action)| {
-                MenuItem::with_id(
+                let (_, icon) = tray_action_menu_meta(action);
+                IconMenuItem::with_id_and_native_icon(
                     app,
                     format!("{}{}", TRAY_PINNED_PREFIX, index),
-                    truncate_menu_label(&action.label),
+                    tray_action_menu_label(action),
                     true,
+                    Some(icon),
                     None::<&str>,
                 )
             })
@@ -2023,7 +2718,7 @@ fn create_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     let pinned_submenu = Submenu::with_id_and_items(
         app,
         TRAY_PINNED_SUBMENU_ID,
-        "置顶操作",
+        "已标记",
         true,
         &pinned_menu_refs,
     )?;
@@ -2192,7 +2887,16 @@ fn execute_tray_replay_action<R: Runtime>(
                 .as_deref()
                 .ok_or_else(|| "缺少项目 Key".to_string())?;
             let config = state.config_state.load()?;
-            state.project_runtime.focus_runtime(&config, project_key)?;
+            let debug_profile = action
+                .payload
+                .as_ref()
+                .and_then(|payload| payload.get("debugProfile"))
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            state
+                .project_runtime
+                .focus_runtime(&config, project_key, debug_profile)?;
         }
         "project.openDirectory" => {
             let project_key = action
@@ -2207,7 +2911,9 @@ fn execute_tray_replay_action<R: Runtime>(
                 .entry
                 .clone()
                 .ok_or_else(|| "缺少快捷入口".to_string())?;
-            open_navigation_entry(&entry).map_err(|error| error.to_string())?;
+            let config = state.config_state.load()?;
+            open_navigation_entry_with_runtime_profiles(&entry, &config.defaults.runtime_profiles)
+                .map_err(|error| error.to_string())?;
         }
         "deploy.replay" => {
             let config = state.config_state.load()?;
@@ -2310,25 +3016,86 @@ fn build_tray<R: tauri::Runtime>(
 fn create_monochrome_tray_icon(icon: Image<'static>) -> Image<'static> {
     let threshold = 188.0f32;
     let rgba = icon.rgba();
-    let mut out = Vec::with_capacity(rgba.len());
+    let width = icon.width() as usize;
+    let height = icon.height() as usize;
+    let mut alpha_mask = Vec::with_capacity(width * height);
 
     for chunk in rgba.chunks_exact(4) {
         let alpha = chunk[3] as f32 / 255.0;
         if alpha <= 0.0 {
-            out.extend_from_slice(&[0, 0, 0, 0]);
+            alpha_mask.push(0);
             continue;
         }
 
         let luminance =
             0.2126 * chunk[0] as f32 + 0.7152 * chunk[1] as f32 + 0.0722 * chunk[2] as f32;
         if luminance <= threshold {
-            out.extend_from_slice(&[0, 0, 0, 0]);
+            alpha_mask.push(0);
             continue;
         }
 
         let whiteness = ((luminance - threshold) / (255.0 - threshold)).clamp(0.0, 1.0);
         let tray_alpha = (alpha * whiteness * 255.0).round() as u8;
-        out.extend_from_slice(&[255, 255, 255, tray_alpha]);
+        alpha_mask.push(tray_alpha);
+    }
+
+    let mut min_x = width;
+    let mut min_y = height;
+    let mut max_x = 0usize;
+    let mut max_y = 0usize;
+    for (index, alpha) in alpha_mask.iter().enumerate() {
+        if *alpha <= 4 {
+            continue;
+        }
+        let x = index % width;
+        let y = index / width;
+        min_x = min_x.min(x);
+        min_y = min_y.min(y);
+        max_x = max_x.max(x);
+        max_y = max_y.max(y);
+    }
+
+    if min_x >= width || min_y >= height {
+        return Image::new_owned(vec![0; rgba.len()], icon.width(), icon.height());
+    }
+
+    let source_width = max_x - min_x + 1;
+    let source_height = max_y - min_y + 1;
+    let target_limit = ((width.min(height) as f32) * 0.88).round() as usize;
+    let scale = (target_limit as f32 / source_width.max(source_height) as f32).max(1.0);
+    let target_width = ((source_width as f32) * scale).round().min(width as f32) as usize;
+    let target_height = ((source_height as f32) * scale).round().min(height as f32) as usize;
+    let target_x = (width - target_width) / 2;
+    let target_y = (height - target_height) / 2;
+    let mut enlarged_alpha = vec![0u8; width * height];
+
+    for y in 0..target_height {
+        for x in 0..target_width {
+            let source_x =
+                min_x + ((x as f32 / target_width as f32) * source_width as f32) as usize;
+            let source_y =
+                min_y + ((y as f32 / target_height as f32) * source_height as f32) as usize;
+            enlarged_alpha[(target_y + y) * width + target_x + x] =
+                alpha_mask[source_y.min(max_y) * width + source_x.min(max_x)];
+        }
+    }
+
+    let mut bold_alpha = enlarged_alpha.clone();
+    for y in 0..height {
+        for x in 0..width {
+            let mut strongest = 0u8;
+            for next_y in y.saturating_sub(1)..=(y + 1).min(height - 1) {
+                for next_x in x.saturating_sub(1)..=(x + 1).min(width - 1) {
+                    strongest = strongest.max(enlarged_alpha[next_y * width + next_x]);
+                }
+            }
+            bold_alpha[y * width + x] = strongest;
+        }
+    }
+
+    let mut out = Vec::with_capacity(rgba.len());
+    for alpha in bold_alpha {
+        out.extend_from_slice(&[255, 255, 255, alpha]);
     }
 
     Image::new_owned(out, icon.width(), icon.height())
@@ -2380,6 +3147,7 @@ pub fn run() {
             save_workspace_app_preferences,
             get_project_config_editor,
             save_default_branch_rules,
+            save_runtime_profiles,
             save_project_config_basics,
             add_project_config,
             delete_project_config,
@@ -2409,9 +3177,13 @@ pub fn run() {
             open_page_navigation_entry,
             list_web_actions,
             open_web_action_target,
+            open_web_action_navigation_target,
             list_web_action_targets,
+            list_web_action_navigation_targets,
             run_web_action,
+            run_web_action_navigation,
             run_web_action_script,
+            run_web_action_navigation_script,
             storage_get_json,
             storage_set_json,
             storage_delete_json,

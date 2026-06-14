@@ -3,7 +3,6 @@ import {
   Box,
   Card,
   CardContent,
-  Chip,
   Collapse,
   IconButton,
   Pagination,
@@ -230,28 +229,28 @@ export function BranchHistoryPanel({
       ),
     [history],
   );
+  function pinnedOrderForBranchGroup(group: (typeof groupedHistory)[number]) {
+    let order: number | undefined;
+    for (const item of group.items) {
+      const key = branchTrayDedupeKeyFromHistory(item);
+      const itemOrder = key ? pinnedActionOrder.get(key) : undefined;
+      if (itemOrder !== undefined) {
+        order = order === undefined ? itemOrder : Math.min(order, itemOrder);
+      }
+    }
+    if (order !== undefined) {
+      return order;
+    }
+    const legacyKey = branchLegacyTrayDedupeKeyFromHistory(group.latest);
+    return legacyKey ? pinnedActionOrder.get(legacyKey) : undefined;
+  }
   const sortedHistoryGroups = useMemo(() => {
     const originalOrder = new Map(
       groupedHistory.map((group, index) => [group.id, index]),
     );
-    const groupPinnedOrder = (group: (typeof groupedHistory)[number]) => {
-      let order: number | undefined;
-      for (const item of group.items) {
-        const key = branchTrayDedupeKeyFromHistory(item);
-        const itemOrder = key ? pinnedActionOrder.get(key) : undefined;
-        if (itemOrder !== undefined) {
-          order = order === undefined ? itemOrder : Math.min(order, itemOrder);
-        }
-      }
-      if (order !== undefined) {
-        return order;
-      }
-      const legacyKey = branchLegacyTrayDedupeKeyFromHistory(group.latest);
-      return legacyKey ? pinnedActionOrder.get(legacyKey) : undefined;
-    };
     return [...groupedHistory].sort((left, right) => {
-      const leftPinnedOrder = groupPinnedOrder(left);
-      const rightPinnedOrder = groupPinnedOrder(right);
+      const leftPinnedOrder = pinnedOrderForBranchGroup(left);
+      const rightPinnedOrder = pinnedOrderForBranchGroup(right);
       const leftPinned = leftPinnedOrder !== undefined;
       const rightPinned = rightPinnedOrder !== undefined;
 
@@ -267,6 +266,20 @@ export function BranchHistoryPanel({
       return (originalOrder.get(left.id) ?? 0) - (originalOrder.get(right.id) ?? 0);
     });
   }, [groupedHistory, pinnedActionOrder]);
+  const pinnedHistoryGroups = useMemo(
+    () =>
+      sortedHistoryGroups.filter(
+        (group) => pinnedOrderForBranchGroup(group) !== undefined,
+      ),
+    [pinnedActionOrder, sortedHistoryGroups],
+  );
+  const unpinnedHistoryGroups = useMemo(
+    () =>
+      sortedHistoryGroups.filter(
+        (group) => pinnedOrderForBranchGroup(group) === undefined,
+      ),
+    [pinnedActionOrder, sortedHistoryGroups],
+  );
   function pinnedActionForBranchGroup(group: (typeof groupedHistory)[number]) {
     let pinnedAction: TrayPinnedAction | null = null;
     let pinnedOrder = Number.POSITIVE_INFINITY;
@@ -285,25 +298,21 @@ export function BranchHistoryPanel({
     const legacyKey = branchLegacyTrayDedupeKeyFromHistory(group.latest);
     return legacyKey ? pinnedActionByKey.get(legacyKey) ?? null : null;
   }
-  function pinnedBranchChipLabel(action: TrayPinnedAction) {
-    const item =
-      branchHistoryByPinnedKey.get(action.dedupeKey) ??
-      branchLegacyHistoryByPinnedKey.get(action.dedupeKey) ??
-      null;
-    const label = action.label.replace(/^分支：/, "");
-    return item ? `${label} · ${formatRelativeTime(item.createdAt)}` : label;
-  }
   const historyPageCount = Math.max(
     1,
-    Math.ceil(sortedHistoryGroups.length / HISTORY_PAGE_SIZE),
+    Math.ceil(unpinnedHistoryGroups.length / HISTORY_PAGE_SIZE),
   );
   const pagedHistoryGroups = useMemo(
     () =>
-      sortedHistoryGroups.slice(
+      unpinnedHistoryGroups.slice(
         (historyPage - 1) * HISTORY_PAGE_SIZE,
         historyPage * HISTORY_PAGE_SIZE,
       ),
-    [historyPage, sortedHistoryGroups],
+    [historyPage, unpinnedHistoryGroups],
+  );
+  const visibleHistoryGroups = useMemo(
+    () => [...pinnedHistoryGroups, ...pagedHistoryGroups],
+    [pagedHistoryGroups, pinnedHistoryGroups],
   );
 
   useEffect(() => {
@@ -420,36 +429,7 @@ export function BranchHistoryPanel({
         <Collapse in={expanded} timeout="auto" unmountOnExit>
           {history.length > 0 ? (
             <Stack spacing={0.8} minWidth={0}>
-              {displayPinnedBranchActions.length > 0 ? (
-                <Stack direction="row" flexWrap="wrap" gap={0.55} alignItems="center">
-                  <Typography
-                    variant="caption"
-                    color="text.secondary"
-                    sx={{ fontWeight: 800, mr: 0.1 }}
-                  >
-                    置顶
-                  </Typography>
-                  {displayPinnedBranchActions.map((action) => (
-                    <Chip
-                      key={action.dedupeKey}
-                      size="small"
-                      icon={<StarIcon />}
-                      label={pinnedBranchChipLabel(action)}
-                      onDelete={() => handleRemovePinned(action.dedupeKey)}
-                      sx={{
-                        maxWidth: "100%",
-                        borderRadius: "999px",
-                        fontWeight: 800,
-                        "& .MuiChip-label": {
-                          overflow: "hidden",
-                          textOverflow: "ellipsis",
-                        },
-                      }}
-                    />
-                  ))}
-                </Stack>
-              ) : null}
-              {pagedHistoryGroups.map((group) => {
+              {visibleHistoryGroups.map((group) => {
                 const item = group.latest;
                 const isGrouped = group.items.length > 1;
                 const groupExpanded = expandedHistoryGroups.has(group.id);
@@ -489,22 +469,6 @@ export function BranchHistoryPanel({
                           disabled={!item.replay}
                           title={item.replay ? "配置联动" : "旧记录缺少回放参数"}
                         />
-                        {isGrouped ? (
-                          <IconButton
-                            size="small"
-                            onClick={() => toggleHistoryGroup(group.id)}
-                            aria-label={
-                              groupExpanded ? "收起同参数记录" : "展开同参数记录"
-                            }
-                            title={groupExpanded ? "收起同参数记录" : "展开同参数记录"}
-                          >
-                            {groupExpanded ? (
-                              <CollapseIcon fontSize="small" />
-                            ) : (
-                              <ExpandIcon fontSize="small" />
-                            )}
-                          </IconButton>
-                        ) : null}
                         <IconButton
                           size="small"
                           onClick={() =>
@@ -514,12 +478,12 @@ export function BranchHistoryPanel({
                           }
                           disabled={!trayAction}
                           color={pinned ? "primary" : "default"}
-                          aria-label={pinned ? "取消置顶到托盘" : "置顶到托盘"}
+                          aria-label={pinned ? "取消标记" : "标记记录"}
                           title={
                             trayAction
                               ? pinned
-                                ? "取消置顶到托盘"
-                                : "置顶到托盘"
+                                ? "取消标记"
+                                : "标记记录"
                               : "旧记录缺少回放参数"
                           }
                           sx={
@@ -537,6 +501,22 @@ export function BranchHistoryPanel({
                         >
                           <StarIcon fontSize="small" />
                         </IconButton>
+                        {isGrouped ? (
+                          <IconButton
+                            size="small"
+                            onClick={() => toggleHistoryGroup(group.id)}
+                            aria-label={
+                              groupExpanded ? "收起同参数记录" : "展开同参数记录"
+                            }
+                            title={groupExpanded ? "收起同参数记录" : "展开同参数记录"}
+                          >
+                            {groupExpanded ? (
+                              <CollapseIcon fontSize="small" />
+                            ) : (
+                              <ExpandIcon fontSize="small" />
+                            )}
+                          </IconButton>
+                        ) : null}
                       </Stack>
                     }
                     detail={item.detail}

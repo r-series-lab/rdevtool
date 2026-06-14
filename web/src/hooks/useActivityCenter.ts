@@ -191,6 +191,9 @@ function matchesActivity(item: ActivityEntry, match: ActivityMatch) {
   if (match.kind && item.kind !== match.kind) {
     return false;
   }
+  if (match.status && item.status !== match.status) {
+    return false;
+  }
   if (match.projectKey && item.projectKey !== match.projectKey) {
     return false;
   }

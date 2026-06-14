@@ -78,6 +78,7 @@ export type ActivityPatch = Partial<
 
 export type ActivityMatch = {
   kind?: ActivityKind;
+  status?: ActivityStatus;
   projectKey?: string | null;
   resourceValues?: string[];
 };

@@ -182,7 +182,7 @@ export type ProjectsModuleContext = {
   handleRunBuild: (projectKey: string) => Promise<void>;
   handleStopBuild: (projectKey: string) => Promise<void>;
   handleOpenBuildOutput: (projectKey: string) => Promise<void>;
-  handleFocusRuntime: (projectKey: string) => Promise<void>;
+  handleFocusRuntime: (projectKey: string, debugProfileKey?: string) => Promise<void>;
   handleOpenProjectDirectory: (projectKey: string) => Promise<void>;
   handleReplayProjectWorkflow: (
     replay: WorkflowProjectReplay,
