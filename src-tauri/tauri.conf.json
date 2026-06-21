@@ -9,15 +9,23 @@
     "frontendDist": "../web/dist"
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "label": "main",
         "title": "rDevTool",
-        "width": 760,
-        "height": 520,
-        "minWidth": 420,
-        "minHeight": 420,
+        "width": 950,
+        "height": 760,
+        "minWidth": 950,
+        "minHeight": 760,
         "resizable": true,
+        "decorations": true,
+        "transparent": true,
+        "windowEffects": {
+          "effects": ["underWindowBackground", "mica"],
+          "state": "active",
+          "radius": 18
+        },
         "titleBarStyle": "Overlay",
         "hiddenTitle": true
       }

@@ -6,6 +6,7 @@ export const ALL_PAGE_KEYS: PageKey[] = [
   "projects",
   "merge",
   "deploy",
+  "proxy",
 ];
 
 export const NAV_ITEMS: Array<{ key: PageKey; label: string; shortLabel: string }> =

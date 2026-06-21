@@ -27,6 +27,7 @@ import { useBranchWorkflowModule } from "./hooks/useBranchWorkflowModule";
 import { usePageModuleRuntime } from "./hooks/usePageModuleRuntime";
 import { usePageScrollReset } from "./hooks/usePageScrollReset";
 import { useProjectsModule } from "./hooks/useProjectsModule";
+import { useProxyModule } from "./hooks/useProxyModule";
 import { useWorkflowSignals } from "./hooks/useWorkflowSignals";
 import type { ActivityEntry } from "./lib/activityCenter";
 import { createAppTheme } from "./theme";
@@ -56,6 +57,7 @@ function App() {
   const deployAvailable = appShell.enabledPages.includes("deploy");
   const mergeAvailable = appShell.enabledPages.includes("merge");
   const projectsAvailable = appShell.enabledPages.includes("projects");
+  const proxyAvailable = appShell.enabledPages.includes("proxy");
   const deployEnabled = deployAvailable && appShell.page === "deploy";
   const mergeEnabled = mergeAvailable && appShell.page === "merge";
   const branchEnabled = deployEnabled || mergeEnabled;
@@ -162,14 +164,19 @@ function App() {
     updateActivity: activityCenter.updateActivity,
     syncActivities: activityCenter.syncActivities,
   });
+  const proxyModule = useProxyModule({
+    enabled: proxyAvailable && appShell.page === "proxy",
+    setError,
+  });
   const moduleRuntime = useMemo(
     () => ({
       appShell,
       deployModule,
       mergeModule,
       projectsModule,
+      proxyModule,
     }),
-    [appShell, deployModule, mergeModule, projectsModule],
+    [appShell, deployModule, mergeModule, projectsModule, proxyModule],
   );
   const activePageProps = buildPagePropsFor(appShell.page, {
     appShell: {
@@ -182,6 +189,7 @@ function App() {
     deployModule,
     mergeModule,
     projectsModule,
+    proxyModule,
     busy,
     workflowSignals,
   });

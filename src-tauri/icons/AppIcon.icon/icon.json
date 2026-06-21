@@ -1,0 +1,54 @@
+{
+  "fill": {
+    "solid": "srgb:0.03137,0.03529,0.05098,1.00000"
+  },
+  "groups": [
+    {
+      "blur-material": null,
+      "layers": [
+        {
+          "blend-mode-specializations": [
+            {
+              "appearance": "dark",
+              "value": "normal"
+            }
+          ],
+          "glass": false,
+          "hidden": false,
+          "image-name-specializations": [
+            {
+              "value": "light.svg"
+            },
+            {
+              "appearance": "dark",
+              "value": "dark.svg"
+            }
+          ],
+          "name": "rDevTool",
+          "position": {
+            "scale": 1,
+            "translation-in-points": [
+              0,
+              0
+            ]
+          }
+        }
+      ],
+      "shadow": {
+        "kind": "none",
+        "opacity": 0
+      },
+      "specular": false,
+      "translucency": {
+        "enabled": false,
+        "value": 0
+      }
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": "shared"
+  }
+}

@@ -21,6 +21,7 @@ import type { WorkflowSignalsState } from "./hooks/useWorkflowSignals";
 import type { WorkflowProjectReplay } from "./lib/workflowSignals";
 import type { DeployPageProps } from "./pages/DeployPage";
 import type { MergePageProps } from "./pages/MergePage";
+import type { ProxyPageProps } from "./pages/ProxyPage";
 import type { ProjectsPageProps } from "./pages/ProjectsPage";
 
 export type PageComponent = LazyExoticComponent<ComponentType<any>>;
@@ -28,18 +29,19 @@ export type PageComponent = LazyExoticComponent<ComponentType<any>>;
 export type AppPagePropsMap = {
   deploy: DeployPageProps;
   merge: MergePageProps;
+  proxy: ProxyPageProps;
   projects: ProjectsPageProps;
 };
 
 export type AppShellContext = {
-  enabledPages: Array<"projects" | "merge" | "deploy">;
+  enabledPages: Array<"projects" | "merge" | "deploy" | "proxy">;
   projects: ProjectSummary[];
   deployProjects: ProjectSummary[];
   branchProjects: ProjectSummary[];
   selectedProject: string;
   selectedProjectInfo: ProjectSummary | null;
   setSelectedProject: (projectKey: string) => void;
-  setPage: (page: "projects" | "merge" | "deploy") => void;
+  setPage: (page: "projects" | "merge" | "deploy" | "proxy") => void;
 };
 
 export type DeployModuleContext = {
@@ -194,6 +196,25 @@ export type ProjectsModuleContext = {
   ) => Promise<void>;
 };
 
+export type ProxyModuleContext = {
+  dashboard: ProxyPageProps["dashboard"];
+  selectedProfileId: ProxyPageProps["selectedProfileId"];
+  loading: boolean;
+  busy: string;
+  error: string;
+  setSelectedProfileId: ProxyPageProps["onSelectedProfileChange"];
+  loadProxyDashboard: () => Promise<void>;
+  saveProxyProfile: ProxyPageProps["onSaveProfile"];
+  deleteProxyProfile: ProxyPageProps["onDeleteProfile"];
+  saveProxyRule: ProxyPageProps["onSaveRule"];
+  deleteProxyRule: ProxyPageProps["onDeleteRule"];
+  startProxyProfile: ProxyPageProps["onStartProfile"];
+  stopProxyProfile: ProxyPageProps["onStopProfile"];
+  clearProxyEvents: ProxyPageProps["onClearEvents"];
+  demoAvailable: ProxyPageProps["demoAvailable"];
+  loadProxyDemoData: NonNullable<ProxyPageProps["onLoadDemoData"]>;
+};
+
 export type BuildModulePropsContext = {
   appShell: AppShellContext;
   branchContext: BranchModuleContext;
@@ -201,6 +222,7 @@ export type BuildModulePropsContext = {
   deployModule: DeployModuleContext;
   mergeModule: MergeModuleContext;
   projectsModule: ProjectsModuleContext;
+  proxyModule: ProxyModuleContext;
   workflowSignals: WorkflowSignalsState;
   busy: string;
 };
@@ -215,6 +237,7 @@ export type ModuleRuntimeContext = {
   deployModule: Pick<DeployModuleContext, "loadDeployHistory">;
   mergeModule: Pick<MergeModuleContext, "loadBranchTaskHistory">;
   projectsModule: Pick<ProjectsModuleContext, "loadFinderData">;
+  proxyModule: Pick<ProxyModuleContext, "loadProxyDashboard">;
 };
 
 export type AppModuleDefinition<TKey extends keyof AppPagePropsMap> = {

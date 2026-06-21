@@ -30,15 +30,13 @@ import {
   RefreshIcon,
   TrashIcon,
 } from "./AppIcons";
+import type { Theme } from "@mui/material/styles";
 
 type ActivityFilter =
   | "attention"
   | "all"
-  | "running"
   | "success"
-  | "failed"
-  | "handled"
-  | "info";
+  | "failed";
 
 type ActivityQueueGroup = {
   id: string;
@@ -111,39 +109,91 @@ const STATUS_LABELS: Record<ActivityStatus, string> = {
   info: "记录",
 };
 
-const activityActionIconSx = {
-  width: 26,
-  height: 26,
-  borderRadius: "999px",
-  border: "1px solid var(--line-soft)",
-  bgcolor: "transparent",
-  color: "var(--accent)",
-  flexShrink: 0,
-  "&:hover": {
-    bgcolor: "var(--accent-soft)",
-    borderColor: "var(--accent-border)",
-  },
-};
-
-const activityHeaderIconSx = {
-  width: 30,
-  height: 30,
-  color: "var(--muted)",
-  "&:hover": {
+const activityActionIconSx = (theme: Theme) => {
+  const dark = theme.palette.mode === "dark";
+  return {
+    width: 28,
+    height: 28,
+    borderRadius: "8px",
+    border: dark ? "1px solid rgba(143,184,234,0.12)" : "1px solid rgba(52,76,96,0.09)",
+    bgcolor: dark ? "rgba(13,18,25,0.48)" : "rgba(255,255,255,0.34)",
     color: "var(--accent)",
-    bgcolor: "var(--accent-soft)",
-  },
+    flexShrink: 0,
+    boxShadow: dark
+      ? "inset 0 1px 0 rgba(255,255,255,0.025)"
+      : "inset 0 1px 0 rgba(255,255,255,0.38)",
+    "&:hover": {
+      bgcolor: dark ? "rgba(20,29,40,0.62)" : "rgba(255,255,255,0.48)",
+      borderColor: "var(--accent-border)",
+      color: "var(--accent-hover)",
+    },
+  };
 };
 
-const activityChipSx = {
-  height: 19,
-  borderRadius: "999px",
-  borderColor: "var(--line-soft)",
-  "& .MuiChip-label": {
-    px: 0.58,
-    fontSize: "0.64rem",
-    fontWeight: 780,
-  },
+const activityHeaderIconSx = (theme: Theme) => {
+  const dark = theme.palette.mode === "dark";
+  return {
+    width: 30,
+    height: 30,
+    borderRadius: "9px",
+    border: dark ? "1px solid rgba(143,184,234,0.12)" : "1px solid rgba(52,76,96,0.09)",
+    bgcolor: dark ? "rgba(13,18,25,0.48)" : "rgba(255,255,255,0.34)",
+    color: "var(--muted)",
+    boxShadow: dark
+      ? "inset 0 1px 0 rgba(255,255,255,0.025)"
+      : "inset 0 1px 0 rgba(255,255,255,0.38)",
+    "&:hover": {
+      color: "var(--accent)",
+      bgcolor: dark ? "rgba(20,29,40,0.62)" : "rgba(255,255,255,0.48)",
+      borderColor: "var(--accent-border)",
+    },
+  };
+};
+
+const activityChipSx = (theme: Theme) => {
+  const dark = theme.palette.mode === "dark";
+  return {
+    height: 20,
+    borderRadius: "7px",
+    borderColor: dark ? "rgba(143,184,234,0.09)" : "rgba(52,76,96,0.09)",
+    bgcolor: dark ? "rgba(13,18,25,0.38)" : "rgba(255,255,255,0.38)",
+    "& .MuiChip-label": {
+      px: 0.62,
+      fontSize: "0.63rem",
+      fontWeight: 780,
+    },
+  };
+};
+
+const activityRecordCardSx = (theme: Theme) => {
+  const dark = theme.palette.mode === "dark";
+  return {
+    border: "1px solid",
+    borderRadius: "14px",
+    px: 1.12,
+    py: 0.98,
+    bgcolor: dark ? "rgba(11,16,22,0.52)" : "rgba(255,255,255,0.52)",
+    background: dark
+      ? "linear-gradient(180deg, rgba(255,255,255,0.042), rgba(255,255,255,0.008) 64%), rgba(11,16,22,0.52)"
+      : "linear-gradient(180deg, rgba(255,255,255,0.5), rgba(255,255,255,0.12) 72%), rgba(255,255,255,0.52)",
+    borderColor: dark ? "rgba(143,184,234,0.1)" : "rgba(52,76,96,0.13)",
+    boxShadow: dark
+      ? "inset 0 1px 0 rgba(255,255,255,0.045), 0 6px 18px rgba(0,0,0,0.14)"
+      : "inset 0 1px 0 rgba(255,255,255,0.62), 0 6px 18px rgba(24,48,62,0.035)",
+    backdropFilter: "blur(22px) saturate(1.18)",
+    WebkitBackdropFilter: "blur(22px) saturate(1.18)",
+    transition: "border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease",
+    "&:hover": {
+      borderColor: dark ? "rgba(143,184,234,0.13)" : "rgba(92,112,133,0.18)",
+      bgcolor: dark ? "rgba(14,20,28,0.62)" : "rgba(255,255,255,0.64)",
+      background: dark
+        ? "linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.01) 64%), rgba(14,20,28,0.62)"
+        : "linear-gradient(180deg, rgba(255,255,255,0.58), rgba(255,255,255,0.14) 72%), rgba(255,255,255,0.64)",
+      boxShadow: dark
+        ? "inset 0 1px 0 rgba(255,255,255,0.038), 0 8px 22px rgba(0,0,0,0.18)"
+        : "inset 0 1px 0 rgba(255,255,255,0.62), 0 8px 20px rgba(24,48,62,0.045)",
+    },
+  };
 };
 
 function formatActivityTime(value: string) {
@@ -157,28 +207,28 @@ function formatActivityTime(value: string) {
 
 function statusColor(status: ActivityStatus) {
   if (status === "failed") {
-    return "var(--danger)";
+    return "var(--activity-danger)";
   }
   if (status === "running") {
-    return "var(--accent)";
+    return "var(--activity-running)";
   }
   if (status === "success") {
-    return "var(--success)";
+    return "var(--activity-success)";
   }
   return "var(--muted)";
 }
 
 function statusTint(status: ActivityStatus) {
   if (status === "failed") {
-    return "rgba(194,65,65,0.055)";
+    return "var(--activity-danger-soft)";
   }
   if (status === "running") {
-    return "var(--accent-soft)";
+    return "var(--activity-running-soft)";
   }
   if (status === "success") {
-    return "rgba(19,138,86,0.055)";
+    return "var(--activity-success-soft)";
   }
-  return "rgba(63,72,87,0.025)";
+  return "var(--glass)";
 }
 
 function activityStatusLabel(item: ActivityEntry) {
@@ -194,14 +244,15 @@ function activityStatusLabel(item: ActivityEntry) {
 function ActivityStatusPill({ item }: { item: ActivityEntry }) {
   const statusLabel = item.acknowledgedAt ? "已确认" : activityStatusLabel(item);
   const statusTextColor = item.acknowledgedAt ? "var(--muted)" : statusColor(item.status);
-  const statusBg = item.acknowledgedAt ? "rgba(63,72,87,0.035)" : statusTint(item.status);
+  const statusBg = item.acknowledgedAt ? "var(--glass)" : statusTint(item.status);
 
   return (
     <Box
+      className="activity-status-pills"
       sx={{
         display: "flex",
         alignItems: "center",
-        gap: 0.35,
+        gap: 0.28,
         flex: "0 0 auto",
         whiteSpace: "nowrap",
       }}
@@ -211,11 +262,11 @@ function ActivityStatusPill({ item }: { item: ActivityEntry }) {
         sx={{
           display: "inline-flex",
           alignItems: "center",
-          height: 20,
-          px: 0.62,
+          height: 21,
+          px: 0.68,
           border: "1px solid var(--line-soft)",
-          borderRadius: "999px",
-          bgcolor: "rgba(63,72,87,0.025)",
+          borderRadius: "7px",
+          bgcolor: "var(--glass)",
           color: "var(--muted)",
           fontSize: "0.62rem",
           fontWeight: 760,
@@ -230,10 +281,10 @@ function ActivityStatusPill({ item }: { item: ActivityEntry }) {
         sx={{
           display: "inline-flex",
           alignItems: "center",
-          height: 20,
-          px: 0.66,
+          height: 21,
+          px: 0.7,
           border: "1px solid var(--line-soft)",
-          borderRadius: "999px",
+          borderRadius: "7px",
           color: statusTextColor,
           bgcolor: statusBg,
           fontSize: "0.62rem",
@@ -251,8 +302,9 @@ function ActivityStatusPill({ item }: { item: ActivityEntry }) {
 function ActivityTitleCluster({ item }: { item: ActivityEntry }) {
   return (
     <Stack
+      className="activity-title-cluster"
       direction="row"
-      spacing={0.65}
+      spacing={0.58}
       alignItems="center"
       minWidth={0}
       flex={1}
@@ -260,8 +312,8 @@ function ActivityTitleCluster({ item }: { item: ActivityEntry }) {
       <Box
         aria-hidden
         sx={{
-          width: 6,
-          height: 6,
+          width: 7,
+          height: 7,
           borderRadius: "50%",
           bgcolor: item.acknowledgedAt ? "var(--muted)" : statusColor(item.status),
           boxShadow: item.status === "running" ? "0 0 0 3px var(--accent-soft)" : "none",
@@ -270,15 +322,15 @@ function ActivityTitleCluster({ item }: { item: ActivityEntry }) {
       />
       <Typography
         variant="body2"
-        fontWeight={820}
+        fontWeight={790}
         noWrap
         title={item.title}
         sx={{
           minWidth: 0,
           flex: "1 1 auto",
           color: "var(--text)",
-          fontSize: "0.82rem",
-          lineHeight: 1.22,
+          fontSize: "0.83rem",
+          lineHeight: 1.3,
           letterSpacing: 0,
         }}
       >
@@ -477,12 +529,13 @@ function buildActivityDisplayUnits(items: ActivityEntry[]): ActivityDisplayUnit[
 function ActivityChainTrail({ items }: { items: ActivityEntry[] }) {
   return (
     <Stack
+      className="activity-chain-trail"
       direction="row"
       alignItems="center"
       flexWrap="wrap"
       rowGap={0.35}
       columnGap={0.45}
-      sx={{ mt: 0.6, color: "var(--muted)" }}
+      sx={{ mt: 0.72, color: "var(--muted)" }}
     >
       {items.map((item, index) => (
         <Stack
@@ -520,7 +573,7 @@ function ActivityChainTrail({ items }: { items: ActivityEntry[] }) {
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
-              color: item.status === "failed" ? "var(--danger)" : "var(--text)",
+              color: item.status === "failed" ? "var(--activity-danger)" : "var(--text)",
               fontSize: "0.66rem",
               fontWeight: item.status === "running" ? 820 : 740,
               lineHeight: 1.2,
@@ -601,24 +654,6 @@ export function ActivityCenter({
     () => items.filter((item) => item.status === "success"),
     [items],
   );
-  const infoItems = useMemo(
-    () => items.filter((item) => item.status === "info"),
-    [items],
-  );
-  const handledItems = useMemo(
-    () =>
-      items
-        .filter(
-          (item) =>
-            item.status === "failed" &&
-            item.acknowledgedAt &&
-            !isDeploySyncFailure(item),
-        )
-        .sort((left, right) =>
-          (right.acknowledgedAt ?? "").localeCompare(left.acknowledgedAt ?? ""),
-        ),
-    [items],
-  );
   const counts = useMemo(
     () => ({
       attention: attentionItems.length,
@@ -626,41 +661,23 @@ export function ActivityCenter({
       running: items.filter(isVisibleRunningActivity).length,
       success: successItems.length,
       failed: failedItems.length,
-      handled: handledItems.length,
-      info: infoItems.length,
     }),
     [
       attentionItems.length,
       failedItems.length,
-      handledItems.length,
-      infoItems.length,
       items,
       successItems.length,
     ],
   );
-  const filterOptions = useMemo(() => {
-    const options: Array<{ key: ActivityFilter; label: string; count: number }> = [];
-    if (counts.attention > 0) {
-      options.push({ key: "attention", label: "待处理", count: counts.attention });
-    }
-    options.push({ key: "all", label: "全部", count: counts.all });
-    if (counts.running > 0) {
-      options.push({ key: "running", label: "进行中", count: counts.running });
-    }
-    if (counts.failed > 0) {
-      options.push({ key: "failed", label: "失败", count: counts.failed });
-    }
-    if (counts.success > 0) {
-      options.push({ key: "success", label: "完成", count: counts.success });
-    }
-    if (counts.info > 0) {
-      options.push({ key: "info", label: "记录", count: counts.info });
-    }
-    if (counts.handled > 0) {
-      options.push({ key: "handled", label: "已确认", count: counts.handled });
-    }
-    return options;
-  }, [counts]);
+  const filterOptions = useMemo<Array<{ key: ActivityFilter; label: string; count: number }>>(
+    () => [
+      { key: "all", label: "全部", count: counts.all },
+      { key: "attention", label: "待处理", count: counts.attention },
+      { key: "success", label: "成功", count: counts.success },
+      { key: "failed", label: "失败", count: counts.failed },
+    ],
+    [counts.all, counts.attention, counts.failed, counts.success],
+  );
   useEffect(() => {
     if (filterOptions.some((item) => item.key === filter)) {
       return;
@@ -721,23 +738,14 @@ export function ActivityCenter({
     if (filter === "attention") {
       return attentionItems;
     }
-    if (filter === "running") {
-      return items.filter(isVisibleRunningActivity);
-    }
     if (filter === "success") {
       return successItems;
     }
     if (filter === "failed") {
       return failedItems;
     }
-    if (filter === "handled") {
-      return handledItems;
-    }
-    if (filter === "info") {
-      return infoItems;
-    }
     return items;
-  }, [attentionItems, failedItems, filter, handledItems, infoItems, items, successItems]);
+  }, [attentionItems, failedItems, filter, items, successItems]);
   const visibleUnits = useMemo(() => {
     const visibleIds = new Set(visibleItems.map((item) => item.id));
     const visibleChainIds = new Set(
@@ -788,7 +796,10 @@ export function ActivityCenter({
       <Box
         className="activity-center-surface"
         sx={{
-          p: { xs: 1.35, sm: 1.45 },
+          py: { xs: 1.15, sm: 1.3 },
+          pl: { xs: 1.05, sm: 1.15 },
+          pr: { xs: 0.62, sm: 0.72 },
+          pt: variant === "panel" ? "calc(var(--window-drag-height) + 18px)" : undefined,
           display: "flex",
           flexDirection: "column",
           height: "100%",
@@ -796,14 +807,20 @@ export function ActivityCenter({
           overflow: "hidden",
         }}
       >
-        <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1}>
+        <Stack
+          className="activity-center-header"
+          direction="row"
+          justifyContent="space-between"
+          alignItems="flex-start"
+          spacing={1}
+        >
           <Box minWidth={0}>
             <Typography
               variant="subtitle1"
               sx={{
-                fontSize: "1.02rem",
-                fontWeight: 860,
-                lineHeight: 1.12,
+                fontSize: "1.05rem",
+                fontWeight: 820,
+                lineHeight: 1.18,
                 textWrap: "balance",
               }}
             >
@@ -812,12 +829,17 @@ export function ActivityCenter({
             <Typography
               variant="caption"
               color="text.secondary"
-              sx={{ display: "block", mt: 0.25, fontSize: "0.72rem", lineHeight: 1.3 }}
+              sx={{ display: "block", mt: 0.3, fontSize: "0.72rem", lineHeight: 1.4 }}
             >
               {attentionSummary}
             </Typography>
           </Box>
-          <Stack direction="row" spacing={0.5}>
+          <Stack
+            className="activity-header-actions"
+            direction="row"
+            spacing={0.42}
+            sx={{ pt: variant === "panel" ? 0.1 : 0 }}
+          >
             <Tooltip title="处理全部失败">
               <span>
                 <IconButton
@@ -872,17 +894,23 @@ export function ActivityCenter({
 
         {queueGroups.length > 0 ? (
           <Box
+            className="activity-queue-section"
             sx={{
-              mt: 0.95,
-              pb: 0.7,
-              borderBottom: "1px solid var(--line)",
+              mt: 1.05,
+              p: 0.9,
             }}
           >
-            <Stack direction="row" justifyContent="space-between" alignItems="baseline" spacing={1}>
+            <Stack
+              className="activity-section-heading"
+              direction="row"
+              justifyContent="space-between"
+              alignItems="center"
+              spacing={1}
+            >
               <Stack direction="row" spacing={0.55} alignItems="baseline" minWidth={0}>
                 <Typography
                   variant="caption"
-                  sx={{ flexShrink: 0, color: "var(--muted)", fontWeight: 760 }}
+                  sx={{ flexShrink: 0, color: "var(--text)", fontWeight: 790, fontSize: "0.7rem" }}
                 >
                   待处理队列
                 </Typography>
@@ -890,7 +918,7 @@ export function ActivityCenter({
                   variant="caption"
                   color="text.secondary"
                   noWrap
-                  sx={{ minWidth: 0, fontSize: "0.68rem" }}
+                  sx={{ minWidth: 0, fontSize: "0.67rem", lineHeight: 1.4 }}
                 >
                   {queueGroups.length} 个分组需要关注
                 </Typography>
@@ -898,43 +926,54 @@ export function ActivityCenter({
               <Chip
                 size="small"
                 label={`${counts.attention}`}
-                color={counts.failed > 0 ? "error" : "primary"}
                 variant="filled"
-                sx={{ height: 18, borderRadius: 1.2, "& .MuiChip-label": { px: 0.6, fontSize: "0.62rem" } }}
+                sx={(theme) => {
+                  const dark = theme.palette.mode === "dark";
+                  return {
+                    height: 21,
+                    borderRadius: "7px",
+                    bgcolor: counts.failed > 0 ? "var(--activity-danger-soft)" : "var(--activity-running-soft)",
+                    color: counts.failed > 0 ? "var(--activity-danger)" : "var(--activity-running)",
+                    border: dark ? "1px solid rgba(143,184,234,0.09)" : "1px solid rgba(52,76,96,0.09)",
+                    backdropFilter: "blur(18px) saturate(1.16)",
+                    WebkitBackdropFilter: "blur(18px) saturate(1.16)",
+                    "& .MuiChip-label": { px: 0.7, fontSize: "0.64rem", fontWeight: 820 },
+                  };
+                }}
               />
             </Stack>
 
-            <Stack spacing={0.55} sx={{ mt: 0.7 }}>
+            <Stack spacing={0.65} sx={{ mt: 0.72 }}>
               {visibleQueueGroups.map((group) => (
                 <Box
+                  className="activity-record-card activity-queue-card"
                   key={group.id}
-                  sx={{
-                    px: 0.85,
-                    py: 0.72,
-                    borderRadius: 1.5,
-                    border: "1px solid var(--line-soft)",
-                    bgcolor: "var(--panel)",
-                    boxShadow: "0 1px 0 rgba(20,31,50,0.025)",
-                  }}
+                  sx={(theme) => ({
+                    ...activityRecordCardSx(theme),
+                    px: 0.9,
+                    py: 0.8,
+                  })}
                 >
-                  <Stack direction="row" spacing={0.65} alignItems="flex-start">
+                  <Stack direction="row" spacing={0.78} alignItems="flex-start">
                     <Box
                       sx={{
                         width: 3,
                         alignSelf: "stretch",
-                        minHeight: 38,
+                        minHeight: 42,
                         borderRadius: 999,
-                        bgcolor: group.failedCount > 0 ? "var(--danger)" : "var(--accent)",
+                        bgcolor: group.failedCount > 0 ? "var(--activity-danger)" : "var(--activity-running)",
                       }}
                     />
                     <Box minWidth={0} flex={1}>
                       <Stack
+                        className="activity-record-heading"
                         direction="row"
                         alignItems="flex-start"
                         justifyContent="space-between"
                         spacing={0.8}
                       >
                         <Stack
+                          className="activity-queue-title-cluster"
                           direction="row"
                           alignItems="center"
                           spacing={0.48}
@@ -947,9 +986,9 @@ export function ActivityCenter({
                             variant="body2"
                             sx={{
                               color: "var(--text)",
-                              fontSize: "0.84rem",
-                              fontWeight: 830,
-                              lineHeight: 1.22,
+                              fontSize: "0.83rem",
+                              fontWeight: 790,
+                              lineHeight: 1.32,
                               overflowWrap: "anywhere",
                             }}
                           >
@@ -960,7 +999,10 @@ export function ActivityCenter({
                               size="small"
                               label={`失败 ${group.failedCount}`}
                               variant="outlined"
-                              sx={{ ...activityChipSx, color: "var(--danger)" }}
+                              sx={(theme) => ({
+                                ...activityChipSx(theme),
+                                color: "var(--activity-danger)",
+                              })}
                             />
                           ) : null}
                           {group.runningCount > 0 ? (
@@ -968,7 +1010,10 @@ export function ActivityCenter({
                               size="small"
                               label={`进行中 ${group.runningCount}`}
                               variant="outlined"
-                              sx={{ ...activityChipSx, color: "var(--accent)" }}
+                              sx={(theme) => ({
+                                ...activityChipSx(theme),
+                                color: "var(--activity-running)",
+                              })}
                             />
                           ) : null}
                           {group.total > 1 ? (
@@ -981,7 +1026,7 @@ export function ActivityCenter({
                           ) : null}
                         </Stack>
                         {group.resourceItem || group.targetItem || group.failedItems.length > 0 ? (
-                          <Stack direction="row" spacing={0.35} flexShrink={0}>
+                          <Stack className="activity-card-actions" direction="row" spacing={0.42} flexShrink={0}>
                             {group.resourceItem ? (
                               <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
                                 <IconButton
@@ -1026,13 +1071,13 @@ export function ActivityCenter({
                         color="text.secondary"
                         sx={{
                           display: "-webkit-box",
-                          mt: 0.25,
+                          mt: 0.42,
                           overflow: "hidden",
                           overflowWrap: "anywhere",
                           WebkitBoxOrient: "vertical",
                           WebkitLineClamp: 2,
-                          fontSize: "0.66rem",
-                          lineHeight: 1.35,
+                          fontSize: "0.67rem",
+                          lineHeight: 1.46,
                         }}
                       >
                         {group.latest.title} · {displayActivitySummary(group.latest)}
@@ -1070,57 +1115,81 @@ export function ActivityCenter({
           </Box>
         ) : null}
 
-        <Stack
-          direction="row"
-          spacing={0.45}
-          useFlexGap
+        <Box
+          className="activity-filter-strip"
           sx={{
-            mt: queueGroups.length > 0 ? 0.85 : 0.95,
-            mb: 0.85,
-            flexWrap: "wrap",
-            rowGap: 0.55,
+            mt: queueGroups.length > 0 ? 0.88 : 1.05,
+            mb: 0.82,
+            p: 0.38,
+            display: "grid",
+            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
+            gap: 0.4,
           }}
         >
           {filterOptions.map((item) => (
             <Chip
               key={item.key}
               size="small"
-              label={`${item.label} ${item.count}`}
+              label={(
+                <Box component="span" className="activity-filter-label">
+                  <Box component="span">{item.label}</Box>
+                  <Box component="span" className="activity-filter-count">
+                    {item.count}
+                  </Box>
+                </Box>
+              )}
               variant={filter === item.key ? "filled" : "outlined"}
               color={filter === item.key ? "primary" : "default"}
               onClick={() => setFilter(item.key as ActivityFilter)}
-              sx={{
-                height: 22,
-                borderRadius: "999px",
-                borderColor: "var(--line)",
-                bgcolor: filter === item.key ? undefined : "var(--panel)",
-                "& .MuiChip-label": {
-                  px: 0.65,
-                  fontSize: "0.64rem",
-                  fontWeight: 760,
-                },
+              sx={(theme) => {
+                const dark = theme.palette.mode === "dark";
+                const active = filter === item.key;
+                return {
+                  height: 25,
+                  borderRadius: "7px",
+                  borderColor: active
+                    ? "var(--accent-border)"
+                    : "transparent",
+                  bgcolor: active
+                    ? dark
+                      ? "rgba(143,184,234,0.18)"
+                      : "rgba(92,112,133,0.72)"
+                    : "transparent",
+                  color: active
+                    ? dark
+                      ? "var(--accent-hover)"
+                      : "#ffffff"
+                    : undefined,
+                  backdropFilter: "blur(18px) saturate(1.16)",
+                  WebkitBackdropFilter: "blur(18px) saturate(1.16)",
+                  "& .MuiChip-label": {
+                    px: 0.72,
+                    fontSize: "0.64rem",
+                    fontWeight: 760,
+                  },
+                };
               }}
             />
           ))}
-        </Stack>
+        </Box>
 
-        <Divider sx={{ borderColor: "var(--line)" }} />
+        <Divider className="activity-list-divider" sx={{ borderColor: "var(--line-soft)", opacity: 0.78 }} />
 
         <Stack
           className="activity-list-scroll"
-          spacing={0.7}
+          spacing={0.75}
           sx={{
-            mt: 0.7,
-            mb: 0.55,
-            p: 0.5,
+            mt: 0.72,
+            mb: 0.52,
+            p: 0.15,
             flex: 1,
             minHeight: 0,
             overflowY: "auto",
             overscrollBehavior: "contain",
             scrollbarGutter: "auto",
-            border: "1px solid var(--line-soft)",
-            borderRadius: 1.6,
-            bgcolor: "rgba(42,82,132,0.025)",
+            border: 0,
+            borderRadius: 0,
+            bgcolor: "transparent",
             scrollbarWidth: "thin",
             scrollbarColor:
               "color-mix(in srgb, var(--muted) 34%, transparent) color-mix(in srgb, var(--muted) 8%, transparent)",
@@ -1177,20 +1246,9 @@ export function ActivityCenter({
                 };
                 return (
                   <Box
+                    className="activity-record-card"
                     key={group.id}
-                    sx={{
-                      border: "1px solid var(--line-soft)",
-                      borderRadius: 1.5,
-                      px: 0.9,
-                      py: 0.78,
-                      bgcolor: "var(--panel)",
-                      boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
-                      transition: "border-color 120ms ease, background-color 120ms ease",
-                      "&:hover": {
-                        borderColor: "var(--accent-border)",
-                        bgcolor: "var(--panel-strong)",
-                      },
-                    }}
+                    sx={activityRecordCardSx}
                   >
                     <Stack direction="row" alignItems="flex-start" spacing={0.62}>
                       <Box
@@ -1205,6 +1263,7 @@ export function ActivityCenter({
                       />
                       <Box minWidth={0} flex={1}>
                         <Stack
+                          className="activity-record-heading"
                           direction="row"
                           alignItems="center"
                           justifyContent="space-between"
@@ -1212,7 +1271,7 @@ export function ActivityCenter({
                         >
                           <ActivityTitleCluster item={headlineItem} />
                           {group.targetItem || group.resourceItem || group.failedItems.length > 0 ? (
-                            <Stack direction="row" spacing={0.25} flexShrink={0}>
+                            <Stack className="activity-card-actions" direction="row" spacing={0.4} flexShrink={0}>
                               {group.resourceItem ? (
                                 <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
                                   <IconButton
@@ -1257,10 +1316,10 @@ export function ActivityCenter({
                           color="text.secondary"
                           sx={{
                             display: "block",
-                            mt: 0.28,
+                            mt: 0.42,
                             overflowWrap: "anywhere",
-                            fontSize: "0.66rem",
-                            lineHeight: 1.32,
+                            fontSize: "0.68rem",
+                            lineHeight: 1.45,
                           }}
                         >
                           {[group.primary.projectName || group.primary.projectKey, formatActivityTime(group.latest.updatedAt)]
@@ -1269,10 +1328,11 @@ export function ActivityCenter({
                         </Typography>
                         <ActivityChainTrail items={group.items} />
                         <Stack
+                          className="activity-detail-stack"
                           spacing={0.35}
                           sx={{
-                            mt: 0.5,
-                            pl: 0.2,
+                            mt: 0.68,
+                            pl: 0.8,
                           }}
                         >
                           {group.items.map((item) => (
@@ -1280,8 +1340,8 @@ export function ActivityCenter({
                               key={item.id}
                               sx={{
                                 display: "grid",
-                                gridTemplateColumns: "68px minmax(0, 1fr)",
-                                gap: 0.55,
+                                gridTemplateColumns: "62px minmax(0, 1fr)",
+                                gap: 0.65,
                                 alignItems: "baseline",
                               }}
                             >
@@ -1290,7 +1350,7 @@ export function ActivityCenter({
                                 noWrap
                                 sx={{
                                   color: statusColor(item.status),
-                                  fontSize: "0.6rem",
+                                  fontSize: "0.63rem",
                                   fontWeight: 800,
                                 }}
                               >
@@ -1301,8 +1361,8 @@ export function ActivityCenter({
                                 sx={{
                                   color: "var(--muted)",
                                   overflowWrap: "anywhere",
-                                  fontSize: "0.62rem",
-                                  lineHeight: 1.32,
+                                  fontSize: "0.65rem",
+                                  lineHeight: 1.45,
                                 }}
                               >
                                 {displayActivitySummary(item) || item.detail || STATUS_LABELS[item.status]}
@@ -1325,20 +1385,9 @@ export function ActivityCenter({
                 };
                 return (
                   <Box
+                    className="activity-record-card"
                     key={group.id}
-                    sx={{
-                      border: "1px solid var(--line-soft)",
-                      borderRadius: 1.5,
-                      px: 0.9,
-                      py: 0.78,
-                      bgcolor: "var(--panel)",
-                      boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
-                      transition: "border-color 120ms ease, background-color 120ms ease",
-                      "&:hover": {
-                        borderColor: "var(--accent-border)",
-                        bgcolor: "var(--panel-strong)",
-                      },
-                    }}
+                    sx={activityRecordCardSx}
                   >
                     <Stack direction="row" alignItems="flex-start" spacing={0.62}>
                       <Box
@@ -1353,13 +1402,14 @@ export function ActivityCenter({
                       />
                       <Box minWidth={0} flex={1}>
                         <Stack
+                          className="activity-record-heading"
                           direction="row"
                           alignItems="center"
                           justifyContent="space-between"
                           spacing={0.62}
                         >
                           <ActivityTitleCluster item={headlineItem} />
-                          <Stack direction="row" spacing={0.25} flexShrink={0}>
+                          <Stack className="activity-card-actions" direction="row" spacing={0.4} flexShrink={0}>
                             <Chip
                               size="small"
                               label={`执行 ${group.executionCount} 次`}
@@ -1409,10 +1459,10 @@ export function ActivityCenter({
                           color="text.secondary"
                           sx={{
                             display: "block",
-                            mt: 0.28,
+                            mt: 0.42,
                             overflowWrap: "anywhere",
-                            fontSize: "0.66rem",
-                            lineHeight: 1.32,
+                            fontSize: "0.68rem",
+                            lineHeight: 1.45,
                           }}
                         >
                           {[group.latest.projectName || group.latest.projectKey, formatActivityTime(group.latest.updatedAt)]
@@ -1424,25 +1474,26 @@ export function ActivityCenter({
                             variant="caption"
                             sx={{
                               display: "-webkit-box",
-                              mt: 0.3,
+                              mt: 0.48,
                               color: "var(--text)",
                               overflow: "hidden",
                               overflowWrap: "anywhere",
                               WebkitBoxOrient: "vertical",
                               WebkitLineClamp: 2,
-                              fontSize: "0.72rem",
+                              fontSize: "0.74rem",
                               fontWeight: 720,
-                              lineHeight: 1.42,
+                              lineHeight: 1.5,
                             }}
                           >
                             {displayActivitySummary(group.latest)}
                           </Typography>
                         ) : null}
                         <Stack
+                          className="activity-detail-stack"
                           spacing={0.35}
                           sx={{
-                            mt: 0.5,
-                            pl: 0.2,
+                            mt: 0.68,
+                            pl: 0.8,
                           }}
                         >
                           {group.items
@@ -1452,8 +1503,8 @@ export function ActivityCenter({
                               key={item.id}
                               sx={{
                                 display: "grid",
-                                gridTemplateColumns: "54px minmax(0, 1fr)",
-                                gap: 0.55,
+                                gridTemplateColumns: "58px minmax(0, 1fr)",
+                                gap: 0.65,
                                 alignItems: "baseline",
                               }}
                             >
@@ -1462,7 +1513,7 @@ export function ActivityCenter({
                                 noWrap
                                 sx={{
                                   color: statusColor(item.status),
-                                  fontSize: "0.6rem",
+                                  fontSize: "0.63rem",
                                   fontWeight: 800,
                                 }}
                               >
@@ -1473,8 +1524,8 @@ export function ActivityCenter({
                                 sx={{
                                   color: "var(--muted)",
                                   overflowWrap: "anywhere",
-                                  fontSize: "0.62rem",
-                                  lineHeight: 1.32,
+                                  fontSize: "0.65rem",
+                                  lineHeight: 1.45,
                                 }}
                               >
                                 {[
@@ -1494,9 +1545,9 @@ export function ActivityCenter({
                               variant="caption"
                               sx={{
                                 color: "var(--muted)",
-                                fontSize: "0.62rem",
+                                fontSize: "0.65rem",
                                 fontWeight: 760,
-                                pl: "54px",
+                                pl: "58px",
                               }}
                             >
                               还有 {group.items.length - ACTIVITY_EXECUTION_PREVIEW_LIMIT} 次记录
@@ -1511,24 +1562,14 @@ export function ActivityCenter({
               const item = unit.item;
               return (
                 <Box
+                  className="activity-record-card"
                   key={item.id}
-                  sx={{
-                    border: "1px solid var(--line-soft)",
-                    borderRadius: 1.5,
-                    px: 0.9,
-                    py: 0.78,
-                    bgcolor: "var(--panel)",
-                    boxShadow: "0 1px 0 rgba(20,31,50,0.03)",
-                    transition: "border-color 120ms ease, background-color 120ms ease",
-                    "&:hover": {
-                      borderColor: "var(--accent-border)",
-                      bgcolor: "var(--panel-strong)",
-                    },
-                  }}
+                  sx={activityRecordCardSx}
                 >
                 <Stack direction="row" alignItems="flex-start" spacing={0.62}>
                   <Box minWidth={0} flex={1}>
                     <Stack
+                      className="activity-record-heading"
                       direction="row"
                       alignItems="center"
                       justifyContent="space-between"
@@ -1536,7 +1577,7 @@ export function ActivityCenter({
                     >
                       <ActivityTitleCluster item={item} />
                       {item.target || item.resource || isUnhandledFailure(item) ? (
-                        <Stack direction="row" spacing={0.25} flexShrink={0}>
+                        <Stack className="activity-card-actions" direction="row" spacing={0.4} flexShrink={0}>
                           {item.resource ? (
                             <Tooltip title={item.resource.label}>
                               <IconButton
@@ -1581,10 +1622,10 @@ export function ActivityCenter({
                       color="text.secondary"
                       sx={{
                         display: "block",
-                        mt: 0.28,
+                        mt: 0.42,
                         overflowWrap: "anywhere",
-                        fontSize: "0.63rem",
-                        lineHeight: 1.32,
+                        fontSize: "0.68rem",
+                        lineHeight: 1.45,
                       }}
                     >
                       {[item.projectName || item.projectKey, formatActivityTime(item.updatedAt)]
@@ -1596,15 +1637,15 @@ export function ActivityCenter({
                         variant="caption"
                         sx={{
                           display: "-webkit-box",
-                          mt: 0.3,
+                          mt: 0.48,
                           color: "var(--text)",
                           overflow: "hidden",
                           overflowWrap: "anywhere",
                           WebkitBoxOrient: "vertical",
                           WebkitLineClamp: 2,
-                          fontSize: "0.72rem",
+                          fontSize: "0.74rem",
                           fontWeight: 720,
-                          lineHeight: 1.42,
+                          lineHeight: 1.5,
                         }}
                       >
                         {displayActivitySummary(item)}
@@ -1616,13 +1657,13 @@ export function ActivityCenter({
                         color="text.secondary"
                         sx={{
                           display: "-webkit-box",
-                          mt: 0.3,
+                          mt: 0.42,
                           overflow: "hidden",
                           overflowWrap: "anywhere",
                           WebkitBoxOrient: "vertical",
                           WebkitLineClamp: 2,
-                          fontSize: "0.63rem",
-                          lineHeight: 1.34,
+                          fontSize: "0.66rem",
+                          lineHeight: 1.46,
                         }}
                         title={item.detail ?? undefined}
                       >
@@ -1671,6 +1712,14 @@ export function ActivityCenter({
                     borderRadius: "9px",
                     fontSize: "0.7rem",
                     fontWeight: 820,
+                    backgroundColor: "var(--side-pane-control)",
+                    border: "1px solid var(--side-pane-line)",
+                    backdropFilter: "blur(18px) saturate(1.16)",
+                    WebkitBackdropFilter: "blur(18px) saturate(1.16)",
+                  },
+                  "& .MuiPaginationItem-root.Mui-selected": {
+                    backgroundColor: "color-mix(in srgb, var(--accent) 72%, transparent)",
+                    color: "#ffffff",
                   },
                 }}
               />
@@ -1728,9 +1777,9 @@ export function ActivityCenter({
           height: "100%",
           maxHeight: "100%",
           overflow: "hidden",
-          bgcolor: "var(--panel-strong)",
+          bgcolor: "transparent",
           color: "var(--text)",
-          borderLeft: "1px solid var(--line)",
+          borderLeft: 0,
           fontVariantNumeric: "tabular-nums",
           letterSpacing: 0,
         }}
@@ -1761,16 +1810,16 @@ export function ActivityCenter({
       PaperProps={{
         className: "activity-drawer-paper",
         sx: {
-          width: { xs: "min(380px, 100vw)", sm: "clamp(360px, 42vw, 380px)" },
+          width: { xs: "min(334px, 100vw)", sm: "clamp(306px, 33vw, 334px)" },
           maxWidth: "100vw",
           top: drawerTopOffset,
           right: 0,
           bottom: 0,
           height: `calc(100dvh - ${drawerTopOffset})`,
           overflow: "hidden",
-          bgcolor: "var(--panel-strong)",
+          bgcolor: "transparent",
           color: "var(--text)",
-          borderLeft: "1px solid var(--line)",
+          borderLeft: 0,
           borderRadius: 0,
           fontVariantNumeric: "tabular-nums",
           letterSpacing: 0,

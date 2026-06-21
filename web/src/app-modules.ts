@@ -253,6 +253,35 @@ export const APP_MODULES = [
     }),
   },
   {
+    key: "proxy",
+    label: "代理服务",
+    shortLabel: "代理",
+    component: lazy(() =>
+      import("./pages/ProxyPage").then((module) => ({
+        default: module.ProxyPage,
+      })),
+    ),
+    loadOnStartup: ({ proxyModule }) => proxyModule.loadProxyDashboard(),
+    buildProps: ({ proxyModule }) => ({
+      dashboard: proxyModule.dashboard,
+      selectedProfileId: proxyModule.selectedProfileId,
+      loading: proxyModule.loading,
+      busy: proxyModule.busy,
+      error: proxyModule.error,
+      onSelectedProfileChange: proxyModule.setSelectedProfileId,
+      onRefresh: proxyModule.loadProxyDashboard,
+      onSaveProfile: proxyModule.saveProxyProfile,
+      onDeleteProfile: proxyModule.deleteProxyProfile,
+      onSaveRule: proxyModule.saveProxyRule,
+      onDeleteRule: proxyModule.deleteProxyRule,
+      onStartProfile: proxyModule.startProxyProfile,
+      onStopProfile: proxyModule.stopProxyProfile,
+      onClearEvents: proxyModule.clearProxyEvents,
+      demoAvailable: proxyModule.demoAvailable,
+      onLoadDemoData: proxyModule.loadProxyDemoData,
+    }),
+  },
+  {
     key: "projects",
     label: "访达",
     shortLabel: "访达",
@@ -362,6 +391,7 @@ export const APP_MODULES = [
 ] as const satisfies readonly [
   AppModuleDefinition<"deploy">,
   AppModuleDefinition<"merge">,
+  AppModuleDefinition<"proxy">,
   AppModuleDefinition<"projects">,
 ];
 
@@ -381,6 +411,7 @@ export function buildPageProps(
   return {
     deploy: APP_MODULE_MAP.deploy.buildProps(context),
     merge: APP_MODULE_MAP.merge.buildProps(context),
+    proxy: APP_MODULE_MAP.proxy.buildProps(context),
     projects: APP_MODULE_MAP.projects.buildProps(context),
   };
 }

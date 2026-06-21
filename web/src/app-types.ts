@@ -111,6 +111,98 @@ export type WorkspaceAppPreferences = {
   enabledPages: PageKey[];
 };
 
+export type ProxyRuleAction =
+  | {
+      kind: "forward";
+      targetBaseUrl: string;
+      rewritePrefix: string;
+      requestHeaders: Record<string, string>;
+      responseHeaders: Record<string, string>;
+      delayMs: number;
+    }
+  | {
+      kind: "mock";
+      status: number;
+      contentType: string;
+      body: string;
+      headers: Record<string, string>;
+      delayMs: number;
+    }
+  | {
+      kind: "block";
+      status: number;
+      body: string;
+      delayMs: number;
+    };
+
+export type ProxyProfile = {
+  id: string;
+  name: string;
+  listenHost: string;
+  listenPort: number;
+  upstreamBaseUrl: string;
+  upstreamProxy: string;
+  captureBody: boolean;
+  maxBodyBytes: number;
+};
+
+export type ProxyRule = {
+  id: string;
+  profileId: string;
+  enabled: boolean;
+  name: string;
+  priority: number;
+  method: string;
+  urlContains: string;
+  pathPrefix: string;
+  headerName: string;
+  headerContains: string;
+  action: ProxyRuleAction;
+};
+
+export type ProxyConfig = {
+  profiles: ProxyProfile[];
+  rules: ProxyRule[];
+};
+
+export type ProxyProfileRuntimeStatus = {
+  profileId: string;
+  running: boolean;
+  listenUrl: string;
+  startedAt?: string | null;
+};
+
+export type ProxyEvent = {
+  id: string;
+  profileId: string;
+  profileName: string;
+  startedAt: string;
+  durationMs: number;
+  method: string;
+  url: string;
+  path: string;
+  status?: number | null;
+  action: string;
+  matchedRuleId?: string | null;
+  matchedRuleName?: string | null;
+  requestBytes: number;
+  responseBytes: number;
+  requestHeaders: Record<string, string>;
+  responseHeaders: Record<string, string>;
+  requestBodyPreview: string;
+  responseBodyPreview: string;
+  requestBodyTruncated: boolean;
+  responseBodyTruncated: boolean;
+  error?: string | null;
+};
+
+export type ProxyDashboard = {
+  configPath: string;
+  config: ProxyConfig;
+  statuses: ProxyProfileRuntimeStatus[];
+  events: ProxyEvent[];
+};
+
 export type ProjectCommandConfigDraft = {
   command: string;
   cwd?: string | null;

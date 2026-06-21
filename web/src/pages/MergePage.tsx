@@ -2,8 +2,6 @@ import {
   Autocomplete,
   Box,
   Button,
-  Card,
-  CardContent,
   Chip,
   FormControl,
   IconButton,
@@ -630,24 +628,10 @@ export function MergePage({
   const workflowReplay = workflowEntry ? workflowReplayFromBranchHistory(workflowEntry) : null;
 
   return (
-    <Box className="workspace workspace--narrow" onKeyDown={handlePrimaryEnter}>
-      <Card variant="outlined" sx={{ borderRadius: "20px", overflow: "hidden", minWidth: 0, maxWidth: "100%" }}>
-        <CardContent>
-          <Stack spacing={1.4}>
-            <Stack
-              direction="row"
-              alignItems="center"
-              justifyContent="space-between"
-              spacing={1}
-            >
-              <Box minWidth={0}>
-                <Typography variant="h6" sx={{ fontWeight: 800 }}>
-                  分支
-                </Typography>
-              </Box>
-            </Stack>
-
-            <BranchModeTabs mode={mode} onModeChange={onModeChange} />
+    <Box className="workspace workspace--workflow" onKeyDown={handlePrimaryEnter}>
+      <Box className="workflow-module workflow-module--control">
+        <Stack spacing={1.4}>
+          <BranchModeTabs mode={mode} onModeChange={onModeChange} />
 
             {mode === "sync" ? (
               <Stack spacing={1.2}>
@@ -1172,16 +1156,17 @@ export function MergePage({
                 </Button>
               </Stack>
             ) : null}
-          </Stack>
-        </CardContent>
-      </Card>
+        </Stack>
+      </Box>
 
-      <BranchTaskResultPanel
-        expanded={resultExpanded}
-        result={branchTaskResult}
-        onToggleExpanded={() => setResultExpanded((current) => !current)}
-        onOpenTaskOutput={onOpenTaskOutput}
-      />
+      {branchTaskResult ? (
+        <BranchTaskResultPanel
+          expanded={resultExpanded}
+          result={branchTaskResult}
+          onToggleExpanded={() => setResultExpanded((current) => !current)}
+          onOpenTaskOutput={onOpenTaskOutput}
+        />
+      ) : null}
 
       <BranchHistoryPanel
         expanded={historyExpanded}

@@ -85,6 +85,7 @@ export function AppShellLayout({
 }: AppShellLayoutProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [activityOpen, setActivityOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activityPanelMode, setActivityPanelMode] = useState(() =>
     typeof window === "undefined"
       ? false
@@ -110,10 +111,25 @@ export function AppShellLayout({
   }
 
   const visibleBusy = shouldShowBusyMessage(busy) ? busy : "";
+  const desktopSidebarCollapsed = activityPanelMode && sidebarCollapsed;
 
   return (
-      <div className="shell">
+      <div
+        className={`shell${activityPanelMode && activityOpen ? " shell--activity-open" : ""}${desktopSidebarCollapsed ? " shell--sidebar-collapsed" : ""}`}
+      >
       <div className="window-drag-region" data-tauri-drag-region />
+      {activityPanelMode ? (
+        <button
+          type="button"
+          className="sidebar-icon-toggle sidebar-icon-toggle--leading"
+          aria-label={desktopSidebarCollapsed ? "展开导航栏" : "收起导航栏"}
+          title={desktopSidebarCollapsed ? "展开导航栏" : "收起导航栏"}
+          onClick={() => setSidebarCollapsed((current) => !current)}
+          aria-expanded={!desktopSidebarCollapsed}
+        >
+          <PanelSideIcon fontSize="small" />
+        </button>
+      ) : null}
       <div className="window-toolbar" aria-label="窗口工具">
         <button
           type="button"
@@ -141,7 +157,7 @@ export function AppShellLayout({
           <SettingsIcon fontSize="small" />
         </button>
       </div>
-      <aside className="sidebar">
+      <aside className={`sidebar${desktopSidebarCollapsed ? " sidebar--collapsed" : ""}`}>
         <div className="shell-brand">
           <div className="shell-brand-mark" aria-hidden="true">
             R
@@ -200,7 +216,7 @@ export function AppShellLayout({
       ) : null}
 
       <div className={`workspace-frame${activityPanelMode && activityOpen ? " has-activity-panel" : ""}`}>
-        <main className="content">
+        <main className={`content content--${activePage}`}>
           {visibleBusy || error ? (
             <div className="content-status-stack">
               {visibleBusy ? (

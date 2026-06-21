@@ -1,8 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   Box,
-  Card,
-  CardContent,
   Collapse,
   IconButton,
   Pagination,
@@ -359,16 +357,7 @@ export function BranchHistoryPanel({
   }
 
   return (
-    <Card
-      variant="outlined"
-      sx={{
-        borderRadius: "20px",
-        overflow: "hidden",
-        minWidth: 0,
-        maxWidth: "100%",
-      }}
-    >
-      <CardContent>
+    <Box className="workflow-panel workflow-history-panel">
         <Stack
           direction="row"
           justifyContent="space-between"
@@ -428,166 +417,170 @@ export function BranchHistoryPanel({
 
         <Collapse in={expanded} timeout="auto" unmountOnExit>
           {history.length > 0 ? (
-            <Stack spacing={0.8} minWidth={0}>
-              {visibleHistoryGroups.map((group) => {
-                const item = group.latest;
-                const isGrouped = group.items.length > 1;
-                const groupExpanded = expandedHistoryGroups.has(group.id);
-                const workflowSignalIds = workflowSignalIdsForBranchReplay(item);
-                const trayAction = branchTrayActionFromHistory(item);
-                const groupPinnedAction = pinnedActionForBranchGroup(group);
-                const pinned = Boolean(groupPinnedAction);
-                return (
-                  <HistoryCard
-                    key={group.id}
-                    title={`${branchWorkflowModeLabel(item.taskKind)} · ${item.summary}`}
-                    subtitle={formatRelativeTime(item.createdAt)}
-                    pinned={pinned}
-                    badge={
-                      <Stack
-                        direction="row"
-                        spacing={0.4}
-                        alignItems="center"
-                        flexWrap="wrap"
-                        rowGap={0.4}
-                        justifyContent="flex-end"
-                      >
-                        <IconButton
-                          size="small"
-                          onClick={() => onReplayHistory(item)}
-                          disabled={Boolean(busy) || !item.replay}
-                          aria-label="重播分支任务"
-                          title={
-                            item.replay ? "使用相同参数重播" : "旧记录缺少回放参数"
-                          }
-                        >
-                          <ReplayIcon fontSize="small" />
-                        </IconButton>
-                        <WorkflowLinkButton
-                          active={workflowSignalIds.length > 0}
-                          onClick={() => onConfigureWorkflow(item)}
-                          disabled={!item.replay}
-                          title={item.replay ? "配置联动" : "旧记录缺少回放参数"}
-                        />
-                        <IconButton
-                          size="small"
-                          onClick={() =>
-                            groupPinnedAction
-                              ? handleRemovePinned(groupPinnedAction.dedupeKey)
-                              : handleTogglePinned(trayAction)
-                          }
-                          disabled={!trayAction}
-                          color={pinned ? "primary" : "default"}
-                          aria-label={pinned ? "取消标记" : "标记记录"}
-                          title={
-                            trayAction
-                              ? pinned
-                                ? "取消标记"
-                                : "标记记录"
-                              : "旧记录缺少回放参数"
-                          }
-                          sx={
-                            pinned
-                              ? {
-                                  bgcolor: "primary.main",
-                                  color: "primary.contrastText",
-                                  borderColor: "primary.main",
-                                  "&:hover": {
-                                    bgcolor: "primary.dark",
-                                  },
-                                }
-                              : undefined
-                          }
-                        >
-                          <StarIcon fontSize="small" />
-                        </IconButton>
-                        {isGrouped ? (
-                          <IconButton
-                            size="small"
-                            onClick={() => toggleHistoryGroup(group.id)}
-                            aria-label={
-                              groupExpanded ? "收起同参数记录" : "展开同参数记录"
-                            }
-                            title={groupExpanded ? "收起同参数记录" : "展开同参数记录"}
+            <Stack className="workflow-history-content" spacing={0.8} minWidth={0}>
+              <Box className="module-list-scroll">
+                <Stack spacing={0.8} minWidth={0}>
+                  {visibleHistoryGroups.map((group) => {
+                    const item = group.latest;
+                    const isGrouped = group.items.length > 1;
+                    const groupExpanded = expandedHistoryGroups.has(group.id);
+                    const workflowSignalIds = workflowSignalIdsForBranchReplay(item);
+                    const trayAction = branchTrayActionFromHistory(item);
+                    const groupPinnedAction = pinnedActionForBranchGroup(group);
+                    const pinned = Boolean(groupPinnedAction);
+                    return (
+                      <HistoryCard
+                        key={group.id}
+                        title={`${branchWorkflowModeLabel(item.taskKind)} · ${item.summary}`}
+                        subtitle={formatRelativeTime(item.createdAt)}
+                        pinned={pinned}
+                        badge={
+                          <Stack
+                            direction="row"
+                            spacing={0.4}
+                            alignItems="center"
+                            flexWrap="wrap"
+                            rowGap={0.4}
+                            justifyContent="flex-end"
                           >
-                            {groupExpanded ? (
-                              <CollapseIcon fontSize="small" />
-                            ) : (
-                              <ExpandIcon fontSize="small" />
-                            )}
-                          </IconButton>
-                        ) : null}
-                      </Stack>
-                    }
-                    detail={item.detail}
-                    meta={[
-                      isGrouped ? `连续 ${group.items.length} 次` : "",
-                      `${item.items.length} 项`,
-                      `${item.items.filter((taskItem) => taskItem.success).length} 成功`,
-                      item.items.some((taskItem) => !taskItem.success) ? "含失败" : "",
-                    ]}
-                  >
-                    {isGrouped ? (
-                      <Collapse in={groupExpanded} timeout="auto" unmountOnExit>
-                        <Stack
-                          spacing={0.6}
-                          sx={(theme) => ({
-                            mt: 0.2,
-                            pt: 0.8,
-                            borderTop: "1px solid",
-                            borderColor: "divider",
-                            color: "text.secondary",
-                            "& .history-row": {
-                              borderRadius: "12px",
-                              px: 0.9,
-                              py: 0.65,
-                              bgcolor:
-                                theme.palette.mode === "dark"
-                                  ? "rgba(255,255,255,0.012)"
-                                  : "rgba(31,37,48,0.025)",
-                            },
-                          })}
-                        >
-                          {group.items.map((historyItem, index) => (
-                            <Box className="history-row" key={historyItem.id}>
-                              <Stack
-                                direction="row"
-                                spacing={1}
-                                alignItems="center"
-                                minWidth={0}
-                                maxWidth="100%"
+                            <IconButton
+                              size="small"
+                              onClick={() => onReplayHistory(item)}
+                              disabled={Boolean(busy) || !item.replay}
+                              aria-label="重播分支任务"
+                              title={
+                                item.replay ? "使用相同参数重播" : "旧记录缺少回放参数"
+                              }
+                            >
+                              <ReplayIcon fontSize="small" />
+                            </IconButton>
+                            <WorkflowLinkButton
+                              active={workflowSignalIds.length > 0}
+                              onClick={() => onConfigureWorkflow(item)}
+                              disabled={!item.replay}
+                              title={item.replay ? "配置联动" : "旧记录缺少回放参数"}
+                            />
+                            <IconButton
+                              size="small"
+                              onClick={() =>
+                                groupPinnedAction
+                                  ? handleRemovePinned(groupPinnedAction.dedupeKey)
+                                  : handleTogglePinned(trayAction)
+                              }
+                              disabled={!trayAction}
+                              color={pinned ? "primary" : "default"}
+                              aria-label={pinned ? "取消标记" : "标记记录"}
+                              title={
+                                trayAction
+                                  ? pinned
+                                    ? "取消标记"
+                                    : "标记记录"
+                                  : "旧记录缺少回放参数"
+                              }
+                              sx={
+                                pinned
+                                  ? {
+                                      bgcolor: "primary.main",
+                                      color: "primary.contrastText",
+                                      borderColor: "primary.main",
+                                      "&:hover": {
+                                        bgcolor: "primary.dark",
+                                      },
+                                    }
+                                  : undefined
+                              }
+                            >
+                              <StarIcon fontSize="small" />
+                            </IconButton>
+                            {isGrouped ? (
+                              <IconButton
+                                size="small"
+                                onClick={() => toggleHistoryGroup(group.id)}
+                                aria-label={
+                                  groupExpanded ? "收起同参数记录" : "展开同参数记录"
+                                }
+                                title={groupExpanded ? "收起同参数记录" : "展开同参数记录"}
                               >
-                                <Typography
-                                  variant="caption"
-                                  color="text.secondary"
-                                  sx={{ flexShrink: 0, fontWeight: 800 }}
-                                >
-                                  {index === 0 ? "最新" : `第 ${index + 1} 次`}
-                                </Typography>
-                                <Typography
-                                  variant="body2"
-                                  noWrap
-                                  sx={{ flex: 1, minWidth: 0 }}
-                                >
-                                  {historyItem.summary}
-                                </Typography>
-                                <Typography
-                                  variant="caption"
-                                  color="text.secondary"
-                                  noWrap
-                                  sx={{ flexShrink: 0 }}
-                                >
-                                  {formatRelativeTime(historyItem.createdAt)}
-                                </Typography>
-                              </Stack>
-                            </Box>
-                          ))}
-                        </Stack>
-                      </Collapse>
-                    ) : null}
-                  </HistoryCard>
-                );
-              })}
+                                {groupExpanded ? (
+                                  <CollapseIcon fontSize="small" />
+                                ) : (
+                                  <ExpandIcon fontSize="small" />
+                                )}
+                              </IconButton>
+                            ) : null}
+                          </Stack>
+                        }
+                        detail={item.detail}
+                        meta={[
+                          isGrouped ? `连续 ${group.items.length} 次` : "",
+                          `${item.items.length} 项`,
+                          `${item.items.filter((taskItem) => taskItem.success).length} 成功`,
+                          item.items.some((taskItem) => !taskItem.success) ? "含失败" : "",
+                        ]}
+                      >
+                        {isGrouped ? (
+                          <Collapse in={groupExpanded} timeout="auto" unmountOnExit>
+                            <Stack
+                              spacing={0.6}
+                              sx={(theme) => ({
+                                mt: 0.2,
+                                pt: 0.8,
+                                borderTop: "1px solid",
+                                borderColor: "divider",
+                                color: "text.secondary",
+                                "& .history-row": {
+                                  borderRadius: "12px",
+                                  px: 0.9,
+                                  py: 0.65,
+                                  bgcolor:
+                                    theme.palette.mode === "dark"
+                                      ? "rgba(255,255,255,0.012)"
+                                      : "rgba(31,37,48,0.025)",
+                                },
+                              })}
+                            >
+                              {group.items.map((historyItem, index) => (
+                                <Box className="history-row" key={historyItem.id}>
+                                  <Stack
+                                    direction="row"
+                                    spacing={1}
+                                    alignItems="center"
+                                    minWidth={0}
+                                    maxWidth="100%"
+                                  >
+                                    <Typography
+                                      variant="caption"
+                                      color="text.secondary"
+                                      sx={{ flexShrink: 0, fontWeight: 800 }}
+                                    >
+                                      {index === 0 ? "最新" : `第 ${index + 1} 次`}
+                                    </Typography>
+                                    <Typography
+                                      variant="body2"
+                                      noWrap
+                                      sx={{ flex: 1, minWidth: 0 }}
+                                    >
+                                      {historyItem.summary}
+                                    </Typography>
+                                    <Typography
+                                      variant="caption"
+                                      color="text.secondary"
+                                      noWrap
+                                      sx={{ flexShrink: 0 }}
+                                    >
+                                      {formatRelativeTime(historyItem.createdAt)}
+                                    </Typography>
+                                  </Stack>
+                                </Box>
+                              ))}
+                            </Stack>
+                          </Collapse>
+                        ) : null}
+                      </HistoryCard>
+                    );
+                  })}
+                </Stack>
+              </Box>
               {historyPageCount > 1 ? (
                 <Stack direction="row" justifyContent="flex-end" sx={{ pt: 0.4 }}>
                   <Pagination
@@ -615,7 +608,6 @@ export function BranchHistoryPanel({
             </Typography>
           )}
         </Collapse>
-      </CardContent>
-    </Card>
+    </Box>
   );
 }

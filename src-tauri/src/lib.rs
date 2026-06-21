@@ -24,6 +24,12 @@ use rdevtool_core::navigation::{
     load_navigation_data, load_navigation_editor_data, navigation_file_path,
     open_navigation_entry_with_runtime_profiles, save_navigation_editor_data,
 };
+use rdevtool_core::proxy::{
+    ProxyDashboard, ProxyProfile, ProxyRule, ProxyRuntimeState, default_proxy_path,
+    delete_proxy_profile as core_delete_proxy_profile,
+    delete_proxy_rule as core_delete_proxy_rule, ensure_proxy_config, load_proxy_config,
+    upsert_proxy_profile, upsert_proxy_rule, validate_proxy_profile, validate_proxy_rule,
+};
 use rdevtool_core::storage::{
     DeployHistoryEntry, MergeHistoryEntry, SaveDeployHistoryRequest, SaveMergeHistoryRequest,
     Storage, default_storage_path,
@@ -56,6 +62,8 @@ use tauri::{
     menu::{IconMenuItem, IsMenuItem, Menu, MenuItem, NativeIcon, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+#[cfg(target_os = "macos")]
+use window_vibrancy::{NSVisualEffectMaterial, NSVisualEffectState, apply_vibrancy};
 
 mod project_runtime;
 
@@ -63,6 +71,7 @@ mod project_runtime;
 struct AppState {
     storage: Storage,
     project_runtime: ProjectRuntimeState,
+    proxy_runtime: ProxyRuntimeState,
     config_state: AppConfigState,
 }
 
@@ -365,7 +374,7 @@ struct SaveProjectDeployTargetsRequest {
     deploy_targets: Vec<DeployTargetEditor>,
 }
 
-const DEFAULT_PAGE_KEYS: [&str; 3] = ["projects", "merge", "deploy"];
+const DEFAULT_PAGE_KEYS: [&str; 4] = ["projects", "merge", "deploy", "proxy"];
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "main-tray";
 const TRAY_SHOW_ID: &str = "tray_show_main";
@@ -451,7 +460,7 @@ fn normalize_page_key(value: Option<String>) -> Option<String> {
     let value = value?.trim().to_string();
     match value.as_str() {
         "navigation" => Some("projects".to_string()),
-        "deploy" | "merge" | "projects" => Some(value),
+        "deploy" | "merge" | "projects" | "proxy" => Some(value),
         _ => None,
     }
 }
@@ -516,6 +525,7 @@ fn app_info() -> serde_json::Value {
         "configPath": default_projects_path().display().to_string(),
         "workspacePath": default_workspace_path().display().to_string(),
         "navigationPath": navigation_file_path(),
+        "proxyPath": default_proxy_path().display().to_string(),
         "storagePath": default_storage_path().display().to_string(),
     })
 }
@@ -554,6 +564,137 @@ async fn save_workspace_app_preferences(
             &config.app.enabled_pages,
         );
         save_workspace_config(&paths.workspace, &config).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_proxy_dashboard(
+    state: tauri::State<'_, AppState>,
+) -> Result<ProxyDashboard, String> {
+    let runtime = state.proxy_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        runtime.dashboard(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn save_proxy_profile(
+    state: tauri::State<'_, AppState>,
+    profile: ProxyProfile,
+) -> Result<ProxyDashboard, String> {
+    let runtime = state.proxy_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_proxy_profile(&profile).map_err(|error| error.to_string())?;
+        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        upsert_proxy_profile(&path, profile).map_err(|error| error.to_string())?;
+        runtime.dashboard(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn delete_proxy_profile(
+    state: tauri::State<'_, AppState>,
+    profile_id: String,
+) -> Result<ProxyDashboard, String> {
+    let runtime = state.proxy_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        runtime.stop_profile(&profile_id);
+        core_delete_proxy_profile(&path, &profile_id).map_err(|error| error.to_string())?;
+        runtime.clear_events(Some(&profile_id));
+        runtime.dashboard(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn save_proxy_rule(
+    state: tauri::State<'_, AppState>,
+    rule: ProxyRule,
+) -> Result<ProxyDashboard, String> {
+    let runtime = state.proxy_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_proxy_rule(&rule).map_err(|error| error.to_string())?;
+        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        upsert_proxy_rule(&path, rule).map_err(|error| error.to_string())?;
+        runtime.dashboard(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn delete_proxy_rule(
+    state: tauri::State<'_, AppState>,
+    rule_id: String,
+) -> Result<ProxyDashboard, String> {
+    let runtime = state.proxy_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        core_delete_proxy_rule(&path, &rule_id).map_err(|error| error.to_string())?;
+        runtime.dashboard(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn start_proxy_profile(
+    state: tauri::State<'_, AppState>,
+    profile_id: String,
+) -> Result<ProxyDashboard, String> {
+    let runtime = state.proxy_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        let config = load_proxy_config(&path).map_err(|error| error.to_string())?;
+        let profile = config
+            .profiles
+            .iter()
+            .find(|item| item.id == profile_id)
+            .ok_or_else(|| format!("代理配置不存在：{profile_id}"))?;
+        validate_proxy_profile(profile).map_err(|error| error.to_string())?;
+        runtime
+            .start_profile(path.clone(), profile_id)
+            .map_err(|error| error.to_string())?;
+        runtime.dashboard(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn stop_proxy_profile(
+    state: tauri::State<'_, AppState>,
+    profile_id: String,
+) -> Result<ProxyDashboard, String> {
+    let runtime = state.proxy_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        runtime.stop_profile(&profile_id);
+        runtime.dashboard(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn clear_proxy_events(
+    state: tauri::State<'_, AppState>,
+    profile_id: Option<String>,
+) -> Result<ProxyDashboard, String> {
+    let runtime = state.proxy_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        runtime.clear_events(profile_id.as_deref());
+        runtime.dashboard(&path).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -3001,104 +3142,105 @@ fn build_tray<R: tauri::Runtime>(
             }
         });
 
-    if let Some(icon) = app
-        .default_window_icon()
-        .cloned()
-        .map(|icon| create_monochrome_tray_icon(icon.to_owned()))
-    {
-        tray_builder = tray_builder.icon(icon);
-    }
+    tray_builder = tray_builder
+        .icon(create_tray_icon_image())
+        .icon_as_template(true);
 
     let _ = tray_builder.build(app)?;
     Ok(())
 }
 
-fn create_monochrome_tray_icon(icon: Image<'static>) -> Image<'static> {
-    let threshold = 188.0f32;
-    let rgba = icon.rgba();
-    let width = icon.width() as usize;
-    let height = icon.height() as usize;
-    let mut alpha_mask = Vec::with_capacity(width * height);
+fn create_tray_icon_image() -> Image<'static> {
+    const SIZE: u32 = 32;
+    Image::new_owned(create_tray_mark_rgba(SIZE, SIZE), SIZE, SIZE)
+}
 
-    for chunk in rgba.chunks_exact(4) {
-        let alpha = chunk[3] as f32 / 255.0;
-        if alpha <= 0.0 {
-            alpha_mask.push(0);
-            continue;
-        }
+fn create_tray_mark_rgba(width: u32, height: u32) -> Vec<u8> {
+    let mut rgba = vec![0u8; (width * height * 4) as usize];
+    let samples = 4;
 
-        let luminance =
-            0.2126 * chunk[0] as f32 + 0.7152 * chunk[1] as f32 + 0.0722 * chunk[2] as f32;
-        if luminance <= threshold {
-            alpha_mask.push(0);
-            continue;
-        }
-
-        let whiteness = ((luminance - threshold) / (255.0 - threshold)).clamp(0.0, 1.0);
-        let tray_alpha = (alpha * whiteness * 255.0).round() as u8;
-        alpha_mask.push(tray_alpha);
-    }
-
-    let mut min_x = width;
-    let mut min_y = height;
-    let mut max_x = 0usize;
-    let mut max_y = 0usize;
-    for (index, alpha) in alpha_mask.iter().enumerate() {
-        if *alpha <= 4 {
-            continue;
-        }
-        let x = index % width;
-        let y = index / width;
-        min_x = min_x.min(x);
-        min_y = min_y.min(y);
-        max_x = max_x.max(x);
-        max_y = max_y.max(y);
-    }
-
-    if min_x >= width || min_y >= height {
-        return Image::new_owned(vec![0; rgba.len()], icon.width(), icon.height());
-    }
-
-    let source_width = max_x - min_x + 1;
-    let source_height = max_y - min_y + 1;
-    let target_limit = ((width.min(height) as f32) * 0.88).round() as usize;
-    let scale = (target_limit as f32 / source_width.max(source_height) as f32).max(1.0);
-    let target_width = ((source_width as f32) * scale).round().min(width as f32) as usize;
-    let target_height = ((source_height as f32) * scale).round().min(height as f32) as usize;
-    let target_x = (width - target_width) / 2;
-    let target_y = (height - target_height) / 2;
-    let mut enlarged_alpha = vec![0u8; width * height];
-
-    for y in 0..target_height {
-        for x in 0..target_width {
-            let source_x =
-                min_x + ((x as f32 / target_width as f32) * source_width as f32) as usize;
-            let source_y =
-                min_y + ((y as f32 / target_height as f32) * source_height as f32) as usize;
-            enlarged_alpha[(target_y + y) * width + target_x + x] =
-                alpha_mask[source_y.min(max_y) * width + source_x.min(max_x)];
-        }
-    }
-
-    let mut bold_alpha = enlarged_alpha.clone();
     for y in 0..height {
         for x in 0..width {
-            let mut strongest = 0u8;
-            for next_y in y.saturating_sub(1)..=(y + 1).min(height - 1) {
-                for next_x in x.saturating_sub(1)..=(x + 1).min(width - 1) {
-                    strongest = strongest.max(enlarged_alpha[next_y * width + next_x]);
+            let mut alpha_acc = 0.0;
+
+            for sy in 0..samples {
+                for sx in 0..samples {
+                    let fx = (x as f32 + (sx as f32 + 0.5) / samples as f32) / width as f32;
+                    let fy = (y as f32 + (sy as f32 + 0.5) / samples as f32) / height as f32;
+                    if inside_tray_bolt(fx, fy) || inside_tray_rail(fx, fy) {
+                        alpha_acc += 1.0;
+                    }
                 }
             }
-            bold_alpha[y * width + x] = strongest;
+
+            let alpha = (alpha_acc / (samples * samples) as f32).clamp(0.0, 1.0);
+            if alpha <= 0.0 {
+                continue;
+            }
+
+            let idx = ((y * width + x) * 4) as usize;
+            rgba[idx] = 255;
+            rgba[idx + 1] = 255;
+            rgba[idx + 2] = 255;
+            rgba[idx + 3] = (alpha * 255.0).round() as u8;
         }
     }
 
-    let mut out = Vec::with_capacity(rgba.len());
-    for alpha in bold_alpha {
-        out.extend_from_slice(&[255, 255, 255, alpha]);
+    rgba
+}
+
+fn inside_tray_bolt(x: f32, y: f32) -> bool {
+    inside_polygon(
+        x,
+        y,
+        &[
+            (0.600, 0.040),
+            (0.215, 0.565),
+            (0.465, 0.565),
+            (0.355, 0.965),
+            (0.800, 0.365),
+            (0.555, 0.365),
+        ],
+    )
+}
+
+fn inside_tray_rail(x: f32, y: f32) -> bool {
+    inside_rounded_rect(x, y, 0.610, 0.620, 0.865, 0.685, 0.033)
+        || inside_rounded_rect(x, y, 0.590, 0.725, 0.805, 0.790, 0.033)
+        || inside_rounded_rect(x, y, 0.570, 0.830, 0.735, 0.895, 0.033)
+}
+
+fn inside_rounded_rect(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32) -> bool {
+    let cx = (x0 + x1) * 0.5;
+    let cy = (y0 + y1) * 0.5;
+    let hw = (x1 - x0) * 0.5;
+    let hh = (y1 - y0) * 0.5;
+    let qx = (x - cx).abs() - (hw - radius);
+    let qy = (y - cy).abs() - (hh - radius);
+    let ox = qx.max(0.0);
+    let oy = qy.max(0.0);
+    let outside = (ox * ox + oy * oy).sqrt();
+    let inside = qx.max(qy).min(0.0);
+    outside + inside <= radius
+}
+
+fn inside_polygon(x: f32, y: f32, points: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let mut previous = points.len() - 1;
+
+    for current in 0..points.len() {
+        let (xi, yi) = points[current];
+        let (xj, yj) = points[previous];
+        let dy = yj - yi;
+        let intersects =
+            dy.abs() > f32::EPSILON && (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / dy + xi;
+        if intersects {
+            inside = !inside;
+        }
+        previous = current;
     }
 
-    Image::new_owned(out, icon.width(), icon.height())
+    inside
 }
 
 pub fn run() {
@@ -3134,10 +3276,21 @@ pub fn run() {
             app.manage(AppState {
                 storage,
                 project_runtime: ProjectRuntimeState::default(),
+                proxy_runtime: ProxyRuntimeState::default(),
                 config_state: AppConfigState::default(),
             });
             if should_use_tray() {
                 build_tray(app.handle(), tray_quitting.clone()).map_err(std::io::Error::other)?;
+            }
+            #[cfg(target_os = "macos")]
+            if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                apply_vibrancy(
+                    &window,
+                    NSVisualEffectMaterial::HudWindow,
+                    Some(NSVisualEffectState::Active),
+                    Some(18.0),
+                )
+                .map_err(std::io::Error::other)?;
             }
             Ok(())
         })
@@ -3145,6 +3298,14 @@ pub fn run() {
             app_info,
             get_workspace_app_preferences,
             save_workspace_app_preferences,
+            get_proxy_dashboard,
+            save_proxy_profile,
+            delete_proxy_profile,
+            save_proxy_rule,
+            delete_proxy_rule,
+            start_proxy_profile,
+            stop_proxy_profile,
+            clear_proxy_events,
             get_project_config_editor,
             save_default_branch_rules,
             save_runtime_profiles,

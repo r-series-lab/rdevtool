@@ -1,7 +1,5 @@
 import {
   Box,
-  Card,
-  CardContent,
   Chip,
   Collapse,
   IconButton,
@@ -145,17 +143,12 @@ export function BranchTaskResultPanel({
   onToggleExpanded,
   onOpenTaskOutput,
 }: BranchTaskResultPanelProps) {
+  if (!result) {
+    return null;
+  }
+
   return (
-    <Card
-      variant="outlined"
-      sx={{
-        borderRadius: "20px",
-        overflow: "hidden",
-        minWidth: 0,
-        maxWidth: "100%",
-      }}
-    >
-      <CardContent>
+    <Box className="workflow-panel workflow-result-panel">
         <Stack
           direction="row"
           justifyContent="space-between"
@@ -200,23 +193,16 @@ export function BranchTaskResultPanel({
         </Stack>
 
         <Collapse in={expanded} timeout="auto" unmountOnExit>
-          {result ? (
-            <Stack spacing={0.8} minWidth={0}>
-              {result.items.map((item, index) => (
-                <BranchTaskItemCard
-                  key={`${item.projectKey}-${item.targetBranch ?? item.outputPath ?? index}`}
-                  item={item}
-                  onOpenTaskOutput={onOpenTaskOutput}
-                />
-              ))}
-            </Stack>
-          ) : (
-            <Typography variant="body2" color="text.secondary">
-              执行后显示本次任务结果。
-            </Typography>
-          )}
+          <Stack spacing={0.8} minWidth={0}>
+            {result.items.map((item, index) => (
+              <BranchTaskItemCard
+                key={`${item.projectKey}-${item.targetBranch ?? item.outputPath ?? index}`}
+                item={item}
+                onOpenTaskOutput={onOpenTaskOutput}
+              />
+            ))}
+          </Stack>
         </Collapse>
-      </CardContent>
-    </Card>
+    </Box>
   );
 }

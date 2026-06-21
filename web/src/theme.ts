@@ -3,48 +3,55 @@ import { createTheme } from "@mui/material";
 export type AppStyleMode = "light" | "mono";
 
 const lightTokens = {
-  bg: "#f4f7fb",
-  panel: "rgba(255,255,255,0.92)",
-  panelStrong: "#fbfdff",
-  line: "rgba(42,82,132,0.16)",
-  lineSoft: "rgba(42,82,132,0.1)",
-  text: "#172133",
-  muted: "#65758b",
-  accent: "#315fbb",
-  accentHover: "#3d6fcd",
-  accentSoft: "rgba(49,95,187,0.07)",
-  accentBorder: "rgba(49,95,187,0.22)",
-  secondary: "#0f766e",
-  success: "#138a56",
-  info: "#0284c7",
-  warning: "#b7791f",
-  error: "#c24141",
-  shadow: "0 18px 42px rgba(46,83,126,0.1)",
+  bg: "rgba(243,246,250,0.58)",
+  panel: "rgba(250,252,255,0.42)",
+  panelStrong: "rgba(250,252,255,0.52)",
+  line: "rgba(52,76,96,0.14)",
+  lineSoft: "rgba(52,76,96,0.08)",
+  text: "#17202b",
+  muted: "rgba(63,79,97,0.68)",
+  accent: "#5c7085",
+  accentHover: "#455a70",
+  accentSoft: "rgba(92,112,133,0.11)",
+  accentBorder: "rgba(92,112,133,0.24)",
+  secondary: "#687386",
+  success: "#3f8269",
+  info: "#5c7085",
+  warning: "#a86c1c",
+  error: "#aa6069",
+  shadow: "0 22px 58px rgba(28,48,68,0.14)",
 };
 
 const monoTokens = {
-  bg: "#080d13",
-  panel: "rgba(15,22,32,0.9)",
-  panelStrong: "rgba(19,28,40,0.94)",
-  line: "rgba(139,169,208,0.14)",
-  lineSoft: "rgba(139,169,208,0.08)",
-  text: "#f2f6fb",
-  muted: "rgba(218,226,238,0.62)",
-  accent: "#4f6fa6",
-  accentHover: "#5877ad",
-  accentSoft: "rgba(111,143,202,0.11)",
-  accentBorder: "rgba(136,165,216,0.24)",
-  secondary: "#48c6b0",
-  success: "#54d98f",
-  info: "#58bdf6",
-  warning: "#f2bc5b",
-  error: "#ff7d7d",
-  shadow: "0 26px 60px rgba(0,0,0,0.38)",
+  bg: "rgba(10,12,15,0.78)",
+  panel: "rgba(18,22,28,0.42)",
+  panelStrong: "rgba(24,29,36,0.52)",
+  line: "rgba(226,232,240,0.12)",
+  lineSoft: "rgba(226,232,240,0.07)",
+  text: "#f2f6f4",
+  muted: "rgba(221,231,229,0.62)",
+  accent: "#8fb8ea",
+  accentHover: "#b6d2f4",
+  accentSoft: "rgba(143,184,234,0.16)",
+  accentBorder: "rgba(182,210,244,0.34)",
+  secondary: "#c6b8d9",
+  success: "#86c2a0",
+  info: "#8fb8ea",
+  warning: "#ecc26f",
+  error: "#df8b94",
+  shadow: "0 30px 72px rgba(0,0,0,0.42)",
 };
 
 export function createAppTheme(styleMode: AppStyleMode) {
   const mono = styleMode === "mono";
   const tokens = mono ? monoTokens : lightTokens;
+  const menuPaperBg = mono ? "rgba(17,21,27,0.96)" : "rgba(248,251,255,0.96)";
+  const menuPaperBorder = mono ? "rgba(226,232,240,0.13)" : "rgba(52,76,96,0.16)";
+  const menuPaperShadow = mono
+    ? "0 22px 52px rgba(0,0,0,0.42), inset 0 1px 0 rgba(255,255,255,0.035)"
+    : "0 22px 52px rgba(28,48,68,0.18), inset 0 1px 0 rgba(255,255,255,0.72)";
+  const menuItemHoverBg = mono ? "rgba(143,184,234,0.09)" : "rgba(92,112,133,0.08)";
+  const menuItemSelectedBg = mono ? "rgba(143,184,234,0.13)" : "rgba(92,112,133,0.12)";
 
   return createTheme({
     palette: {
@@ -52,8 +59,8 @@ export function createAppTheme(styleMode: AppStyleMode) {
       primary: {
         main: tokens.accent,
         light: tokens.accentHover,
-        dark: mono ? "#2f6ff6" : "#1d4ed8",
-        contrastText: "#ffffff",
+        dark: mono ? "#6f96c7" : "#455a70",
+        contrastText: mono ? "#07111d" : "#ffffff",
       },
       secondary: {
         main: tokens.secondary,
@@ -101,10 +108,12 @@ export function createAppTheme(styleMode: AppStyleMode) {
       MuiCard: {
         styleOverrides: {
           root: {
-            borderRadius: 14,
+            borderRadius: 13,
             borderColor: tokens.line,
             background: tokens.panel,
             boxShadow: tokens.shadow,
+            backdropFilter: "blur(24px) saturate(1.18)",
+            WebkitBackdropFilter: "blur(24px) saturate(1.18)",
           },
         },
       },
@@ -131,12 +140,12 @@ export function createAppTheme(styleMode: AppStyleMode) {
             border: `1px solid ${tokens.accentBorder}`,
             backgroundColor: tokens.accent,
             boxShadow: mono
-              ? "0 10px 22px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.12)"
-              : "0 8px 18px rgba(49,95,187,0.14)",
+              ? "0 12px 28px rgba(38,84,132,0.28), inset 0 1px 0 rgba(255,255,255,0.3)"
+              : "0 8px 20px rgba(38,105,132,0.16)",
             "&:hover": {
               backgroundColor: tokens.accentHover,
               boxShadow: mono
-                ? "0 12px 24px rgba(0,0,0,0.2), inset 0 1px 0 rgba(255,255,255,0.14)"
+                ? "0 14px 30px rgba(50,98,148,0.32), inset 0 1px 0 rgba(255,255,255,0.34)"
                 : "0 10px 20px rgba(49,95,187,0.16)",
             },
             "&.Mui-disabled": {
@@ -146,7 +155,7 @@ export function createAppTheme(styleMode: AppStyleMode) {
           outlinedInherit: {
             borderColor: tokens.line,
             color: tokens.text,
-            backgroundColor: mono ? "rgba(255,255,255,0.012)" : "rgba(255,255,255,0.46)",
+            backgroundColor: mono ? "rgba(255,255,255,0.026)" : "rgba(255,255,255,0.4)",
             "&:hover": {
               borderColor: tokens.accentBorder,
               backgroundColor: tokens.accentSoft,
@@ -173,13 +182,14 @@ export function createAppTheme(styleMode: AppStyleMode) {
             borderRadius: mono ? 9 : 9,
             ...(mono
               ? {
-                  color: "rgba(228,233,240,0.72)",
-                  border: `1px solid ${tokens.lineSoft}`,
-                  backgroundColor: "rgba(255,255,255,0.014)",
-                  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.02)",
+                  color: "rgba(235,241,248,0.82)",
+                  border: "1px solid rgba(156,185,220,0.16)",
+                  backgroundColor: "rgba(143,184,234,0.07)",
+                  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.035)",
                   "&:hover": {
-                    backgroundColor: "rgba(255,255,255,0.03)",
-                    borderColor: "rgba(229,233,240,0.08)",
+                    color: "#f7fbff",
+                    backgroundColor: "rgba(143,184,234,0.13)",
+                    borderColor: "rgba(182,210,244,0.28)",
                   },
                   "&.Mui-disabled": {
                     color: "rgba(167,173,181,0.32)",
@@ -241,11 +251,10 @@ export function createAppTheme(styleMode: AppStyleMode) {
       MuiOutlinedInput: {
         styleOverrides: {
           root: {
-            borderRadius: 9,
+            borderRadius: mono ? 10 : 9,
             ...(mono
               ? {
-                  borderRadius: 10,
-                  backgroundColor: "rgba(255,255,255,0.016)",
+                  backgroundColor: "rgba(255,255,255,0.026)",
                   boxShadow: "inset 0 1px 0 rgba(255,255,255,0.016)",
                   "& .MuiOutlinedInput-notchedOutline": {
                     borderColor: tokens.lineSoft,
@@ -257,7 +266,19 @@ export function createAppTheme(styleMode: AppStyleMode) {
                     borderColor: tokens.accentBorder,
                   },
                 }
-              : {}),
+              : {
+                  backgroundColor: "rgba(255,255,255,0.46)",
+                  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.5)",
+                  "& .MuiOutlinedInput-notchedOutline": {
+                    borderColor: tokens.line,
+                  },
+                  "&:hover .MuiOutlinedInput-notchedOutline": {
+                    borderColor: tokens.accentBorder,
+                  },
+                  "&.Mui-focused .MuiOutlinedInput-notchedOutline": {
+                    borderColor: tokens.accentBorder,
+                  },
+                }),
           },
         },
       },
@@ -317,58 +338,72 @@ export function createAppTheme(styleMode: AppStyleMode) {
       },
       MuiAutocomplete: {
         styleOverrides: {
-          paper: mono
-            ? {
-                marginTop: 8,
-                borderRadius: 16,
-                border: `1px solid ${tokens.line}`,
-                background: tokens.panelStrong,
-                boxShadow: "0 20px 44px rgba(0,0,0,0.32)",
-              }
-            : {},
-          listbox: mono
-            ? {
-                padding: 8,
-              }
-            : {},
+          paper: {
+            marginTop: 8,
+            borderRadius: 14,
+            border: `1px solid ${menuPaperBorder}`,
+            background: menuPaperBg,
+            color: tokens.text,
+            boxShadow: menuPaperShadow,
+            backdropFilter: "blur(18px) saturate(1.16)",
+            WebkitBackdropFilter: "blur(18px) saturate(1.16)",
+            backgroundImage: "none",
+          },
+          listbox: {
+            padding: 8,
+          },
+          option: {
+            borderRadius: 10,
+            minHeight: 34,
+            '&[aria-selected="true"]': {
+              backgroundColor: menuItemSelectedBg,
+            },
+            '&[aria-selected="true"].Mui-focused': {
+              backgroundColor: menuItemSelectedBg,
+            },
+            "&.Mui-focused": {
+              backgroundColor: menuItemHoverBg,
+            },
+          },
         },
       },
       MuiMenu: {
         styleOverrides: {
-          paper: mono
-            ? {
-                marginTop: 8,
-                borderRadius: 16,
-                border: `1px solid ${tokens.line}`,
-                background: tokens.panelStrong,
-                boxShadow: "0 20px 44px rgba(0,0,0,0.32)",
-              }
-            : {},
-          list: mono
-            ? {
-                padding: 8,
-              }
-            : {},
+          paper: {
+            marginTop: 8,
+            borderRadius: 14,
+            border: `1px solid ${menuPaperBorder}`,
+            background: menuPaperBg,
+            color: tokens.text,
+            boxShadow: menuPaperShadow,
+            backdropFilter: "blur(18px) saturate(1.16)",
+            WebkitBackdropFilter: "blur(18px) saturate(1.16)",
+            backgroundImage: "none",
+          },
+          list: {
+            padding: 8,
+          },
         },
       },
       MuiMenuItem: {
         styleOverrides: {
-          root: mono
-            ? {
-                minHeight: 36,
-                borderRadius: 12,
-                color: "#eef1f5",
-                "&:hover": {
-                  backgroundColor: "rgba(255,255,255,0.035)",
-                },
-                "&.Mui-selected": {
-                  backgroundColor: "rgba(255,255,255,0.06)",
-                },
-                "&.Mui-selected:hover": {
-                  backgroundColor: "rgba(255,255,255,0.075)",
-                },
-              }
-            : {},
+          root: {
+            minHeight: 36,
+            borderRadius: 10,
+            color: tokens.text,
+            "&:hover": {
+              backgroundColor: menuItemHoverBg,
+            },
+            "&.Mui-selected": {
+              backgroundColor: menuItemSelectedBg,
+            },
+            "&.Mui-selected:hover": {
+              backgroundColor: menuItemSelectedBg,
+            },
+            "&.Mui-disabled": {
+              opacity: mono ? 0.32 : 0.42,
+            },
+          },
         },
       },
       MuiDivider: {

@@ -6,5 +6,6 @@ pub mod git;
 pub mod gitlab;
 pub mod jenkins;
 pub mod navigation;
+pub mod proxy;
 pub mod storage;
 pub mod web_actions;

@@ -77,16 +77,24 @@ export function HistoryCard({
         borderRadius: "16px",
         bgcolor:
           pinned && theme.palette.mode === "dark"
-            ? alpha(theme.palette.primary.main, 0.08)
+            ? alpha(theme.palette.primary.main, 0.06)
             : pinned
               ? alpha(theme.palette.primary.main, 0.045)
-              : "rgba(255,255,255,0.01)",
+              : theme.palette.mode === "dark"
+                ? "rgba(18,22,28,0.42)"
+                : "rgba(246,249,252,0.34)",
         borderColor: pinned
-          ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.36 : 0.24)
-          : undefined,
+          ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.3 : 0.24)
+          : theme.palette.mode === "dark"
+            ? "rgba(143,184,234,0.1)"
+            : "rgba(52,76,96,0.1)",
         boxShadow: pinned
-          ? `inset 3px 0 0 ${alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.72 : 0.5)}`
-          : undefined,
+          ? `inset 3px 0 0 ${alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.58 : 0.5)}`
+          : theme.palette.mode === "dark"
+            ? "inset 0 1px 0 rgba(255,255,255,0.03), 0 10px 26px rgba(0,0,0,0.14)"
+            : "inset 0 1px 0 rgba(255,255,255,0.48), 0 10px 24px rgba(24,48,62,0.045)",
+        backdropFilter: "blur(18px) saturate(1.12)",
+        WebkitBackdropFilter: "blur(18px) saturate(1.12)",
         minWidth: 0,
         maxWidth: "100%",
       })}

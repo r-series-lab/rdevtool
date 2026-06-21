@@ -1509,6 +1509,7 @@ fn build_tray_runtime() -> Result<TrayRuntime> {
         .with_tooltip("项目部署")
         .with_menu(Box::new(menu))
         .with_icon(icon)
+        .with_icon_as_template(true)
         .build()
         .map_err(|error| anyhow!("failed to build tray icon: {error}"))?;
 
@@ -1533,15 +1534,27 @@ fn create_window_icon() -> Arc<egui::IconData> {
 fn create_tray_icon() -> Result<Icon> {
     let width: u32 = 32;
     let height: u32 = 32;
-    let rgba = create_brand_icon_rgba(width, height);
+    let rgba = create_tray_mark_rgba(width, height);
 
     Icon::from_rgba(rgba, width, height)
         .map_err(|error| anyhow!("failed to create tray icon from rgba: {error}"))
 }
 
 fn create_brand_icon_rgba(width: u32, height: u32) -> Vec<u8> {
+    render_icon_rgba(width, height, 4, sample_brand_icon)
+}
+
+fn create_tray_mark_rgba(width: u32, height: u32) -> Vec<u8> {
+    render_icon_rgba(width, height, 4, sample_tray_mark)
+}
+
+fn render_icon_rgba(
+    width: u32,
+    height: u32,
+    samples: u32,
+    sampler: fn(f32, f32) -> [f32; 4],
+) -> Vec<u8> {
     let mut rgba = vec![0u8; (width * height * 4) as usize];
-    let samples = 4;
 
     for y in 0..height {
         for x in 0..width {
@@ -1552,7 +1565,7 @@ fn create_brand_icon_rgba(width: u32, height: u32) -> Vec<u8> {
                 for sx in 0..samples {
                     let fx = (x as f32 + (sx as f32 + 0.5) / samples as f32) / width as f32;
                     let fy = (y as f32 + (sy as f32 + 0.5) / samples as f32) / height as f32;
-                    let sample = sample_brand_icon(fx, fy);
+                    let sample = sampler(fx, fy);
                     alpha_acc += sample[3];
                     color_acc[0] += sample[0] * sample[3];
                     color_acc[1] += sample[1] * sample[3];
@@ -1578,45 +1591,72 @@ fn create_brand_icon_rgba(width: u32, height: u32) -> Vec<u8> {
 }
 
 fn sample_brand_icon(x: f32, y: f32) -> [f32; 4] {
-    if !inside_rounded_rect(x, y, 0.08, 0.08, 0.92, 0.92, 0.20) {
+    if !inside_rounded_rect(x, y, 0.032, 0.032, 0.968, 0.968, 0.215) {
         return [0.0, 0.0, 0.0, 0.0];
     }
 
-    let mut base = lerp_rgb(
-        [108.0, 71.0, 57.0],
-        [201.0, 120.0, 84.0],
-        y * 0.82 + x * 0.18,
-    );
-    let glow = ((0.24 - x).powi(2) + (0.20 - y).powi(2)).sqrt();
-    let glow_strength = ((0.22 - glow) / 0.22).clamp(0.0, 1.0) * 0.18;
-    base = mix_rgb(base, [246.0, 214.0, 190.0], glow_strength);
-
-    if inside_segment_capsule(x, y, 0.33, 0.24, 0.74, 0.14, 0.045) {
-        base = mix_rgb(base, [255.0, 236.0, 220.0], 0.10);
+    let mut color = lerp_rgb([8.0, 9.0, 13.0], [12.0, 13.0, 17.0], y);
+    let sheen = ((0.30 - x).powi(2) + (0.20 - y).powi(2)).sqrt();
+    let sheen_strength = ((0.30 - sheen) / 0.30).clamp(0.0, 1.0) * 0.04;
+    color = mix_rgb(color, [56.0, 68.0, 92.0], sheen_strength);
+    if inside_brand_rail(x, y) {
+        color = [205.0, 214.0, 229.0];
     }
-
-    let mut color = base;
-    if inside_r_shadow(x, y) {
-        color = mix_rgb(color, [76.0, 48.0, 38.0], 0.14);
-    }
-    if inside_r_letter(x, y) {
-        color = [252.0, 246.0, 239.0];
+    if inside_brand_bolt(x, y) {
+        color = [248.0, 250.0, 255.0];
     }
 
     [color[0], color[1], color[2], 1.0]
 }
 
-fn inside_r_letter(x: f32, y: f32) -> bool {
-    let stem = inside_rounded_rect(x, y, 0.24, 0.20, 0.40, 0.82, 0.06);
-    let bowl_outer = inside_rounded_rect(x, y, 0.30, 0.18, 0.76, 0.58, 0.17);
-    let bowl_inner = inside_rounded_rect(x, y, 0.42, 0.30, 0.62, 0.46, 0.08);
-    let bowl = bowl_outer && !bowl_inner;
-    let leg = inside_segment_capsule(x, y, 0.46, 0.50, 0.74, 0.82, 0.075);
-    stem || bowl || leg
+fn sample_tray_mark(x: f32, y: f32) -> [f32; 4] {
+    if inside_tray_bolt(x, y) || inside_tray_rail(x, y) {
+        [255.0, 255.0, 255.0, 1.0]
+    } else {
+        [0.0, 0.0, 0.0, 0.0]
+    }
 }
 
-fn inside_r_shadow(x: f32, y: f32) -> bool {
-    inside_r_letter(x - 0.018, y - 0.018)
+fn inside_brand_bolt(x: f32, y: f32) -> bool {
+    inside_polygon(
+        x,
+        y,
+        &[
+            (0.575, 0.145),
+            (0.315, 0.555),
+            (0.475, 0.555),
+            (0.390, 0.860),
+            (0.720, 0.420),
+            (0.555, 0.420),
+        ],
+    )
+}
+
+fn inside_tray_bolt(x: f32, y: f32) -> bool {
+    inside_polygon(
+        x,
+        y,
+        &[
+            (0.600, 0.040),
+            (0.215, 0.565),
+            (0.465, 0.565),
+            (0.355, 0.965),
+            (0.800, 0.365),
+            (0.555, 0.365),
+        ],
+    )
+}
+
+fn inside_tray_rail(x: f32, y: f32) -> bool {
+    inside_rounded_rect(x, y, 0.610, 0.620, 0.865, 0.685, 0.033)
+        || inside_rounded_rect(x, y, 0.590, 0.725, 0.805, 0.790, 0.033)
+        || inside_rounded_rect(x, y, 0.570, 0.830, 0.735, 0.895, 0.033)
+}
+
+fn inside_brand_rail(x: f32, y: f32) -> bool {
+    inside_rounded_rect(x, y, 0.600, 0.615, 0.785, 0.650, 0.018)
+        || inside_rounded_rect(x, y, 0.590, 0.685, 0.745, 0.720, 0.018)
+        || inside_rounded_rect(x, y, 0.575, 0.755, 0.705, 0.790, 0.018)
 }
 
 fn inside_rounded_rect(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, radius: f32) -> bool {
@@ -1633,15 +1673,23 @@ fn inside_rounded_rect(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, radiu
     outside + inside <= radius
 }
 
-fn inside_segment_capsule(x: f32, y: f32, ax: f32, ay: f32, bx: f32, by: f32, radius: f32) -> bool {
-    let pax = x - ax;
-    let pay = y - ay;
-    let bax = bx - ax;
-    let bay = by - ay;
-    let h = ((pax * bax + pay * bay) / (bax * bax + bay * bay)).clamp(0.0, 1.0);
-    let dx = pax - bax * h;
-    let dy = pay - bay * h;
-    (dx * dx + dy * dy).sqrt() <= radius
+fn inside_polygon(x: f32, y: f32, points: &[(f32, f32)]) -> bool {
+    let mut inside = false;
+    let mut previous = points.len() - 1;
+
+    for current in 0..points.len() {
+        let (xi, yi) = points[current];
+        let (xj, yj) = points[previous];
+        let dy = yj - yi;
+        let intersects =
+            dy.abs() > f32::EPSILON && (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / dy + xi;
+        if intersects {
+            inside = !inside;
+        }
+        previous = current;
+    }
+
+    inside
 }
 
 fn lerp_rgb(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {

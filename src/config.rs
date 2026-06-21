@@ -39,6 +39,7 @@ fn default_workspace_enabled_pages() -> Vec<String> {
         "projects".to_string(),
         "merge".to_string(),
         "deploy".to_string(),
+        "proxy".to_string(),
     ]
 }
 
