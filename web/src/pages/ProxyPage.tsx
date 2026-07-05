@@ -18,9 +18,11 @@ import {
   Tooltip,
   Typography,
 } from "@mui/material";
+import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
   ProxyDashboard,
   ProxyEvent,
+  ProxyOutboundMode,
   ProxyProfile,
   ProxyRule,
   ProxyRuleAction,
@@ -29,6 +31,7 @@ import {
   CheckIcon,
   ClearIcon,
   CopyIcon,
+  DownloadIcon,
   EditIcon,
   PlusIcon,
   RefreshIcon,
@@ -36,6 +39,8 @@ import {
   StarIcon,
   StopIcon,
   TrashIcon,
+  UploadIcon,
+  WebsiteIcon,
 } from "../components/AppIcons";
 
 const HTTP_METHODS = ["", "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
@@ -45,7 +50,22 @@ const ACTION_KINDS: Array<{ value: ProxyRuleAction["kind"]; label: string }> = [
   { value: "block", label: "阻断" },
 ];
 
-type ProxyView = "config" | "requests";
+const OUTBOUND_MODES: Array<{ value: ProxyOutboundMode; label: string; helper: string }> = [
+  { value: "inherit", label: "继承默认", helper: "使用服务配置里的上游代理；为空则直连" },
+  { value: "direct", label: "直连", helper: "这条规则不走任何上游代理" },
+  { value: "proxy", label: "指定代理", helper: "仅这条规则走指定 HTTP/SOCKS 上游" },
+];
+
+type RequestFilter = "all" | "success" | "failed" | "mock" | "forward" | "block";
+
+const REQUEST_FILTERS: Array<{ value: RequestFilter; label: string }> = [
+  { value: "all", label: "全部" },
+  { value: "success", label: "成功" },
+  { value: "failed", label: "失败" },
+  { value: "mock", label: "Mock" },
+  { value: "forward", label: "转发" },
+  { value: "block", label: "阻断" },
+];
 
 export type ProxyPageProps = {
   dashboard: ProxyDashboard | null;
@@ -62,8 +82,8 @@ export type ProxyPageProps = {
   onStartProfile: (profileId: string) => Promise<ProxyDashboard> | void;
   onStopProfile: (profileId: string) => Promise<ProxyDashboard> | void;
   onClearEvents: (profileId?: string | null) => Promise<ProxyDashboard> | void;
-  demoAvailable?: boolean;
-  onLoadDemoData?: () => void;
+  onExportProfilePack: (profileId: string, path: string) => Promise<ProxyDashboard> | void;
+  onImportProfilePack: (path: string) => Promise<ProxyDashboard> | void;
 };
 
 function newId(prefix: string) {
@@ -135,6 +155,8 @@ function defaultAction(kind: ProxyRuleAction["kind"]): ProxyRuleAction {
     rewritePrefix: "",
     requestHeaders: {},
     responseHeaders: {},
+    outboundMode: "inherit",
+    outboundProxy: "",
     delayMs: 0,
   };
 }
@@ -254,8 +276,57 @@ function actionLabel(action: string) {
   return "转发";
 }
 
+function eventMatchesRequestFilter(event: ProxyEvent, filter: RequestFilter) {
+  if (filter === "all") {
+    return true;
+  }
+  if (filter === "success") {
+    return !event.error && typeof event.status === "number" && event.status >= 200 && event.status < 400;
+  }
+  if (filter === "failed") {
+    return Boolean(event.error) || event.action === "error" || (typeof event.status === "number" && event.status >= 400);
+  }
+  if (filter === "forward") {
+    return event.action !== "mock" && event.action !== "block" && event.action !== "error";
+  }
+  return event.action === filter;
+}
+
+function eventMatchesQuery(event: ProxyEvent, query: string) {
+  const keyword = query.trim().toLowerCase();
+  if (!keyword) {
+    return true;
+  }
+  return [
+    event.method,
+    event.url,
+    event.path,
+    String(event.status ?? ""),
+    event.action,
+    actionLabel(event.action),
+    event.profileName,
+    event.matchedRuleName ?? "",
+    event.error ?? "",
+  ]
+    .join(" ")
+    .toLowerCase()
+    .includes(keyword);
+}
+
 function actionKindLabel(kind: ProxyRuleAction["kind"]) {
   return ACTION_KINDS.find((item) => item.value === kind)?.label ?? kind;
+}
+
+function outboundModeLabel(mode?: ProxyOutboundMode) {
+  return OUTBOUND_MODES.find((item) => item.value === (mode ?? "inherit"))?.label ?? "继承默认";
+}
+
+function forwardOutboundMode(action: Extract<ProxyRuleAction, { kind: "forward" }>) {
+  return action.outboundMode ?? "inherit";
+}
+
+function forwardOutboundProxy(action: Extract<ProxyRuleAction, { kind: "forward" }>) {
+  return action.outboundProxy ?? "";
 }
 
 function activateRow(event: KeyboardEvent<HTMLElement>, action: () => void) {
@@ -264,6 +335,16 @@ function activateRow(event: KeyboardEvent<HTMLElement>, action: () => void) {
   }
   event.preventDefault();
   action();
+}
+
+function safeFileName(value: string) {
+  const normalized = value
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, "-")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  return normalized || "rdevtool-proxy";
 }
 
 export function ProxyPage({
@@ -281,8 +362,8 @@ export function ProxyPage({
   onStartProfile,
   onStopProfile,
   onClearEvents,
-  demoAvailable = false,
-  onLoadDemoData,
+  onExportProfilePack,
+  onImportProfilePack,
 }: ProxyPageProps) {
   const statuses = useMemo(() => statusByProfile(dashboard), [dashboard]);
   const profiles = dashboard?.config.profiles ?? [];
@@ -309,14 +390,26 @@ export function ProxyPage({
   const [ruleDraft, setRuleDraft] = useState<ProxyRule | null>(null);
   const [profileDialogOpen, setProfileDialogOpen] = useState(false);
   const [ruleDialogOpen, setRuleDialogOpen] = useState(false);
-  const [view, setView] = useState<ProxyView>("config");
+  const [requestsDialogOpen, setRequestsDialogOpen] = useState(false);
+  const [requestQuery, setRequestQuery] = useState("");
+  const [requestFilter, setRequestFilter] = useState<RequestFilter>("all");
   const [selectedEventId, setSelectedEventId] = useState("");
   const [formError, setFormError] = useState("");
   const [copiedKey, setCopiedKey] = useState("");
   const [requestHeadersText, setRequestHeadersText] = useState("");
   const [responseHeadersText, setResponseHeadersText] = useState("");
   const [mockHeadersText, setMockHeadersText] = useState("");
-  const selectedEvent = events.find((event) => event.id === selectedEventId) ?? events[0] ?? null;
+  const filteredEvents = useMemo(
+    () =>
+      events.filter(
+        (event) =>
+          eventMatchesRequestFilter(event, requestFilter) &&
+          eventMatchesQuery(event, requestQuery),
+      ),
+    [events, requestFilter, requestQuery],
+  );
+  const selectedEvent =
+    filteredEvents.find((event) => event.id === selectedEventId) ?? filteredEvents[0] ?? null;
   const nextPort =
     Array.from({ length: 20 }, (_, index) => 8787 + index).find(
       (port) => !profiles.some((profile) => profile.listenPort === port),
@@ -326,11 +419,11 @@ export function ProxyPage({
     ruleDraft && rules.some((rule) => rule.id === ruleDraft.id) ? ruleDraft : null;
 
   useEffect(() => {
-    if (!selectedEvent || events.some((event) => event.id === selectedEventId)) {
+    if (!selectedEvent || filteredEvents.some((event) => event.id === selectedEventId)) {
       return;
     }
     setSelectedEventId(selectedEvent.id);
-  }, [events, selectedEvent, selectedEventId]);
+  }, [filteredEvents, selectedEvent, selectedEventId]);
 
   function openProfileDialog(profile: ProxyProfile) {
     setFormError("");
@@ -445,6 +538,10 @@ export function ProxyPage({
     let action = ruleDraft.action;
     try {
       if (action.kind === "forward") {
+        if ((action.outboundMode ?? "inherit") === "proxy" && !action.outboundProxy.trim()) {
+          setFormError("选择指定代理时，上游代理地址不能为空");
+          return;
+        }
         action = {
           ...action,
           requestHeaders: parseHeaderText(requestHeadersText),
@@ -472,6 +569,60 @@ export function ProxyPage({
     closeRuleDialog();
   }
 
+  async function importProfilePack() {
+    try {
+      const selected = await open({
+        title: "导入代理包",
+        multiple: false,
+        directory: false,
+        filters: [
+          { name: "rDevTool Proxy Pack", extensions: ["json"] },
+        ],
+      });
+      if (typeof selected !== "string") {
+        return;
+      }
+      if (
+        !window.confirm(
+          "导入会创建一个新的代理服务，并把包内规则归属到新服务，不会覆盖现有服务。继续？",
+        )
+      ) {
+        return;
+      }
+      await onImportProfilePack(selected);
+    } catch (reason) {
+      setFormError(String(reason instanceof Error ? reason.message : reason));
+    }
+  }
+
+  async function exportSelectedProfilePack() {
+    if (!selectedProfile) {
+      return;
+    }
+    if (
+      !window.confirm(
+        "导出的代理包会包含当前服务配置、规则、Header、Mock Body 和上游地址。请确认其中没有敏感信息。",
+      )
+    ) {
+      return;
+    }
+    try {
+      const selected = await save({
+        title: "导出代理包",
+        defaultPath: `${safeFileName(selectedProfile.name)}.rdevproxy.json`,
+        filters: [
+          { name: "rDevTool Proxy Pack", extensions: ["json"] },
+        ],
+      });
+      if (typeof selected !== "string") {
+        return;
+      }
+      await onExportProfilePack(selectedProfile.id, selected);
+    } catch (reason) {
+      setFormError(String(reason instanceof Error ? reason.message : reason));
+    }
+  }
+
   if (!dashboard && loading) {
     return (
       <Box className="workspace workspace--narrow proxy-workspace">
@@ -490,29 +641,7 @@ export function ProxyPage({
         </Stack>
       ) : null}
 
-      <Box className="proxy-view-tabs" role="tablist" aria-label="代理子页面">
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "config"}
-          className={`proxy-view-tab${view === "config" ? " is-active" : ""}`}
-          onClick={() => setView("config")}
-        >
-          <span>配置</span>
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={view === "requests"}
-          className={`proxy-view-tab${view === "requests" ? " is-active" : ""}`}
-          onClick={() => setView("requests")}
-        >
-          <span>请求</span>
-        </button>
-      </Box>
-
-      <Box className={`proxy-main-grid proxy-main-grid--${view}`}>
-        {view === "config" ? (
+      <Box className="proxy-main-grid proxy-main-grid--config">
         <section className="workflow-panel proxy-control-panel" aria-label="代理服务与规则">
           <Box className="proxy-control-split">
             <Box component="section" className="proxy-section proxy-service-panel" aria-labelledby="proxy-service-title">
@@ -520,7 +649,35 @@ export function ProxyPage({
                 id="proxy-service-title"
                 title="服务"
                 aside={
-                  <Stack direction="row" spacing={0.6}>
+                  <Stack direction="row" spacing={0.6} alignItems="center">
+                    <Button
+                      className="proxy-request-open-button"
+                      variant="outlined"
+                      color="inherit"
+                      startIcon={<WebsiteIcon fontSize="small" />}
+                      disabled={!selectedProfile}
+                      onClick={() => setRequestsDialogOpen(true)}
+                    >
+                      请求 {events.length}
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      color="inherit"
+                      startIcon={<UploadIcon fontSize="small" />}
+                      disabled={Boolean(busy)}
+                      onClick={() => void importProfilePack()}
+                    >
+                      导入
+                    </Button>
+                    <Button
+                      variant="outlined"
+                      color="inherit"
+                      startIcon={<DownloadIcon fontSize="small" />}
+                      disabled={!selectedProfile || Boolean(busy)}
+                      onClick={() => void exportSelectedProfilePack()}
+                    >
+                      导出
+                    </Button>
                     <Tooltip title="新建代理配置">
                       <IconButton
                         aria-label="新建代理配置"
@@ -538,7 +695,11 @@ export function ProxyPage({
                 }
               />
 
-              <Box className="proxy-card-list module-list-scroll" role="list" aria-label="代理服务列表">
+              <Box
+                className={`proxy-card-list module-list-scroll${profiles.length === 0 ? " is-empty" : ""}`}
+                role="list"
+                aria-label="代理服务列表"
+              >
                 {profiles.length > 0 ? (
                   profiles.map((profile) => {
                     const status = statuses.get(profile.id);
@@ -622,11 +783,7 @@ export function ProxyPage({
                     );
                   })
                 ) : (
-                  <EmptyProxyState
-                    text="暂无代理配置。"
-                    demoAvailable={demoAvailable}
-                    onLoadDemoData={onLoadDemoData}
-                  />
+                  <EmptyProxyState text="暂无代理配置。" />
                 )}
               </Box>
             </Box>
@@ -652,7 +809,11 @@ export function ProxyPage({
                 }
               />
 
-              <Box className="proxy-card-list module-list-scroll" role="list" aria-label="代理规则列表">
+              <Box
+                className={`proxy-card-list module-list-scroll${rules.length === 0 ? " is-empty" : ""}`}
+                role="list"
+                aria-label="代理规则列表"
+              >
                 {rules.length > 0 ? (
                   rules.map((rule) => (
                     <Box
@@ -683,6 +844,13 @@ export function ProxyPage({
                           </small>
                           <span className="proxy-list-meta">
                             <Chip size="small" label={actionKindLabel(rule.action.kind)} variant="outlined" />
+                            {rule.action.kind === "forward" ? (
+                              <Chip
+                                size="small"
+                                label={`出站 ${outboundModeLabel(forwardOutboundMode(rule.action))}`}
+                                variant="outlined"
+                              />
+                            ) : null}
                             <Chip size="small" label={`优先级 ${rule.priority}`} variant="outlined" />
                             {rule.action.delayMs > 0 ? (
                               <Chip size="small" label={`${formatNumber(rule.action.delayMs)} ms`} variant="outlined" />
@@ -700,49 +868,98 @@ export function ProxyPage({
                     </Box>
                   ))
                 ) : (
-                  <EmptyProxyState
-                    text="暂无规则。"
-                    demoAvailable={demoAvailable}
-                    onLoadDemoData={onLoadDemoData}
-                  />
+                  <EmptyProxyState text="暂无规则。" />
                 )}
               </Box>
             </Box>
           </Box>
         </section>
-        ) : null}
+      </Box>
 
-        {view === "requests" ? (
-        <section className="workflow-panel proxy-traffic-panel" aria-labelledby="proxy-traffic-title">
-          <PanelHeader
-            id="proxy-traffic-title"
-            title="请求"
-            aside={
-              <Stack direction="row" spacing={0.6}>
-                <Tooltip title="刷新请求记录">
-                  <IconButton onClick={() => void onRefresh()} aria-label="刷新请求记录">
-                    <RefreshIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-                <Tooltip title="清空当前代理记录">
-                  <span>
-                    <IconButton
-                      onClick={() => void onClearEvents(selectedProfile?.id)}
-                      disabled={!selectedProfile || events.length === 0 || Boolean(busy)}
-                      aria-label="清空当前代理记录"
-                    >
-                      <ClearIcon fontSize="small" />
-                    </IconButton>
-                  </span>
-                </Tooltip>
-              </Stack>
-            }
-          />
+      <Dialog
+        open={requestsDialogOpen}
+        onClose={() => setRequestsDialogOpen(false)}
+        maxWidth="lg"
+        fullWidth
+        className="proxy-requests-dialog"
+      >
+        <DialogTitle>
+          <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+            <Stack direction="row" alignItems="center" spacing={0.8} minWidth={0}>
+              <WebsiteIcon fontSize="small" />
+              <span>请求</span>
+              <Chip size="small" label={`${filteredEvents.length} / ${events.length} 条`} variant="outlined" />
+            </Stack>
+            <Stack direction="row" spacing={0.6}>
+              <Tooltip title="刷新请求记录">
+                <IconButton onClick={() => void onRefresh()} aria-label="刷新请求记录">
+                  <RefreshIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="关闭">
+                <IconButton
+                  onClick={() => setRequestsDialogOpen(false)}
+                  aria-label="关闭请求面板"
+                >
+                  <ClearIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Stack>
+          </Stack>
+        </DialogTitle>
+        <DialogContent>
+          <Box className="proxy-requests-shell">
+            <Box className="proxy-requests-toolbar">
+              <TextField
+                size="small"
+                value={requestQuery}
+                onChange={(event) => setRequestQuery(event.target.value)}
+                placeholder="搜索接口 / 路径 / 状态 / 规则"
+                inputProps={{ "aria-label": "搜索请求记录" }}
+              />
+              <Box className="proxy-request-filter-group" aria-label="筛选请求记录">
+                {REQUEST_FILTERS.map((filter) => (
+                  <Chip
+                    key={filter.value}
+                    label={filter.label}
+                    color={requestFilter === filter.value ? "primary" : "default"}
+                    variant={requestFilter === filter.value ? "filled" : "outlined"}
+                    onClick={() => setRequestFilter(filter.value)}
+                    clickable
+                  />
+                ))}
+              </Box>
+              <Button
+                variant="outlined"
+                color="inherit"
+                startIcon={<ClearIcon fontSize="small" />}
+                disabled={!requestQuery && requestFilter === "all"}
+                onClick={() => {
+                  setRequestQuery("");
+                  setRequestFilter("all");
+                }}
+              >
+                重置
+              </Button>
+              <Button
+                variant="outlined"
+                color="inherit"
+                startIcon={<TrashIcon fontSize="small" />}
+                disabled={!selectedProfile || events.length === 0 || Boolean(busy)}
+                onClick={() => void onClearEvents(selectedProfile?.id)}
+              >
+                清空
+              </Button>
+            </Box>
 
-          <Box className="proxy-traffic-grid">
-            <Box className="proxy-event-list module-list-scroll" role="list" aria-label="代理请求记录">
-              {events.length > 0 ? (
-                events.map((event) => (
+            <Box className="proxy-traffic-grid proxy-requests-modal-grid">
+            <Box
+              className={`proxy-event-list module-list-scroll${filteredEvents.length === 0 ? " is-empty" : ""}`}
+              role="list"
+              aria-label="代理请求记录"
+            >
+              {filteredEvents.length > 0 ? (
+                filteredEvents.map((event) => (
                   <Box
                     component="div"
                     key={event.id}
@@ -787,13 +1004,15 @@ export function ProxyPage({
                   </Box>
                 ))
               ) : (
-                <Typography variant="body2" color="text.secondary">
-                  暂无请求记录。
+                <Typography className="proxy-empty-copy" variant="body2" color="text.secondary">
+                  {events.length > 0 ? "没有匹配的请求。" : "暂无请求记录。"}
                 </Typography>
               )}
             </Box>
 
-            <Box className="proxy-event-detail module-list-scroll">
+            <Box
+              className={`proxy-event-detail module-list-scroll${selectedEvent ? "" : " is-empty"}`}
+            >
               {selectedEvent ? (
                 <Stack spacing={1} minWidth={0}>
                   <Stack direction="row" spacing={0.6} alignItems="center" flexWrap="wrap" useFlexGap>
@@ -828,15 +1047,15 @@ export function ProxyPage({
                   </Box>
                 </Stack>
               ) : (
-                <Typography variant="body2" color="text.secondary">
+                <Typography className="proxy-empty-copy" variant="body2" color="text.secondary">
                   选择一条请求查看详情。
                 </Typography>
               )}
             </Box>
           </Box>
-        </section>
-        ) : null}
-      </Box>
+          </Box>
+        </DialogContent>
+      </Dialog>
 
       <ProfileDialog
         open={profileDialogOpen}
@@ -885,7 +1104,14 @@ function eventsForProfile(dashboard: ProxyDashboard | null, profileId: string) {
 
 function PanelHeader({ id, title, aside }: { id: string; title: string; aside?: ReactNode }) {
   return (
-    <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1} minWidth={0}>
+    <Stack
+      className="proxy-panel-header"
+      direction="row"
+      alignItems="center"
+      justifyContent="space-between"
+      spacing={1}
+      minWidth={0}
+    >
       <Typography id={id} variant="h6" sx={{ fontWeight: 820, textWrap: "balance" }}>
         {title}
       </Typography>
@@ -894,30 +1120,12 @@ function PanelHeader({ id, title, aside }: { id: string; title: string; aside?: 
   );
 }
 
-function EmptyProxyState({
-  text,
-  demoAvailable,
-  onLoadDemoData,
-}: {
-  text: string;
-  demoAvailable: boolean;
-  onLoadDemoData?: () => void;
-}) {
+function EmptyProxyState({ text }: { text: string }) {
   return (
     <Stack spacing={0.7} alignItems="flex-start" className="proxy-empty-state">
       <Typography variant="body2" color="text.secondary">
         {text}
       </Typography>
-      {demoAvailable && onLoadDemoData ? (
-        <Button
-          variant="outlined"
-          color="inherit"
-          startIcon={<PlusIcon fontSize="small" />}
-          onClick={onLoadDemoData}
-        >
-          载入示例数据
-        </Button>
-      ) : null}
     </Stack>
   );
 }
@@ -947,98 +1155,163 @@ function ProfileDialog({
 }) {
   const proxyUrl = selectedStatusUrl || (draft ? `http://${draft.listenHost}:${draft.listenPort}` : "");
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="sm" fullWidth className="proxy-config-dialog">
-      <DialogTitle>{draft?.name ? "代理配置" : "新建代理"}</DialogTitle>
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth className="proxy-config-dialog">
+      <DialogTitle>
+        <Stack className="proxy-profile-title" direction="row" alignItems="flex-start" justifyContent="space-between" gap={1}>
+          <Box minWidth={0}>
+            <Typography variant="h6">{draft?.name ? "代理配置" : "新建代理"}</Typography>
+            <Typography variant="body2" color="text.secondary">
+              配置本机监听入口、默认转发目标和请求记录策略。
+            </Typography>
+          </Box>
+          {proxyUrl ? <Chip className="proxy-profile-url-chip" label={proxyUrl} size="small" /> : null}
+        </Stack>
+      </DialogTitle>
       <DialogContent dividers>
         {error ? <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert> : null}
         {draft ? (
-          <Stack spacing={1.2} minWidth={0}>
-            <TextField
-              label="名称"
-              name="proxy-profile-name"
-              autoComplete="off"
-              value={draft.name}
-              onChange={(event) => onChange({ name: event.target.value })}
-            />
-            <Box className="proxy-two-fields">
-              <TextField
-                label="监听地址"
-                name="proxy-listen-host"
-                autoComplete="off"
-                value={draft.listenHost}
-                onChange={(event) => onChange({ listenHost: event.target.value })}
-                inputProps={{ spellCheck: false, translate: "no" }}
-              />
-              <TextField
-                label="端口"
-                name="proxy-listen-port"
-                type="number"
-                inputMode="numeric"
-                autoComplete="off"
-                value={draft.listenPort}
-                onChange={(event) =>
-                  onChange({ listenPort: Math.max(1, Number(event.target.value) || 0) })
-                }
-              />
-            </Box>
-            <TextField
-              label="上游地址"
-              name="proxy-upstream-base-url"
-              autoComplete="off"
-              value={draft.upstreamBaseUrl}
-              onChange={(event) => onChange({ upstreamBaseUrl: event.target.value })}
-              helperText="可空。为空时按请求原目标转发。"
-              inputProps={{ spellCheck: false, translate: "no" }}
-            />
-            <TextField
-              label="上游代理"
-              name="proxy-upstream-proxy"
-              autoComplete="off"
-              value={draft.upstreamProxy}
-              onChange={(event) => onChange({ upstreamProxy: event.target.value })}
-              helperText="可空，例如 socks5://127.0.0.1:7890"
-              inputProps={{ spellCheck: false, translate: "no" }}
-            />
-            <Box className="proxy-two-fields">
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={draft.captureBody}
-                    onChange={(event) => onChange({ captureBody: event.target.checked })}
-                  />
-                }
-                label="记录正文"
-              />
-              <TextField
-                label="正文预览字节"
-                name="proxy-max-body-bytes"
-                type="number"
-                inputMode="numeric"
-                autoComplete="off"
-                value={draft.maxBodyBytes}
-                onChange={(event) =>
-                  onChange({ maxBodyBytes: Math.max(512, Number(event.target.value) || 512) })
-                }
-              />
-            </Box>
-            {proxyUrl ? (
-              <Stack spacing={0.55}>
-                {[
-                  ["HTTP_PROXY", proxyUrl],
-                  ["HTTPS_PROXY", proxyUrl],
-                ].map(([key, value]) => (
-                  <Button
-                    key={key}
-                    variant="text"
-                    color="inherit"
-                    onClick={() => void onCopy(key, `${key}=${value}`)}
-                    startIcon={copiedKey === key ? <CheckIcon fontSize="small" /> : <CopyIcon fontSize="small" />}
-                    sx={{ justifyContent: "flex-start", fontFamily: "monospace" }}
-                  >
-                    {key}={value}
-                  </Button>
-                ))}
+          <Stack className="proxy-profile-form" spacing={1.1} minWidth={0}>
+            <Box className="proxy-profile-section">
+              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                <Box minWidth={0}>
+                  <Typography variant="subtitle2">监听入口</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    其他应用连接到这个本地地址后，请求会进入 rDevTool 代理服务。
+                  </Typography>
+                </Box>
+                <Chip label="HTTP / HTTPS" size="small" />
               </Stack>
+              <Stack spacing={1}>
+                <TextField
+                  label="名称"
+                  name="proxy-profile-name"
+                  autoComplete="off"
+                  value={draft.name}
+                  onChange={(event) => onChange({ name: event.target.value })}
+                />
+                <Box className="proxy-two-fields">
+                  <TextField
+                    label="监听地址"
+                    name="proxy-listen-host"
+                    autoComplete="off"
+                    value={draft.listenHost}
+                    onChange={(event) => onChange({ listenHost: event.target.value })}
+                    inputProps={{ spellCheck: false, translate: "no" }}
+                  />
+                  <TextField
+                    label="端口"
+                    name="proxy-listen-port"
+                    type="number"
+                    inputMode="numeric"
+                    autoComplete="off"
+                    value={draft.listenPort}
+                    onChange={(event) =>
+                      onChange({ listenPort: Math.max(1, Number(event.target.value) || 0) })
+                    }
+                  />
+                </Box>
+              </Stack>
+            </Box>
+
+            <Box className="proxy-profile-section proxy-profile-section--route">
+              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                <Box minWidth={0}>
+                  <Typography variant="subtitle2">默认转发</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    没有被规则改写时使用；规则里的出站设置可以覆盖这里。
+                  </Typography>
+                </Box>
+                <Chip label={draft.upstreamProxy ? "代理中转" : "默认直连"} size="small" color={draft.upstreamProxy ? "primary" : "default"} />
+              </Stack>
+              <Box className="proxy-two-fields">
+                <TextField
+                  label="上游地址"
+                  name="proxy-upstream-base-url"
+                  autoComplete="off"
+                  placeholder="https://api.example.com"
+                  value={draft.upstreamBaseUrl}
+                  onChange={(event) => onChange({ upstreamBaseUrl: event.target.value })}
+                  helperText="可空。用于相对路径请求的默认目标；为空时按请求原目标转发。"
+                  inputProps={{ spellCheck: false, translate: "no" }}
+                />
+                <TextField
+                  label="上游代理"
+                  name="proxy-upstream-proxy"
+                  autoComplete="off"
+                  placeholder="socks5://127.0.0.1:7890"
+                  value={draft.upstreamProxy}
+                  onChange={(event) => onChange({ upstreamProxy: event.target.value })}
+                  helperText="可空。作为服务默认出站代理；规则选择“继承默认”时使用。"
+                  inputProps={{ spellCheck: false, translate: "no" }}
+                />
+              </Box>
+            </Box>
+
+            <Box className="proxy-profile-section proxy-profile-section--capture">
+              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                <Box minWidth={0}>
+                  <Typography variant="subtitle2">记录</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    控制请求面板里是否保存 Body 预览，Header 与基础信息会继续记录。
+                  </Typography>
+                </Box>
+                <Switch
+                  checked={draft.captureBody}
+                  onChange={(event) => onChange({ captureBody: event.target.checked })}
+                  inputProps={{ "aria-label": "记录正文" }}
+                />
+              </Stack>
+              <Box className="proxy-two-fields proxy-profile-capture-grid">
+                <Box className="proxy-profile-capture-card">
+                  <Typography variant="body2" sx={{ fontWeight: 780 }}>记录正文</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    {draft.captureBody ? "已开启，会保存请求与响应正文预览。" : "已关闭，只记录 URL、状态码、耗时和 Header。"}
+                  </Typography>
+                </Box>
+                <TextField
+                  label="正文预览字节"
+                  name="proxy-max-body-bytes"
+                  type="number"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  value={draft.maxBodyBytes}
+                  onChange={(event) =>
+                    onChange({ maxBodyBytes: Math.max(512, Number(event.target.value) || 512) })
+                  }
+                  helperText="每个请求/响应最多保留的正文预览大小。"
+                />
+              </Box>
+            </Box>
+
+            {proxyUrl ? (
+              <Box className="proxy-profile-section proxy-profile-section--env">
+                <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                  <Box minWidth={0}>
+                    <Typography variant="subtitle2">环境变量</Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      复制到终端或项目运行配置里，让命令行请求走这个代理入口。
+                    </Typography>
+                  </Box>
+                </Stack>
+                <Box className="proxy-profile-env-list">
+                  {[
+                    ["HTTP_PROXY", proxyUrl],
+                    ["HTTPS_PROXY", proxyUrl],
+                  ].map(([key, value]) => (
+                    <Button
+                      key={key}
+                      className="proxy-profile-env-button"
+                      variant="outlined"
+                      color="inherit"
+                      onClick={() => void onCopy(key, `${key}=${value}`)}
+                      startIcon={copiedKey === key ? <CheckIcon fontSize="small" /> : <CopyIcon fontSize="small" />}
+                    >
+                      <span>{key}</span>
+                      <code>{value}</code>
+                    </Button>
+                  ))}
+                </Box>
+              </Box>
             ) : null}
           </Stack>
         ) : null}
@@ -1090,13 +1363,15 @@ function RuleDialog({
   onSave: () => void;
   onDelete: (() => void) | null;
 }) {
+  const forwardAction = draft?.action.kind === "forward" ? draft.action : null;
+
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth className="proxy-config-dialog">
+    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth className="proxy-config-dialog proxy-rule-dialog">
       <DialogTitle>{draft?.name ? "规则配置" : "新建规则"}</DialogTitle>
       <DialogContent dividers>
         {error ? <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert> : null}
         {draft ? (
-          <Stack spacing={1.15} minWidth={0}>
+          <Stack spacing={0.85} minWidth={0}>
             <Box className="proxy-two-fields">
               <TextField
                 label="规则名称"
@@ -1203,42 +1478,89 @@ function RuleDialog({
               />
             </Box>
 
-            {draft.action.kind === "forward" ? (
-              <Stack spacing={1.05}>
-                <Box className="proxy-two-fields">
-                  <TextField
-                    label="目标上游"
-                    name="proxy-rule-target-base-url"
-                    autoComplete="off"
-                    value={draft.action.targetBaseUrl}
-                    onChange={(event) => onForwardChange({ targetBaseUrl: event.target.value })}
-                    inputProps={{ spellCheck: false, translate: "no" }}
-                  />
-                  <TextField
-                    label="重写前缀"
-                    name="proxy-rule-rewrite-prefix"
-                    autoComplete="off"
-                    value={draft.action.rewritePrefix}
-                    onChange={(event) => onForwardChange({ rewritePrefix: event.target.value })}
-                    inputProps={{ spellCheck: false, translate: "no" }}
-                  />
+            {forwardAction ? (
+              <Stack spacing={0.85}>
+                <Box className="proxy-rule-subsection">
+                  <span>
+                    <b>目标</b>
+                    <small>只决定请求转发到哪里，不决定是否走代理。</small>
+                  </span>
+                  <Box className="proxy-two-fields">
+                    <TextField
+                      label="转发到"
+                      name="proxy-rule-target-base-url"
+                      autoComplete="off"
+                      placeholder="为空则使用原请求地址"
+                      value={forwardAction.targetBaseUrl}
+                      onChange={(event) => onForwardChange({ targetBaseUrl: event.target.value })}
+                      inputProps={{ spellCheck: false, translate: "no" }}
+                    />
+                    <TextField
+                      label="路径改写"
+                      name="proxy-rule-rewrite-prefix"
+                      autoComplete="off"
+                      placeholder="例如 /mock-api"
+                      value={forwardAction.rewritePrefix}
+                      onChange={(event) => onForwardChange({ rewritePrefix: event.target.value })}
+                      inputProps={{ spellCheck: false, translate: "no" }}
+                    />
+                  </Box>
+                </Box>
+                <Box className="proxy-rule-subsection">
+                  <span>
+                    <b>出站</b>
+                    <small>{OUTBOUND_MODES.find((item) => item.value === forwardOutboundMode(forwardAction))?.helper}</small>
+                  </span>
+                  <Box className="proxy-two-fields">
+                    <TextField
+                      select
+                      label="出站策略"
+                      name="proxy-rule-outbound-mode"
+                      value={forwardOutboundMode(forwardAction)}
+                      onChange={(event) =>
+                        onForwardChange({
+                          outboundMode: event.target.value as ProxyOutboundMode,
+                          outboundProxy:
+                            event.target.value === "proxy"
+                              ? forwardOutboundProxy(forwardAction)
+                              : "",
+                        })
+                      }
+                    >
+                      {OUTBOUND_MODES.map((item) => (
+                        <MenuItem key={item.value} value={item.value}>
+                          {item.label}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                    <TextField
+                      label="指定上游代理"
+                      name="proxy-rule-outbound-proxy"
+                      autoComplete="off"
+                      placeholder="socks5://127.0.0.1:7890"
+                      value={forwardOutboundProxy(forwardAction)}
+                      onChange={(event) => onForwardChange({ outboundProxy: event.target.value })}
+                      disabled={forwardOutboundMode(forwardAction) !== "proxy"}
+                      inputProps={{ spellCheck: false, translate: "no" }}
+                    />
+                  </Box>
                 </Box>
                 <Box className="proxy-two-fields">
                   <TextField
-                    label="请求 Header"
+                    label="追加请求 Header"
                     name="proxy-rule-request-headers"
                     multiline
-                    minRows={3}
+                    minRows={2}
                     autoComplete="off"
                     value={requestHeadersText}
                     onChange={(event) => onRequestHeadersTextChange(event.target.value)}
                     inputProps={{ spellCheck: false, translate: "no" }}
                   />
                   <TextField
-                    label="响应 Header"
+                    label="追加响应 Header"
                     name="proxy-rule-response-headers"
                     multiline
-                    minRows={3}
+                    minRows={2}
                     autoComplete="off"
                     value={responseHeadersText}
                     onChange={(event) => onResponseHeadersTextChange(event.target.value)}
@@ -1249,7 +1571,7 @@ function RuleDialog({
             ) : null}
 
             {draft.action.kind === "mock" ? (
-              <Stack spacing={1.05}>
+              <Stack spacing={0.85}>
                 <Box className="proxy-two-fields">
                   <TextField
                     label="状态码"
@@ -1283,7 +1605,7 @@ function RuleDialog({
                   label="响应正文"
                   name="proxy-rule-mock-body"
                   multiline
-                  minRows={5}
+                  minRows={4}
                   autoComplete="off"
                   value={draft.action.body}
                   onChange={(event) => onMockChange({ body: event.target.value })}
@@ -1293,7 +1615,7 @@ function RuleDialog({
             ) : null}
 
             {draft.action.kind === "block" ? (
-              <Stack spacing={1.05}>
+              <Stack spacing={0.85}>
                 <TextField
                   label="状态码"
                   name="proxy-rule-block-status"
@@ -1307,7 +1629,7 @@ function RuleDialog({
                   label="阻断响应"
                   name="proxy-rule-block-body"
                   multiline
-                  minRows={4}
+                  minRows={3}
                   autoComplete="off"
                   value={draft.action.body}
                   onChange={(event) => onBlockChange({ body: event.target.value })}

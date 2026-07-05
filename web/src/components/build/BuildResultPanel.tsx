@@ -9,7 +9,7 @@ import {
   Typography,
 } from "@mui/material";
 import { useEffect, useState } from "react";
-import type { BuildResult } from "../../hooks/useDeployHistory";
+import type { BuildResult } from "../../hooks/useBuildHistory";
 import {
   CheckIcon,
   CollapseIcon,
@@ -80,7 +80,7 @@ function BuildStatusFreshness({
   );
 }
 
-type DeployResultRowProps = {
+type BuildResultRowProps = {
   label: string;
   value?: string | number | null;
   copyKey?: string;
@@ -88,13 +88,13 @@ type DeployResultRowProps = {
   onCopy?: (field: string, value?: string | number | null) => void;
 };
 
-function DeployResultRow({
+function BuildResultRow({
   label,
   value,
   copyKey,
   copied = false,
   onCopy,
-}: DeployResultRowProps) {
+}: BuildResultRowProps) {
   const textValue = value === null || value === undefined || value === "" ? "-" : String(value);
   const canCopy = Boolean(copyKey && textValue !== "-" && onCopy);
 
@@ -144,7 +144,7 @@ function DeployResultRow({
   );
 }
 
-type DeployResultPanelProps = {
+type BuildResultPanelProps = {
   buildResult: BuildResult | null;
   buildResultUpdatedAtMs: number;
   buildAutoRefreshTimedOut: boolean;
@@ -154,7 +154,7 @@ type DeployResultPanelProps = {
   onOpenBuildRecord: () => void;
 };
 
-export function DeployResultPanel({
+export function BuildResultPanel({
   buildResult,
   buildResultUpdatedAtMs,
   buildAutoRefreshTimedOut,
@@ -162,7 +162,7 @@ export function DeployResultPanel({
   onCopy,
   onRefreshBuild,
   onOpenBuildRecord,
-}: DeployResultPanelProps) {
+}: BuildResultPanelProps) {
   const [expanded, setExpanded] = useState(true);
   const [nowMs, setNowMs] = useState(Date.now());
   const canRefreshBuild = Boolean(buildResult?.queueUrl || buildResult?.buildUrl);
@@ -196,7 +196,7 @@ export function DeployResultPanel({
             结果
           </Typography>
           <Stack direction="row" spacing={0.8} alignItems="center" flexWrap="wrap" rowGap={0.5} justifyContent="flex-end">
-            <IconButton onClick={onRefreshBuild} disabled={!canRefreshBuild} size="small" title="刷新部署状态">
+            <IconButton onClick={onRefreshBuild} disabled={!canRefreshBuild} size="small" title="刷新构建状态">
               <RefreshIcon fontSize="small" />
             </IconButton>
             <IconButton onClick={onOpenBuildRecord} disabled={!canRefreshBuild} size="small" title="打开构建记录页">
@@ -212,7 +212,7 @@ export function DeployResultPanel({
                 onRefresh={onRefreshBuild}
               />
             ) : null}
-            <IconButton size="small" onClick={() => setExpanded((current) => !current)} title={expanded ? "收起部署结果" : "展开部署结果"}>
+            <IconButton size="small" onClick={() => setExpanded((current) => !current)} title={expanded ? "收起构建结果" : "展开构建结果"}>
               {expanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
             </IconButton>
           </Stack>
@@ -220,23 +220,23 @@ export function DeployResultPanel({
         <Collapse in={expanded} timeout="auto" unmountOnExit>
           {buildResult ? (
             <Stack spacing={0.1} minWidth={0}>
-              <DeployResultRow label="状态" value={buildResult.stateLabel} />
-              <DeployResultRow label="HTTP" value={buildResult.status} />
-              <DeployResultRow
+              <BuildResultRow label="状态" value={buildResult.stateLabel} />
+              <BuildResultRow label="HTTP" value={buildResult.status} />
+              <BuildResultRow
                 label="队列"
                 value={buildResult.queueUrl}
                 copyKey="queueUrl"
                 copied={copiedField === "queueUrl"}
                 onCopy={onCopy}
               />
-              <DeployResultRow
+              <BuildResultRow
                 label="构建"
                 value={buildResult.buildUrl}
                 copyKey="buildUrl"
                 copied={copiedField === "buildUrl"}
                 onCopy={onCopy}
               />
-              <DeployResultRow
+              <BuildResultRow
                 label="说明"
                 value={buildResult.detail}
                 copyKey="detail"
@@ -246,7 +246,7 @@ export function DeployResultPanel({
             </Stack>
           ) : (
             <Typography variant="body2" color="text.secondary">
-              部署完成后，这里展示状态和 Jenkins 地址。
+              构建完成后，这里展示状态和记录地址。
             </Typography>
           )}
         </Collapse>

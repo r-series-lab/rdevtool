@@ -806,7 +806,8 @@ impl ProjectRuntimeState {
             .map_err(|_| "project runtime lock poisoned".to_string())?;
         let already_running = {
             let (running, last_results) = store.build_parts();
-            task_running_state(running, last_results, project, ProjectCommandKind::Build)?.is_some()
+            task_running_state(running, last_results, project, ProjectCommandKind::Build)?
+                .is_some()
         };
         if already_running {
             return snapshot_for_project(&mut store, project);
@@ -827,6 +828,79 @@ impl ProjectRuntimeState {
         if let Some(process) = store.running_builds.get(&project.key) {
             log_project_runtime_event(format!(
                 "build launched key={} pid={} cwd={} command={}",
+                project.key,
+                process.pid,
+                resolved.cwd.display(),
+                resolved.command
+            ));
+        }
+
+        snapshot_for_project(&mut store, project)
+    }
+
+    pub fn run_build_command(
+        &self,
+        config: &AppConfig,
+        project_key: &str,
+        command: String,
+        cwd: PathBuf,
+        env: BTreeMap<String, String>,
+    ) -> Result<ProjectRuntimeSnapshot, String> {
+        log_project_runtime_event(format!("build target requested key={}", project_key));
+        let project = config
+            .find_project(project_key)
+            .map_err(|error| error.to_string())?;
+        let command = command.trim().to_string();
+        if command.is_empty() {
+            return Err("构建命令不能为空".to_string());
+        }
+        if !cwd.exists() {
+            return Err(format!("打包目录不存在: {}", cwd.display()));
+        }
+        if !cwd.is_dir() {
+            return Err(format!("打包目录不是文件夹: {}", cwd.display()));
+        }
+        let resolved = ResolvedProjectCommand {
+            command,
+            cwd,
+            env: env.into_iter().collect(),
+        };
+        let launch_resolved = resolved.clone();
+        log_project_runtime_event(format!(
+            "build target resolved key={} cwd={} command={}",
+            project.key,
+            resolved.cwd.display(),
+            resolved.command
+        ));
+
+        let mut store = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| "project runtime lock poisoned".to_string())?;
+        let already_running = {
+            let (running, last_results) = store.build_parts();
+            task_running_state(running, last_results, project, ProjectCommandKind::Build)?.is_some()
+        };
+        if already_running {
+            return snapshot_for_project(&mut store, project);
+        }
+
+        {
+            let (running, last_results) = store.build_parts();
+            launch_project_command(
+                running,
+                last_results,
+                project,
+                launch_resolved,
+                ProjectCommandKind::Build,
+                None,
+            )?;
+        }
+
+        if let Some(process) = store.running_builds.get(&project.key) {
+            log_project_runtime_event(format!(
+                "build target launched key={} pid={} cwd={} command={}",
                 project.key,
                 process.pid,
                 resolved.cwd.display(),
@@ -1049,11 +1123,20 @@ fn snapshot_for_project(
             .display()
             .to_string()
     });
-    let build_log_path = display.build.command.as_ref().map(|_| {
-        task_log_path(project, ProjectCommandKind::Build)
-            .display()
-            .to_string()
-    });
+    let build_log_path = if display.build.command.is_some()
+        || build_state.is_running
+        || matches!(
+            build_state.status_key.as_str(),
+            "succeeded" | "failed" | "stopped"
+        ) {
+        Some(
+            task_log_path(project, ProjectCommandKind::Build)
+                .display()
+                .to_string(),
+        )
+    } else {
+        None
+    };
 
     Ok(ProjectRuntimeSnapshot {
         key: project.key.clone(),

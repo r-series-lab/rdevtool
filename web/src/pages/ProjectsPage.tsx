@@ -13,6 +13,7 @@ import {
   ListItemText,
   Menu,
   MenuItem,
+  Pagination,
   Stack,
   Switch,
   TextField,
@@ -32,6 +33,8 @@ import type {
   ProjectRuntimeEntry,
   ProjectRuntimeLogKind,
   ProjectRuntimeLogResponse,
+  ProxyDashboard,
+  ProxyProfile,
   RuntimeProfileDraft,
 } from "../app-types";
 import {
@@ -74,9 +77,11 @@ import {
 } from "../lib/workflowSignals";
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 
-type FinderType = "项目" | "网站" | "应用" | "脚本";
+type FinderType = "项目" | "网站" | "目录" | "工具";
 type FinderQuickFilter = "全部" | "最近";
 type RuntimePanelTab = "overview" | "config" | "logs" | "webActions";
+
+const FINDER_PAGE_SIZE = 10;
 
 type RuntimeLogState = {
   projectKey: string;
@@ -113,7 +118,7 @@ export type ProjectsPageProps = {
   recentShortcutKeys: string[];
   selectedDebugProfileKeys: Record<string, string>;
   branchProjectKeys: string[];
-  deployProjectKeys: string[];
+  buildProjectKeys: string[];
   workflowReceiveRules: WorkflowReceiveRule[];
   workflowBroadcastRules: WorkflowBroadcastRule[];
   workflowSignalOptions: string[];
@@ -145,7 +150,7 @@ export type ProjectsPageProps = {
   onProjectDebugProfileChange: (projectKey: string, profileKey: string) => void;
   onMarkShortcutUsed: (item: FinderShortcutItem) => void;
   onOpenProjectBranch: (projectKey: string) => void;
-  onOpenProjectDeploy: (projectKey: string) => void;
+  onOpenProjectBuild: (projectKey: string) => void;
   onRefresh: () => void;
   onOpenFinderEntry: (entry: FinderEntry) => Promise<boolean> | boolean;
   onStartRuntime: (
@@ -164,6 +169,7 @@ export type ProjectsPageProps = {
 const SHORTCUT_CONFIRM_MS = 1100;
 const RUNTIME_LOG_MAX_LINES = 120;
 const DEFAULT_RUNTIME_PROFILE_VALUE = "__default__";
+const RUNTIME_PROXY_MANUAL_VALUE = "__manual__";
 const PROJECT_WORKFLOW_ACTIONS: ProjectWorkflowAction[] = [
   "project.runtime.start",
   "project.runtime.stop",
@@ -250,6 +256,7 @@ function emptyRuntimeProfileDraft(profiles: RuntimeProfileDraft[]): RuntimeProfi
     webActionsUserDataDir: "",
     browserArgsText: "",
     proxyUrl: "",
+    rdevProxyProfileId: null,
     proxyBypass: "localhost;127.0.0.1;::1",
     hostResolverRulesText: "MAP app.example.test 127.0.0.1",
     networkProxy: {
@@ -260,6 +267,14 @@ function emptyRuntimeProfileDraft(profiles: RuntimeProfileDraft[]): RuntimeProfi
       noProxy: "localhost,127.0.0.1,::1",
     },
   };
+}
+
+function proxyProfileListenUrl(profile: ProxyProfile) {
+  return `http://${profile.listenHost}:${profile.listenPort}`;
+}
+
+function proxyProfileLabel(profile: ProxyProfile) {
+  return profile.name || profile.id;
 }
 
 function projectSelectedProfileKey(
@@ -578,10 +593,10 @@ function finderPlaceholder(type: FinderType): string {
   switch (type) {
     case "网站":
       return "搜索网站、地址或备注";
-    case "应用":
-      return "搜索应用、Bundle ID 或备注";
-    case "脚本":
-      return "搜索脚本、路径或备注";
+    case "目录":
+      return "搜索目录、路径或备注";
+    case "工具":
+      return "搜索应用、脚本、路径或备注";
     default:
       return "搜索项目、路径、命令";
   }
@@ -593,6 +608,8 @@ function finderEntryKindLabel(kind: string): string {
       return "应用";
     case "script":
       return "脚本";
+    case "directory":
+      return "目录";
     default:
       return "网站";
   }
@@ -604,6 +621,8 @@ function FinderEntryIcon({ kind }: { kind: string }) {
       return <AppWindowIcon fontSize="inherit" />;
     case "script":
       return <TerminalIcon fontSize="inherit" />;
+    case "directory":
+      return <FolderIcon fontSize="inherit" />;
     default:
       return <WebsiteIcon fontSize="inherit" />;
   }
@@ -636,7 +655,8 @@ function buildFinderEntryDetails(item: FinderShortcutItem): string[] {
   addDetail("Bundle ID", entry.bundleId);
   addDetail("应用", entry.appName);
   addDetail("脚本", entry.script);
-  addDetail("目录", entry.cwd);
+  addDetail("路径", entry.path);
+  addDetail("工作目录", entry.cwd);
 
   return detailLines;
 }
@@ -656,6 +676,9 @@ function navigationEditorEntryMatchesShortcut(
       (entry.bundleId ?? "").trim() === (item.entry.bundleId ?? "").trim() &&
       (entry.appName ?? "").trim() === (item.entry.appName ?? "").trim()
     );
+  }
+  if (item.entry.kind === "directory") {
+    return (entry.path ?? "").trim() === (item.entry.path ?? "").trim();
   }
   return (entry.script ?? "").trim() === (item.entry.script ?? "").trim();
 }
@@ -833,7 +856,7 @@ export function ProjectsPage({
   recentShortcutKeys,
   selectedDebugProfileKeys,
   branchProjectKeys,
-  deployProjectKeys,
+  buildProjectKeys,
   workflowReceiveRules,
   workflowBroadcastRules,
   workflowSignalOptions,
@@ -852,7 +875,7 @@ export function ProjectsPage({
   onProjectDebugProfileChange,
   onMarkShortcutUsed,
   onOpenProjectBranch,
-  onOpenProjectDeploy,
+  onOpenProjectBuild,
   onRefresh,
   onOpenFinderEntry,
   onStartRuntime,
@@ -927,6 +950,7 @@ export function ProjectsPage({
   });
   const [runtimeLogRefreshKey, setRuntimeLogRefreshKey] = useState(0);
   const [runtimeProfileDrafts, setRuntimeProfileDrafts] = useState<RuntimeProfileDraft[]>([]);
+  const [runtimeProxyProfiles, setRuntimeProxyProfiles] = useState<ProxyProfile[]>([]);
   const [runtimeProfileIndex, setRuntimeProfileIndex] = useState(0);
   const [runtimeProfilesLoaded, setRuntimeProfilesLoaded] = useState(false);
   const [runtimeProfilesLoading, setRuntimeProfilesLoading] = useState(false);
@@ -936,6 +960,8 @@ export function ProjectsPage({
     useState<RuntimeProfileDialogState | null>(null);
   const runtimeProfilesLoadingRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [finderPage, setFinderPage] = useState(1);
+  const finderListRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const confirmTimerRef = useRef<number | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
@@ -948,6 +974,23 @@ export function ProjectsPage({
   ).length;
   const activeShortcutCount = filteredShortcutEntries.length;
   const totalShortcutCount = shortcutEntries.length;
+  const filteredFinderEntryCount = finderIsProjects
+    ? filteredRuntimeEntries.length
+    : filteredShortcutEntries.length;
+  const finderPageCount = Math.max(
+    1,
+    Math.ceil(filteredFinderEntryCount / FINDER_PAGE_SIZE),
+  );
+  const activeFinderPage = Math.min(finderPage, finderPageCount);
+  const finderPageStart = (activeFinderPage - 1) * FINDER_PAGE_SIZE;
+  const pagedRuntimeEntries = filteredRuntimeEntries.slice(
+    finderPageStart,
+    finderPageStart + FINDER_PAGE_SIZE,
+  );
+  const pagedShortcutEntries = filteredShortcutEntries.slice(
+    finderPageStart,
+    finderPageStart + FINDER_PAGE_SIZE,
+  );
   const showFinderCategories =
     !finderIsProjects && finderCategories.length > 1;
   const favoriteProjectKeySet = new Set(favoriteProjectKeys);
@@ -955,7 +998,7 @@ export function ProjectsPage({
   const favoriteShortcutKeySet = new Set(favoriteShortcutKeys);
   const recentShortcutKeySet = new Set(recentShortcutKeys);
   const branchProjectKeySet = new Set(branchProjectKeys);
-  const deployProjectKeySet = new Set(deployProjectKeys);
+  const buildProjectKeySet = new Set(buildProjectKeys);
   const projectMenuEntry =
     runtimeEntries.find((item) => item.key === projectMenuKey) ?? null;
   const shortcutMenuItem =
@@ -986,6 +1029,13 @@ export function ProjectsPage({
   const runtimeOptionsSelectedProfile =
     findDebugProfile(runtimeOptionsProfiles, runtimeOptionsProfileKey) ?? null;
   const runtimePanelProfile = runtimeProfileDrafts[runtimeProfileIndex] ?? null;
+  const runtimeProxyProfileById = useMemo(
+    () => new Map(runtimeProxyProfiles.map((profile) => [profile.id, profile])),
+    [runtimeProxyProfiles],
+  );
+  const runtimePanelBoundProxy = runtimePanelProfile?.rdevProxyProfileId
+    ? runtimeProxyProfileById.get(runtimePanelProfile.rdevProxyProfileId) ?? null
+    : null;
   const runtimeOptionsParseResult = useMemo(
     () => parseRuntimeEnvText(runtimeOptionsEnvText),
     [runtimeOptionsEnvText],
@@ -1008,6 +1058,9 @@ export function ProjectsPage({
   const shortcutRuntimeProfile =
     runtimeProfileDrafts.find((profile) => profile.key === shortcutRuntimeProfileKey) ??
     null;
+  const shortcutBoundProxy = shortcutRuntimeProfile?.rdevProxyProfileId
+    ? runtimeProxyProfileById.get(shortcutRuntimeProfile.rdevProxyProfileId) ?? null
+    : null;
   const shortcutWebActionsContext = useMemo<WebActionsDialogContext | null>(() => {
     const url = shortcutRuntimePanelCurrentItem?.entry.url?.trim();
     if (!shortcutRuntimePanelCurrentItem || !url) {
@@ -1034,6 +1087,20 @@ export function ProjectsPage({
     () => [...workflowReceiveGroups, ...workflowBroadcastGroups],
     [workflowBroadcastGroups, workflowReceiveGroups],
   );
+
+  useEffect(() => {
+    setFinderPage(1);
+  }, [finderCategory, finderQuery, finderQuickFilter, finderType]);
+
+  useEffect(() => {
+    setFinderPage((current) => Math.min(current, finderPageCount));
+  }, [finderPageCount]);
+
+  useEffect(() => {
+    if (finderListRef.current) {
+      finderListRef.current.scrollTop = 0;
+    }
+  }, [activeFinderPage, finderCategory, finderQuery, finderQuickFilter, finderType]);
 
   useEffect(() => {
     return () => {
@@ -1386,9 +1453,13 @@ export function ProjectsPage({
     setRuntimeProfilesLoading(true);
     setRuntimeProfilesError("");
     try {
-      const state = await invoke<ProjectConfigEditorState>("get_project_config_editor");
+      const [state, proxyDashboard] = await Promise.all([
+        invoke<ProjectConfigEditorState>("get_project_config_editor"),
+        invoke<ProxyDashboard>("get_proxy_dashboard").catch(() => null),
+      ]);
       const profiles = state.runtimeProfiles ?? [];
       setRuntimeProfileDrafts(profiles);
+      setRuntimeProxyProfiles(proxyDashboard?.config.profiles ?? []);
       const preferredIndex = preferredKey
         ? profiles.findIndex((profile) => profile.key === preferredKey)
         : -1;
@@ -1501,6 +1572,7 @@ export function ProjectsPage({
       ...runtimeProfileDialog.draft,
       key: runtimeProfileDialog.draft.key.trim(),
       label: runtimeProfileDialog.draft.label.trim(),
+      rdevProxyProfileId: runtimeProfileDialog.draft.rdevProxyProfileId?.trim() || null,
     };
     const duplicate = runtimeProfileDrafts.some(
       (profile, index) =>
@@ -1667,10 +1739,10 @@ export function ProjectsPage({
             alignItems="center"
             justifyContent="flex-end"
             spacing={0.8}
-            mb={1.05}
+            mb={0.72}
             sx={{
               px: 0.2,
-              pb: 0.95,
+              pb: 0.58,
               borderBottom: `1px solid ${tone.topDivider}`,
             }}
           >
@@ -1788,9 +1860,9 @@ export function ProjectsPage({
             >
               <Box
                 sx={{
-                  mb: 1.05,
-                  p: 0.45,
-                  borderRadius: "18px",
+                  mb: 0.72,
+                  p: 0.32,
+                  borderRadius: "13px",
                   border: `1px solid ${tone.searchWrapBorder}`,
                   backgroundColor: tone.searchWrapBg,
                   boxShadow: tone.searchWrapShadow,
@@ -1808,7 +1880,7 @@ export function ProjectsPage({
                     placeholder={finderPlaceholder(finderType)}
                     sx={{
                       "& .MuiOutlinedInput-root": {
-                        borderRadius: "14px",
+                        borderRadius: "11px",
                         backgroundColor: tone.searchInputBg,
                         color: tone.searchInputColor,
                         "& .MuiOutlinedInput-notchedOutline": {
@@ -1822,8 +1894,8 @@ export function ProjectsPage({
                         },
                       },
                       "& .MuiInputBase-input": {
-                        paddingTop: "9px",
-                        paddingBottom: "9px",
+                        paddingTop: "7.5px",
+                        paddingBottom: "7.5px",
                       },
                       "& .MuiInputBase-input::placeholder": {
                         color: tone.searchPlaceholder,
@@ -1838,9 +1910,9 @@ export function ProjectsPage({
                         disabled={!finderQuery}
                         aria-label="清空项目搜索"
                         sx={{
-                          width: 32,
-                          height: 32,
-                          borderRadius: "11px",
+                          width: 28,
+                          height: 28,
+                          borderRadius: "9px",
                           color: tone.clearButtonColor,
                           border: `1px solid ${tone.clearButtonBorder}`,
                           backgroundColor: tone.clearButtonBg,
@@ -1859,9 +1931,9 @@ export function ProjectsPage({
 
               <Box
                 sx={{
-                  mb: 1.05,
-                  p: 0.45,
-                  borderRadius: "18px",
+                  mb: 0.72,
+                  p: 0.32,
+                  borderRadius: "13px",
                   border: `1px solid ${tone.searchWrapBorder}`,
                   backgroundColor: tone.searchWrapBg,
                   boxShadow: tone.searchWrapShadow,
@@ -1886,9 +1958,9 @@ export function ProjectsPage({
                         sx={{
                           width: "100%",
                           minWidth: 0,
-                          height: { xs: 38, sm: 34 },
-                          px: { xs: 0.72, sm: 0.9 },
-                          borderRadius: "13px",
+                          height: { xs: 34, sm: 30 },
+                          px: { xs: 0.66, sm: 0.78 },
+                          borderRadius: "10px",
                           display: "flex",
                           alignItems: "center",
                           justifyContent: "space-between",
@@ -1936,7 +2008,7 @@ export function ProjectsPage({
                           component="span"
                           sx={{
                             flexShrink: 0,
-                            minWidth: 18,
+                            minWidth: 16,
                             px: 0.36,
                             py: 0.04,
                             borderRadius: "999px",
@@ -1964,10 +2036,10 @@ export function ProjectsPage({
               {showQuickFilters ? (
                 <Box
                   sx={{
-                    mb: 1.05,
+                    mb: 0.72,
                     display: "flex",
                     flexWrap: "wrap",
-                    gap: 0.58,
+                    gap: 0.45,
                   }}
                 >
                   {finderQuickFilterOptions.map((filter) => {
@@ -1985,7 +2057,7 @@ export function ProjectsPage({
                             : () => onFinderQuickFilterChange(filter)
                         }
                         sx={{
-                          height: 24,
+                          height: 22,
                           opacity: disabled ? 0.48 : 1,
                           cursor: disabled ? "default" : "pointer",
                           bgcolor: active
@@ -2010,8 +2082,8 @@ export function ProjectsPage({
                                 : tone.categoryChipHoverBg,
                           },
                           "& .MuiChip-label": {
-                            px: 0.95,
-                            fontSize: "0.68rem",
+                            px: 0.82,
+                            fontSize: "0.65rem",
                             fontWeight: active ? 700 : 600,
                             letterSpacing: "0.02em",
                           },
@@ -2025,16 +2097,16 @@ export function ProjectsPage({
               {showFinderCategories ? (
                 <Box
                   sx={{
-                    mb: 1.15,
-                    p: 0.78,
-                    borderRadius: "15px",
+                    mb: 0.82,
+                    p: 0.58,
+                    borderRadius: "12px",
                     border: `1px solid ${tone.searchWrapBorder}`,
                     backgroundColor: tone.searchWrapBg,
                     boxShadow: tone.searchWrapShadow,
                     backdropFilter: "blur(12px)",
                   }}
                 >
-                  <Stack spacing={0.72}>
+                  <Stack spacing={0.52}>
                     <Typography
                       variant="caption"
                       sx={{
@@ -2049,7 +2121,7 @@ export function ProjectsPage({
                       sx={{
                         display: "flex",
                         flexWrap: "wrap",
-                        gap: 0.6,
+                        gap: 0.48,
                       }}
                     >
                       {finderCategories.map((category) => {
@@ -2065,7 +2137,7 @@ export function ProjectsPage({
                             }
                             onClick={() => onFinderCategoryChange(category)}
                             sx={{
-                              height: 24,
+                              height: 22,
                               bgcolor: active
                                 ? tone.categoryChipActiveBg
                                 : tone.categoryChipBg,
@@ -2084,8 +2156,8 @@ export function ProjectsPage({
                                   : tone.categoryChipHoverBg,
                               },
                               "& .MuiChip-label": {
-                                px: 0.95,
-                                fontSize: "0.68rem",
+                                px: 0.82,
+                                fontSize: "0.65rem",
                                 fontWeight: active ? 700 : 600,
                                 letterSpacing: "0.02em",
                               },
@@ -2102,8 +2174,8 @@ export function ProjectsPage({
                 <Box
                   sx={{
                     px: 1.2,
-                    py: 1.1,
-                    borderRadius: "16px",
+                    py: 0.86,
+                    borderRadius: "12px",
                     border: `1px solid ${tone.emptyBorder}`,
                     backgroundColor: tone.emptyBg,
                     boxShadow: tone.emptyShadow,
@@ -2121,8 +2193,8 @@ export function ProjectsPage({
                 <Box
                   sx={{
                     px: 1.2,
-                    py: 1.1,
-                    borderRadius: "16px",
+                    py: 0.86,
+                    borderRadius: "12px",
                     border: `1px solid ${tone.emptyBorder}`,
                     backgroundColor: tone.emptyBg,
                     boxShadow: tone.emptyShadow,
@@ -2137,17 +2209,25 @@ export function ProjectsPage({
               {finderIsProjects &&
               runtimeEntries.length > 0 &&
               filteredRuntimeEntries.length > 0 ? (
-                <Box
-                  className="module-list-scroll finder-list-scroll"
-                  sx={{
-                    display: "grid",
-                    alignContent: "start",
-                    gap: 0.78,
-                    flex: "1 1 auto",
-                    minHeight: 0,
-                  }}
+                <Stack
+                  spacing={0.6}
+                  minWidth={0}
+                  minHeight={0}
+                  flex="1 1 auto"
+                  overflow="hidden"
                 >
-                  {filteredRuntimeEntries.map((item, index) => {
+                  <Box
+                    ref={finderListRef}
+                    className="module-list-scroll finder-list-scroll"
+                    sx={{
+                      display: "grid",
+                      alignContent: "start",
+                      gap: 0.56,
+                      flex: "1 1 auto",
+                      minHeight: 0,
+                    }}
+                  >
+                    {pagedRuntimeEntries.map((item, index) => {
                     const runtimeRunning = item.canStop;
                     const runtimeAvailable = item.canStart || item.canStop;
                     const runtimeTooltip = runtimeRunning
@@ -2202,14 +2282,14 @@ export function ProjectsPage({
                             xs: "minmax(0,1fr)",
                             md: "minmax(0, 1fr) max-content",
                           },
-                          columnGap: { xs: 1, md: 1.1 },
-                          rowGap: 0.75,
+                          columnGap: { xs: 0.9, md: 0.85 },
+                          rowGap: 0.58,
                           alignItems: "center",
-                          px: 1.25,
-                          py: { xs: 1.05, md: 0.92 },
-                          pr: { xs: 15.4, md: 1.25 },
-                          minHeight: { xs: 64, md: 54 },
-                          borderRadius: "18px",
+                          px: 1.05,
+                          py: { xs: 0.9, md: 0.72 },
+                          pr: { xs: 14.2, md: 1.05 },
+                          minHeight: { xs: 58, md: 48 },
+                          borderRadius: "14px",
                           border: "1px solid",
                           borderColor:
                             projectFavorite
@@ -2277,12 +2357,12 @@ export function ProjectsPage({
                           <Box
                             aria-hidden="true"
                             sx={{
-                              width: 28,
-                              height: 28,
+                              width: 26,
+                              height: 26,
                               display: "grid",
                               placeItems: "center",
                               flexShrink: 0,
-                              borderRadius: "10px",
+                              borderRadius: "9px",
                               border: "1px solid",
                               borderColor:
                                 item.statusKey === "running"
@@ -2389,14 +2469,14 @@ export function ProjectsPage({
                             justifySelf: { md: "end" },
                             alignSelf: "center",
                             px: 0.45,
-                            py: 0.35,
+                            py: 0.26,
                             borderRadius: "999px",
                             border: `1px solid ${tone.actionGroupBorder}`,
                             backgroundColor: tone.actionGroupBg,
                             boxShadow: tone.actionGroupShadow,
                             position: { xs: "absolute", md: "static" },
-                            top: { xs: 12, md: "auto" },
-                            right: { xs: 12, md: "auto" },
+                            top: { xs: 10, md: "auto" },
+                            right: { xs: 10, md: "auto" },
                             zIndex: 1,
                           }}
                         >
@@ -2417,8 +2497,8 @@ export function ProjectsPage({
                                   );
                                 }}
                                 sx={{
-                                  width: 28,
-                                  height: 28,
+                                  width: 26,
+                                  height: 26,
                                   borderRadius: "999px",
                                   bgcolor: runtimeRunning
                                     ? tone.stopButtonBg
@@ -2464,8 +2544,8 @@ export function ProjectsPage({
                                   onOpenProjectDirectory(item.key);
                                 }}
                                 sx={{
-                                  width: 28,
-                                  height: 28,
+                                  width: 26,
+                                  height: 26,
                                   borderRadius: "999px",
                                   bgcolor: tone.stopButtonBg,
                                   color: item.cwd || item.repoPath
@@ -2491,8 +2571,8 @@ export function ProjectsPage({
                                   setProjectMenuKey(item.key);
                                 }}
                                 sx={{
-                                  width: 28,
-                                  height: 28,
+                                  width: 26,
+                                  height: 26,
                                   borderRadius: "999px",
                                   bgcolor: tone.stopButtonBg,
                                   color: tone.stopButtonColor,
@@ -2510,8 +2590,34 @@ export function ProjectsPage({
 
                       </Box>
                     );
-                  })}
-                </Box>
+                    })}
+                  </Box>
+                  {finderPageCount > 1 ? (
+                    <Stack
+                      direction="row"
+                      justifyContent="flex-end"
+                      sx={{ pt: 0.25 }}
+                    >
+                      <Pagination
+                        aria-label="访达分页"
+                        size="small"
+                        page={activeFinderPage}
+                        count={finderPageCount}
+                        siblingCount={0}
+                        boundaryCount={1}
+                        onChange={(_, nextPage) => setFinderPage(nextPage)}
+                        sx={{
+                          "& .MuiPaginationItem-root": {
+                            minWidth: 26,
+                            height: 26,
+                            borderRadius: "9px",
+                            fontWeight: 800,
+                          },
+                        }}
+                      />
+                    </Stack>
+                  ) : null}
+                </Stack>
               ) : null}
 
               <Menu
@@ -2674,13 +2780,13 @@ export function ProjectsPage({
                 <MenuItem
                   disabled={
                     !projectMenuEntry ||
-                    !deployProjectKeySet.has(projectMenuEntry.key)
+                    !buildProjectKeySet.has(projectMenuEntry.key)
                   }
                   onClick={() => {
                     if (!projectMenuEntry) {
                       return;
                     }
-                    onOpenProjectDeploy(projectMenuEntry.key);
+                    onOpenProjectBuild(projectMenuEntry.key);
                     closeProjectMenu();
                   }}
                 >
@@ -2688,7 +2794,7 @@ export function ProjectsPage({
                     <OpenExternalIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary="打开部署页"
+                    primary="打开构建页"
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -3105,7 +3211,17 @@ export function ProjectsPage({
                                 {runtimePanelProfile.browserUserDataDir ? (
                                   <Chip size="small" label="独立数据目录" variant="outlined" />
                                 ) : null}
-                                {runtimePanelProfile.proxyUrl ? (
+                                {runtimePanelProfile.rdevProxyProfileId ? (
+                                  <Chip
+                                    size="small"
+                                    label={
+                                      runtimePanelBoundProxy
+                                        ? `代理服务 ${proxyProfileLabel(runtimePanelBoundProxy)}`
+                                        : "代理服务缺失"
+                                    }
+                                    variant="outlined"
+                                  />
+                                ) : runtimePanelProfile.proxyUrl ? (
                                   <Chip size="small" label="浏览器代理" variant="outlined" />
                                 ) : null}
                                 {runtimePanelProfile.hostResolverRulesText?.trim() ? (
@@ -3801,7 +3917,17 @@ export function ProjectsPage({
 	                            {shortcutRuntimeProfile.browserUserDataDir ? (
 	                              <Chip size="small" label="独立数据目录" variant="outlined" />
 	                            ) : null}
-	                            {shortcutRuntimeProfile.proxyUrl ? (
+	                            {shortcutRuntimeProfile.rdevProxyProfileId ? (
+	                              <Chip
+	                                size="small"
+	                                label={
+	                                  shortcutBoundProxy
+	                                    ? `代理服务 ${proxyProfileLabel(shortcutBoundProxy)}`
+	                                    : "代理服务缺失"
+	                                }
+	                                variant="outlined"
+	                              />
+	                            ) : shortcutRuntimeProfile.proxyUrl ? (
 	                              <Chip size="small" label="浏览器代理" variant="outlined" />
 	                            ) : null}
 	                            {shortcutRuntimeProfile.hostResolverRulesText?.trim() ? (
@@ -3854,6 +3980,7 @@ export function ProjectsPage({
 	              ) : null}
 
 	              <Dialog
+                className="runtime-profile-dialog"
                 open={Boolean(runtimeProfileDialog)}
                 onClose={() => {
                   if (!runtimeProfilesSaving) {
@@ -3940,13 +4067,63 @@ export function ProjectsPage({
                           }}
                         />
                         <TextField
+                          select
                           size="small"
-                          label="浏览器代理"
+                          label="代理服务"
+                          value={
+                            runtimeProfileDialog.draft.rdevProxyProfileId ??
+                            RUNTIME_PROXY_MANUAL_VALUE
+                          }
+                          onChange={(event) => {
+                            const nextValue = event.target.value;
+                            if (nextValue === RUNTIME_PROXY_MANUAL_VALUE) {
+                              updateRuntimeProfileDialog({
+                                rdevProxyProfileId: null,
+                              });
+                              return;
+                            }
+                            const proxyProfile = runtimeProxyProfileById.get(nextValue);
+                            updateRuntimeProfileDialog({
+                              rdevProxyProfileId: nextValue,
+                              proxyUrl: proxyProfile
+                                ? proxyProfileListenUrl(proxyProfile)
+                                : runtimeProfileDialog.draft.proxyUrl,
+                            });
+                          }}
+                          inputProps={{
+                            name: "runtime-profile-rdev-proxy",
+                            autoComplete: "off",
+                          }}
+                        >
+                          <MenuItem value={RUNTIME_PROXY_MANUAL_VALUE}>
+                            手动代理或不使用
+                          </MenuItem>
+                          {runtimeProfileDialog.draft.rdevProxyProfileId &&
+                          !runtimeProxyProfileById.has(runtimeProfileDialog.draft.rdevProxyProfileId) ? (
+                            <MenuItem value={runtimeProfileDialog.draft.rdevProxyProfileId}>
+                              已缺失：{runtimeProfileDialog.draft.rdevProxyProfileId}
+                            </MenuItem>
+                          ) : null}
+                          {runtimeProxyProfiles.map((profile) => (
+                            <MenuItem key={profile.id} value={profile.id}>
+                              {proxyProfileLabel(profile)} · {proxyProfileListenUrl(profile)}
+                            </MenuItem>
+                          ))}
+                        </TextField>
+                        <TextField
+                          size="small"
+                          label="浏览器代理地址"
                           value={runtimeProfileDialog.draft.proxyUrl}
                           onChange={(event) =>
                             updateRuntimeProfileDialog({ proxyUrl: event.target.value })
                           }
                           placeholder="http://127.0.0.1:7897…"
+                          helperText={
+                            runtimeProfileDialog.draft.rdevProxyProfileId
+                              ? "打开项目或访达入口前会自动启动代理服务并使用最新地址。"
+                              : "手动填写时不会自动启动 rDevTool 代理服务。"
+                          }
+                          disabled={Boolean(runtimeProfileDialog.draft.rdevProxyProfileId)}
                           inputProps={{
                             name: "runtime-profile-browser-proxy",
                             autoComplete: "off",
@@ -4122,8 +4299,8 @@ export function ProjectsPage({
                 <Box
                   sx={{
                     px: 1.2,
-                    py: 1.1,
-                    borderRadius: "16px",
+                    py: 0.86,
+                    borderRadius: "12px",
                     border: `1px solid ${tone.emptyBorder}`,
                     backgroundColor: tone.emptyBg,
                     boxShadow: tone.emptyShadow,
@@ -4155,24 +4332,25 @@ export function ProjectsPage({
               ) : null}
 
               {!finderIsProjects && filteredShortcutEntries.length > 0 ? (
-                <Box
-                  className="module-list-scroll finder-list-scroll"
-                  sx={{
-                    display: "grid",
-                    gridTemplateColumns: {
-                      xs: "repeat(2, minmax(0, 1fr))",
-                      sm: "repeat(3, minmax(0, 1fr))",
-                    },
-                    gap: 0.72,
-                    alignContent: "start",
-                    flex: "1 1 auto",
-                    minHeight: 0,
-                    "@media (max-width: 390px)": {
-                      gridTemplateColumns: "minmax(0, 1fr)",
-                    },
-                  }}
+                <Stack
+                  spacing={0.6}
+                  minWidth={0}
+                  minHeight={0}
+                  flex="1 1 auto"
+                  overflow="hidden"
                 >
-                  {filteredShortcutEntries.map((item, index) => {
+                  <Box
+                    ref={finderListRef}
+                    className="module-list-scroll finder-list-scroll"
+                    sx={{
+                      display: "grid",
+                      gap: 0.56,
+                      alignContent: "start",
+                      flex: "1 1 auto",
+                      minHeight: 0,
+                    }}
+                  >
+                    {pagedShortcutEntries.map((item, index) => {
                     const detailLines = buildFinderEntryDetails(item);
                     const shortcutKey = buildFinderShortcutKey(item);
                     const shortcutConfirmed =
@@ -4214,6 +4392,9 @@ export function ProjectsPage({
                             void handleOpenShortcut(item, shortcutKey)
                           }
                           onKeyDown={(event) => {
+                            if (event.target !== event.currentTarget) {
+                              return;
+                            }
                             if (event.key !== "Enter" && event.key !== " ") {
                               return;
                             }
@@ -4223,15 +4404,20 @@ export function ProjectsPage({
                           sx={{
                             position: "relative",
                             display: "grid",
-                            gridTemplateColumns: "auto minmax(0,1fr)",
-                            gap: 0.72,
+                            gridTemplateColumns: {
+                              xs: "minmax(0,1fr)",
+                              md: "minmax(0, 1fr) max-content",
+                            },
+                            columnGap: { xs: 0.9, md: 0.85 },
+                            rowGap: 0.58,
                             alignItems: "center",
                             width: "100%",
                             minWidth: 0,
-                            minHeight: 56,
-                            px: 0.82,
-                            py: 0.66,
-                            borderRadius: "16px",
+                            minHeight: { xs: 58, md: 48 },
+                            px: 1.05,
+                            py: { xs: 0.9, md: 0.72 },
+                            pr: { xs: 10.1, md: 1.05 },
+                            borderRadius: "14px",
                             cursor: "pointer",
                             textAlign: "left",
                             font: "inherit",
@@ -4255,123 +4441,222 @@ export function ProjectsPage({
                               background: tone.rowHoverBg,
                               boxShadow: tone.rowHoverShadow,
                             },
+                            "@media (prefers-reduced-motion: reduce)": {
+                              transition: "none",
+                              "&:hover": {
+                                transform: "none",
+                              },
+                            },
                           }}
                         >
-                          <Tooltip title="更多操作">
-                            <Box
-                              component="span"
-                              role="button"
-                              tabIndex={0}
-                              aria-label={`${item.entry.name} 更多操作`}
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                setShortcutMenuAnchor(event.currentTarget);
-                                setShortcutMenuKey(shortcutKey);
-                              }}
-                              onKeyDown={(event) => {
-                                if (event.key !== "Enter" && event.key !== " ") {
-                                  return;
-                                }
-                                event.preventDefault();
-                                event.stopPropagation();
-                                setShortcutMenuAnchor(event.currentTarget);
-                                setShortcutMenuKey(shortcutKey);
-                              }}
-                              sx={{
-                                position: "absolute",
-                                top: 7,
-                                right: 7,
-                                width: 24,
-                                height: 24,
-                                borderRadius: "999px",
-                                display: "grid",
-                                placeItems: "center",
-                                cursor: "pointer",
-                                bgcolor: tone.actionGroupBg,
-                                color: shortcutFavorite
-                                  ? tone.categoryChipActiveColor
-                                  : tone.rowHint,
-                                border: `1px solid ${tone.actionGroupBorder}`,
-                                "&:hover": {
-                                  bgcolor: tone.categoryChipHoverBg,
-                                },
-                              }}
-                            >
-                              <MoreIcon sx={{ fontSize: 14 }} />
-                            </Box>
-                          </Tooltip>
-
-                          <Box
-                            sx={{
-                              width: 32,
-                              height: 32,
-                              borderRadius: "12px",
-                              display: "grid",
-                              placeItems: "center",
-                              border: `1px solid ${tone.actionGroupBorder}`,
-                              backgroundColor: shortcutConfirmed
-                                ? mono
-                                  ? "rgba(150, 215, 170, 0.14)"
-                                  : "rgba(76, 122, 85, 0.12)"
-                                : tone.actionGroupBg,
-                              color: shortcutConfirmed
-                                ? mono
-                                  ? "#bfe9cb"
-                                  : "#416a4a"
-                                : tone.rowMeta,
-                              boxShadow: tone.actionGroupShadow,
-                              fontSize: 15,
-                              flexShrink: 0,
-                              transition:
-                                "background-color 160ms ease, color 160ms ease, border-color 160ms ease",
-                            }}
-                          >
-                            {shortcutConfirmed ? (
-                              <CheckIcon fontSize="inherit" />
-                            ) : (
-                              <FinderEntryIcon kind={item.entry.kind} />
-                            )}
-                          </Box>
-
                           <Stack
                             direction="row"
                             alignItems="center"
-                            spacing={0.45}
+                            spacing={0.9}
+                            minWidth={0}
                             sx={{
-                              minWidth: 0,
-                              pr: 2.8,
+                              pr: { xs: 0.75, md: 0 },
+                              maxWidth: "100%",
                             }}
                           >
-                            <Typography
-                              variant="body2"
-                              noWrap
+                            <Box
+                              aria-hidden="true"
                               sx={{
-                                minWidth: 0,
-                                fontWeight: 700,
-                                lineHeight: 1.2,
-                                color: tone.rowTitle,
-                                fontSize: { xs: "0.84rem", sm: "0.88rem" },
+                                width: 26,
+                                height: 26,
+                                display: "grid",
+                                placeItems: "center",
+                                flexShrink: 0,
+                                borderRadius: "9px",
+                                border: `1px solid ${tone.actionGroupBorder}`,
+                                backgroundColor: shortcutConfirmed
+                                  ? mono
+                                    ? "rgba(150, 215, 170, 0.14)"
+                                    : "rgba(76, 122, 85, 0.12)"
+                                  : tone.actionGroupBg,
+                                color: shortcutConfirmed
+                                  ? mono
+                                    ? "#bfe9cb"
+                                    : "#416a4a"
+                                  : tone.rowMeta,
+                                boxShadow: tone.actionGroupShadow,
+                                fontSize: 14,
                               }}
                             >
-                              {shortcutRecent ? `${item.entry.name} · 最近` : item.entry.name}
-                            </Typography>
-                            {shortcutFavorite ? (
-                              <StarIcon
+                              {shortcutConfirmed ? (
+                                <CheckIcon fontSize="inherit" />
+                              ) : (
+                                <FinderEntryIcon kind={item.entry.kind} />
+                              )}
+                            </Box>
+                            <Box minWidth={0}>
+                              <Stack
+                                direction="row"
+                                alignItems="center"
+                                spacing={0.55}
+                                minWidth={0}
+                              >
+                                <Typography
+                                  variant="body2"
+                                  noWrap
+                                  sx={{
+                                    minWidth: 0,
+                                    fontWeight: 760,
+                                    lineHeight: 1.18,
+                                    color: tone.rowTitle,
+                                  }}
+                                >
+                                  {item.entry.name}
+                                </Typography>
+                                {shortcutFavorite ? (
+                                  <StarIcon
+                                    sx={{
+                                      width: 13,
+                                      height: 13,
+                                      flexShrink: 0,
+                                      color: tone.categoryChipActiveColor,
+                                      opacity: 0.82,
+                                    }}
+                                  />
+                                ) : null}
+                                {shortcutRecent ? (
+                                  <Chip
+                                    size="small"
+                                    label="最近"
+                                    sx={{
+                                      height: 18,
+                                      flexShrink: 0,
+                                      borderRadius: "6px",
+                                      border: `1px solid ${tone.categoryChipBorder}`,
+                                      bgcolor: tone.categoryChipBg,
+                                      color: tone.categoryChipColor,
+                                      fontSize: "0.62rem",
+                                      fontWeight: 700,
+                                      "& .MuiChip-label": {
+                                        px: 0.7,
+                                        lineHeight: "18px",
+                                      },
+                                    }}
+                                  />
+                                ) : null}
+                              </Stack>
+                              <Typography
+                                variant="caption"
+                                noWrap
                                 sx={{
-                                  width: 13,
-                                  height: 13,
-                                  flexShrink: 0,
-                                  color: tone.categoryChipActiveColor,
-                                  opacity: 0.82,
+                                  display: "block",
+                                  mt: 0.28,
+                                  overflow: "hidden",
+                                  textOverflow: "ellipsis",
+                                  letterSpacing: 0,
+                                  color: tone.rowKey,
                                 }}
-                              />
-                            ) : null}
+                              >
+                                {item.entry.targetLabel}
+                              </Typography>
+                            </Box>
+                          </Stack>
+
+                          <Stack
+                            direction="row"
+                            spacing={0.45}
+                            justifyContent={{ xs: "flex-start", md: "flex-end" }}
+                            sx={{
+                              gridColumn: { md: 2 },
+                              width: "fit-content",
+                              minWidth: "max-content",
+                              flexShrink: 0,
+                              justifySelf: { md: "end" },
+                              alignSelf: "center",
+                              px: 0.45,
+                              py: 0.26,
+                              borderRadius: "999px",
+                              border: `1px solid ${tone.actionGroupBorder}`,
+                              backgroundColor: tone.actionGroupBg,
+                              boxShadow: tone.actionGroupShadow,
+                              position: { xs: "absolute", md: "static" },
+                              top: { xs: 10, md: "auto" },
+                              right: { xs: 10, md: "auto" },
+                              zIndex: 1,
+                            }}
+                          >
+                            <Tooltip title={`打开${finderEntryKindLabel(item.entry.kind)}`}>
+                              <IconButton
+                                aria-label={`打开 ${item.entry.name}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleOpenShortcut(item, shortcutKey);
+                                }}
+                                sx={{
+                                  width: 26,
+                                  height: 26,
+                                  borderRadius: "999px",
+                                  bgcolor: tone.startButtonBg,
+                                  color: tone.startButtonColor,
+                                  border: `1px solid ${tone.startButtonBorder}`,
+                                  "&:hover": {
+                                    bgcolor: tone.startButtonHoverBg,
+                                  },
+                                }}
+                              >
+                                <PlayIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
+                            <Tooltip title="更多操作">
+                              <IconButton
+                                aria-label={`${item.entry.name} 更多操作`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  setShortcutMenuAnchor(event.currentTarget);
+                                  setShortcutMenuKey(shortcutKey);
+                                }}
+                                sx={{
+                                  width: 26,
+                                  height: 26,
+                                  borderRadius: "999px",
+                                  bgcolor: tone.stopButtonBg,
+                                  color: tone.stopButtonColor,
+                                  border: `1px solid ${tone.stopButtonBorder}`,
+                                  "&:hover": {
+                                    bgcolor: tone.stopButtonHoverBg,
+                                  },
+                                }}
+                              >
+                                <MoreIcon fontSize="small" />
+                              </IconButton>
+                            </Tooltip>
                           </Stack>
                         </Box>
                       </Tooltip>
                     );
-                  })}
-                </Box>
+                    })}
+                  </Box>
+                  {finderPageCount > 1 ? (
+                    <Stack
+                      direction="row"
+                      justifyContent="flex-end"
+                      sx={{ pt: 0.25 }}
+                    >
+                      <Pagination
+                        aria-label="访达分页"
+                        size="small"
+                        page={activeFinderPage}
+                        count={finderPageCount}
+                        siblingCount={0}
+                        boundaryCount={1}
+                        onChange={(_, nextPage) => setFinderPage(nextPage)}
+                        sx={{
+                          "& .MuiPaginationItem-root": {
+                            minWidth: 26,
+                            height: 26,
+                            borderRadius: "9px",
+                            fontWeight: 800,
+                          },
+                        }}
+                      />
+                    </Stack>
+                  ) : null}
+                </Stack>
               ) : null}
               <Menu
                 anchorEl={shortcutMenuAnchor}

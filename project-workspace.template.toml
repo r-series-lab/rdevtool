@@ -1,0 +1,29 @@
+key = "system"
+name = "系统工作区"
+description = "显示全部项目和入口，作为全局管理视图。"
+include_all_projects = true
+include_all_navigation = true
+
+# 需求工作区建议复制此文件到 workspaces/<key>.toml 后修改：
+#
+# key = "marketing-rework"
+# name = "营销改造"
+# description = "只显示当前需求相关项目和入口。"
+# include_all_projects = false
+# include_all_navigation = false
+# projects = ["imop-admin", "marketing-admin"]
+# navigation_categories = ["营销后台", "常用环境"]
+# navigation_entries = ["禅道需求", "Jenkins 营销"]
+#
+# R 系列开发工作区示例：
+#
+# key = "r-series"
+# name = "R系列"
+# description = "R 系列工具开发工作区，只显示当前工具家族相关项目和少量通用入口。"
+# include_all_projects = false
+# include_all_navigation = false
+# projects = ["rdevtool", "rterm", "rimage", "rqrcode"]
+# navigation_categories = ["R系列开发"]
+# navigation_entries = ["访达", "iTerm"]
+#
+# `projects.toml` 和 `navigation.toml` 仍然是事实源；工作区只做引用和过滤。

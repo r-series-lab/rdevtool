@@ -2,8 +2,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { deleteStoredJson, getStoredJson, setStoredJson } from "../lib/storage";
 import {
-  DEPLOY_STATUS_SYNC_MAX_FAILURES,
+  BUILD_STATUS_SYNC_MAX_FAILURES,
   createActivityEntry,
+  isBuildActivityKind,
   normalizeActivityEntries,
   type ActivityBulkUpdater,
   type ActivityDraft,
@@ -16,12 +17,14 @@ import {
 const ACTIVITY_STORAGE_NAMESPACE = "activity-center";
 const ACTIVITY_STORAGE_KEY = "items";
 const MAX_ACTIVITY_ITEMS = 60;
-const DEPLOY_STATUS_SYNC_LIMIT = 5;
+const BUILD_STATUS_SYNC_LIMIT = 5;
 const URL_LIKE_PATTERN = /^https?:\/\//i;
 const JENKINS_QUEUE_PATTERN = /\/queue\/item\//i;
 
 type UseActivityCenterOptions = {
   setError: (value: string) => void;
+  projectKeys?: string[];
+  includeAllProjects?: boolean;
 };
 
 type BuildStatusResponse = {
@@ -32,16 +35,20 @@ type BuildStatusResponse = {
   detail: string;
 };
 
-type DeployStatusSyncOptions = {
+type BuildStatusSyncOptions = {
   force?: boolean;
+};
+
+type ActivityNormalizeOptions = {
+  expireStaleRunning?: boolean;
 };
 
 function normalizedActivityLink(value?: string | null) {
   return value?.trim() ?? "";
 }
 
-function deployActivityResourceValue(item: ActivityEntry) {
-  if (item.kind !== "deploy") {
+function buildActivityResourceValue(item: ActivityEntry) {
+  if (!isBuildActivityKind(item.kind)) {
     return "";
   }
   const resourceValue = normalizedActivityLink(item.resource?.value);
@@ -56,9 +63,9 @@ function activityDedupeKey(item: ActivityEntry) {
   if (item.chainId || item.parentId) {
     return `id:${item.id}`;
   }
-  const deployResource = deployActivityResourceValue(item);
-  if (deployResource) {
-    return `deploy:${item.projectKey ?? ""}:${deployResource}`;
+  const buildResource = buildActivityResourceValue(item);
+  if (buildResource) {
+    return `build:${item.projectKey ?? ""}:${buildResource}`;
   }
   return `id:${item.id}`;
 }
@@ -96,13 +103,13 @@ function activityStatusFromBuildState(stateKey?: string | null): ActivityStatus 
   return "info";
 }
 
-function deploySyncFailureCount(item: ActivityEntry) {
+function buildSyncFailureCount(item: ActivityEntry) {
   return item.syncFailureCount ?? 0;
 }
 
-function isDeployStatusSyncNotice(item: ActivityEntry) {
+function isBuildStatusSyncNotice(item: ActivityEntry) {
   return (
-    item.kind === "deploy" &&
+    isBuildActivityKind(item.kind) &&
     (item.summary.startsWith("状态同步失败") ||
       item.summary === "同步 Jenkins 状态中…")
   );
@@ -121,15 +128,15 @@ function buildRecordResource(
     : null;
 }
 
-function deployActivityStatusRequest(
+function buildActivityStatusRequest(
   item: ActivityEntry,
-  options: DeployStatusSyncOptions = {},
+  options: BuildStatusSyncOptions = {},
 ) {
   const shouldRetrySyncFailure =
     item.status === "failed" &&
     item.summary.startsWith("状态同步失败") &&
     options.force;
-  if (item.kind !== "deploy" || (item.status !== "running" && !shouldRetrySyncFailure)) {
+  if (!isBuildActivityKind(item.kind) || (item.status !== "running" && !shouldRetrySyncFailure)) {
     return null;
   }
   const values = [
@@ -159,8 +166,8 @@ function compactSyncError(reason: unknown) {
 }
 
 function syncFailureSummary(failureCount: number) {
-  const countText = `${failureCount}/${DEPLOY_STATUS_SYNC_MAX_FAILURES}`;
-  if (failureCount >= DEPLOY_STATUS_SYNC_MAX_FAILURES) {
+  const countText = `${failureCount}/${BUILD_STATUS_SYNC_MAX_FAILURES}`;
+  if (failureCount >= BUILD_STATUS_SYNC_MAX_FAILURES) {
     return `状态同步失败 · 已停止自动重试（${countText}）`;
   }
   return `状态同步失败 · 请手动刷新（${countText}）`;
@@ -175,12 +182,94 @@ function chooseActivityDuplicate(left: ActivityEntry, right: ActivityEntry) {
   return right.updatedAt.localeCompare(left.updatedAt) > 0 ? right : left;
 }
 
-function normalizeActivityList(value: unknown) {
+function buildExecutionActivityKey(item: ActivityEntry) {
+  const projectKey = item.projectKey?.trim();
+  const executionKey = item.executionKey?.trim();
+  if (!isBuildActivityKind(item.kind) || !projectKey || !executionKey) {
+    return "";
+  }
+  return `${projectKey}:${executionKey}`;
+}
+
+function removeSupersededBuildRunningActivities(items: ActivityEntry[]) {
+  const terminalByExecution = new Map<string, ActivityEntry>();
+  for (const item of items) {
+    if (item.status !== "success" && item.status !== "failed") {
+      continue;
+    }
+    const key = buildExecutionActivityKey(item);
+    if (!key) {
+      continue;
+    }
+    const current = terminalByExecution.get(key);
+    if (!current || item.updatedAt.localeCompare(current.updatedAt) > 0) {
+      terminalByExecution.set(key, item);
+    }
+  }
+
+  if (terminalByExecution.size === 0) {
+    return items;
+  }
+
+  return items.filter((item) => {
+    if (item.status !== "running") {
+      return true;
+    }
+    const key = buildExecutionActivityKey(item);
+    if (!key) {
+      return true;
+    }
+    const terminal = terminalByExecution.get(key);
+    return !terminal || terminal.updatedAt.localeCompare(item.updatedAt) < 0;
+  });
+}
+
+function activityDateKey(value?: string | null) {
+  const timestamp = Date.parse(value ?? "");
+  if (!Number.isFinite(timestamp)) {
+    return "";
+  }
+  return new Date(timestamp).toDateString();
+}
+
+function staleRunningSummary(item: ActivityEntry) {
+  const originalSummary = item.summary.trim();
+  const prefix = isBuildActivityKind(item.kind)
+    ? "上次本地构建未确认完成"
+    : "上次会话未确认完成";
+  return originalSummary ? `${prefix} · 原状态：${originalSummary}` : prefix;
+}
+
+function normalizeStaleRunningActivity(item: ActivityEntry, todayKey: string) {
+  if (item.status !== "running" || !todayKey) {
+    return item;
+  }
+  if (isBuildActivityKind(item.kind) && buildActivityStatusRequest(item)) {
+    return item;
+  }
+  const itemDateKey = activityDateKey(item.updatedAt || item.createdAt);
+  if (!itemDateKey || itemDateKey === todayKey) {
+    return item;
+  }
+  return {
+    ...item,
+    status: "info" as ActivityStatus,
+    summary: staleRunningSummary(item),
+    acknowledgedAt: null,
+  };
+}
+
+function normalizeActivityList(value: unknown, options: ActivityNormalizeOptions = {}) {
+  const todayKey = options.expireStaleRunning ? new Date().toDateString() : "";
   const deduped = new Map<string, ActivityEntry>();
-  for (const item of normalizeActivityEntries(value)) {
-    const key = activityDedupeKey(item);
+  for (const item of removeSupersededBuildRunningActivities(normalizeActivityEntries(value))) {
+    const normalizedItem = normalizeStaleRunningActivity(item, todayKey);
+    const key = activityDedupeKey(normalizedItem);
     const current = deduped.get(key);
-    deduped.set(key, current ? chooseActivityDuplicate(current, item) : item);
+    deduped.set(
+      key,
+      current ? chooseActivityDuplicate(current, normalizedItem) : normalizedItem,
+    );
   }
   return Array.from(deduped.values())
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
@@ -207,6 +296,22 @@ function matchesActivity(item: ActivityEntry, match: ActivityMatch) {
     item.resource?.value,
     item.detail,
   ].some((value) => resourceValues.has(normalizedActivityLink(value)));
+}
+
+function activityProjectKey(item: ActivityEntry) {
+  return item.projectKey || item.target?.projectKey || "";
+}
+
+function activityMatchesScope(
+  item: ActivityEntry,
+  projectKeys: Set<string>,
+  includeAllProjects: boolean,
+) {
+  if (includeAllProjects) {
+    return true;
+  }
+  const projectKey = activityProjectKey(item);
+  return Boolean(projectKey && projectKeys.has(projectKey));
 }
 
 function sameActivityResource(left: ActivityEntry["resource"], right: ActivityEntry["resource"]) {
@@ -245,37 +350,50 @@ function shouldApplyActivityPatch(item: ActivityEntry, patch: ActivityPatch) {
   return false;
 }
 
-export function useActivityCenter({ setError }: UseActivityCenterOptions) {
-  const [items, setItems] = useState<ActivityEntry[]>([]);
+export function useActivityCenter({
+  setError,
+  projectKeys = [],
+  includeAllProjects = true,
+}: UseActivityCenterOptions) {
+  const [allItems, setAllItems] = useState<ActivityEntry[]>([]);
   const itemsRef = useRef<ActivityEntry[]>([]);
+  const projectKeySet = useMemo(() => new Set(projectKeys), [projectKeys]);
+
+  const scopedItems = useMemo(
+    () =>
+      allItems.filter((item) =>
+        activityMatchesScope(item, projectKeySet, includeAllProjects),
+      ),
+    [allItems, includeAllProjects, projectKeySet],
+  );
 
   const stats = useMemo(
     () => ({
-      running: items.filter(
-        (item) => item.status === "running" && !isDeployStatusSyncNotice(item),
+      running: scopedItems.filter(
+        (item) => item.status === "running" && !isBuildStatusSyncNotice(item),
       ).length,
-      failed: items.filter(
+      failed: scopedItems.filter(
         (item) =>
           item.status === "failed" &&
           !item.acknowledgedAt &&
-          !isDeployStatusSyncNotice(item),
+          !isBuildStatusSyncNotice(item),
       ).length,
-      handled: items.filter(
+      handled: scopedItems.filter(
         (item) =>
           item.status === "failed" &&
           item.acknowledgedAt &&
-          !isDeployStatusSyncNotice(item),
+          !isBuildStatusSyncNotice(item),
       ).length,
-      success: items.filter((item) => item.status === "success").length,
-      total: items.length,
+      success: scopedItems.filter((item) => item.status === "success").length,
+      total: scopedItems.length,
     }),
-    [items],
+    [scopedItems],
   );
 
   const persist = useCallback((nextItems: ActivityEntry[]) => {
     const normalized = normalizeActivityList(nextItems);
     itemsRef.current = normalized;
-    setItems(normalized);
+    setAllItems(normalized);
     void setStoredJson(
       ACTIVITY_STORAGE_NAMESPACE,
       ACTIVITY_STORAGE_KEY,
@@ -303,20 +421,20 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
     );
   }, [persist]);
 
-  const syncStoredDeployStatuses = useCallback(async (
+  const syncStoredBuildStatuses = useCallback(async (
     sourceItems: ActivityEntry[],
-    options: DeployStatusSyncOptions = {},
+    options: BuildStatusSyncOptions = {},
   ) => {
     const targets = sourceItems
       .map((item) => ({
         item,
-        request: deployActivityStatusRequest(item, options),
+        request: buildActivityStatusRequest(item, options),
       }))
       .filter(
         (target): target is { item: ActivityEntry; request: { queueUrl: string | null; buildUrl: string | null } } =>
           Boolean(target.request),
       )
-      .slice(0, DEPLOY_STATUS_SYNC_LIMIT);
+      .slice(0, BUILD_STATUS_SYNC_LIMIT);
 
     if (targets.length === 0) {
       return;
@@ -337,8 +455,8 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
         });
       } catch (reason) {
         const failureCount = Math.min(
-          deploySyncFailureCount(item) + 1,
-          DEPLOY_STATUS_SYNC_MAX_FAILURES,
+          buildSyncFailureCount(item) + 1,
+          BUILD_STATUS_SYNC_MAX_FAILURES,
         );
         patchStoredActivity(item.id, {
           status: "failed",
@@ -352,9 +470,9 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
     }
   }, [patchStoredActivity]);
 
-  const refreshDeployActivities = useCallback(async (options: DeployStatusSyncOptions = {}) => {
-    await syncStoredDeployStatuses(itemsRef.current, options);
-  }, [syncStoredDeployStatuses]);
+  const refreshBuildActivities = useCallback(async (options: BuildStatusSyncOptions = {}) => {
+    await syncStoredBuildStatuses(scopedItems, options);
+  }, [scopedItems, syncStoredBuildStatuses]);
 
   useEffect(() => {
     let cancelled = false;
@@ -363,9 +481,18 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
         if (cancelled) {
           return;
         }
-        const normalized = normalizeActivityList(stored);
+        const normalized = normalizeActivityList(stored, { expireStaleRunning: true });
         itemsRef.current = normalized;
-        setItems(normalized);
+        setAllItems(normalized);
+        void setStoredJson(
+          ACTIVITY_STORAGE_NAMESPACE,
+          ACTIVITY_STORAGE_KEY,
+          normalized,
+        ).catch((reason) => {
+          if (!cancelled) {
+            setError(String(reason));
+          }
+        });
       })
       .catch((reason) => {
         if (!cancelled) {
@@ -376,7 +503,7 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
     return () => {
       cancelled = true;
     };
-  }, [setError, syncStoredDeployStatuses]);
+  }, [setError]);
 
   const recordActivity = useCallback((draft: ActivityDraft) => {
     const entry = createActivityEntry(draft);
@@ -419,6 +546,7 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
     if (changed) {
       persist(nextItems);
     }
+    return changed;
   }, [persist]);
 
   const acknowledgeActivities = useCallback((ids: string[]) => {
@@ -444,18 +572,25 @@ export function useActivityCenter({ setError }: UseActivityCenterOptions) {
   }, [acknowledgeActivities]);
 
   const clearActivities = useCallback(async () => {
-    itemsRef.current = [];
-    setItems([]);
-    await deleteStoredJson(ACTIVITY_STORAGE_NAMESPACE, ACTIVITY_STORAGE_KEY);
-  }, []);
+    if (includeAllProjects) {
+      itemsRef.current = [];
+      setAllItems([]);
+      await deleteStoredJson(ACTIVITY_STORAGE_NAMESPACE, ACTIVITY_STORAGE_KEY);
+      return;
+    }
+    const remaining = itemsRef.current.filter(
+      (item) => !activityMatchesScope(item, projectKeySet, includeAllProjects),
+    );
+    persist(remaining);
+  }, [includeAllProjects, persist, projectKeySet]);
 
   return {
-    items,
+    items: scopedItems,
     stats,
     recordActivity,
     updateActivity,
     syncActivities,
-    refreshDeployActivities,
+    refreshBuildActivities,
     acknowledgeActivity,
     acknowledgeActivities,
     clearActivities,

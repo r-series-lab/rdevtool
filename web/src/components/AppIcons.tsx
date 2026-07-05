@@ -221,6 +221,38 @@ export function CopyIcon(props: SvgIconProps) {
   );
 }
 
+export function UploadIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M12 4 6.6 9.4 8 10.8l3-3V16h2V7.8l3 3 1.4-1.4L12 4Z"
+        fill="currentColor"
+      />
+      <path
+        d="M5 18h14v2H5v-2Z"
+        fill="currentColor"
+        opacity=".54"
+      />
+    </SvgIcon>
+  );
+}
+
+export function DownloadIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M11 4h2v8.2l3-3 1.4 1.4L12 16l-5.4-5.4L8 9.2l3 3V4Z"
+        fill="currentColor"
+      />
+      <path
+        d="M5 18h14v2H5v-2Z"
+        fill="currentColor"
+        opacity=".54"
+      />
+    </SvgIcon>
+  );
+}
+
 export function PlayIcon(props: SvgIconProps) {
   return (
     <SvgIcon viewBox="0 0 24 24" {...props}>

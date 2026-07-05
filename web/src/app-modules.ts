@@ -7,9 +7,13 @@ import type {
 } from "./app-modules.types";
 import {
   workflowReplayFromBranchHistory,
-  workflowReplayFromDeployHistory,
+  workflowReplayFromBuildHistory,
   workflowReplayFromProjectRuntime,
 } from "./lib/workflowSignals";
+
+function isBuildReplayTarget(target: string) {
+  return target === "build.replay" || target === "deploy.replay";
+}
 
 function formatHistoryTime(value?: string) {
   if (!value) {
@@ -40,65 +44,65 @@ function normalizeHistoryTimestamp(value: string) {
 
 export const APP_MODULES = [
   {
-    key: "deploy",
-    label: "项目部署",
-    shortLabel: "部署",
+    key: "build",
+    label: "项目构建",
+    shortLabel: "构建",
     component: lazy(() =>
-      import("./pages/DeployPage").then((module) => ({
-        default: module.DeployPage,
+      import("./pages/BuildPage").then((module) => ({
+        default: module.BuildPage,
       })),
     ),
-    loadOnStartup: ({ deployModule }) => deployModule.loadDeployHistory(),
+    loadOnStartup: ({ buildModule }) => buildModule.loadBuildHistory(),
     buildProps: ({
       appShell,
       branchContext,
       mergeSelection,
-      deployModule,
+      buildModule,
       workflowSignals,
       busy,
     }) => ({
-      projects: appShell.deployProjects,
+      projects: appShell.buildProjects,
       selectedProject: appShell.selectedProject,
       onProjectChange: appShell.setSelectedProject,
-      target: deployModule.target,
+      target: buildModule.target,
       onTargetChange: (value) => {
-        deployModule.setDeployContextLoadedKey("");
-        deployModule.setTarget(value);
+        buildModule.setBuildContextLoadedKey("");
+        buildModule.setTarget(value);
       },
-      targetMeta: deployModule.targetMeta,
-      paramValues: deployModule.paramValues,
-      defaultParamValues: deployModule.defaultParamValues,
-      onParamChange: deployModule.setParamValue,
-      contextLoading: deployModule.deployContextStatus === "loading",
-      contextError: deployModule.deployContextStatus === "error",
-      contextErrorText: deployModule.deployContextError,
+      targetMeta: buildModule.targetMeta,
+      paramValues: buildModule.paramValues,
+      defaultParamValues: buildModule.defaultParamValues,
+      onParamChange: buildModule.setParamValue,
+      contextLoading: buildModule.buildContextStatus === "loading",
+      contextError: buildModule.buildContextStatus === "error",
+      contextErrorText: buildModule.buildContextError,
       onSyncBranches: () =>
         void branchContext.handleSyncBranches(appShell.selectedProject),
       sourceBranchEntries: mergeSelection.sourceBranchEntries,
       sourceBranchOptions: mergeSelection.sourceBranchOptions,
       branchSyncText: branchContext.branchSyncText,
       busy,
-      onTriggerBuild: deployModule.handleTriggerBuild,
-      plan: deployModule.plan,
-      buildResult: deployModule.buildResult,
-      buildResultUpdatedAtMs: deployModule.buildResultUpdatedAtMs,
-      buildAutoRefreshTimedOut: deployModule.buildAutoRefreshTimedOut,
-      onRefreshBuild: deployModule.handleRefreshBuild,
-      onOpenBuildRecord: deployModule.handleOpenBuildRecord,
-      onOpenBuildUrl: deployModule.handleOpenBuildUrl,
-      deployHistory: deployModule.visibleDeployHistory,
-      onReplayDeployHistory: (entry) =>
-        void deployModule.handleReplayDeployHistory(entry),
+      onTriggerBuild: buildModule.handleTriggerBuild,
+      plan: buildModule.plan,
+      buildResult: buildModule.buildResult,
+      buildResultUpdatedAtMs: buildModule.buildResultUpdatedAtMs,
+      buildAutoRefreshTimedOut: buildModule.buildAutoRefreshTimedOut,
+      onRefreshBuild: buildModule.handleRefreshBuild,
+      onOpenBuildRecord: buildModule.handleOpenBuildRecord,
+      onOpenBuildUrl: buildModule.handleOpenBuildUrl,
+      buildHistory: buildModule.visibleBuildHistory,
+      onReplayBuildHistory: (entry) =>
+        void buildModule.handleReplayBuildHistory(entry),
       workflowReceiveRules: workflowSignals.rules.receivers.filter(
-        (rule) => rule.replay.target === "deploy.replay",
+        (rule) => isBuildReplayTarget(rule.replay.target),
       ),
-      workflowSignalIdsForDeployReplay: (entry) =>
-        workflowSignals.signalIdsForReplay(workflowReplayFromDeployHistory(entry)),
+      workflowSignalIdsForBuildReplay: (entry) =>
+        workflowSignals.signalIdsForReplay(workflowReplayFromBuildHistory(entry)),
       workflowSignalOptions: workflowSignals.signalOptions,
       workflowSignalSummaries: workflowSignals.signalSummaries,
-      onWorkflowDeployReplayReceiversChange: (entry, signalIds) =>
+      onWorkflowBuildReplayReceiversChange: (entry, signalIds) =>
         void workflowSignals.setReceiveRulesForReplay(
-          workflowReplayFromDeployHistory(entry),
+          workflowReplayFromBuildHistory(entry),
           signalIds,
         ),
       onWorkflowReceiveRulesEnabledChange: (ruleIds, enabled) =>
@@ -108,14 +112,14 @@ export const APP_MODULES = [
       onWorkflowSignalDelete: (signalId) =>
         void workflowSignals.deleteWorkflowSignal(signalId),
       onWorkflowSignalsClear: () => void workflowSignals.clearWorkflowSignals(),
-      onRefreshDeployHistory: () =>
-        void deployModule.refreshDeployHistoryStatuses(),
-      onClearDeployHistory: () =>
+      onRefreshBuildHistory: () =>
+        void buildModule.refreshBuildHistoryStatuses(),
+      onClearBuildHistory: () =>
         void (async () => {
-          await deployModule.handleClearDeployHistory();
+          await buildModule.handleClearBuildHistory();
           await workflowSignals.deleteReceiveRules(
             workflowSignals.rules.receivers
-              .filter((rule) => rule.replay.target === "deploy.replay")
+              .filter((rule) => isBuildReplayTarget(rule.replay.target))
               .map((rule) => rule.id),
           );
         })(),
@@ -175,6 +179,14 @@ export const APP_MODULES = [
       pushStatusLoading: mergeModule.pushStatusLoading,
       pushStatusError: mergeModule.pushStatusError,
       pushStatusUpdatedAtMs: mergeModule.pushStatusUpdatedAtMs,
+      worktrees: mergeModule.worktrees,
+      worktreesLoading: mergeModule.worktreesLoading,
+      worktreesError: mergeModule.worktreesError,
+      selectedWorktreePath: mergeModule.selectedWorktreePath,
+      onWorktreePathChange: mergeModule.setSelectedWorktreePath,
+      onChooseWorktreeDirectory: mergeModule.handleChooseWorktreeDirectory,
+      onRefreshWorktrees: () =>
+        void mergeModule.loadProjectWorktrees(appShell.selectedProject),
       onRefreshPushStatus: () => void mergeModule.loadPushStatus(),
       onSyncBranches: () =>
         void branchContext.handleSyncBranches(appShell.selectedProject),
@@ -277,8 +289,8 @@ export const APP_MODULES = [
       onStartProfile: proxyModule.startProxyProfile,
       onStopProfile: proxyModule.stopProxyProfile,
       onClearEvents: proxyModule.clearProxyEvents,
-      demoAvailable: proxyModule.demoAvailable,
-      onLoadDemoData: proxyModule.loadProxyDemoData,
+      onExportProfilePack: proxyModule.exportProxyProfilePack,
+      onImportProfilePack: proxyModule.importProxyProfilePack,
     }),
   },
   {
@@ -318,8 +330,8 @@ export const APP_MODULES = [
       branchProjectKeys: appShell.enabledPages.includes("merge")
         ? appShell.branchProjects.map((item) => item.key)
         : [],
-      deployProjectKeys: appShell.enabledPages.includes("deploy")
-        ? appShell.deployProjects.map((item) => item.key)
+      buildProjectKeys: appShell.enabledPages.includes("build")
+        ? appShell.buildProjects.map((item) => item.key)
         : [],
       workflowReceiveRules: workflowSignals.rules.receivers.filter(
         (rule) => rule.replay.target === "project.replay",
@@ -361,9 +373,9 @@ export const APP_MODULES = [
         appShell.setSelectedProject(projectKey);
         appShell.setPage("merge");
       },
-      onOpenProjectDeploy: (projectKey) => {
+      onOpenProjectBuild: (projectKey) => {
         appShell.setSelectedProject(projectKey);
-        appShell.setPage("deploy");
+        appShell.setPage("build");
       },
       onRefresh: () => void projectsModule.loadFinderData({ force: true }),
       onOpenFinderEntry: (entry) =>
@@ -389,7 +401,7 @@ export const APP_MODULES = [
     }),
   },
 ] as const satisfies readonly [
-  AppModuleDefinition<"deploy">,
+  AppModuleDefinition<"build">,
   AppModuleDefinition<"merge">,
   AppModuleDefinition<"proxy">,
   AppModuleDefinition<"projects">,
@@ -409,7 +421,7 @@ export function buildPageProps(
   context: BuildModulePropsContext,
 ): AppPagePropsMap {
   return {
-    deploy: APP_MODULE_MAP.deploy.buildProps(context),
+    build: APP_MODULE_MAP.build.buildProps(context),
     merge: APP_MODULE_MAP.merge.buildProps(context),
     proxy: APP_MODULE_MAP.proxy.buildProps(context),
     projects: APP_MODULE_MAP.projects.buildProps(context),

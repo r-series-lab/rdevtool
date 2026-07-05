@@ -21,20 +21,22 @@ import { useAppBootstrap } from "./hooks/useAppBootstrap";
 import { useBranchContext } from "./hooks/useBranchContext";
 import { useMergeSelection } from "./hooks/useMergeSelection";
 import {
-  useDeployModule,
-} from "./hooks/useDeployModule";
+  useBuildModule,
+} from "./hooks/useBuildModule";
 import { useBranchWorkflowModule } from "./hooks/useBranchWorkflowModule";
 import { usePageModuleRuntime } from "./hooks/usePageModuleRuntime";
 import { usePageScrollReset } from "./hooks/usePageScrollReset";
 import { useProjectsModule } from "./hooks/useProjectsModule";
 import { useProxyModule } from "./hooks/useProxyModule";
 import { useWorkflowSignals } from "./hooks/useWorkflowSignals";
+import type { CreateProjectWorkspacePayload } from "./app-types";
 import type { ActivityEntry } from "./lib/activityCenter";
 import { createAppTheme } from "./theme";
 
 type AppInfo = {
   configDir?: string;
   configPath?: string;
+  workspacesPath?: string;
   navigationPath?: string;
 };
 
@@ -51,17 +53,33 @@ function App() {
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
 
   const appShell = useAppShell({ setError });
-  const activityCenter = useActivityCenter({ setError });
+  const activeProjectWorkspace = useMemo(
+    () =>
+      appShell.projectWorkspaces.find(
+        (workspace) => workspace.key === appShell.activeProjectWorkspaceKey,
+      ) ?? null,
+    [appShell.activeProjectWorkspaceKey, appShell.projectWorkspaces],
+  );
+  const activeProjectKeys = useMemo(
+    () => appShell.projects.map((project) => project.key),
+    [appShell.projects],
+  );
+  const activityCenter = useActivityCenter({
+    setError,
+    projectKeys: activeProjectKeys,
+    includeAllProjects: activeProjectWorkspace?.includeAllProjects ?? true,
+  });
   const workflowSignals = useWorkflowSignals({ setError });
   const workflowAutoRunKeyRef = useRef("");
-  const deployAvailable = appShell.enabledPages.includes("deploy");
+  const buildAvailable = appShell.enabledPages.includes("build");
   const mergeAvailable = appShell.enabledPages.includes("merge");
   const projectsAvailable = appShell.enabledPages.includes("projects");
   const proxyAvailable = appShell.enabledPages.includes("proxy");
-  const deployEnabled = deployAvailable && appShell.page === "deploy";
+  const buildEnabled = buildAvailable && appShell.page === "build";
   const mergeEnabled = mergeAvailable && appShell.page === "merge";
-  const branchEnabled = deployEnabled || mergeEnabled;
-  const deployProjects = useMemo(
+  const proxyEnabled = proxyAvailable && appShell.page === "proxy";
+  const branchEnabled = buildEnabled || mergeEnabled;
+  const buildProjects = useMemo(
     () => appShell.projects.filter((item) => item.supportsDeploy),
     [appShell.projects],
   );
@@ -86,15 +104,15 @@ function App() {
   }, [appShell, branchProjects, mergeEnabled]);
 
   useEffect(() => {
-    if (!deployEnabled) {
+    if (!buildEnabled) {
       return;
     }
-    if (!appShell.selectedProject || !deployProjects.some((item) => item.key === appShell.selectedProject)) {
-      if (deployProjects[0]) {
-        appShell.setSelectedProject(deployProjects[0].key);
+    if (!appShell.selectedProject || !buildProjects.some((item) => item.key === appShell.selectedProject)) {
+      if (buildProjects[0]) {
+        appShell.setSelectedProject(buildProjects[0].key);
       }
     }
-  }, [appShell, deployEnabled, deployProjects]);
+  }, [appShell, buildEnabled, buildProjects]);
 
   const branchContext = useBranchContext({
     enabled: branchEnabled,
@@ -115,8 +133,8 @@ function App() {
     setProjectSelections: appShell.setProjectSelections,
   });
 
-  const deployModule = useDeployModule({
-    deployEnabled,
+  const buildModule = useBuildModule({
+    buildEnabled,
     selectedProject: appShell.selectedProject,
     branchOptions: branchContext.branchOptions,
     setBusy,
@@ -128,17 +146,17 @@ function App() {
 
   useEffect(() => {
     if (
-      !deployAvailable ||
+      !buildAvailable ||
       activityCenter.items.length === 0 ||
-      deployModule.visibleDeployHistory.length === 0
+      buildModule.visibleBuildHistory.length === 0
     ) {
       return;
     }
-    deployModule.syncDeployActivitiesFromHistory();
+    buildModule.syncBuildActivitiesFromHistory();
   }, [
     activityCenter.items.length,
-    deployAvailable,
-    deployModule,
+    buildAvailable,
+    buildModule,
   ]);
 
   const mergeModule = useBranchWorkflowModule({
@@ -165,28 +183,28 @@ function App() {
     syncActivities: activityCenter.syncActivities,
   });
   const proxyModule = useProxyModule({
-    enabled: proxyAvailable && appShell.page === "proxy",
+    enabled: proxyEnabled,
     setError,
   });
   const moduleRuntime = useMemo(
     () => ({
       appShell,
-      deployModule,
+      buildModule,
       mergeModule,
       projectsModule,
       proxyModule,
     }),
-    [appShell, deployModule, mergeModule, projectsModule, proxyModule],
+    [appShell, buildModule, mergeModule, projectsModule, proxyModule],
   );
   const activePageProps = buildPagePropsFor(appShell.page, {
     appShell: {
       ...appShell,
-      deployProjects,
+      buildProjects,
       branchProjects,
     },
     branchContext,
     mergeSelection,
-    deployModule,
+    buildModule,
     mergeModule,
     projectsModule,
     proxyModule,
@@ -231,9 +249,11 @@ function App() {
 
   useEffect(() => {
     const signal = workflowSignals.nextPendingSignal;
-    const deployReceivers = signal
+    const buildReceivers = signal
       ? workflowSignals.matchingReceivers(signal).filter(
-          (receiver) => receiver.replay.target === "deploy.replay",
+          (receiver) =>
+            receiver.replay.target === "build.replay" ||
+            receiver.replay.target === "deploy.replay",
         )
       : [];
     const branchReceivers = signal
@@ -252,7 +272,7 @@ function App() {
       !isFreshWorkflowSignal(signal.createdAt) ||
       (branchReceivers.length === 0 &&
         projectReceivers.length === 0 &&
-        deployReceivers.length === 0)
+        buildReceivers.length === 0)
     ) {
       return;
     }
@@ -262,7 +282,7 @@ function App() {
     if (projectReceivers.length > 0 && !projectsAvailable) {
       return;
     }
-    if (deployReceivers.length > 0 && !deployAvailable) {
+    if (buildReceivers.length > 0 && !buildAvailable) {
       return;
     }
 
@@ -298,14 +318,17 @@ function App() {
           }
         }
       }
-      if (deployReceivers.length > 0) {
-        for (const receiver of deployReceivers) {
-          if (receiver.replay.target === "deploy.replay") {
-            await deployModule.handleReplayDeployHistory(receiver.replay.entry, {
+      if (buildReceivers.length > 0) {
+        for (const receiver of buildReceivers) {
+          if (
+            receiver.replay.target === "build.replay" ||
+            receiver.replay.target === "deploy.replay"
+          ) {
+            await buildModule.handleReplayBuildHistory(receiver.replay.entry, {
               force: true,
               chainId,
               parentId,
-              stepLabel: "触发部署",
+              stepLabel: "触发构建",
             });
           }
         }
@@ -314,8 +337,8 @@ function App() {
     })();
   }, [
     busy,
-    deployAvailable,
-    deployModule,
+    buildAvailable,
+    buildModule,
     mergeAvailable,
     mergeModule,
     projectsAvailable,
@@ -362,7 +385,52 @@ function App() {
     }
   }
 
+  async function openProjectWorkspacesDir() {
+    try {
+      const info = await invoke<AppInfo>("app_info");
+      const path = info.workspacesPath;
+      if (!path) {
+        throw new Error("未找到工作区配置目录");
+      }
+      await invoke("open_local_path", { path });
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function changeProjectWorkspace(workspaceKey: string) {
+    try {
+      setError("");
+      await appShell.setActiveProjectWorkspace(workspaceKey);
+      if (projectsAvailable) {
+        await projectsModule.loadFinderData({ force: true });
+      }
+      if (buildEnabled) {
+        await buildModule.loadBuildHistory();
+      }
+      if (proxyEnabled) {
+        await proxyModule.loadProxyDashboard();
+      }
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function createProjectWorkspace(payload: CreateProjectWorkspacePayload) {
+    try {
+      setError("");
+      await appShell.createProjectWorkspace(payload);
+      if (projectsAvailable) {
+        await projectsModule.loadFinderData({ force: true });
+      }
+    } catch (reason) {
+      setError(String(reason));
+      throw reason;
+    }
+  }
+
   async function reloadProjectsAfterConfigSave() {
+    await appShell.loadProjectWorkspaces();
     await appShell.loadProjects(appShell.selectedProject, true);
     if (projectsAvailable) {
       await projectsModule.loadFinderData({ force: true });
@@ -418,10 +486,15 @@ function App() {
         onDefaultPageChange={appShell.setDefaultPage}
         styleMode={appShell.styleMode}
         onStyleModeChange={appShell.setStyleMode}
+        projectWorkspaces={appShell.projectWorkspaces}
+        activeProjectWorkspaceKey={appShell.activeProjectWorkspaceKey}
+        onProjectWorkspaceChange={changeProjectWorkspace}
         selectedProjectKey={appShell.selectedProject}
         onOpenConfigDir={openConfigDir}
         onOpenConfigFile={openConfigFile}
+        onOpenProjectWorkspacesDir={openProjectWorkspacesDir}
         onOpenNavigationConfigFile={openNavigationConfigFile}
+        onCreateProjectWorkspace={createProjectWorkspace}
         onProjectConfigSaved={reloadProjectsAfterConfigSave}
         activityItems={activityCenter.items}
         activityAlertCount={activityCenter.stats.running + activityCenter.stats.failed}
@@ -429,7 +502,7 @@ function App() {
         onOpenActivityResource={(entry) => {
           void openActivityResource(entry);
         }}
-        onRefreshActivities={activityCenter.refreshDeployActivities}
+        onRefreshActivities={activityCenter.refreshBuildActivities}
         onAcknowledgeActivityEntry={(entry) => {
           activityCenter.acknowledgeActivity(entry.id);
         }}

@@ -167,10 +167,40 @@ function formatResult(result: WebActionRunResult | null) {
   if (!result) {
     return "";
   }
-  if (result.error) {
-    return result.error;
-  }
   return result.resultText || "执行完成";
+}
+
+function formatActionOption(action: WebActionSummary) {
+  const name = action.name || action.key;
+  if (action.kind === "request") {
+    const request = action.request;
+    return `${name} · ${request?.method || "GET"} ${request?.url || "-"}`;
+  }
+  return `${name}${
+    action.matchPatterns.length > 0 ? ` · ${action.matchPatterns[0]}` : ""
+  }`;
+}
+
+function formatRequestPreview(action: WebActionSummary | null) {
+  const request = action?.request;
+  if (!request) {
+    return "";
+  }
+  const lines = [
+    `${request.method || "GET"} ${request.url || "-"}`,
+    `timeout: ${request.timeoutMs || 30000} ms`,
+  ];
+  const headers = Object.entries(request.headers ?? {});
+  if (headers.length > 0) {
+    lines.push("", "headers:");
+    for (const [key, value] of headers) {
+      lines.push(`  ${key}: ${value}`);
+    }
+  }
+  if (request.body) {
+    lines.push("", "body:", request.body);
+  }
+  return lines.join("\n");
 }
 
 export function RuntimePanelDrawer<T extends string = string>({
@@ -192,6 +222,7 @@ export function RuntimePanelDrawer<T extends string = string>({
 }: RuntimePanelDrawerProps<T>) {
   return (
     <Drawer
+      className="runtime-panel-drawer"
       anchor="right"
       open={open}
       onClose={closeDisabled ? undefined : onClose}
@@ -199,7 +230,7 @@ export function RuntimePanelDrawer<T extends string = string>({
       slotProps={{
         paper: {
           sx: {
-            width: { xs: "100%", sm: 430 },
+            width: { xs: "100%", sm: 456 },
             maxWidth: "100%",
             bgcolor: "var(--panel)",
             color: "var(--text)",
@@ -210,6 +241,7 @@ export function RuntimePanelDrawer<T extends string = string>({
       }}
     >
       <Box
+        className="runtime-panel-shell"
         sx={{
           height: "100%",
           display: "flex",
@@ -219,6 +251,7 @@ export function RuntimePanelDrawer<T extends string = string>({
         }}
       >
         <Stack
+          className="runtime-panel-header"
           direction="row"
           alignItems="flex-start"
           justifyContent="space-between"
@@ -239,6 +272,7 @@ export function RuntimePanelDrawer<T extends string = string>({
                 />
               ) : icon ? (
                 <Box
+                  className="runtime-panel-title-icon"
                   sx={{
                     width: 30,
                     height: 30,
@@ -255,6 +289,7 @@ export function RuntimePanelDrawer<T extends string = string>({
                 </Box>
               ) : null}
               <Typography
+                className="runtime-panel-title"
                 variant="h6"
                 sx={{
                   minWidth: 0,
@@ -271,6 +306,7 @@ export function RuntimePanelDrawer<T extends string = string>({
             </Stack>
             {subtitle ? (
               <Typography
+                className="runtime-panel-subtitle"
                 variant="caption"
                 noWrap
                 sx={{
@@ -319,6 +355,7 @@ export function RuntimePanelDrawer<T extends string = string>({
 
         {tabs.length > 0 && activeTab ? (
           <Tabs
+            className="runtime-panel-tabs"
             value={activeTab}
             onChange={(_, value) => onTabChange?.(value as T)}
             variant="fullWidth"
@@ -362,6 +399,7 @@ export function RuntimePanelDrawer<T extends string = string>({
         ) : null}
 
         <Box
+          className="runtime-panel-body"
           sx={{
             display: "flex",
             flexDirection: "column",
@@ -403,9 +441,13 @@ export function WebActionsPanel({
     [actions, selectedActionKey],
   );
   const isTemporaryAction = selectedActionKey === TEMPORARY_ACTION_KEY;
+  const selectedActionNeedsTarget =
+    isTemporaryAction || selectedAction?.kind !== "request";
   const scriptValue = isTemporaryAction
     ? temporaryScript
-    : selectedAction?.script ?? "";
+    : selectedAction?.kind === "request"
+      ? formatRequestPreview(selectedAction)
+      : selectedAction?.script ?? "";
 
   async function loadPanelData(nextContext = context) {
     if (!nextContext?.url) {
@@ -549,7 +591,10 @@ export function WebActionsPanel({
   }
 
   async function runSelectedAction() {
-    if (!context || !selectedTargetId) {
+    if (!context) {
+      return;
+    }
+    if (selectedActionNeedsTarget && !selectedTargetId) {
       return;
     }
     if (!isTemporaryAction && !selectedAction) {
@@ -583,7 +628,7 @@ export function WebActionsPanel({
               ...(context.entry ? { entry: context.entry } : {}),
               request: {
                 actionKey: selectedAction!.key,
-                targetId: selectedTargetId,
+                targetId: selectedTargetId || undefined,
                 scope: context.scope,
                 url: context.url,
                 params: paramValues,
@@ -603,10 +648,11 @@ export function WebActionsPanel({
 
   const canRun = Boolean(
     context?.url &&
-      selectedTargetId &&
+      (!selectedActionNeedsTarget || selectedTargetId) &&
       (isTemporaryAction ? temporaryScript.trim() : selectedAction),
   );
   const resultText = formatResult(result);
+  const resultFailed = Boolean(error || (result && !result.success));
 
   return (
     <Stack spacing={compact ? 1 : 1.15}>
@@ -678,9 +724,11 @@ export function WebActionsPanel({
               variant="caption"
               sx={{ color: "var(--muted)", fontWeight: 700 }}
             >
-              {targets.length > 0
-                ? "未找到与当前入口匹配的页面，可手动选择或打开页面。"
-                : "未发现受控页面，请先打开页面。"}
+              {selectedAction?.kind === "request"
+                ? "请求动作可直接运行；脚本动作需要先打开受控页面。"
+                : targets.length > 0
+                  ? "未找到与当前入口匹配的页面，可手动选择或打开页面。"
+                  : "未发现受控页面，请先打开页面。"}
             </Typography>
           ) : null}
           <Typography
@@ -711,6 +759,7 @@ export function WebActionsPanel({
             sx={{ color: "var(--muted)", fontWeight: 850 }}
           >
             动作脚本
+            {selectedAction?.kind === "request" ? " / 请求" : ""}
           </Typography>
           <TextField
             select
@@ -722,10 +771,7 @@ export function WebActionsPanel({
           >
             {actions.map((action) => (
               <MenuItem key={action.key} value={action.key}>
-                {action.name || action.key}
-                {action.matchPatterns.length > 0
-                  ? ` · ${action.matchPatterns[0]}`
-                  : ""}
+                {formatActionOption(action)}
               </MenuItem>
             ))}
             <MenuItem value={TEMPORARY_ACTION_KEY}>临时脚本 · 当前页面</MenuItem>
@@ -776,7 +822,8 @@ export function WebActionsPanel({
           <TextField
             value={scriptValue}
             multiline
-            minRows={compact ? 4 : 5}
+            label={selectedAction?.kind === "request" ? "请求配置" : undefined}
+            minRows={selectedAction?.kind === "request" ? 3 : compact ? 4 : 5}
             maxRows={compact ? 7 : 10}
             fullWidth
             onChange={(event) => {
@@ -785,7 +832,13 @@ export function WebActionsPanel({
               }
             }}
             InputProps={{ readOnly: !isTemporaryAction }}
-            helperText={isTemporaryAction ? "临时脚本不会写入配置文件" : ""}
+            helperText={
+              isTemporaryAction
+                ? "临时脚本不会写入配置文件"
+                : selectedAction?.kind === "request"
+                  ? "请求动作由 Rust HTTP 客户端执行，支持 GET/POST/PUT/PATCH/DELETE、Header、Body 和参数替换。"
+                  : ""
+            }
             sx={{
               "& .MuiInputBase-root": {
                 fontFamily:
@@ -818,7 +871,9 @@ export function WebActionsPanel({
             p: 1,
             borderRadius: "13px",
             border: "1px solid var(--line-soft)",
-            bgcolor: error ? "rgba(193,107,118,0.09)" : "rgba(95,128,104,0.1)",
+            bgcolor: resultFailed
+              ? "rgba(193,107,118,0.09)"
+              : "rgba(95,128,104,0.1)",
             maxHeight: compact ? 160 : 220,
             overflow: "auto",
             scrollbarWidth: "thin",

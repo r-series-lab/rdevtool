@@ -362,21 +362,21 @@ export function BranchHistoryPanel({
           direction="row"
           justifyContent="space-between"
           alignItems="center"
-          spacing={1}
+          spacing={0.8}
           flexWrap="wrap"
-          rowGap={0.6}
+          rowGap={0.45}
           minWidth={0}
-          mb={expanded ? 1.2 : 0}
+          mb={expanded ? 0.8 : 0}
         >
           <Typography variant="h6" sx={{ flexShrink: 0, fontWeight: 800 }}>
             记录
           </Typography>
           <Stack
             direction="row"
-            spacing={0.7}
+            spacing={0.55}
             alignItems="center"
             flexWrap="wrap"
-            rowGap={0.6}
+            rowGap={0.4}
             justifyContent="flex-end"
           >
             <WorkflowLinkSummaryButton
@@ -417,9 +417,9 @@ export function BranchHistoryPanel({
 
         <Collapse in={expanded} timeout="auto" unmountOnExit>
           {history.length > 0 ? (
-            <Stack className="workflow-history-content" spacing={0.8} minWidth={0}>
+            <Stack className="workflow-history-content" spacing={0.65} minWidth={0}>
               <Box className="module-list-scroll">
-                <Stack spacing={0.8} minWidth={0}>
+                <Stack spacing={0.65} minWidth={0}>
                   {visibleHistoryGroups.map((group) => {
                     const item = group.latest;
                     const isGrouped = group.items.length > 1;
@@ -582,7 +582,7 @@ export function BranchHistoryPanel({
                 </Stack>
               </Box>
               {historyPageCount > 1 ? (
-                <Stack direction="row" justifyContent="flex-end" sx={{ pt: 0.4 }}>
+                <Stack direction="row" justifyContent="flex-end" sx={{ pt: 0.25 }}>
                   <Pagination
                     size="small"
                     page={historyPage}
@@ -592,9 +592,9 @@ export function BranchHistoryPanel({
                     onChange={(_, nextPage) => setHistoryPage(nextPage)}
                     sx={{
                       "& .MuiPaginationItem-root": {
-                        minWidth: 28,
-                        height: 28,
-                        borderRadius: "10px",
+                        minWidth: 26,
+                        height: 26,
+                        borderRadius: "9px",
                         fontWeight: 800,
                       },
                     }}

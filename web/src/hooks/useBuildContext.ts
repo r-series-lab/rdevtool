@@ -2,20 +2,22 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { BranchOption } from "../app-types";
 
-export type DeployContextStatus = "idle" | "loading" | "ready" | "error";
+export type BuildContextStatus = "idle" | "loading" | "ready" | "error";
 
-export type DeployTargetSummary = {
+export type BuildTargetSummary = {
   key: string;
   label: string;
+  adapter: string;
+  actionKind: string;
   jobName: string;
 };
 
-export type DeployParamKind = "select" | "boolean" | "branch" | "text" | "hidden";
+export type BuildParamKind = "select" | "boolean" | "branch" | "text" | "hidden";
 
-export type DeployParamMeta = {
+export type BuildParamMeta = {
   key: string;
   label: string;
-  kind: DeployParamKind;
+  kind: BuildParamKind;
   defaultValue: string;
   options: string[];
   required: boolean;
@@ -23,30 +25,35 @@ export type DeployParamMeta = {
   falseValue: string;
 };
 
-export type DeployTargetMeta = {
-  targets: DeployTargetSummary[];
+export type BuildTargetMeta = {
+  targets: BuildTargetSummary[];
   selectedTarget: string;
-  params: DeployParamMeta[];
+  params: BuildParamMeta[];
 };
 
-export type DeployPlan = {
+export type BuildPlan = {
   projectKey: string;
   projectName: string;
+  adapter: string;
+  actionKind: string;
   jobKind: string;
   jobName: string;
   triggerUrl: string;
   params: Record<string, string>;
   jenkinsBaseUrl: string;
+  command?: string | null;
+  cwd?: string | null;
+  outputDir?: string | null;
 };
 
-export type DeployRequest = {
+export type BuildRequest = {
   project: string;
   target: string | null;
   params: Record<string, string>;
 };
 
-const DEPLOY_CONTEXT_TIMEOUT_MS = 8000;
-const DEPLOY_CONTEXT_FALLBACK_TIMEOUT_MS = DEPLOY_CONTEXT_TIMEOUT_MS + 1000;
+const BUILD_CONTEXT_TIMEOUT_MS = 8000;
+const BUILD_CONTEXT_FALLBACK_TIMEOUT_MS = BUILD_CONTEXT_TIMEOUT_MS + 1000;
 const PLAN_PREVIEW_DEBOUNCE_MS = 220;
 
 async function withTimeout<T>(
@@ -69,31 +76,31 @@ async function withTimeout<T>(
   }
 }
 
-type UseDeployContextOptions = {
+type UseBuildContextOptions = {
   enabled: boolean;
   selectedProject: string;
   branchOptions: string[];
   setError: (value: string) => void;
 };
 
-export function useDeployContext({
+export function useBuildContext({
   enabled,
   selectedProject,
   branchOptions,
   setError,
-}: UseDeployContextOptions) {
-  const deployContextRequestRef = useRef(0);
+}: UseBuildContextOptions) {
+  const buildContextRequestRef = useRef(0);
   const planPreviewRequestRef = useRef(0);
   const [target, setTarget] = useState("");
-  const [targetMeta, setTargetMeta] = useState<DeployTargetMeta | null>(null);
+  const [targetMeta, setTargetMeta] = useState<BuildTargetMeta | null>(null);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [defaultParamValues, setDefaultParamValues] = useState<Record<string, string>>({});
-  const [deployContextLoadedKey, setDeployContextLoadedKey] = useState("");
-  const [deployContextStatus, setDeployContextStatus] = useState<DeployContextStatus>("idle");
-  const [deployContextError, setDeployContextError] = useState("");
-  const [plan, setPlan] = useState<DeployPlan | null>(null);
+  const [buildContextLoadedKey, setBuildContextLoadedKey] = useState("");
+  const [buildContextStatus, setBuildContextStatus] = useState<BuildContextStatus>("idle");
+  const [buildContextError, setBuildContextError] = useState("");
+  const [plan, setPlan] = useState<BuildPlan | null>(null);
 
-  const deployScopeKey = useMemo(
+  const buildScopeKey = useMemo(
     () => (selectedProject && target ? `${selectedProject}:${target}` : ""),
     [selectedProject, target],
   );
@@ -117,66 +124,71 @@ export function useDeployContext({
   const env = envParam ? paramValues[envParam.key] ?? "" : "";
 
   useEffect(() => {
-    deployContextRequestRef.current += 1;
+    buildContextRequestRef.current += 1;
     if (!enabled) {
       setTarget("");
       setTargetMeta(null);
       setParamValues({});
       setDefaultParamValues({});
-      setDeployContextLoadedKey("");
-      setDeployContextStatus("idle");
-      setDeployContextError("");
+      setBuildContextLoadedKey("");
+      setBuildContextStatus("idle");
+      setBuildContextError("");
       setPlan(null);
     }
   }, [enabled]);
 
   useEffect(() => {
-    if (!enabled || !selectedProject) {
-      return;
-    }
-
-    setDeployContextLoadedKey("");
+    buildContextRequestRef.current += 1;
+    planPreviewRequestRef.current += 1;
+    setTarget("");
+    setBuildContextLoadedKey("");
     setPlan(null);
-    setDeployContextStatus("loading");
-    setDeployContextError("");
+    setBuildContextError("");
     setTargetMeta(null);
     setParamValues({});
     setDefaultParamValues({});
-    void loadDeployContext(selectedProject, null);
+
+    if (!enabled || !selectedProject) {
+      setBuildContextStatus("idle");
+      return;
+    }
+
+    setBuildContextStatus("loading");
+    void loadBuildContext(selectedProject, null);
   }, [enabled, selectedProject]);
 
   useEffect(() => {
-    if (!enabled || !selectedProject || !target || deployContextLoadedKey === deployScopeKey) {
+    if (!enabled || !selectedProject || !target || buildContextLoadedKey === buildScopeKey) {
       return;
     }
 
     setPlan(null);
-    setDeployContextStatus("loading");
-    setDeployContextError("");
+    setBuildContextStatus("loading");
+    setBuildContextError("");
     setError("");
-    setDeployContextLoadedKey("");
-    void loadDeployContext(selectedProject, target);
-  }, [deployContextLoadedKey, deployScopeKey, enabled, selectedProject, setError, target]);
+    setBuildContextLoadedKey("");
+    void loadBuildContext(selectedProject, target);
+  }, [buildContextLoadedKey, buildScopeKey, enabled, selectedProject, setError, target]);
 
   useEffect(() => {
-    if (!enabled || deployContextStatus !== "loading" || !selectedProject) {
+    if (!enabled || buildContextStatus !== "loading" || !selectedProject) {
       return;
     }
 
     const timer = window.setTimeout(() => {
-      deployContextRequestRef.current += 1;
-      setDeployContextLoadedKey("");
-      setDeployContextStatus("error");
-      setDeployContextError("加载部署配置超时，请检查项目配置或稍后重试");
-    }, DEPLOY_CONTEXT_FALLBACK_TIMEOUT_MS);
+      buildContextRequestRef.current += 1;
+      setBuildContextLoadedKey("");
+      setBuildContextStatus("error");
+      setBuildContextError("加载构建配置超时，请检查项目配置或稍后重试");
+    }, BUILD_CONTEXT_FALLBACK_TIMEOUT_MS);
 
     return () => {
       window.clearTimeout(timer);
     };
-  }, [deployContextStatus, deployScopeKey, enabled, selectedProject]);
+  }, [buildContextStatus, buildScopeKey, enabled, selectedProject]);
 
   useEffect(() => {
-    if (!enabled || !selectedProject || !targetMeta || deployContextLoadedKey !== deployScopeKey) {
+    if (!enabled || !selectedProject || !targetMeta || buildContextLoadedKey !== buildScopeKey) {
       return;
     }
 
@@ -187,24 +199,24 @@ export function useDeployContext({
     return () => {
       window.clearTimeout(timer);
     };
-  }, [deployContextLoadedKey, deployScopeKey, enabled, paramValues, selectedProject, targetMeta]);
+  }, [buildContextLoadedKey, buildScopeKey, enabled, paramValues, selectedProject, targetMeta]);
 
-  async function loadDeployContext(project: string, nextTarget: string | null) {
-    const requestId = ++deployContextRequestRef.current;
+  async function loadBuildContext(project: string, nextTarget: string | null) {
+    const requestId = ++buildContextRequestRef.current;
     try {
       const [defaultBranch, meta] = await withTimeout(
         Promise.all([
           invoke<string>("get_default_branch", { project }),
-          invoke<DeployTargetMeta>("get_deploy_target_meta", {
+          invoke<BuildTargetMeta>("get_build_target_meta", {
             project,
             target: nextTarget,
           }),
         ]),
-        DEPLOY_CONTEXT_TIMEOUT_MS,
-        "加载部署配置超时，请重试",
+        BUILD_CONTEXT_TIMEOUT_MS,
+        "加载构建配置超时，请重试",
       );
 
-      if (requestId !== deployContextRequestRef.current) {
+      if (requestId !== buildContextRequestRef.current) {
         return;
       }
 
@@ -222,16 +234,16 @@ export function useDeployContext({
       setTargetMeta(meta);
       setParamValues(defaults);
       setDefaultParamValues(defaults);
-      setDeployContextLoadedKey(`${project}:${meta.selectedTarget}`);
-      setDeployContextStatus("ready");
-      setDeployContextError("");
+      setBuildContextLoadedKey(`${project}:${meta.selectedTarget}`);
+      setBuildContextStatus("ready");
+      setBuildContextError("");
     } catch (reason) {
-      if (requestId !== deployContextRequestRef.current) {
+      if (requestId !== buildContextRequestRef.current) {
         return;
       }
-      setDeployContextLoadedKey("");
-      setDeployContextStatus("error");
-      setDeployContextError(String(reason));
+      setBuildContextLoadedKey("");
+      setBuildContextStatus("error");
+      setBuildContextError(String(reason));
       setTargetMeta(null);
       setParamValues({});
       setDefaultParamValues({});
@@ -245,7 +257,7 @@ export function useDeployContext({
     }));
   }
 
-  function currentDeployRequest(): DeployRequest {
+  function currentBuildRequest(): BuildRequest {
     return {
       project: selectedProject,
       target: target || null,
@@ -259,8 +271,8 @@ export function useDeployContext({
     }
     const requestId = ++planPreviewRequestRef.current;
     try {
-      const nextPlan = await invoke<DeployPlan>("build_deploy_plan", {
-        request: currentDeployRequest(),
+      const nextPlan = await invoke<BuildPlan>("preview_build_plan", {
+        request: currentBuildRequest(),
       });
       if (requestId !== planPreviewRequestRef.current) {
         return;
@@ -286,13 +298,13 @@ export function useDeployContext({
     setBranch: branchParam ? (value: string) => setParamValue(branchParam.key, value) : () => {},
     env,
     setEnv: envParam ? (value: string) => setParamValue(envParam.key, value) : () => {},
-    deployContextLoadedKey,
-    setDeployContextLoadedKey,
-    deployContextStatus,
-    deployContextError,
+    buildContextLoadedKey,
+    setBuildContextLoadedKey,
+    buildContextStatus,
+    buildContextError,
     plan,
     setPlan,
-    setDeployContextStatus,
-    currentDeployRequest,
+    setBuildContextStatus,
+    currentBuildRequest,
   };
 }

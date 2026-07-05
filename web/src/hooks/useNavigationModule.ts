@@ -12,6 +12,7 @@ type NavigationEntry = {
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  path?: string | null;
   cwd?: string | null;
   note?: string | null;
 };
@@ -28,17 +29,17 @@ type NavigationData = {
   categories: NavigationCategory[];
 };
 
-const NAVIGATION_TYPE_OPTIONS = ["全部", "网页", "应用", "脚本"] as const;
+const NAVIGATION_TYPE_OPTIONS = ["全部", "网站", "目录", "工具"] as const;
 type NavigationTypeFilter = (typeof NAVIGATION_TYPE_OPTIONS)[number];
 
 function matchesNavigationType(entry: NavigationEntry, filter: NavigationTypeFilter) {
   switch (filter) {
-    case "网页":
+    case "网站":
       return entry.kind === "url";
-    case "应用":
-      return entry.kind === "app";
-    case "脚本":
-      return entry.kind === "script";
+    case "目录":
+      return entry.kind === "directory";
+    case "工具":
+      return entry.kind === "app" || entry.kind === "script";
     default:
       return true;
   }
@@ -84,19 +85,21 @@ export function useNavigationModule({
   const navigationTypeCounts = useMemo(() => {
     const counts: Record<string, number> = {
       全部: 0,
-      网页: 0,
-      应用: 0,
-      脚本: 0,
+      网站: 0,
+      目录: 0,
+      工具: 0,
     };
     for (const category of allNavigationCategories) {
       for (const entry of category.entries) {
         counts["全部"] += 1;
         if (entry.kind === "url") {
-          counts["网页"] += 1;
+          counts["网站"] += 1;
+        } else if (entry.kind === "directory") {
+          counts["目录"] += 1;
         } else if (entry.kind === "app") {
-          counts["应用"] += 1;
+          counts["工具"] += 1;
         } else if (entry.kind === "script") {
-          counts["脚本"] += 1;
+          counts["工具"] += 1;
         }
       }
     }
@@ -166,7 +169,7 @@ export function useNavigationModule({
       category.entries
         .filter((entry) => {
           const haystack =
-            `${category.title} ${entry.kind} ${entry.name} ${entry.targetLabel} ${entry.note ?? ""}`.toLowerCase();
+            `${category.title} ${entry.kind} ${entry.name} ${entry.targetLabel} ${entry.note ?? ""} ${entry.runtimeProfile ?? ""} ${entry.path ?? ""} ${entry.script ?? ""} ${entry.cwd ?? ""}`.toLowerCase();
           return (
             matchesNavigationType(entry, navigationTypeFilter) &&
             haystack.includes(keyword)

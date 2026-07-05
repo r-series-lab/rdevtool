@@ -79,13 +79,60 @@ command = "npm run dev"
 
 [projects.build]
 command = "npm run build"
+output_dir = "/path/to/example-web/target/release/bundle"
 
 [projects.build.env]
 # NODE_ENV = "production"
 
+# R 系列应用建议至少提供两个构建 target：
+# - web: 只跑前端构建，反馈快
+# - package: 走 r_series_package，本地打包桌面应用
+[[projects.deploy_targets]]
+key = "web"
+label = "前端构建"
+adapter = "local_command"
+action_kind = "build"
+job_name = "npm run web:build"
+
+[[projects.deploy_targets.params]]
+key = "build_output_dir"
+label = "产物目录"
+type = "hidden"
+default = "/path/to/example-web/dist"
+
+[[projects.deploy_targets]]
+key = "package"
+label = "本地打包"
+adapter = "r_series_package"
+action_kind = "package"
+job_name = ""
+
+[[projects.deploy_targets.params]]
+key = "platform"
+label = "系统"
+type = "select"
+default = "macos"
+options = ["macos", "windows", "linux"]
+
+[[projects.deploy_targets.params]]
+key = "profile"
+label = "配置"
+type = "select"
+default = "release"
+options = ["release", "debug"]
+
+[[projects.deploy_targets.params]]
+key = "channel"
+label = "渠道"
+type = "select"
+default = "local"
+options = ["local", "beta", "stable"]
+
 [[projects.deploy_targets]]
 key = "standard"
 label = "标准"
+adapter = "jenkins"
+action_kind = "deploy"
 jenkins_profile = "default"
 job_name = "Example/example-web"
 

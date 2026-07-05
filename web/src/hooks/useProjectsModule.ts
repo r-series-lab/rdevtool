@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { ProjectRuntimeEntry, ProjectWorkflowAction } from "../app-types";
 import type {
+  ActivityPatch,
   ActivityResource,
   ActivityBulkUpdater,
   ActivityRecorder,
@@ -28,7 +29,7 @@ type UseProjectsModuleOptions = {
   syncActivities?: ActivityBulkUpdater;
 };
 
-type FinderType = "项目" | "网站" | "应用" | "脚本";
+type FinderType = "项目" | "网站" | "目录" | "工具";
 type FinderQuickFilter = "全部" | "最近";
 
 type NavigationEntry = {
@@ -38,9 +39,11 @@ type NavigationEntry = {
   url?: string | null;
   browser?: string | null;
   browserProfile?: string | null;
+  runtimeProfile?: string | null;
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  path?: string | null;
   cwd?: string | null;
   note?: string | null;
 };
@@ -63,7 +66,7 @@ export type FinderShortcutItem = {
   entry: NavigationEntry;
 };
 
-const FINDER_TYPE_OPTIONS = ["项目", "网站", "应用", "脚本"] as const;
+const FINDER_TYPE_OPTIONS = ["项目", "网站", "目录", "工具"] as const;
 const FINDER_QUICK_FILTER_OPTIONS = ["全部", "最近"] as const;
 const FINDER_STORAGE_NAMESPACE = "projects";
 const FINDER_PREFERENCES_STORAGE_KEY = "finder-preferences";
@@ -256,6 +259,8 @@ function shortcutActivityExecutionKey(entry: NavigationEntry) {
     cwd: entry.cwd ?? null,
     kind: entry.kind,
     name: entry.name,
+    path: entry.path ?? null,
+    runtimeProfile: entry.runtimeProfile ?? null,
     script: entry.script ?? null,
     targetLabel: entry.targetLabel,
     url: entry.url ?? null,
@@ -308,16 +313,16 @@ function compareMarkedFirst(leftMarked: boolean, rightMarked: boolean) {
   return Number(rightMarked) - Number(leftMarked);
 }
 
-function kind_from_finder_type(value: FinderType): string | null {
+function entry_matches_finder_type(entry: NavigationEntry, value: FinderType) {
   switch (value) {
     case "网站":
-      return "url";
-    case "应用":
-      return "app";
-    case "脚本":
-      return "script";
+      return entry.kind === "url";
+    case "目录":
+      return entry.kind === "directory";
+    case "工具":
+      return entry.kind === "app" || entry.kind === "script";
     default:
-      return null;
+      return false;
   }
 }
 
@@ -349,9 +354,11 @@ function buildShortcutHaystack(item: FinderShortcutItem): string {
     item.entry.targetLabel,
     item.entry.note ?? "",
     item.entry.url ?? "",
+    item.entry.runtimeProfile ?? "",
     item.entry.bundleId ?? "",
     item.entry.appName ?? "",
     item.entry.script ?? "",
+    item.entry.path ?? "",
     item.entry.cwd ?? "",
   ]
     .join(" ")
@@ -527,14 +534,13 @@ export function useProjectsModule({
   );
 
   const shortcutEntries = useMemo(() => {
-    const expectedKind = kind_from_finder_type(finderType);
-    if (!expectedKind) {
+    if (finderType === "项目") {
       return [] as FinderShortcutItem[];
     }
 
     return navigationCategories.flatMap((category) =>
       category.entries
-        .filter((entry) => entry.kind === expectedKind)
+        .filter((entry) => entry_matches_finder_type(entry, finderType))
         .map((entry) => ({
           categoryTitle: category.title,
           categoryLabel: category.shortLabel,
@@ -551,14 +557,17 @@ export function useProjectsModule({
           count + category.entries.filter((entry) => entry.kind === "url").length,
         0,
       ),
-      应用: navigationCategories.reduce(
+      目录: navigationCategories.reduce(
         (count, category) =>
-          count + category.entries.filter((entry) => entry.kind === "app").length,
+          count + category.entries.filter((entry) => entry.kind === "directory").length,
         0,
       ),
-      脚本: navigationCategories.reduce(
+      工具: navigationCategories.reduce(
         (count, category) =>
-          count + category.entries.filter((entry) => entry.kind === "script").length,
+          count +
+          category.entries.filter(
+            (entry) => entry.kind === "app" || entry.kind === "script",
+          ).length,
         0,
       ),
     }),
@@ -886,6 +895,9 @@ export function useProjectsModule({
         value: entry.url,
       };
     }
+    if (entry.path) {
+      return localPathResource("打开目录", entry.path);
+    }
     return (
       localPathResource("打开脚本目录", entry.cwd) ??
       localPathResource("打开脚本", entry.script)
@@ -1159,17 +1171,27 @@ export function useProjectsModule({
       ) {
         const status = runtimeActivityStatus(item.buildStatusKey);
         const activityId = activeBuildActivityIdsRef.current[item.key];
+        const completionPatch: ActivityPatch = {
+          status,
+          summary: runtimeActivitySummary(item.buildStatusLabel, item.buildDetail),
+          detail: item.buildLogPath || item.buildOutputDir || null,
+          projectName: item.name,
+          target: runtimeActivityTarget(item.key),
+          resource: buildResource(item),
+        };
         if (activityId) {
-          updateActivity?.(activityId, {
-            status,
-            summary: runtimeActivitySummary(item.buildStatusLabel, item.buildDetail),
-            detail: item.buildLogPath || item.buildOutputDir || null,
-            projectName: item.name,
-            target: runtimeActivityTarget(item.key),
-            resource: buildResource(item),
-          });
+          updateActivity?.(activityId, completionPatch);
           delete activeBuildActivityIdsRef.current[item.key];
-        } else {
+        } else if (
+          !syncActivities?.(
+            {
+              kind: "build",
+              status: "running",
+              projectKey: item.key,
+            },
+            completionPatch,
+          )
+        ) {
           recordActivity?.({
             kind: "build",
             status,
@@ -1218,7 +1240,7 @@ export function useProjectsModule({
         },
       ]),
     );
-  }, [enabled, recordActivity, runtimeItems, updateActivity]);
+  }, [enabled, recordActivity, runtimeItems, syncActivities, updateActivity]);
 
   async function handleOpenFinderEntry(entry: NavigationEntry): Promise<boolean> {
     if (!enabled) {
@@ -1232,7 +1254,7 @@ export function useProjectsModule({
         status: "running",
         title: "打开入口",
         summary: `${entry.name} · ${entry.targetLabel}`,
-        detail: entry.note || entry.url || entry.bundleId || entry.script || null,
+        detail: entry.note || entry.url || entry.bundleId || entry.path || entry.script || null,
         executionKey: shortcutActivityExecutionKey(entry),
         ...projectWorkflowChainFields("打开入口"),
         resource: shortcutResource(entry),

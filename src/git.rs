@@ -89,6 +89,14 @@ pub struct BranchPushResult {
     pub status_before_push: WorkingTreeStatus,
 }
 
+#[derive(Debug, Clone)]
+pub struct GitWorktreeSummary {
+    pub path: PathBuf,
+    pub branch: Option<String>,
+    pub detached: bool,
+    pub bare: bool,
+}
+
 fn git_command() -> Command {
     let command = Command::new("git");
     #[cfg(target_os = "windows")]
@@ -131,6 +139,50 @@ pub fn working_tree_status(repo_path: &Path) -> Result<WorkingTreeStatus> {
     parse_working_tree_status(&output)
 }
 
+pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeSummary>> {
+    let output = run_git_capture(repo_path, &["worktree", "list", "--porcelain"])?;
+    let mut items = Vec::new();
+    let mut path: Option<PathBuf> = None;
+    let mut branch: Option<String> = None;
+    let mut detached = false;
+    let mut bare = false;
+
+    for line in output.lines().chain(std::iter::once("")) {
+        let line = line.trim();
+        if line.is_empty() {
+            if let Some(path) = path.take() {
+                items.push(GitWorktreeSummary {
+                    path,
+                    branch: branch.take(),
+                    detached,
+                    bare,
+                });
+            }
+            detached = false;
+            bare = false;
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(value.trim()));
+        } else if let Some(value) = line.strip_prefix("branch ") {
+            branch = Some(
+                value
+                    .trim()
+                    .strip_prefix("refs/heads/")
+                    .unwrap_or(value.trim())
+                    .to_string(),
+            );
+        } else if line == "detached" {
+            detached = true;
+        } else if line == "bare" {
+            bare = true;
+        }
+    }
+
+    Ok(items)
+}
+
 pub fn push_current_branch(
     repo_path: &Path,
     commit_before_push: bool,
@@ -141,7 +193,7 @@ pub fn push_current_branch(
         anyhow::bail!("当前仓库处于 detached HEAD，无法执行推送");
     }
     if status_before_push.conflicted_count > 0 {
-        anyhow::bail!("当前工作区存在冲突，请先处理冲突后再推送");
+        anyhow::bail!("当前工作副本存在冲突，请先处理冲突后再推送");
     }
 
     let current_branch = status_before_push.current_branch.clone();
@@ -827,11 +879,11 @@ pub fn switch_branch(repo_path: &Path, target_branch: &str) -> Result<BranchSwit
     };
 
     if status_before.conflicted_count > 0 {
-        anyhow::bail!("当前工作区存在冲突，请先处理冲突后再切换分支");
+        anyhow::bail!("当前工作副本存在冲突，请先处理冲突后再切换分支");
     }
     if !status_before.clean {
         anyhow::bail!(
-            "当前工作区存在未提交改动，请先提交、暂存或清理后再切换分支（已暂存 {}，未暂存 {}，未跟踪 {}）",
+            "当前工作副本存在未提交改动，请先提交、暂存或清理后再切换分支（已暂存 {}，未暂存 {}，未跟踪 {}）",
             status_before.staged_count,
             status_before.unstaged_count,
             status_before.untracked_count

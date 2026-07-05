@@ -12,7 +12,7 @@ export type BranchOption = {
   updatedTs: number;
 };
 
-export type DeployHistoryEntry = {
+export type BuildHistoryEntry = {
   historyKey: string;
   projectKey: string;
   projectName: string;
@@ -28,6 +28,8 @@ export type DeployHistoryEntry = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type DeployHistoryEntry = BuildHistoryEntry;
 
 export type BranchWorkflowMode = "sync" | "create" | "checkout" | "switch" | "push";
 
@@ -58,6 +60,24 @@ export type BranchPushStatus = {
   untrackedCount: number;
   conflictedCount: number;
   files: BranchPushFileStatus[];
+  latestCommit?: CommitInfo | null;
+};
+
+export type BranchWorktreeSummary = {
+  projectKey: string;
+  projectName: string;
+  repoPath: string;
+  label: string;
+  currentBranch: string;
+  detached: boolean;
+  clean: boolean;
+  ahead: number;
+  behind: number;
+  isDefault: boolean;
+  isGitWorktree: boolean;
+  statusKey: string;
+  statusLabel: string;
+  detail: string;
   latestCommit?: CommitInfo | null;
 };
 
@@ -109,7 +129,88 @@ export type WorkspaceAppPreferences = {
   styleMode: string;
   defaultPage?: PageKey | null;
   enabledPages: PageKey[];
+  activeWorkspace?: string | null;
 };
+
+export type ProjectWorkspaceSummary = {
+  key: string;
+  name: string;
+  description?: string | null;
+  active: boolean;
+  system: boolean;
+  projectCount: number;
+  includeAllProjects: boolean;
+  includeAllNavigation: boolean;
+  projectScopeLabel: string;
+  navigationScopeLabel: string;
+};
+
+export type ProjectWorkspaceState = {
+  activeKey: string;
+  workspacesDir: string;
+  workspaces: ProjectWorkspaceSummary[];
+};
+
+export type CreateProjectWorkspacePayload = {
+  key: string;
+  name: string;
+  description?: string | null;
+  copyCurrent: boolean;
+  activate: boolean;
+};
+
+export type ProjectWorkspaceEditorDraft = {
+  key: string;
+  name: string;
+  description?: string | null;
+  system: boolean;
+  includeAllProjects: boolean;
+  includeAllNavigation: boolean;
+  projects: string[];
+  navigationCategories: string[];
+  navigationEntries: string[];
+  proxyProfiles: string[];
+};
+
+export type ProjectWorkspaceEditorProject = {
+  key: string;
+  name: string;
+  category: string;
+  selected: boolean;
+};
+
+export type ProjectWorkspaceEditorNavigationEntry = {
+  name: string;
+  scopedName: string;
+  kind: string;
+  selected: boolean;
+};
+
+export type ProjectWorkspaceEditorNavigationCategory = {
+  title: string;
+  shortLabel: string;
+  selected: boolean;
+  entries: ProjectWorkspaceEditorNavigationEntry[];
+};
+
+export type ProjectWorkspaceEditorProxyProfile = {
+  id: string;
+  name: string;
+  listenHost: string;
+  listenPort: number;
+  workspaceKey?: string | null;
+  workspaceLabel: string;
+  selected: boolean;
+};
+
+export type ProjectWorkspaceEditorState = {
+  workspace: ProjectWorkspaceEditorDraft;
+  projects: ProjectWorkspaceEditorProject[];
+  navigationCategories: ProjectWorkspaceEditorNavigationCategory[];
+  proxyProfiles: ProjectWorkspaceEditorProxyProfile[];
+};
+
+export type ProxyOutboundMode = "inherit" | "direct" | "proxy";
 
 export type ProxyRuleAction =
   | {
@@ -118,6 +219,8 @@ export type ProxyRuleAction =
       rewritePrefix: string;
       requestHeaders: Record<string, string>;
       responseHeaders: Record<string, string>;
+      outboundMode: ProxyOutboundMode;
+      outboundProxy: string;
       delayMs: number;
     }
   | {
@@ -137,6 +240,7 @@ export type ProxyRuleAction =
 
 export type ProxyProfile = {
   id: string;
+  workspaceKey?: string | null;
   name: string;
   listenHost: string;
   listenPort: number;
@@ -247,6 +351,7 @@ export type RuntimeProfileDraft = {
   webActionsUserDataDir?: string | null;
   browserArgsText: string;
   proxyUrl: string;
+  rdevProxyProfileId?: string | null;
   proxyBypass: string;
   hostResolverRulesText: string;
   networkProxy: ProjectNetworkProxyDraft;
@@ -317,6 +422,8 @@ export type DeployParamConfigSummary = {
 export type DeployTargetConfigSummary = {
   key: string;
   label: string;
+  adapter: "jenkins" | "local_command" | "r_series_package";
+  actionKind: "build" | "deploy" | "package" | "release";
   jenkinsProfile: string;
   jobName: string;
   params: DeployParamConfigSummary[];
@@ -415,6 +522,7 @@ export type FinderEntry = {
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  path?: string | null;
   cwd?: string | null;
   note?: string | null;
 };
@@ -431,14 +539,27 @@ export type WebActionParamSummary = {
   defaultValue: string;
 };
 
+export type WebActionKind = "script" | "request";
+
+export type WebActionRequestSummary = {
+  method: string;
+  url: string;
+  headers: Record<string, string>;
+  body: string;
+  timeoutMs: number;
+  maxBodyBytes: number;
+};
+
 export type WebActionSummary = {
   key: string;
   name: string;
+  kind: WebActionKind;
   scope: string;
   matchPatterns: string[];
   runManually: boolean;
   params: WebActionParamSummary[];
   script: string;
+  request?: WebActionRequestSummary | null;
 };
 
 export type WebActionListResponse = {
@@ -465,7 +586,7 @@ export type WebActionRunResult = {
   error?: string | null;
 };
 
-export type NavigationEditorEntryKind = "url" | "app" | "script";
+export type NavigationEditorEntryKind = "url" | "directory" | "app" | "script";
 
 export type NavigationEditorEntry = {
   name: string;
@@ -477,6 +598,7 @@ export type NavigationEditorEntry = {
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  path?: string | null;
   cwd?: string | null;
   note?: string | null;
 };

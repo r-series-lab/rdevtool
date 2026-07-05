@@ -22,6 +22,7 @@ import type {
   BranchTaskHistoryEntry,
   BranchTaskResponse,
   BranchWorkflowMode,
+  BranchWorktreeSummary,
 } from "../app-types";
 import {
   BranchModeTabs,
@@ -94,6 +95,13 @@ export type MergePageProps = {
   pushStatusLoading: boolean;
   pushStatusError: string;
   pushStatusUpdatedAtMs: number;
+  worktrees: BranchWorktreeSummary[];
+  worktreesLoading: boolean;
+  worktreesError: string;
+  selectedWorktreePath: string;
+  onWorktreePathChange: (value: string) => void;
+  onChooseWorktreeDirectory: () => void;
+  onRefreshWorktrees: () => void;
   onRefreshPushStatus: () => void;
   onSyncBranches: () => void;
   sourceBranchEntries: BranchOption[];
@@ -295,6 +303,123 @@ function PushStatusFreshness({
   );
 }
 
+function worktreeBranchLabel(item: BranchWorktreeSummary) {
+  if (item.detached) {
+    return "detached";
+  }
+  return item.currentBranch || "HEAD";
+}
+
+function WorktreeSelector({
+  items,
+  value,
+  loading,
+  error,
+  disabled,
+  onChange,
+  onChooseDirectory,
+  onRefresh,
+}: {
+  items: BranchWorktreeSummary[];
+  value: string;
+  loading: boolean;
+  error: string;
+  disabled: boolean;
+  onChange: (value: string) => void;
+  onChooseDirectory: () => void;
+  onRefresh: () => void;
+}) {
+  const selected = items.find((item) => item.repoPath === value) ?? null;
+  const helperText =
+    error ||
+    selected?.detail ||
+    selected?.repoPath ||
+    (loading ? "正在读取本地工作副本" : "选择本地目录或 worktree 后再操作");
+
+  return (
+    <Stack spacing={0.45}>
+      <Box
+        sx={{
+          display: "grid",
+          gridTemplateColumns: "minmax(0, 1fr) auto auto",
+          gap: 0.45,
+          alignItems: "stretch",
+        }}
+      >
+        <FormControl fullWidth disabled={disabled}>
+          <InputLabel>工作副本</InputLabel>
+          <Select
+            value={value}
+            label="工作副本"
+            displayEmpty
+            onChange={(event: SelectChangeEvent<string>) => onChange(event.target.value)}
+            renderValue={(selectedValue) => {
+              const item = items.find((entry) => entry.repoPath === selectedValue);
+              if (!item) {
+                return loading ? "正在读取工作副本" : "选择工作副本";
+              }
+              return `${item.label} · ${worktreeBranchLabel(item)}`;
+            }}
+          >
+            {items.map((item) => (
+              <MenuItem key={item.repoPath} value={item.repoPath}>
+                <Box sx={{ minWidth: 0, width: "100%" }}>
+                  <Stack direction="row" spacing={0.55} alignItems="center" minWidth={0}>
+                    <Typography variant="body2" fontWeight={820} noWrap>
+                      {item.label}
+                    </Typography>
+                    {item.isDefault ? <Chip size="small" label="默认" variant="outlined" /> : null}
+                    {item.isGitWorktree ? <Chip size="small" label="worktree" variant="outlined" /> : null}
+                    <Chip
+                      size="small"
+                      label={item.statusLabel}
+                      color={item.statusKey === "clean" ? "success" : item.statusKey === "unavailable" ? "error" : "primary"}
+                      variant={item.statusKey === "clean" ? "outlined" : "filled"}
+                    />
+                  </Stack>
+                  <Typography
+                    variant="caption"
+                    color="text.secondary"
+                    noWrap
+                    sx={{ display: "block", mt: 0.1 }}
+                  >
+                    {worktreeBranchLabel(item)} · {item.repoPath}
+                  </Typography>
+                </Box>
+              </MenuItem>
+            ))}
+          </Select>
+        </FormControl>
+        <IconButton
+          onClick={onRefresh}
+          disabled={disabled || loading}
+          aria-label="刷新工作副本"
+          title="刷新工作副本"
+          sx={{ alignSelf: "center" }}
+        >
+          <RefreshIcon fontSize="small" />
+        </IconButton>
+        <IconButton
+          onClick={onChooseDirectory}
+          disabled={disabled}
+          aria-label="选择本地目录"
+          title="选择本地目录"
+          sx={{ alignSelf: "center" }}
+        >
+          <FolderIcon fontSize="small" />
+        </IconButton>
+      </Box>
+      <Typography
+        variant="caption"
+        color={error ? "error" : "text.secondary"}
+        sx={{ display: "block", minHeight: 16, overflowWrap: "anywhere", lineHeight: 1.35 }}
+      >
+        {helperText}
+      </Typography>
+    </Stack>
+  );
+}
+
 function BranchInput({
   label,
   value,
@@ -356,62 +481,82 @@ function BranchInput({
           </Box>
         );
       }}
-      renderInput={(params) => (
-        <Box sx={{ position: "relative" }}>
-          <TextField
-            {...params}
-          label={label}
-          sx={{
-            "& .MuiOutlinedInput-root": {
-              pr: value.trim() ? 9.5 : 5.75,
-            },
-            "& .MuiOutlinedInput-input": {
-              pr: 0.5,
-            },
-          }}
-          InputProps={{
-            ...params.InputProps,
-            endAdornment: (
-              <InputAdornment
-                position="end"
-                sx={{
-                  position: "absolute",
-                  right: 8,
-                  top: "50%",
-                  transform: "translateY(-50%)",
-                  m: 0,
-                }}
-              >
-                <Stack direction="row" spacing={0.35} alignItems="center">
-                    {value.trim() ? (
+      renderInput={(params) => {
+        const { ref: inputRef, ...inputProps } = params.inputProps;
+
+        return (
+          <Box sx={{ position: "relative" }}>
+            <TextField
+              {...params}
+              inputRef={inputRef}
+              inputProps={inputProps}
+              label={label}
+              sx={{
+                "& .MuiOutlinedInput-root": {
+                  pr: value.trim() ? 9.5 : 5.75,
+                },
+                "& .MuiOutlinedInput-input": {
+                  pr: 0.5,
+                },
+              }}
+              InputProps={{
+                ...params.InputProps,
+                endAdornment: (
+                  <InputAdornment
+                    position="end"
+                    sx={{
+                      position: "absolute",
+                      right: 8,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      m: 0,
+                    }}
+                  >
+                    <Stack direction="row" spacing={0.35} alignItems="center">
+                      {value.trim() ? (
+                        <IconButton
+                          size="small"
+                          onMouseDown={(event) => {
+                            event.preventDefault();
+                            event.stopPropagation();
+                          }}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            onClear();
+                          }}
+                          disabled={disabled}
+                          edge="end"
+                          aria-label={`清空${label}`}
+                          title={`清空${label}`}
+                        >
+                          <ClearIcon fontSize="small" />
+                        </IconButton>
+                      ) : null}
                       <IconButton
                         size="small"
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={onClear}
+                        onMouseDown={(event) => {
+                          event.preventDefault();
+                          event.stopPropagation();
+                        }}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onSyncBranches();
+                        }}
+                        disabled={disabled}
                         edge="end"
-                        aria-label={`清空${label}`}
-                        title={`清空${label}`}
+                        aria-label="同步分支"
+                        title="同步分支"
                       >
-                        <ClearIcon fontSize="small" />
+                        <RefreshIcon fontSize="small" />
                       </IconButton>
-                    ) : null}
-                    <IconButton
-                      size="small"
-                      onClick={onSyncBranches}
-                      disabled={disabled}
-                      edge="end"
-                      aria-label="同步分支"
-                      title="同步分支"
-                    >
-                      <RefreshIcon fontSize="small" />
-                    </IconButton>
-                  </Stack>
-                </InputAdornment>
-              ),
-            }}
-          />
-        </Box>
-      )}
+                    </Stack>
+                  </InputAdornment>
+                ),
+              }}
+            />
+          </Box>
+        );
+      }}
     />
   );
 }
@@ -452,6 +597,13 @@ export function MergePage({
   pushStatusLoading,
   pushStatusError,
   pushStatusUpdatedAtMs,
+  worktrees,
+  worktreesLoading,
+  worktreesError,
+  selectedWorktreePath,
+  onWorktreePathChange,
+  onChooseWorktreeDirectory,
+  onRefreshWorktrees,
   onRefreshPushStatus,
   onSyncBranches,
   sourceBranchEntries,
@@ -536,14 +688,19 @@ export function MergePage({
       pushStatus.currentBranch === normalizedSwitchTarget,
   );
   const switchBlockedByStatus = Boolean(pushStatus && !pushStatus.clean);
+  const hasSelectedWorktree = Boolean(selectedWorktreePath.trim());
   const switchReady =
     Boolean(selectedProject) &&
+    hasSelectedWorktree &&
     Boolean(normalizedSwitchTarget) &&
     Boolean(pushStatus) &&
     !switchSameAsCurrent &&
     !switchBlockedByStatus;
   const pushReady =
     Boolean(selectedProject) &&
+    hasSelectedWorktree &&
+    Boolean(pushStatus) &&
+    Boolean(pushStatus?.canPush) &&
     (pushAction === "pushOnly" || Boolean(pushCommitMessage.trim()));
   const switchStatusHelper = pushStatusError
     || (pushStatusLoading
@@ -552,11 +709,13 @@ export function MergePage({
         ? switchSameAsCurrent
           ? "当前已在目标分支"
           : switchBlockedByStatus
-            ? "工作区有未提交或未跟踪文件，处理后再切换"
+            ? "工作副本有未提交或未跟踪文件，处理后再切换"
             : pushStatusStale
               ? "本地状态可能已过期，建议刷新后再操作"
               : pushStatus.repoPath
-        : "读取本地仓库状态后可切换分支");
+        : hasSelectedWorktree
+          ? "读取本地仓库状态后可切换分支"
+          : "先选择本地工作副本");
   const workflowBroadcastGroups = useMemo(
     () => groupWorkflowBroadcastRules(workflowBroadcastRules),
     [workflowBroadcastRules],
@@ -630,11 +789,11 @@ export function MergePage({
   return (
     <Box className="workspace workspace--workflow" onKeyDown={handlePrimaryEnter}>
       <Box className="workflow-module workflow-module--control">
-        <Stack spacing={1.4}>
+        <Stack spacing={0.85}>
           <BranchModeTabs mode={mode} onModeChange={onModeChange} />
 
             {mode === "sync" ? (
-              <Stack spacing={1.2}>
+              <Stack spacing={0.85}>
                 <FormControl fullWidth>
                   <InputLabel>项目</InputLabel>
                   <Select
@@ -673,65 +832,83 @@ export function MergePage({
                   options={targetBranchOptions}
                   value={syncTargets}
                   onChange={(_, values) => onSyncTargetsChange(normalizeBranchValues(values))}
-                  renderInput={(params) => (
-                    <TextField
-                      {...params}
-                      label="目标分支"
-                      helperText="合并模式不会自动创建缺失目标分支"
-                      sx={{
-                        "& .MuiOutlinedInput-root": {
-                          pr: 9.5,
-                        },
-                        "& .MuiAutocomplete-endAdornment": {
-                          position: "static",
-                          transform: "none",
-                          mr: 0,
-                        },
-                      }}
-                      InputProps={{
-                        ...params.InputProps,
-                        endAdornment: (
-                          <InputAdornment
-                            position="end"
-                            sx={{
-                              position: "absolute",
-                              right: 8,
-                              top: "50%",
-                              transform: "translateY(-50%)",
-                              m: 0,
-                            }}
-                          >
-                            <Stack direction="row" spacing={0.35} alignItems="center">
-                              {syncTargets.length > 0 ? (
+                  renderInput={(params) => {
+                    const { ref: inputRef, ...inputProps } = params.inputProps;
+
+                    return (
+                      <TextField
+                        {...params}
+                        inputRef={inputRef}
+                        inputProps={inputProps}
+                        label="目标分支"
+                        helperText="合并模式不会自动创建缺失目标分支"
+                        sx={{
+                          "& .MuiOutlinedInput-root": {
+                            pr: 9.5,
+                          },
+                          "& .MuiAutocomplete-endAdornment": {
+                            position: "static",
+                            transform: "none",
+                            mr: 0,
+                          },
+                        }}
+                        InputProps={{
+                          ...params.InputProps,
+                          endAdornment: (
+                            <InputAdornment
+                              position="end"
+                              sx={{
+                                position: "absolute",
+                                right: 8,
+                                top: "50%",
+                                transform: "translateY(-50%)",
+                                m: 0,
+                              }}
+                            >
+                              <Stack direction="row" spacing={0.35} alignItems="center">
+                                {syncTargets.length > 0 ? (
+                                  <IconButton
+                                    size="small"
+                                    onMouseDown={(event) => {
+                                      event.preventDefault();
+                                      event.stopPropagation();
+                                    }}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      onSyncTargetsChange([]);
+                                    }}
+                                    disabled={Boolean(busy)}
+                                    edge="end"
+                                    aria-label="清空目标分支"
+                                    title="清空目标分支"
+                                  >
+                                    <ClearIcon fontSize="small" />
+                                  </IconButton>
+                                ) : null}
                                 <IconButton
                                   size="small"
-                                  onMouseDown={(event) => event.preventDefault()}
-                                  onClick={() => onSyncTargetsChange([])}
-                                  disabled={Boolean(busy)}
+                                  onMouseDown={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                  }}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    onSyncBranches();
+                                  }}
+                                  disabled={!selectedProject || Boolean(busy)}
                                   edge="end"
-                                  aria-label="清空目标分支"
-                                  title="清空目标分支"
+                                  aria-label="同步分支"
+                                  title="同步分支"
                                 >
-                                  <ClearIcon fontSize="small" />
+                                  <RefreshIcon fontSize="small" />
                                 </IconButton>
-                              ) : null}
-                              <IconButton
-                                size="small"
-                                onMouseDown={(event) => event.preventDefault()}
-                                onClick={onSyncBranches}
-                                disabled={!selectedProject || Boolean(busy)}
-                                edge="end"
-                                aria-label="同步分支"
-                                title="同步分支"
-                              >
-                                <RefreshIcon fontSize="small" />
-                              </IconButton>
-                            </Stack>
-                          </InputAdornment>
-                        ),
-                      }}
-                    />
-                  )}
+                              </Stack>
+                            </InputAdornment>
+                          ),
+                        }}
+                      />
+                    );
+                  }}
                   renderOption={(props, option) => {
                     const { key, ...optionProps } = props;
                     const item = targetBranchEntryMap.get(option);
@@ -761,7 +938,7 @@ export function MergePage({
                   variant="contained"
                   onClick={onExecuteSync}
                   disabled={actionDisabled}
-                  sx={{ minHeight: 36, borderRadius: "14px" }}
+                  sx={{ minHeight: 34, borderRadius: "11px" }}
                 >
                   执行合并
                 </Button>
@@ -769,7 +946,7 @@ export function MergePage({
             ) : null}
 
             {mode === "create" ? (
-              <Stack spacing={1.2}>
+              <Stack spacing={0.85}>
                 <Autocomplete<ProjectOption, true, false, false>
                   multiple
                   fullWidth
@@ -779,15 +956,17 @@ export function MergePage({
                   getOptionLabel={(option) => `${option.name} (${option.key})`}
                   isOptionEqualToValue={(option, value) => option.key === value.key}
                   onChange={(_, values) => onCreateProjectsChange(values.map((item) => item.key))}
-                  renderInput={(params) => (
-                    <TextField {...params} label="项目" />
-                  )}
+                  renderInput={(params) => {
+                    const { ref: inputRef, ...inputProps } = params.inputProps;
+
+                    return <TextField {...params} inputRef={inputRef} inputProps={inputProps} label="项目" />;
+                  }}
                 />
                 <Box
                   sx={{
                     display: "grid",
-                    gridTemplateColumns: { xs: "1fr", md: "1fr 1fr" },
-                    gap: 1,
+                    gridTemplateColumns: "minmax(0, 1fr)",
+                    gap: 0.7,
                   }}
                 >
                   <BranchInput
@@ -821,7 +1000,7 @@ export function MergePage({
                   variant="contained"
                   onClick={onExecuteCreate}
                   disabled={actionDisabled}
-                  sx={{ minHeight: 36, borderRadius: "14px" }}
+                  sx={{ minHeight: 34, borderRadius: "11px" }}
                 >
                   批量创建
                 </Button>
@@ -829,7 +1008,7 @@ export function MergePage({
             ) : null}
 
             {mode === "switch" ? (
-              <Stack spacing={1.2}>
+              <Stack spacing={0.85}>
                 <FormControl fullWidth>
                   <InputLabel>项目</InputLabel>
                   <Select
@@ -850,17 +1029,17 @@ export function MergePage({
                     display: "grid",
                     gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
                     gap: { xs: 0.24, sm: 0.35 },
-                    p: { xs: 0.24, sm: 0.35 },
+                    p: { xs: 0.2, sm: 0.28 },
                     border: "1px solid",
                     borderColor: "divider",
-                    borderRadius: "14px",
+                    borderRadius: "11px",
                     bgcolor: "rgba(255,255,255,0.01)",
                     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.014)",
                   }}
                 >
                   {[
-                    { key: "switch", label: "切换绑定目录" },
-                    { key: "clone", label: "克隆到目录" },
+                    { key: "switch", label: "切换分支" },
+                    { key: "clone", label: "克隆新副本" },
                   ].map((item) => (
                     <Button
                       key={item.key}
@@ -869,11 +1048,11 @@ export function MergePage({
                       onClick={() => setLocalOperation(item.key as LocalBranchOperation)}
                       sx={{
                         minWidth: 0,
-                        minHeight: { xs: 30, sm: 32 },
-                        borderRadius: { xs: "9px", sm: "10px" },
+                        minHeight: { xs: 27, sm: 29 },
+                        borderRadius: { xs: "8px", sm: "8px" },
                         px: { xs: 0.32, sm: 1 },
                         py: 0,
-                        fontSize: { xs: "0.72rem", sm: "0.84rem" },
+                        fontSize: { xs: "0.72rem", sm: "0.8rem" },
                         lineHeight: 1.1,
                         whiteSpace: "normal",
                         textAlign: "center",
@@ -887,39 +1066,26 @@ export function MergePage({
 
                 {localOperation === "switch" ? (
                   <>
-                    <TextField
-                      label="当前工作区"
-                      value={
-                        pushStatus
-                          ? `${pushStatus.currentBranch || "HEAD"}${pushStatus.detached ? " (detached)" : ""}`
-                          : ""
-                      }
-                      placeholder={pushStatusLoading ? "正在读取本地仓库状态" : "等待读取仓库状态"}
-                      InputProps={{
-                        readOnly: true,
-                        endAdornment: (
-                          <InputAdornment position="end">
-                            <IconButton
-                              size="small"
-                              onClick={onRefreshPushStatus}
-                              disabled={!selectedProject || Boolean(busy) || pushStatusLoading}
-                              edge="end"
-                              aria-label="刷新本地状态"
-                              title="刷新本地状态"
-                            >
-                              <RefreshIcon fontSize="small" />
-                            </IconButton>
-                          </InputAdornment>
-                        ),
-                      }}
-                      helperText={switchStatusHelper}
-                      sx={{
-                        "& .MuiFormHelperText-root": {
-                          whiteSpace: "normal",
-                          wordBreak: "break-all",
-                        },
+                    <WorktreeSelector
+                      items={worktrees}
+                      value={selectedWorktreePath}
+                      loading={worktreesLoading || pushStatusLoading}
+                      error={worktreesError || pushStatusError}
+                      disabled={!selectedProject || Boolean(busy)}
+                      onChange={onWorktreePathChange}
+                      onChooseDirectory={onChooseWorktreeDirectory}
+                      onRefresh={() => {
+                        onRefreshWorktrees();
+                        onRefreshPushStatus();
                       }}
                     />
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      sx={{ display: "block", mt: -0.2, overflowWrap: "anywhere", lineHeight: 1.35 }}
+                    >
+                      {switchStatusHelper}
+                    </Typography>
                     <PushStatusFreshness
                       updatedAtMs={pushStatusUpdatedAtMs}
                       nowMs={nowMs}
@@ -960,7 +1126,7 @@ export function MergePage({
                       variant="contained"
                       onClick={onExecuteSwitch}
                       disabled={actionDisabled}
-                      sx={{ minHeight: 36, borderRadius: "14px" }}
+                      sx={{ minHeight: 34, borderRadius: "11px" }}
                     >
                       切换到目标分支
                     </Button>
@@ -1024,7 +1190,7 @@ export function MergePage({
                       variant="contained"
                       onClick={onExecuteCheckout}
                       disabled={actionDisabled}
-                      sx={{ minHeight: 36, borderRadius: "14px" }}
+                      sx={{ minHeight: 34, borderRadius: "11px" }}
                     >
                       克隆到目标目录
                     </Button>
@@ -1034,7 +1200,7 @@ export function MergePage({
             ) : null}
 
             {mode === "push" ? (
-              <Stack spacing={1.2}>
+              <Stack spacing={0.85}>
                 <FormControl fullWidth>
                   <InputLabel>项目</InputLabel>
                   <Select
@@ -1050,33 +1216,17 @@ export function MergePage({
                   </Select>
                 </FormControl>
 
-                <TextField
-                  label="当前分支"
-                  value={pushStatus?.currentBranch ?? ""}
-                  placeholder={pushStatusLoading ? "正在读取本地仓库状态" : "等待读取仓库状态"}
-                  InputProps={{
-                    readOnly: true,
-                    endAdornment: (
-                      <InputAdornment position="end">
-                        <IconButton
-                          size="small"
-                          onClick={onRefreshPushStatus}
-                          disabled={!selectedProject || Boolean(busy) || pushStatusLoading}
-                          edge="end"
-                          aria-label="刷新推送状态"
-                          title="刷新推送状态"
-                        >
-                          <RefreshIcon fontSize="small" />
-                        </IconButton>
-                      </InputAdornment>
-                    ),
-                  }}
-                  helperText={pushStatusError || (pushStatus?.repoPath ?? "读取本地仓库当前状态")}
-                  sx={{
-                    "& .MuiFormHelperText-root": {
-                      whiteSpace: "normal",
-                      wordBreak: "break-all",
-                    },
+                <WorktreeSelector
+                  items={worktrees}
+                  value={selectedWorktreePath}
+                  loading={worktreesLoading || pushStatusLoading}
+                  error={worktreesError || pushStatusError}
+                  disabled={!selectedProject || Boolean(busy)}
+                  onChange={onWorktreePathChange}
+                  onChooseDirectory={onChooseWorktreeDirectory}
+                  onRefresh={() => {
+                    onRefreshWorktrees();
+                    onRefreshPushStatus();
                   }}
                 />
                 <PushStatusFreshness
@@ -1101,10 +1251,10 @@ export function MergePage({
                     display: "grid",
                     gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
                     gap: { xs: 0.24, sm: 0.35 },
-                    p: { xs: 0.24, sm: 0.35 },
+                    p: { xs: 0.2, sm: 0.28 },
                     border: "1px solid",
                     borderColor: "divider",
-                    borderRadius: "14px",
+                    borderRadius: "11px",
                     bgcolor: "rgba(255,255,255,0.01)",
                     boxShadow: "inset 0 1px 0 rgba(255,255,255,0.014)",
                   }}
@@ -1120,11 +1270,11 @@ export function MergePage({
                       onClick={() => onPushActionChange(item.key as BranchPushAction)}
                       sx={{
                         minWidth: 0,
-                        minHeight: { xs: 30, sm: 32 },
-                        borderRadius: { xs: "9px", sm: "10px" },
+                        minHeight: { xs: 27, sm: 29 },
+                        borderRadius: { xs: "8px", sm: "8px" },
                         px: { xs: 0.32, sm: 1 },
                         py: 0,
-                        fontSize: { xs: "0.72rem", sm: "0.84rem" },
+                        fontSize: { xs: "0.72rem", sm: "0.8rem" },
                         lineHeight: 1.1,
                         whiteSpace: "normal",
                         textAlign: "center",
@@ -1150,7 +1300,7 @@ export function MergePage({
                   variant="contained"
                   onClick={onExecutePush}
                   disabled={actionDisabled}
-                  sx={{ minHeight: 36, borderRadius: "14px" }}
+                  sx={{ minHeight: 34, borderRadius: "11px" }}
                 >
                   执行推送
                 </Button>

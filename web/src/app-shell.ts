@@ -5,7 +5,7 @@ export type PageKey = AppModuleKey;
 export const ALL_PAGE_KEYS: PageKey[] = [
   "projects",
   "merge",
-  "deploy",
+  "build",
   "proxy",
 ];
 
@@ -26,6 +26,9 @@ export function normalizePageKey(value: unknown): PageKey | null {
   }
   if (value === "navigation") {
     return "projects";
+  }
+  if (value === "deploy") {
+    return "build";
   }
   return ALL_PAGE_KEYS.includes(value as PageKey) ? (value as PageKey) : null;
 }

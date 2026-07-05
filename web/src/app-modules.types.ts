@@ -11,15 +11,16 @@ import type {
   BranchTaskHistoryEntry,
   BranchTaskResponse,
   BranchWorkflowMode,
+  BranchWorktreeSummary,
 } from "./app-types";
 import type {
   ProjectSelectionEntry,
   ProjectSummary,
 } from "./hooks/useBranchContext";
-import type { DeployRequest } from "./hooks/useDeployContext";
+import type { BuildRequest } from "./hooks/useBuildContext";
 import type { WorkflowSignalsState } from "./hooks/useWorkflowSignals";
 import type { WorkflowProjectReplay } from "./lib/workflowSignals";
-import type { DeployPageProps } from "./pages/DeployPage";
+import type { BuildPageProps } from "./pages/BuildPage";
 import type { MergePageProps } from "./pages/MergePage";
 import type { ProxyPageProps } from "./pages/ProxyPage";
 import type { ProjectsPageProps } from "./pages/ProjectsPage";
@@ -27,55 +28,55 @@ import type { ProjectsPageProps } from "./pages/ProjectsPage";
 export type PageComponent = LazyExoticComponent<ComponentType<any>>;
 
 export type AppPagePropsMap = {
-  deploy: DeployPageProps;
+  build: BuildPageProps;
   merge: MergePageProps;
   proxy: ProxyPageProps;
   projects: ProjectsPageProps;
 };
 
 export type AppShellContext = {
-  enabledPages: Array<"projects" | "merge" | "deploy" | "proxy">;
+  enabledPages: Array<"projects" | "merge" | "build" | "proxy">;
   projects: ProjectSummary[];
-  deployProjects: ProjectSummary[];
+  buildProjects: ProjectSummary[];
   branchProjects: ProjectSummary[];
   selectedProject: string;
   selectedProjectInfo: ProjectSummary | null;
   setSelectedProject: (projectKey: string) => void;
-  setPage: (page: "projects" | "merge" | "deploy" | "proxy") => void;
+  setPage: (page: "projects" | "merge" | "build" | "proxy") => void;
 };
 
-export type DeployModuleContext = {
+export type BuildModuleContext = {
   branch: string;
   setBranch: (value: string) => void;
   env: string;
   setEnv: (value: string) => void;
   target: string;
   setTarget: Dispatch<SetStateAction<string>>;
-  targetMeta: DeployPageProps["targetMeta"];
-  paramValues: DeployPageProps["paramValues"];
-  defaultParamValues: DeployPageProps["defaultParamValues"];
-  setParamValue: DeployPageProps["onParamChange"];
-  setDeployContextLoadedKey: (value: string) => void;
-  deployContextStatus: "idle" | "loading" | "ready" | "error";
-  deployContextError: string;
-  plan: DeployPageProps["plan"];
-  buildResult: DeployPageProps["buildResult"];
-  buildResultUpdatedAtMs: DeployPageProps["buildResultUpdatedAtMs"];
+  targetMeta: BuildPageProps["targetMeta"];
+  paramValues: BuildPageProps["paramValues"];
+  defaultParamValues: BuildPageProps["defaultParamValues"];
+  setParamValue: BuildPageProps["onParamChange"];
+  setBuildContextLoadedKey: (value: string) => void;
+  buildContextStatus: "idle" | "loading" | "ready" | "error";
+  buildContextError: string;
+  plan: BuildPageProps["plan"];
+  buildResult: BuildPageProps["buildResult"];
+  buildResultUpdatedAtMs: BuildPageProps["buildResultUpdatedAtMs"];
   buildAutoRefreshTimedOut: boolean;
-  visibleDeployHistory: DeployPageProps["deployHistory"];
+  visibleBuildHistory: BuildPageProps["buildHistory"];
   handleTriggerBuild: () => Promise<void>;
-  handleTriggerDeployRequest: (
-    request: DeployRequest,
+  handleTriggerBuildRequest: (
+    request: BuildRequest,
     busyText?: string,
   ) => Promise<void>;
   handleRefreshBuild: () => Promise<void>;
-  handleReplayDeployHistory: DeployPageProps["onReplayDeployHistory"];
+  handleReplayBuildHistory: BuildPageProps["onReplayBuildHistory"];
   handleOpenBuildRecord: () => Promise<void>;
-  handleOpenBuildUrl: DeployPageProps["onOpenBuildUrl"];
-  currentDeployRequest: () => DeployRequest;
-  loadDeployHistory: () => Promise<void>;
-  refreshDeployHistoryStatuses: () => Promise<void>;
-  handleClearDeployHistory: () => Promise<void>;
+  handleOpenBuildUrl: BuildPageProps["onOpenBuildUrl"];
+  currentBuildRequest: () => BuildRequest;
+  loadBuildHistory: () => Promise<void>;
+  refreshBuildHistoryStatuses: () => Promise<void>;
+  handleClearBuildHistory: () => Promise<void>;
 };
 
 export type BranchModuleContext = {
@@ -125,14 +126,24 @@ export type MergeModuleContext = {
   pushStatusLoading: boolean;
   pushStatusError: string;
   pushStatusUpdatedAtMs: number;
+  worktrees: BranchWorktreeSummary[];
+  worktreesLoading: boolean;
+  worktreesError: string;
+  selectedWorktreePath: string;
+  setSelectedWorktreePath: (value: string) => void;
   branchTaskResult: BranchTaskResponse | null;
   visibleBranchTaskHistory: BranchTaskHistoryEntry[];
   loadBranchTaskHistory: () => Promise<void>;
+  loadProjectWorktrees: (
+    projectKey?: string,
+  ) => Promise<BranchWorktreeSummary[] | undefined>;
   loadPushStatus: (
     projectKey?: string,
+    repoPath?: string,
   ) => Promise<BranchPushStatus | null | undefined>;
   handleClearBranchTaskHistory: () => Promise<void>;
   handleChooseCheckoutDirectory: () => Promise<void>;
+  handleChooseWorktreeDirectory: () => Promise<void>;
   handleExecuteSync: () => Promise<void>;
   handleExecuteCreate: () => Promise<void>;
   handleExecuteCheckout: () => Promise<void>;
@@ -211,15 +222,15 @@ export type ProxyModuleContext = {
   startProxyProfile: ProxyPageProps["onStartProfile"];
   stopProxyProfile: ProxyPageProps["onStopProfile"];
   clearProxyEvents: ProxyPageProps["onClearEvents"];
-  demoAvailable: ProxyPageProps["demoAvailable"];
-  loadProxyDemoData: NonNullable<ProxyPageProps["onLoadDemoData"]>;
+  exportProxyProfilePack: ProxyPageProps["onExportProfilePack"];
+  importProxyProfilePack: ProxyPageProps["onImportProfilePack"];
 };
 
 export type BuildModulePropsContext = {
   appShell: AppShellContext;
   branchContext: BranchModuleContext;
   mergeSelection: MergeSelectionContext;
-  deployModule: DeployModuleContext;
+  buildModule: BuildModuleContext;
   mergeModule: MergeModuleContext;
   projectsModule: ProjectsModuleContext;
   proxyModule: ProxyModuleContext;
@@ -234,7 +245,7 @@ export type ModuleRuntimeContext = {
       replaceSelection?: boolean,
     ) => Promise<void>;
   };
-  deployModule: Pick<DeployModuleContext, "loadDeployHistory">;
+  buildModule: Pick<BuildModuleContext, "loadBuildHistory">;
   mergeModule: Pick<MergeModuleContext, "loadBranchTaskHistory">;
   projectsModule: Pick<ProjectsModuleContext, "loadFinderData">;
   proxyModule: Pick<ProxyModuleContext, "loadProxyDashboard">;

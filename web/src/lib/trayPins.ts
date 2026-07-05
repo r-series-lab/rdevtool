@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export const TRAY_PINNED_LIMIT = 5;
+const BUILD_REPLAY_KIND = "build.replay";
+const LEGACY_DEPLOY_REPLAY_KIND = "deploy.replay";
 
 export type TrayPinnedAction = {
   kind: string;
@@ -28,23 +30,37 @@ function isTrayPinnedAction(value: unknown): value is TrayPinnedAction {
   );
 }
 
+function normalizeTrayPinnedKind(kind: string) {
+  const normalized = kind.trim();
+  return normalized === LEGACY_DEPLOY_REPLAY_KIND ? BUILD_REPLAY_KIND : normalized;
+}
+
+function normalizeTrayPinnedDedupeKey(dedupeKey: string) {
+  const normalized = dedupeKey.trim();
+  return normalized.startsWith(`${LEGACY_DEPLOY_REPLAY_KIND}:`)
+    ? `${BUILD_REPLAY_KIND}:${normalized.slice(LEGACY_DEPLOY_REPLAY_KIND.length + 1)}`
+    : normalized;
+}
+
 export function normalizeTrayPinnedActions(actions: unknown[]): TrayPinnedAction[] {
   const normalized: TrayPinnedAction[] = [];
   for (const action of actions) {
     if (!isTrayPinnedAction(action)) {
       continue;
     }
-    if (normalized.some((item) => item.dedupeKey === action.dedupeKey)) {
+    const kind = normalizeTrayPinnedKind(action.kind);
+    const dedupeKey = normalizeTrayPinnedDedupeKey(action.dedupeKey);
+    if (normalized.some((item) => item.dedupeKey === dedupeKey)) {
       continue;
     }
     normalized.push({
-      kind: action.kind.trim(),
+      kind,
       label: action.label.trim(),
       detail: action.detail ?? null,
       projectKey: action.projectKey ?? null,
       entry: action.entry ?? null,
       payload: action.payload ?? null,
-      dedupeKey: action.dedupeKey.trim(),
+      dedupeKey,
       updatedAtMs: Number(action.updatedAtMs) || Date.now(),
     });
     if (normalized.length >= TRAY_PINNED_LIMIT) {

@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { WorkspaceAppPreferences } from "../app-types";
+import type {
+  CreateProjectWorkspacePayload,
+  ProjectWorkspaceState,
+  ProjectWorkspaceSummary,
+  WorkspaceAppPreferences,
+} from "../app-types";
 import {
   NAV_ITEM_MAP,
   normalizeEnabledPages,
@@ -39,6 +44,9 @@ export function useAppShell({ setError }: UseAppShellOptions) {
   const [defaultPage, setDefaultPage] = useState<PageKey>("projects");
   const [styleMode, setStyleMode] = useState<AppStyleMode>("light");
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectWorkspaces, setProjectWorkspaces] = useState<ProjectWorkspaceSummary[]>([]);
+  const [projectWorkspacesDir, setProjectWorkspacesDir] = useState("");
+  const [activeProjectWorkspaceKey, setActiveProjectWorkspaceKey] = useState("system");
   const [selectedProject, setSelectedProject] = useState("");
   const [lastProjectKey, setLastProjectKey] = useState("");
   const [branchCache, setBranchCache] = useState<BranchCacheMap>({});
@@ -137,6 +145,38 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     }
   }
 
+  function applyProjectWorkspaceState(state: ProjectWorkspaceState | null) {
+    if (!state) {
+      return;
+    }
+    setProjectWorkspaces(state.workspaces);
+    setProjectWorkspacesDir(state.workspacesDir);
+    setActiveProjectWorkspaceKey(state.activeKey || "system");
+  }
+
+  async function loadProjectWorkspaces() {
+    const state = await invoke<ProjectWorkspaceState>("get_project_workspaces");
+    applyProjectWorkspaceState(state);
+    return state;
+  }
+
+  async function setActiveProjectWorkspace(workspaceKey: string) {
+    const state = await invoke<ProjectWorkspaceState>("set_active_project_workspace", {
+      workspaceKey,
+    });
+    applyProjectWorkspaceState(state);
+    await loadProjects("", true);
+  }
+
+  async function createProjectWorkspace(payload: CreateProjectWorkspacePayload) {
+    const state = await invoke<ProjectWorkspaceState>("create_project_workspace_config", {
+      payload,
+    });
+    applyProjectWorkspaceState(state);
+    await loadProjects("", true);
+    return state;
+  }
+
   async function hydratePersistedState(): Promise<{
     preferredProject: string;
     enabledPages: PageKey[];
@@ -148,12 +188,14 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       storedLastProject,
       storedStyleMode,
       workspacePreferences,
+      projectWorkspaceState,
     ] = await Promise.all([
       getStoredJson<Record<string, unknown>>(APP_STORAGE_NAMESPACE, BRANCH_CACHE_STORAGE_KEY),
       getStoredJson<Record<string, unknown>>(APP_STORAGE_NAMESPACE, PROJECT_SELECTION_STORAGE_KEY),
       getStoredJson<string>(APP_STORAGE_NAMESPACE, LAST_PROJECT_STORAGE_KEY),
       getStoredJson<string>(APP_STORAGE_NAMESPACE, STYLE_MODE_STORAGE_KEY),
       invoke<WorkspaceAppPreferences>("get_workspace_app_preferences").catch(() => null),
+      invoke<ProjectWorkspaceState>("get_project_workspaces").catch(() => null),
     ]);
 
     const nextBranchCache = storedBranchCache
@@ -198,6 +240,7 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     setBranchCache(nextBranchCache);
     setProjectSelections(nextProjectSelections);
     setLastProjectKey(typeof storedLastProject === "string" ? storedLastProject : "");
+    applyProjectWorkspaceState(projectWorkspaceState);
 
     const nextStyleMode =
       normalizeStyleMode(workspacePreferences?.styleMode) ??
@@ -248,6 +291,12 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     projects,
     selectedProject,
     setSelectedProject,
+    projectWorkspaces,
+    projectWorkspacesDir,
+    activeProjectWorkspaceKey,
+    loadProjectWorkspaces,
+    setActiveProjectWorkspace,
+    createProjectWorkspace,
     branchCache,
     setBranchCache,
     projectSelections,

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
@@ -83,6 +83,8 @@ impl Default for ProxyConfig {
 pub struct ProxyProfile {
     #[serde(default = "default_profile_id")]
     pub id: String,
+    #[serde(default)]
+    pub workspace_key: Option<String>,
     #[serde(default = "default_profile_name")]
     pub name: String,
     #[serde(default = "default_listen_host")]
@@ -103,6 +105,7 @@ impl Default for ProxyProfile {
     fn default() -> Self {
         Self {
             id: default_profile_id(),
+            workspace_key: None,
             name: default_profile_name(),
             listen_host: default_listen_host(),
             listen_port: default_listen_port(),
@@ -151,6 +154,18 @@ pub struct ProxyRule {
     pub action: ProxyRuleAction,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProxyOutboundMode {
+    Inherit,
+    Direct,
+    Proxy,
+}
+
+fn default_outbound_mode() -> ProxyOutboundMode {
+    ProxyOutboundMode::Inherit
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ProxyRuleAction {
@@ -163,6 +178,10 @@ pub enum ProxyRuleAction {
         request_headers: BTreeMap<String, String>,
         #[serde(default)]
         response_headers: BTreeMap<String, String>,
+        #[serde(default = "default_outbound_mode")]
+        outbound_mode: ProxyOutboundMode,
+        #[serde(default)]
+        outbound_proxy: String,
         #[serde(default)]
         delay_ms: u64,
     },
@@ -195,6 +214,8 @@ impl Default for ProxyRuleAction {
             rewrite_prefix: String::new(),
             request_headers: BTreeMap::new(),
             response_headers: BTreeMap::new(),
+            outbound_mode: default_outbound_mode(),
+            outbound_proxy: String::new(),
             delay_ms: 0,
         }
     }
@@ -260,6 +281,18 @@ pub struct ProxyDashboard {
     pub config: ProxyConfig,
     pub statuses: Vec<ProxyProfileRuntimeStatus>,
     pub events: Vec<ProxyEvent>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyProfilePack {
+    pub schema_version: u16,
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    pub exported_at: String,
+    pub profiles: Vec<ProxyProfile>,
+    pub rules: Vec<ProxyRule>,
 }
 
 #[derive(Clone, Default)]
@@ -365,6 +398,108 @@ pub fn delete_proxy_rule(path: &Path, rule_id: &str) -> Result<ProxyConfig> {
     load_proxy_config(path)
 }
 
+pub fn export_proxy_profile_pack(path: &Path, profile_id: &str) -> Result<ProxyProfilePack> {
+    let config = load_proxy_config(path)?;
+    let profile = config
+        .profiles
+        .iter()
+        .find(|item| item.id == profile_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("proxy profile not found: {}", profile_id))?;
+    let rules = config
+        .rules
+        .into_iter()
+        .filter(|rule| rule.profile_id == profile.id)
+        .collect::<Vec<_>>();
+    Ok(ProxyProfilePack {
+        schema_version: 1,
+        name: profile.name.clone(),
+        description: format!("rDevTool proxy profile: {}", profile.name),
+        exported_at: Utc::now().to_rfc3339(),
+        profiles: vec![profile],
+        rules,
+    })
+}
+
+pub fn import_proxy_profile_pack(path: &Path, pack: ProxyProfilePack) -> Result<ProxyConfig> {
+    if pack.schema_version != 1 {
+        bail!(
+            "unsupported proxy pack schema version: {}",
+            pack.schema_version
+        );
+    }
+    if pack.profiles.is_empty() {
+        bail!("proxy pack does not contain a profile");
+    }
+
+    let mut config = load_proxy_config(path)?;
+    let occupied_ports = config
+        .profiles
+        .iter()
+        .map(|profile| profile.listen_port)
+        .collect::<Vec<_>>();
+    let first_profile = pack.profiles[0].clone();
+    let old_profile_id = first_profile.id.clone();
+    let new_profile_id = Uuid::new_v4().to_string();
+
+    let mut profile = first_profile;
+    profile.id = new_profile_id.clone();
+    profile.name = imported_profile_name(&config, &profile.name);
+    profile.listen_port = next_available_proxy_port(profile.listen_port, &occupied_ports);
+    normalize_profile(&mut profile);
+    config.profiles.push(profile);
+
+    for mut rule in pack
+        .rules
+        .into_iter()
+        .filter(|rule| rule.profile_id == old_profile_id)
+    {
+        rule.id = Uuid::new_v4().to_string();
+        rule.profile_id = new_profile_id.clone();
+        normalize_rule(&mut rule);
+        config.rules.push(rule);
+    }
+
+    save_proxy_config(path, &config)?;
+    load_proxy_config(path)
+}
+
+fn imported_profile_name(config: &ProxyConfig, base_name: &str) -> String {
+    let base = {
+        let trimmed = base_name.trim();
+        if trimmed.is_empty() {
+            "导入代理"
+        } else {
+            trimmed
+        }
+    };
+    let mut candidate = base.to_string();
+    let mut index = 2;
+    while config
+        .profiles
+        .iter()
+        .any(|profile| profile.name == candidate)
+    {
+        candidate = format!("{base} ({index})");
+        index += 1;
+    }
+    candidate
+}
+
+fn next_available_proxy_port(preferred_port: u16, occupied_ports: &[u16]) -> u16 {
+    let start = if preferred_port == 0 {
+        DEFAULT_PROXY_PORT
+    } else {
+        preferred_port
+    };
+    for port in start..=u16::MAX {
+        if !occupied_ports.contains(&port) {
+            return port;
+        }
+    }
+    DEFAULT_PROXY_PORT
+}
+
 fn normalize_proxy_config(config: &mut ProxyConfig) {
     if config.profiles.is_empty() {
         config.profiles.push(ProxyProfile::default());
@@ -406,6 +541,11 @@ fn normalize_profile(profile: &mut ProxyProfile) {
     } else {
         profile.name = profile.name.trim().to_string();
     }
+    profile.workspace_key = profile
+        .workspace_key
+        .as_ref()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
     if profile.listen_host.trim().is_empty() {
         profile.listen_host = default_listen_host();
     } else {
@@ -440,6 +580,17 @@ fn normalize_rule(rule: &mut ProxyRule) {
     rule.path_prefix = rule.path_prefix.trim().to_string();
     rule.header_name = rule.header_name.trim().to_ascii_lowercase();
     rule.header_contains = rule.header_contains.trim().to_string();
+    if let ProxyRuleAction::Forward {
+        target_base_url,
+        rewrite_prefix,
+        outbound_proxy,
+        ..
+    } = &mut rule.action
+    {
+        *target_base_url = target_base_url.trim().to_string();
+        *rewrite_prefix = rewrite_prefix.trim().to_string();
+        *outbound_proxy = outbound_proxy.trim().to_string();
+    }
 }
 
 impl ProxyRuntimeState {
@@ -522,6 +673,32 @@ impl ProxyRuntimeState {
             listen_url,
             started_at: Some(started_at),
         })
+    }
+
+    pub fn ensure_profile_running(
+        &self,
+        path: PathBuf,
+        profile_id: String,
+    ) -> Result<ProxyProfileRuntimeStatus> {
+        let config = load_proxy_config(&path)?;
+        let profile = config
+            .profiles
+            .iter()
+            .find(|item| item.id == profile_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("proxy profile not found: {}", profile_id))?;
+        {
+            let inner = self.inner.lock().expect("proxy runtime poisoned");
+            if let Some(handle) = inner.servers.get(&profile.id) {
+                return Ok(ProxyProfileRuntimeStatus {
+                    profile_id: profile.id,
+                    running: true,
+                    listen_url: handle.listen_url.clone(),
+                    started_at: Some(handle.started_at.clone()),
+                });
+            }
+        }
+        self.start_profile(path, profile.id)
     }
 
     pub fn stop_profile(&self, profile_id: &str) -> bool {
@@ -636,11 +813,11 @@ fn handle_proxy_connection(
 
     let method = parts[0].to_ascii_uppercase();
     let target = parts[1].to_string();
+    let headers = read_headers(&mut reader)?;
     if method == "CONNECT" {
-        return handle_connect_tunnel(stream, profile, target, runtime);
+        return handle_connect_tunnel(stream, profile, profile_rules, target, headers, runtime);
     }
 
-    let headers = read_headers(&mut reader)?;
     let content_length = header_value(&headers, "content-length")
         .and_then(|value| value.trim().parse::<usize>().ok())
         .unwrap_or(0);
@@ -840,17 +1017,109 @@ fn handle_proxy_connection(
 fn handle_connect_tunnel(
     mut stream: TcpStream,
     profile: ProxyProfile,
+    profile_rules: Vec<ProxyRule>,
     target: String,
+    headers: Vec<(String, String)>,
     runtime: ProxyRuntimeState,
 ) -> Result<()> {
     let started_at = Utc::now().to_rfc3339();
     let started = Instant::now();
     let request_bytes = Arc::new(AtomicU64::new(0));
     let response_bytes = Arc::new(AtomicU64::new(0));
-    let mut request_headers = BTreeMap::new();
-    request_headers.insert("target".to_string(), target.clone());
+    let mut request_headers = headers_to_map(&headers);
+    request_headers.insert(":authority".to_string(), target.clone());
+    let target_url = Url::parse(&format!("https://{target}/")).ok();
+    let matched_rule = target_url.as_ref().and_then(|url| {
+        profile_rules
+            .iter()
+            .find(|rule| rule_matches(rule, "CONNECT", url.as_str(), url, &headers))
+    });
 
-    match TcpStream::connect(&target) {
+    if let Some(rule) = matched_rule {
+        if rule.action.delay_ms() > 0 {
+            thread::sleep(Duration::from_millis(rule.action.delay_ms()));
+        }
+        match &rule.action {
+            ProxyRuleAction::Mock {
+                status,
+                content_type,
+                body,
+                headers: response_headers,
+                ..
+            } => {
+                let status = normalize_status(*status, 200);
+                send_simple_response(
+                    &mut stream,
+                    status,
+                    content_type,
+                    body.as_bytes(),
+                    response_headers,
+                )?;
+                runtime.push_event(ProxyEvent {
+                    id: Uuid::new_v4().to_string(),
+                    profile_id: profile.id,
+                    profile_name: profile.name,
+                    started_at,
+                    duration_ms: started.elapsed().as_millis(),
+                    method: "CONNECT".to_string(),
+                    url: target.clone(),
+                    path: target,
+                    status: Some(status),
+                    action: rule.action.label().to_string(),
+                    matched_rule_id: Some(rule.id.clone()),
+                    matched_rule_name: Some(rule.name.clone()),
+                    request_bytes: 0,
+                    response_bytes: body.len(),
+                    request_headers,
+                    response_headers: response_headers.clone(),
+                    request_body_preview: String::new(),
+                    response_body_preview: body.clone(),
+                    request_body_truncated: false,
+                    response_body_truncated: false,
+                    error: None,
+                });
+                return Ok(());
+            }
+            ProxyRuleAction::Block { status, body, .. } => {
+                let status = normalize_status(*status, 403);
+                send_simple_response(
+                    &mut stream,
+                    status,
+                    "text/plain; charset=utf-8",
+                    body.as_bytes(),
+                    &BTreeMap::new(),
+                )?;
+                runtime.push_event(ProxyEvent {
+                    id: Uuid::new_v4().to_string(),
+                    profile_id: profile.id,
+                    profile_name: profile.name,
+                    started_at,
+                    duration_ms: started.elapsed().as_millis(),
+                    method: "CONNECT".to_string(),
+                    url: target.clone(),
+                    path: target,
+                    status: Some(status),
+                    action: rule.action.label().to_string(),
+                    matched_rule_id: Some(rule.id.clone()),
+                    matched_rule_name: Some(rule.name.clone()),
+                    request_bytes: 0,
+                    response_bytes: body.len(),
+                    request_headers,
+                    response_headers: BTreeMap::new(),
+                    request_body_preview: String::new(),
+                    response_body_preview: body.clone(),
+                    request_body_truncated: false,
+                    response_body_truncated: false,
+                    error: None,
+                });
+                return Ok(());
+            }
+            ProxyRuleAction::Forward { .. } => {}
+        }
+    }
+
+    let outbound_proxy = outbound_proxy_for_request(&profile, matched_rule);
+    match connect_tunnel_stream(&target, outbound_proxy.as_deref()) {
         Ok(mut upstream) => {
             stream.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")?;
             stream.flush()?;
@@ -880,8 +1149,8 @@ fn handle_connect_tunnel(
                 path: target,
                 status: Some(200),
                 action: "tunnel".to_string(),
-                matched_rule_id: None,
-                matched_rule_name: None,
+                matched_rule_id: matched_rule.map(|rule| rule.id.clone()),
+                matched_rule_name: matched_rule.map(|rule| rule.name.clone()),
                 request_bytes: request_bytes.load(Ordering::Relaxed) as usize,
                 response_bytes: response_bytes.load(Ordering::Relaxed) as usize,
                 request_headers,
@@ -913,8 +1182,8 @@ fn handle_connect_tunnel(
                 path: target,
                 status: Some(502),
                 action: "tunnel".to_string(),
-                matched_rule_id: None,
-                matched_rule_name: None,
+                matched_rule_id: matched_rule.map(|rule| rule.id.clone()),
+                matched_rule_name: matched_rule.map(|rule| rule.name.clone()),
                 request_bytes: 0,
                 response_bytes: body.len(),
                 request_headers,
@@ -946,6 +1215,202 @@ fn copy_tunnel(reader: &mut TcpStream, writer: &mut TcpStream, counter: &AtomicU
         }
     }
     let _ = writer.shutdown(Shutdown::Write);
+}
+
+fn connect_tunnel_stream(target: &str, outbound_proxy: Option<&str>) -> Result<TcpStream> {
+    let Some(outbound_proxy) = outbound_proxy
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return TcpStream::connect(target).with_context(|| format!("connect failed: {target}"));
+    };
+
+    let proxy_url = Url::parse(outbound_proxy)
+        .with_context(|| format!("invalid tunnel upstream proxy: {outbound_proxy}"))?;
+    match proxy_url.scheme() {
+        "http" => connect_http_proxy_tunnel(&proxy_url, target),
+        "socks5" | "socks5h" => connect_socks5_tunnel(&proxy_url, target),
+        "https" => bail!("CONNECT through https upstream proxy is not supported yet"),
+        scheme => bail!("unsupported tunnel upstream proxy scheme: {scheme}"),
+    }
+}
+
+fn proxy_host_port(proxy_url: &Url, default_port: u16) -> Result<String> {
+    let host = proxy_url
+        .host_str()
+        .ok_or_else(|| anyhow!("upstream proxy host is empty"))?;
+    let port = proxy_url.port().unwrap_or(default_port);
+    Ok(format!("{host}:{port}"))
+}
+
+fn connect_http_proxy_tunnel(proxy_url: &Url, target: &str) -> Result<TcpStream> {
+    let proxy_addr = proxy_host_port(proxy_url, 80)?;
+    let mut stream = TcpStream::connect(&proxy_addr)
+        .with_context(|| format!("connect upstream proxy failed: {proxy_addr}"))?;
+    stream.set_read_timeout(Some(PROXY_READ_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(PROXY_WRITE_TIMEOUT)).ok();
+
+    write!(
+        stream,
+        "CONNECT {target} HTTP/1.1\r\nHost: {target}\r\nProxy-Connection: Keep-Alive\r\n"
+    )?;
+    if !proxy_url.username().is_empty() {
+        let credentials = format!(
+            "{}:{}",
+            proxy_url.username(),
+            proxy_url.password().unwrap_or_default()
+        );
+        write!(
+            stream,
+            "Proxy-Authorization: Basic {}\r\n",
+            base64_encode(credentials.as_bytes())
+        )?;
+    }
+    write!(stream, "\r\n")?;
+    stream.flush()?;
+    read_http_connect_response(&mut stream)?;
+    Ok(stream)
+}
+
+fn read_http_connect_response(stream: &mut TcpStream) -> Result<()> {
+    let mut response = Vec::new();
+    let mut byte = [0_u8; 1];
+    while response.len() < 16 * 1024 {
+        stream.read_exact(&mut byte)?;
+        response.push(byte[0]);
+        if response.ends_with(b"\r\n\r\n") {
+            break;
+        }
+    }
+    let response_text = String::from_utf8_lossy(&response);
+    let status_line = response_text.lines().next().unwrap_or_default();
+    if status_line.split_whitespace().nth(1) == Some("200") {
+        return Ok(());
+    }
+    bail!("upstream proxy CONNECT failed: {status_line}");
+}
+
+fn target_host_port(target: &str) -> Result<(String, u16)> {
+    let url = Url::parse(&format!("https://{target}"))
+        .with_context(|| format!("invalid CONNECT target: {target}"))?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("CONNECT target host is empty: {target}"))?
+        .to_string();
+    let port = url.port_or_known_default().unwrap_or(443);
+    Ok((host, port))
+}
+
+fn connect_socks5_tunnel(proxy_url: &Url, target: &str) -> Result<TcpStream> {
+    let proxy_addr = proxy_host_port(proxy_url, 1080)?;
+    let mut stream = TcpStream::connect(&proxy_addr)
+        .with_context(|| format!("connect SOCKS5 proxy failed: {proxy_addr}"))?;
+    stream.set_read_timeout(Some(PROXY_READ_TIMEOUT)).ok();
+    stream.set_write_timeout(Some(PROXY_WRITE_TIMEOUT)).ok();
+
+    let username = proxy_url.username();
+    let password = proxy_url.password().unwrap_or_default();
+    if username.is_empty() {
+        stream.write_all(&[0x05, 0x01, 0x00])?;
+    } else {
+        stream.write_all(&[0x05, 0x02, 0x00, 0x02])?;
+    }
+    let mut method_response = [0_u8; 2];
+    stream.read_exact(&mut method_response)?;
+    if method_response[0] != 0x05 {
+        bail!("invalid SOCKS5 handshake response");
+    }
+    match method_response[1] {
+        0x00 => {}
+        0x02 => {
+            if username.len() > 255 || password.len() > 255 {
+                bail!("SOCKS5 username/password is too long");
+            }
+            let mut auth = Vec::with_capacity(3 + username.len() + password.len());
+            auth.push(0x01);
+            auth.push(username.len() as u8);
+            auth.extend_from_slice(username.as_bytes());
+            auth.push(password.len() as u8);
+            auth.extend_from_slice(password.as_bytes());
+            stream.write_all(&auth)?;
+            let mut auth_response = [0_u8; 2];
+            stream.read_exact(&mut auth_response)?;
+            if auth_response != [0x01, 0x00] {
+                bail!("SOCKS5 authentication failed");
+            }
+        }
+        0xff => bail!("SOCKS5 proxy has no acceptable auth method"),
+        method => bail!("unsupported SOCKS5 auth method: {method}"),
+    }
+
+    let (host, port) = target_host_port(target)?;
+    let mut request = vec![0x05, 0x01, 0x00];
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        match ip {
+            IpAddr::V4(value) => {
+                request.push(0x01);
+                request.extend_from_slice(&value.octets());
+            }
+            IpAddr::V6(value) => {
+                request.push(0x04);
+                request.extend_from_slice(&value.octets());
+            }
+        }
+    } else {
+        if host.len() > 255 {
+            bail!("SOCKS5 target host is too long: {host}");
+        }
+        request.push(0x03);
+        request.push(host.len() as u8);
+        request.extend_from_slice(host.as_bytes());
+    }
+    request.extend_from_slice(&port.to_be_bytes());
+    stream.write_all(&request)?;
+
+    let mut response_head = [0_u8; 4];
+    stream.read_exact(&mut response_head)?;
+    if response_head[0] != 0x05 {
+        bail!("invalid SOCKS5 connect response");
+    }
+    if response_head[1] != 0x00 {
+        bail!("SOCKS5 connect failed: {}", response_head[1]);
+    }
+    let address_len = match response_head[3] {
+        0x01 => 4,
+        0x03 => {
+            let mut len = [0_u8; 1];
+            stream.read_exact(&mut len)?;
+            len[0] as usize
+        }
+        0x04 => 16,
+        atyp => bail!("invalid SOCKS5 address type: {atyp}"),
+    };
+    let mut skip = vec![0_u8; address_len + 2];
+    stream.read_exact(&mut skip)?;
+    Ok(stream)
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = *chunk.get(1).unwrap_or(&0);
+        let b2 = *chunk.get(2).unwrap_or(&0);
+        output.push(TABLE[(b0 >> 2) as usize] as char);
+        output.push(TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
+        if chunk.len() > 1 {
+            output.push(TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
+        } else {
+            output.push('=');
+        }
+        if chunk.len() > 2 {
+            output.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+        } else {
+            output.push('=');
+        }
+    }
+    output
 }
 
 fn read_headers(reader: &mut BufReader<TcpStream>) -> Result<Vec<(String, String)>> {
@@ -1063,10 +1528,10 @@ fn forward_http_request(
     let mut builder = Client::builder()
         .timeout(Duration::from_secs(90))
         .redirect(reqwest::redirect::Policy::none());
-    if !profile.upstream_proxy.is_empty() {
+    if let Some(upstream_proxy) = outbound_proxy_for_request(profile, rule) {
         builder = builder.proxy(
-            reqwest::Proxy::all(&profile.upstream_proxy)
-                .with_context(|| format!("invalid upstream proxy: {}", profile.upstream_proxy))?,
+            reqwest::Proxy::all(&upstream_proxy)
+                .with_context(|| format!("invalid upstream proxy: {upstream_proxy}"))?,
         );
     }
     let client = builder
@@ -1135,6 +1600,28 @@ fn forward_http_request(
         headers: response_headers,
         body,
     })
+}
+
+fn outbound_proxy_for_request(profile: &ProxyProfile, rule: Option<&ProxyRule>) -> Option<String> {
+    let mode_and_proxy = rule.and_then(|rule| {
+        let ProxyRuleAction::Forward {
+            outbound_mode,
+            outbound_proxy,
+            ..
+        } = &rule.action
+        else {
+            return None;
+        };
+        Some((*outbound_mode, outbound_proxy.trim()))
+    });
+
+    let proxy = match mode_and_proxy {
+        Some((ProxyOutboundMode::Direct, _)) => return None,
+        Some((ProxyOutboundMode::Proxy, outbound_proxy)) => outbound_proxy,
+        Some((ProxyOutboundMode::Inherit, _)) | None => profile.upstream_proxy.trim(),
+    };
+
+    (!proxy.is_empty()).then(|| proxy.to_string())
 }
 
 fn rewrite_destination_url(target_url: &Url, rule: Option<&ProxyRule>) -> Result<Url> {
@@ -1353,11 +1840,21 @@ pub fn validate_proxy_rule(rule: &ProxyRule) -> Result<()> {
     }
     match &rule.action {
         ProxyRuleAction::Forward {
-            target_base_url, ..
+            target_base_url,
+            outbound_mode,
+            outbound_proxy,
+            ..
         } => {
             if !target_base_url.trim().is_empty() {
                 Url::parse(target_base_url.trim())
                     .with_context(|| format!("重写目标无效：{target_base_url}"))?;
+            }
+            if *outbound_mode == ProxyOutboundMode::Proxy {
+                if outbound_proxy.trim().is_empty() {
+                    bail!("指定上游代理时，代理地址不能为空");
+                }
+                reqwest::Proxy::all(outbound_proxy.trim())
+                    .with_context(|| format!("上游代理无效：{outbound_proxy}"))?;
             }
         }
         ProxyRuleAction::Mock { status, .. } | ProxyRuleAction::Block { status, .. } => {

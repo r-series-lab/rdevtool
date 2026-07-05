@@ -1,18 +1,17 @@
 #![allow(dead_code)]
 
+use crate::build;
 use crate::config::{
-    AppConfig, DeployParamConfig, DeployParamKind, DeployTargetConfig, JenkinsProfileConfig,
-    JobConfig, ProjectConfig,
+    AppConfig, DeployParamConfig, DeployParamKind, DeployTargetConfig, JobConfig, ProjectConfig,
 };
 use crate::credentials;
 use crate::git;
 use crate::gitlab;
 use crate::jenkins;
 use anyhow::{Context, Result};
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -73,6 +72,8 @@ pub struct DeployRequest {
 pub struct StatusRequest {
     pub queue_url: Option<String>,
     pub build_url: Option<String>,
+    #[serde(default)]
+    pub project: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -80,11 +81,16 @@ pub struct StatusRequest {
 pub struct DeployPlan {
     pub project_key: String,
     pub project_name: String,
+    pub adapter: String,
+    pub action_kind: String,
     pub job_kind: String,
     pub job_name: String,
     pub trigger_url: String,
     pub params: BTreeMap<String, String>,
     pub jenkins_base_url: String,
+    pub command: Option<String>,
+    pub cwd: Option<String>,
+    pub output_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -92,6 +98,8 @@ pub struct DeployPlan {
 pub struct DeployTargetSummary {
     pub key: String,
     pub label: String,
+    pub adapter: String,
+    pub action_kind: String,
     pub job_name: String,
 }
 
@@ -225,12 +233,16 @@ pub struct BranchCheckoutRequest {
 pub struct BranchSwitchRequest {
     pub project: String,
     pub target_branch: String,
+    #[serde(default)]
+    pub repo_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BranchPushRequest {
     pub project: String,
+    #[serde(default)]
+    pub repo_path: Option<String>,
     #[serde(default)]
     pub commit_before_push: bool,
     pub commit_message: Option<String>,
@@ -265,6 +277,26 @@ pub struct BranchPushStatus {
     pub untracked_count: usize,
     pub conflicted_count: usize,
     pub files: Vec<BranchPushFileStatus>,
+    pub latest_commit: Option<BranchCommitInfo>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchWorktreeSummary {
+    pub project_key: String,
+    pub project_name: String,
+    pub repo_path: String,
+    pub label: String,
+    pub current_branch: String,
+    pub detached: bool,
+    pub clean: bool,
+    pub ahead: usize,
+    pub behind: usize,
+    pub is_default: bool,
+    pub is_git_worktree: bool,
+    pub status_key: String,
+    pub status_label: String,
+    pub detail: String,
     pub latest_commit: Option<BranchCommitInfo>,
 }
 
@@ -519,7 +551,6 @@ pub fn build_plan(config: &AppConfig, request: &DeployRequest) -> Result<DeployP
         }
     });
     let target = selected_deploy_target(project, target_key)?;
-    let profile = selected_jenkins_profile(config, target)?;
     let mut params = BTreeMap::new();
 
     for param in &target.params {
@@ -536,14 +567,21 @@ pub fn build_plan(config: &AppConfig, request: &DeployRequest) -> Result<DeployP
         params.insert(key.clone(), value.clone());
     }
 
+    let adapter_plan = build::plan_adapter(config, project, target, &params)?;
+
     Ok(DeployPlan {
         project_key: project.key.clone(),
         project_name: project.name.clone(),
+        adapter: adapter_plan.adapter,
+        action_kind: adapter_plan.action_kind,
         job_kind: target.key.clone(),
-        job_name: target.job_name.clone(),
-        trigger_url: build_trigger_url(&profile.base_url, &target.job_name),
+        job_name: adapter_plan.job_name,
+        trigger_url: adapter_plan.trigger_url,
         params,
-        jenkins_base_url: profile.base_url.clone(),
+        jenkins_base_url: adapter_plan.jenkins_base_url,
+        command: adapter_plan.command,
+        cwd: adapter_plan.cwd,
+        output_dir: adapter_plan.output_dir,
     })
 }
 
@@ -557,16 +595,18 @@ pub fn trigger_deploy(config: &AppConfig, request: &DeployRequest) -> Result<Bui
         }
     });
     let target = selected_deploy_target(project, target_key)?;
-    let profile = selected_jenkins_profile(config, target)?;
     let plan = build_plan(config, request)?;
-    let password = credentials::load_jenkins_profile_password(profile)
-        .or_else(|_| credentials::load_jenkins_password(&config.defaults))?;
-    let result = jenkins::trigger_build(
-        &profile.base_url,
-        &profile.username,
-        &password,
-        &plan.trigger_url,
-        &plan.params,
+    let result = build::trigger_adapter(
+        config,
+        project,
+        target,
+        build::BuildAdapterExecution {
+            trigger_url: &plan.trigger_url,
+            params: &plan.params,
+            command: plan.command.as_deref(),
+            cwd: plan.cwd.as_deref(),
+            output_dir: plan.output_dir.as_deref(),
+        },
     )?;
 
     Ok(BuildTriggerResponse {
@@ -574,8 +614,8 @@ pub fn trigger_deploy(config: &AppConfig, request: &DeployRequest) -> Result<Bui
         status: result.status,
         queue_url: result.queue_url,
         build_url: result.build_url,
-        state_key: trigger_state_key(result.state).to_string(),
-        state_label: result.state.label().to_string(),
+        state_key: result.state_key,
+        state_label: result.state_label,
         detail: result.detail,
     })
 }
@@ -584,13 +624,8 @@ pub fn refresh_deploy_status(
     config: &AppConfig,
     request: &StatusRequest,
 ) -> Result<BuildStatusResponse> {
-    let profile = default_jenkins_profile(config)?;
-    let password = credentials::load_jenkins_profile_password(profile)
-        .or_else(|_| credentials::load_jenkins_password(&config.defaults))?;
-    let result = jenkins::refresh_status(
-        &profile.base_url,
-        &profile.username,
-        &password,
+    let result = build::refresh_jenkins_status(
+        config,
         request.queue_url.as_deref(),
         request.build_url.as_deref(),
     )?;
@@ -1044,25 +1079,178 @@ pub fn checkout_branch_to_directory(
     Ok(branch_task_response("checkout", items))
 }
 
+fn resolve_branch_repo_path(project: &ProjectConfig, repo_path: Option<&str>) -> Result<PathBuf> {
+    if let Some(value) = repo_path.map(str::trim).filter(|value| !value.is_empty()) {
+        let path = PathBuf::from(value);
+        if !path.exists() {
+            anyhow::bail!("本地工作副本目录不存在：{}", path.display());
+        }
+        if !path.is_dir() {
+            anyhow::bail!("本地工作副本不是目录：{}", path.display());
+        }
+        return Ok(path);
+    }
+
+    project
+        .repo_path
+        .clone()
+        .with_context(|| format!("project {} has no repo_path configured", project.key))
+}
+
+fn path_identity(path: &Path) -> String {
+    path.canonicalize()
+        .unwrap_or_else(|_| path.to_path_buf())
+        .to_string_lossy()
+        .to_string()
+}
+
+fn branch_worktree_label(path: &Path, is_default: bool, branch: &str) -> String {
+    if is_default {
+        return "默认目录".to_string();
+    }
+    if !branch.trim().is_empty() && branch != "HEAD" {
+        return branch.to_string();
+    }
+    path.file_name()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("本地目录")
+        .to_string()
+}
+
+fn branch_status_for_project_path(
+    project: &ProjectConfig,
+    repo_path: &Path,
+    is_default: bool,
+    is_git_worktree: bool,
+    branch_hint: Option<&str>,
+    detached_hint: bool,
+) -> BranchWorktreeSummary {
+    let repo_path_text = repo_path.display().to_string();
+    match git::working_tree_status(repo_path) {
+        Ok(status) => {
+            let latest_commit = if status.detached || status.current_branch.is_empty() {
+                None
+            } else {
+                git::latest_branch_commit(repo_path, &status.current_branch)
+                    .ok()
+                    .map(branch_commit_info)
+            };
+            let current_branch = status.current_branch.clone();
+            let label = branch_worktree_label(repo_path, is_default, &current_branch);
+            BranchWorktreeSummary {
+                project_key: project.key.clone(),
+                project_name: project.name.clone(),
+                repo_path: repo_path_text,
+                label,
+                current_branch,
+                detached: status.detached,
+                clean: status.clean,
+                ahead: status.ahead,
+                behind: status.behind,
+                is_default,
+                is_git_worktree,
+                status_key: if status.clean { "clean" } else { "dirty" }.to_string(),
+                status_label: if status.clean { "干净" } else { "有改动" }.to_string(),
+                detail: status
+                    .upstream_branch
+                    .as_deref()
+                    .map(|upstream| format!("upstream: {upstream}"))
+                    .unwrap_or_else(|| "未配置 upstream".to_string()),
+                latest_commit,
+            }
+        }
+        Err(error) => {
+            let current_branch = branch_hint.unwrap_or_default().to_string();
+            BranchWorktreeSummary {
+                project_key: project.key.clone(),
+                project_name: project.name.clone(),
+                repo_path: repo_path_text.clone(),
+                label: branch_worktree_label(repo_path, is_default, &current_branch),
+                current_branch,
+                detached: detached_hint,
+                clean: false,
+                ahead: 0,
+                behind: 0,
+                is_default,
+                is_git_worktree,
+                status_key: "unavailable".to_string(),
+                status_label: "不可用".to_string(),
+                detail: error.to_string(),
+                latest_commit: None,
+            }
+        }
+    }
+}
+
+pub fn project_worktrees(config: &AppConfig, key: &str) -> Result<Vec<BranchWorktreeSummary>> {
+    let project = config.find_project(key)?;
+    let default_repo_path = project
+        .repo_path
+        .as_ref()
+        .with_context(|| format!("project {} has no repo_path configured", project.key))?;
+    let default_identity = path_identity(default_repo_path);
+    let mut seen = BTreeSet::new();
+    let mut paths = Vec::<(PathBuf, bool, bool, Option<String>, bool)>::new();
+
+    seen.insert(default_identity.clone());
+    paths.push((default_repo_path.clone(), true, false, None, false));
+
+    if let Ok(worktrees) = git::list_worktrees(default_repo_path) {
+        for worktree in worktrees {
+            if worktree.bare {
+                continue;
+            }
+            let identity = path_identity(&worktree.path);
+            if seen.insert(identity.clone()) {
+                paths.push((
+                    worktree.path,
+                    identity == default_identity,
+                    true,
+                    worktree.branch,
+                    worktree.detached,
+                ));
+            } else if identity == default_identity {
+                paths[0].2 = true;
+                paths[0].3 = worktree.branch;
+                paths[0].4 = worktree.detached;
+            }
+        }
+    }
+
+    Ok(paths
+        .into_iter()
+        .map(
+            |(path, is_default, is_git_worktree, branch_hint, detached_hint)| {
+                branch_status_for_project_path(
+                    project,
+                    &path,
+                    is_default,
+                    is_git_worktree,
+                    branch_hint.as_deref(),
+                    detached_hint,
+                )
+            },
+        )
+        .collect())
+}
+
 pub fn execute_branch_switch(
     config: &AppConfig,
     request: &BranchSwitchRequest,
 ) -> Result<BranchTaskResponse> {
     let project = config.find_project(&request.project)?;
-    let repo_path = project
-        .repo_path
-        .as_ref()
-        .with_context(|| format!("project {} has no repo_path configured", project.key))?;
+    let repo_path = resolve_branch_repo_path(project, request.repo_path.as_deref())?;
     let target_branch = request.target_branch.trim();
     if target_branch.is_empty() {
         anyhow::bail!("目标分支不能为空");
     }
 
-    let result = git::switch_branch(repo_path, target_branch)?;
+    let result = git::switch_branch(&repo_path, target_branch)?;
     let commit = if result.current_branch.trim().is_empty() {
         None
     } else {
-        git::latest_branch_commit(repo_path, &result.current_branch)
+        git::latest_branch_commit(&repo_path, &result.current_branch)
             .ok()
             .map(branch_commit_info)
     };
@@ -1091,7 +1279,7 @@ pub fn execute_branch_switch(
         } else if result.created_tracking_branch {
             "已创建本地跟踪分支并切换".to_string()
         } else {
-            "已切换本地工作区分支".to_string()
+            "已切换本地工作副本分支".to_string()
         },
         detail: result.detail,
         remote: result.created_tracking_branch,
@@ -1101,17 +1289,18 @@ pub fn execute_branch_switch(
     Ok(branch_task_response("switch", vec![item]))
 }
 
-pub fn branch_push_status(config: &AppConfig, key: &str) -> Result<BranchPushStatus> {
+pub fn branch_push_status(
+    config: &AppConfig,
+    key: &str,
+    repo_path: Option<&str>,
+) -> Result<BranchPushStatus> {
     let project = config.find_project(key)?;
-    let repo_path = project
-        .repo_path
-        .as_ref()
-        .with_context(|| format!("project {} has no repo_path configured", project.key))?;
-    let status = git::working_tree_status(repo_path)?;
+    let repo_path = resolve_branch_repo_path(project, repo_path)?;
+    let status = git::working_tree_status(&repo_path)?;
     let latest_commit = if status.detached || status.current_branch.is_empty() {
         None
     } else {
-        git::latest_branch_commit(repo_path, &status.current_branch)
+        git::latest_branch_commit(&repo_path, &status.current_branch)
             .ok()
             .map(branch_commit_info)
     };
@@ -1152,17 +1341,14 @@ pub fn execute_branch_push(
     request: &BranchPushRequest,
 ) -> Result<BranchTaskResponse> {
     let project = config.find_project(&request.project)?;
-    let repo_path = project
-        .repo_path
-        .as_ref()
-        .with_context(|| format!("project {} has no repo_path configured", project.key))?;
-    let fallback_source_branch = git::working_tree_status(repo_path)
+    let repo_path = resolve_branch_repo_path(project, request.repo_path.as_deref())?;
+    let fallback_source_branch = git::working_tree_status(&repo_path)
         .ok()
         .map(|status| status.current_branch)
         .unwrap_or_default();
 
     let result = git::push_current_branch(
-        repo_path,
+        &repo_path,
         request.commit_before_push,
         request.commit_message.as_deref(),
     );
@@ -1170,7 +1356,7 @@ pub fn execute_branch_push(
         Ok(value) => {
             let mut detail = value.detail;
             if !value.status_before_push.clean && !value.committed {
-                let reminder = "当前工作区仍有未提交改动，本次仅推送已提交内容。";
+                let reminder = "当前工作副本仍有未提交改动，本次仅推送已提交内容。";
                 detail = if detail.trim().is_empty() {
                     reminder.to_string()
                 } else {
@@ -1206,7 +1392,7 @@ pub fn execute_branch_push(
                 detail,
                 remote: true,
                 commit: value.commit.map(branch_commit_info).or_else(|| {
-                    git::latest_branch_commit(repo_path, &value.current_branch)
+                    git::latest_branch_commit(&repo_path, &value.current_branch)
                         .ok()
                         .map(branch_commit_info)
                 }),
@@ -1420,6 +1606,8 @@ fn deploy_target_summaries(project: &ProjectConfig) -> Vec<DeployTargetSummary> 
         .map(|target| DeployTargetSummary {
             key: target.key.clone(),
             label: target.label.clone(),
+            adapter: build::adapter_key(&target.adapter).to_string(),
+            action_kind: build::action_kind_key(&target.action_kind).to_string(),
             job_name: target.job_name.clone(),
         })
         .collect()
@@ -1448,29 +1636,6 @@ fn selected_deploy_target<'a>(
                 target_key, project.key
             )
         })
-}
-
-fn selected_jenkins_profile<'a>(
-    config: &'a AppConfig,
-    target: &DeployTargetConfig,
-) -> Result<&'a JenkinsProfileConfig> {
-    config
-        .defaults
-        .jenkins_profiles
-        .get(&target.jenkins_profile)
-        .with_context(|| format!("jenkins profile {} not found", target.jenkins_profile))
-}
-
-fn default_jenkins_profile(config: &AppConfig) -> Result<&JenkinsProfileConfig> {
-    if let Some(profile) = config.defaults.jenkins_profiles.get("default") {
-        return Ok(profile);
-    }
-    config
-        .defaults
-        .jenkins_profiles
-        .values()
-        .next()
-        .with_context(|| "no Jenkins profile configured")
 }
 
 fn deploy_param_meta(project: &ProjectConfig, param: &DeployParamConfig) -> DeployParamMeta {
@@ -1598,20 +1763,6 @@ fn infer_branch(project: &ProjectConfig, branch_override: Option<String>) -> Res
             })
         }
     }
-}
-
-fn build_trigger_url(base_url: &str, job_name: &str) -> String {
-    let encoded_path = job_name
-        .split('/')
-        .map(|segment| format!("job/{}", utf8_percent_encode(segment, NON_ALPHANUMERIC)))
-        .collect::<Vec<_>>()
-        .join("/");
-
-    format!(
-        "{}/{}/buildWithParameters",
-        base_url.trim_end_matches('/'),
-        encoded_path
-    )
 }
 
 fn trigger_state_key(state: jenkins::TriggerState) -> &'static str {

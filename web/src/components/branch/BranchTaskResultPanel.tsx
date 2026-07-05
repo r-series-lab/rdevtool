@@ -28,6 +28,7 @@ function BranchTaskItemCard({
   const targetText = item.targetBranch || item.outputPath || "-";
   return (
     <Box
+      className="branch-result-item"
       sx={{
         border: "1px solid",
         borderColor: item.success ? "divider" : "warning.main",

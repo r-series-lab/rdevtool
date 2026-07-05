@@ -8,6 +8,7 @@ import {
   normalizeWorkflowRules,
   normalizeWorkflowSignals,
   workflowReplayKey,
+  workflowReplayTargetsEqual,
   type WorkflowBroadcastRule,
   type WorkflowReceiveRule,
   type WorkflowReplay,
@@ -207,14 +208,14 @@ export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
   function receiveRulesForReplay(replay: WorkflowReplay) {
     const replayKey = workflowReplayKey(replay);
     return rules.receivers.filter(
-      (rule) => rule.target === replay.target && rule.replayKey === replayKey,
+      (rule) => workflowReplayTargetsEqual(rule.target, replay.target) && rule.replayKey === replayKey,
     );
   }
 
   function signalIdsForReplay(replay: WorkflowReplay) {
     const replayKey = workflowReplayKey(replay);
     return rules.receivers
-      .filter((rule) => rule.target === replay.target && rule.replayKey === replayKey)
+      .filter((rule) => workflowReplayTargetsEqual(rule.target, replay.target) && rule.replayKey === replayKey)
       .map((rule) => rule.signalId);
   }
 

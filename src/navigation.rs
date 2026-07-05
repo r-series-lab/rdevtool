@@ -2,13 +2,14 @@
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use crate::config::{RuntimeProfileConfig, default_config_dir};
+use crate::config::{ProjectWorkspaceConfig, RuntimeProfileConfig, default_config_dir};
 
 const DEFAULT_NAVIGATION_TEMPLATE: &str = include_str!("../navigation.template.toml");
 const LEGACY_NAVIGATION_MARKDOWN_PATH: &str = "navigation.md";
@@ -34,6 +35,7 @@ pub struct NavigationEntry {
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub script: Option<String>,
+    pub path: Option<String>,
     pub cwd: Option<String>,
     pub note: Option<String>,
 }
@@ -66,6 +68,7 @@ pub struct NavigationEditorEntry {
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub script: Option<String>,
+    pub path: Option<String>,
     pub cwd: Option<String>,
     pub note: Option<String>,
 }
@@ -141,6 +144,8 @@ struct NavigationEntryConfig {
     #[serde(default)]
     script: Option<String>,
     #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
     cwd: Option<String>,
     #[serde(default)]
     note: Option<String>,
@@ -151,6 +156,7 @@ enum NavigationEntryKind {
     Url,
     App,
     Script,
+    Directory,
 }
 
 impl NavigationEntryKind {
@@ -159,14 +165,16 @@ impl NavigationEntryKind {
             Self::Url => "url",
             Self::App => "app",
             Self::Script => "script",
+            Self::Directory => "directory",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
-            Self::Url => "网页",
+            Self::Url => "网站",
             Self::App => "应用",
             Self::Script => "脚本",
+            Self::Directory => "目录",
         }
     }
 }
@@ -182,6 +190,75 @@ pub fn load_navigation_data() -> Result<NavigationData> {
         config,
         path.display().to_string(),
     ))
+}
+
+pub fn load_navigation_data_for_workspace(
+    workspace: &ProjectWorkspaceConfig,
+) -> Result<NavigationData> {
+    let data = load_navigation_data()?;
+    Ok(filter_navigation_data_for_workspace(data, workspace))
+}
+
+pub fn filter_navigation_data_for_workspace(
+    data: NavigationData,
+    workspace: &ProjectWorkspaceConfig,
+) -> NavigationData {
+    if workspace.include_all_navigation {
+        return data;
+    }
+
+    let category_filter = workspace
+        .navigation_categories
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let entry_filter = workspace
+        .navigation_entries
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+
+    let categories = data
+        .categories
+        .into_iter()
+        .filter_map(|category| {
+            if category_filter.contains(category.title.as_str()) {
+                return Some(category);
+            }
+
+            let title = category.title.clone();
+            let entries = category
+                .entries
+                .into_iter()
+                .filter(|entry| {
+                    let scoped_name = format!("{}/{}", title, entry.name);
+                    entry_filter.contains(entry.name.as_str())
+                        || entry_filter.contains(scoped_name.as_str())
+                })
+                .collect::<Vec<_>>();
+
+            if entries.is_empty() {
+                return None;
+            }
+
+            Some(NavigationCategory {
+                title: category.title,
+                short_label: category.short_label,
+                entries,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let preferred_category = data
+        .preferred_category
+        .filter(|target| categories.iter().any(|category| category.title == *target))
+        .or_else(|| preferred_navigation_category(&categories));
+
+    NavigationData {
+        file_path: data.file_path,
+        preferred_category,
+        categories,
+    }
 }
 
 pub fn load_navigation_editor_data() -> Result<NavigationEditorData> {
@@ -322,6 +399,7 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
     let bundle_id = normalize_optional_text(entry.bundle_id);
     let app_name = normalize_optional_text(entry.app_name);
     let script = normalize_optional_text(entry.script);
+    let path = normalize_optional_text(entry.path);
     let cwd = normalize_optional_text(entry.cwd);
 
     let target_label = match kind {
@@ -337,6 +415,7 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
             .or_else(|| app_name.clone())
             .filter(|value| !value.is_empty())?,
         NavigationEntryKind::Script => script.clone().filter(|value| !value.is_empty())?,
+        NavigationEntryKind::Directory => path.clone().filter(|value| !value.is_empty())?,
     };
 
     Some(NavigationEntry {
@@ -363,10 +442,31 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
         } else {
             None
         },
-        bundle_id,
-        app_name,
-        script,
-        cwd,
+        bundle_id: if matches!(kind, NavigationEntryKind::App) {
+            bundle_id
+        } else {
+            None
+        },
+        app_name: if matches!(kind, NavigationEntryKind::App) {
+            app_name
+        } else {
+            None
+        },
+        script: if matches!(kind, NavigationEntryKind::Script) {
+            script
+        } else {
+            None
+        },
+        path: if matches!(kind, NavigationEntryKind::Directory) {
+            path
+        } else {
+            None
+        },
+        cwd: if matches!(kind, NavigationEntryKind::Script) {
+            cwd
+        } else {
+            None
+        },
         note,
     })
 }
@@ -382,6 +482,7 @@ fn navigation_entry_config_from_entry(entry: &NavigationEntry) -> NavigationEntr
         bundle_id: entry.bundle_id.clone(),
         app_name: entry.app_name.clone(),
         script: entry.script.clone(),
+        path: entry.path.clone(),
         cwd: entry.cwd.clone(),
         note: entry.note.clone(),
     }
@@ -425,6 +526,7 @@ fn navigation_editor_entry_from_config(entry: NavigationEntryConfig) -> Navigati
         bundle_id: normalize_optional_text(entry.bundle_id),
         app_name: normalize_optional_text(entry.app_name),
         script: normalize_optional_text(entry.script),
+        path: normalize_optional_text(entry.path),
         cwd: normalize_optional_text(entry.cwd),
         note: normalize_optional_text(entry.note),
     }
@@ -475,6 +577,7 @@ fn navigation_editor_entry_is_blank(entry: &NavigationEditorEntry) -> bool {
         entry.bundle_id.as_deref().unwrap_or(""),
         entry.app_name.as_deref().unwrap_or(""),
         entry.script.as_deref().unwrap_or(""),
+        entry.path.as_deref().unwrap_or(""),
         entry.cwd.as_deref().unwrap_or(""),
         entry.note.as_deref().unwrap_or(""),
     ]
@@ -498,6 +601,7 @@ fn navigation_entry_config_from_editor_entry(
     let bundle_id = normalize_optional_text(entry.bundle_id);
     let app_name = normalize_optional_text(entry.app_name);
     let script = normalize_optional_text(entry.script);
+    let path = normalize_optional_text(entry.path);
     let cwd = normalize_optional_text(entry.cwd);
     let note = normalize_optional_text(entry.note);
 
@@ -520,6 +624,14 @@ fn navigation_entry_config_from_editor_entry(
                 anyhow::bail!("脚本入口需要填写脚本路径");
             }
         }
+        "directory" => {
+            let Some(value) = path.as_deref() else {
+                anyhow::bail!("目录入口需要填写目录路径");
+            };
+            if !PathBuf::from(value).is_absolute() {
+                anyhow::bail!("目录入口需要使用绝对路径");
+            }
+        }
         _ => unreachable!("entry kind was normalized"),
     }
 
@@ -535,6 +647,7 @@ fn navigation_entry_config_from_editor_entry(
         bundle_id,
         app_name,
         script,
+        path,
         cwd,
         note,
     })
@@ -630,6 +743,7 @@ pub fn open_navigation_entry_with_runtime_profiles(
         NavigationEntryKind::Url => open_navigation_url(entry, runtime_profiles),
         NavigationEntryKind::App => open_navigation_app(entry),
         NavigationEntryKind::Script => open_navigation_script(entry),
+        NavigationEntryKind::Directory => open_navigation_directory(entry),
     }
 }
 
@@ -1022,12 +1136,48 @@ fn open_navigation_script(entry: &NavigationEntry) -> Result<NavigationOpenResul
     })
 }
 
+fn open_navigation_directory(entry: &NavigationEntry) -> Result<NavigationOpenResult> {
+    let path = entry
+        .path
+        .as_deref()
+        .ok_or_else(|| anyhow!("missing path for directory shortcut"))?;
+    let directory = resolve_directory_path(path)?;
+
+    let status = Command::new("open")
+        .arg(directory.as_os_str())
+        .status()
+        .map_err(|error| anyhow!("failed to open directory: {error}"))?;
+    if !status.success() {
+        anyhow::bail!("failed to open directory: {}", directory.display());
+    }
+
+    Ok(NavigationOpenResult {
+        url: directory.display().to_string(),
+        detail: "已打开目录入口".to_string(),
+    })
+}
+
 pub fn list_navigation_entries(limit: usize) -> Result<Vec<NavigationIndexEntry>> {
     let data = load_navigation_data()?;
-    Ok(flatten_navigation_entries(&data)
+    Ok(list_navigation_entries_from_data(&data, limit))
+}
+
+pub fn list_navigation_entries_for_workspace(
+    workspace: &ProjectWorkspaceConfig,
+    limit: usize,
+) -> Result<Vec<NavigationIndexEntry>> {
+    let data = load_navigation_data_for_workspace(workspace)?;
+    Ok(list_navigation_entries_from_data(&data, limit))
+}
+
+fn list_navigation_entries_from_data(
+    data: &NavigationData,
+    limit: usize,
+) -> Vec<NavigationIndexEntry> {
+    flatten_navigation_entries(data)
         .into_iter()
         .take(normalize_limit(limit, 24))
-        .collect())
+        .collect()
 }
 
 pub fn search_navigation_entries(
@@ -1035,13 +1185,30 @@ pub fn search_navigation_entries(
     limit: usize,
 ) -> Result<Vec<NavigationIndexEntry>> {
     let data = load_navigation_data()?;
+    Ok(search_navigation_entries_from_data(&data, query, limit))
+}
+
+pub fn search_navigation_entries_for_workspace(
+    workspace: &ProjectWorkspaceConfig,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<NavigationIndexEntry>> {
+    let data = load_navigation_data_for_workspace(workspace)?;
+    Ok(search_navigation_entries_from_data(&data, query, limit))
+}
+
+fn search_navigation_entries_from_data(
+    data: &NavigationData,
+    query: Option<&str>,
+    limit: usize,
+) -> Vec<NavigationIndexEntry> {
     let normalized_query = query
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.to_ascii_lowercase());
     let limit = normalize_limit(limit, 24);
 
-    let entries = flatten_navigation_entries(&data)
+    let entries = flatten_navigation_entries(data)
         .into_iter()
         .filter(|entry| {
             let Some(query) = normalized_query.as_ref() else {
@@ -1062,7 +1229,7 @@ pub fn search_navigation_entries(
         .take(limit)
         .collect();
 
-    Ok(entries)
+    entries
 }
 
 pub fn find_navigation_entry(
@@ -1071,6 +1238,25 @@ pub fn find_navigation_entry(
     query: Option<&str>,
 ) -> Result<(NavigationCategory, NavigationEntry)> {
     let data = load_navigation_data()?;
+    find_navigation_entry_in_data(data, name, category, query)
+}
+
+pub fn find_navigation_entry_for_workspace(
+    workspace: &ProjectWorkspaceConfig,
+    name: Option<&str>,
+    category: Option<&str>,
+    query: Option<&str>,
+) -> Result<(NavigationCategory, NavigationEntry)> {
+    let data = load_navigation_data_for_workspace(workspace)?;
+    find_navigation_entry_in_data(data, name, category, query)
+}
+
+fn find_navigation_entry_in_data(
+    data: NavigationData,
+    name: Option<&str>,
+    category: Option<&str>,
+    query: Option<&str>,
+) -> Result<(NavigationCategory, NavigationEntry)> {
     let name = normalize_locator(name);
     let category = normalize_locator(category);
     let query = normalize_locator(query);
@@ -1146,6 +1332,7 @@ fn parse_nav_entry(cells: &[String]) -> Option<NavigationEntry> {
         bundle_id: None,
         app_name: None,
         script: None,
+        path: None,
         cwd: None,
         note: if note.is_empty() { None } else { Some(note) },
     })
@@ -1202,6 +1389,7 @@ fn resolve_entry_kind(entry: &NavigationEntryConfig) -> Option<NavigationEntryKi
             "url" => Some(NavigationEntryKind::Url),
             "app" => Some(NavigationEntryKind::App),
             "script" => Some(NavigationEntryKind::Script),
+            "directory" | "dir" | "folder" => Some(NavigationEntryKind::Directory),
             _ => None,
         };
     }
@@ -1217,6 +1405,9 @@ fn resolve_entry_kind(entry: &NavigationEntryConfig) -> Option<NavigationEntryKi
     if normalize_optional_text(entry.script.clone()).is_some() {
         return Some(NavigationEntryKind::Script);
     }
+    if normalize_optional_text(entry.path.clone()).is_some() {
+        return Some(NavigationEntryKind::Directory);
+    }
     None
 }
 
@@ -1225,6 +1416,7 @@ fn normalize_entry_kind(value: &str) -> Option<String> {
         "url" => Some(NavigationEntryKind::Url.key().to_string()),
         "app" => Some(NavigationEntryKind::App.key().to_string()),
         "script" => Some(NavigationEntryKind::Script.key().to_string()),
+        "directory" | "dir" | "folder" => Some(NavigationEntryKind::Directory.key().to_string()),
         _ => None,
     }
 }
@@ -1234,6 +1426,7 @@ fn entry_kind(entry: &NavigationEntry) -> Result<NavigationEntryKind> {
         "url" => Ok(NavigationEntryKind::Url),
         "app" => Ok(NavigationEntryKind::App),
         "script" => Ok(NavigationEntryKind::Script),
+        "directory" | "dir" | "folder" => Ok(NavigationEntryKind::Directory),
         other => Err(anyhow!("unsupported navigation entry kind: {}", other)),
     }
 }
@@ -1256,6 +1449,24 @@ fn resolve_script_path(script: &str, cwd: Option<&PathBuf>) -> Result<PathBuf> {
     }
 
     Ok(resolved)
+}
+
+fn resolve_directory_path(path: &str) -> Result<PathBuf> {
+    let directory = PathBuf::from(path);
+    if !directory.is_absolute() {
+        anyhow::bail!("directory shortcut requires an absolute path");
+    }
+    if !directory.exists() {
+        anyhow::bail!("directory does not exist: {}", directory.display());
+    }
+    if !directory.is_dir() {
+        anyhow::bail!(
+            "directory shortcut target is not a directory: {}",
+            directory.display()
+        );
+    }
+
+    Ok(directory)
 }
 
 fn preferred_navigation_category(categories: &[NavigationCategory]) -> Option<String> {

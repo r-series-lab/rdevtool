@@ -50,7 +50,7 @@ export function LocalWorkspaceStatusCard({
         <Stack direction="row" columnGap={0.5} rowGap={0.45} flexWrap="wrap">
           <Chip
             size="small"
-            label={status.clean ? "工作区干净" : "存在本地改动"}
+            label={status.clean ? "工作副本干净" : "存在本地改动"}
             color={status.clean ? "success" : "primary"}
             variant={status.clean ? "outlined" : "filled"}
           />

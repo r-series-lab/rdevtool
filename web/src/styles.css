@@ -9,18 +9,19 @@
   --window-material-soft: rgba(232, 237, 243, 0.48);
   --region-material: rgba(255, 255, 255, 0.18);
   --region-material-strong: rgba(255, 255, 255, 0.28);
-  --side-pane-material: rgba(236, 241, 246, 0.94);
-  --side-pane-material-soft: rgba(236, 241, 246, 0.92);
-  --side-pane-top-glass: rgba(255, 255, 255, 0.12);
-  --side-pane-control: rgba(248, 251, 254, 0.92);
-  --side-pane-control-strong: rgba(250, 252, 255, 0.95);
-  --side-pane-line: rgba(52, 76, 96, 0.1);
+  --side-pane-material: rgba(244, 247, 251, 0.96);
+  --side-pane-material-soft: rgba(238, 243, 249, 0.94);
+  --side-pane-top-glass: rgba(255, 255, 255, 0.22);
+  --side-pane-control: rgba(251, 253, 255, 0.9);
+  --side-pane-control-strong: rgba(255, 255, 255, 0.94);
+  --side-pane-line: rgba(52, 76, 96, 0.055);
   --line: rgba(52, 76, 96, 0.14);
   --line-soft: rgba(52, 76, 96, 0.08);
   --text: #17202b;
   --muted: rgba(63, 79, 97, 0.68);
   --accent: #5c7085;
   --accent-hover: #455a70;
+  --accent-contrast: #ffffff;
   --accent-soft: rgba(92, 112, 133, 0.11);
   --accent-border: rgba(92, 112, 133, 0.24);
   --success: #3f8269;
@@ -71,6 +72,7 @@
   --muted: rgba(221, 231, 229, 0.62);
   --accent: #8fb8ea;
   --accent-hover: #b6d2f4;
+  --accent-contrast: #0d141d;
   --accent-soft: rgba(143, 184, 234, 0.16);
   --accent-border: rgba(182, 210, 244, 0.34);
   --success: #86c2a0;
@@ -251,21 +253,22 @@ body::-webkit-scrollbar-corner,
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
   padding: calc(var(--window-drag-height) + 10px) 12px 12px;
   border-radius: 0;
-  background: linear-gradient(135deg, var(--side-pane-material), var(--side-pane-material-soft));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.3), rgba(255, 255, 255, 0.1) 34%, rgba(255, 255, 255, 0.02) 72%),
+    linear-gradient(180deg, var(--side-pane-material), var(--side-pane-material-soft));
   border: 0;
   border-right: 1px solid var(--side-pane-line);
   box-shadow:
-    inset -1px 0 0 rgba(255, 255, 255, 0.1),
-    10px 0 26px rgba(31, 55, 90, 0.028);
+    inset -1px 0 0 rgba(255, 255, 255, 0.42);
   min-height: 100vh;
   align-items: stretch;
   align-self: stretch;
   top: 0;
-  backdrop-filter: blur(44px) saturate(1.42);
-  -webkit-backdrop-filter: blur(44px) saturate(1.42);
+  backdrop-filter: blur(32px) saturate(1.08);
+  -webkit-backdrop-filter: blur(32px) saturate(1.08);
   min-width: 0;
   overflow: hidden;
   transition:
@@ -444,6 +447,276 @@ body::-webkit-scrollbar-corner,
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.13),
     0 14px 30px rgba(0, 0, 0, 0.24);
+}
+
+.workspace-switcher {
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  appearance: none;
+  transition:
+    color 140ms ease,
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.workspace-switcher:hover {
+  border-color: color-mix(in srgb, var(--side-pane-line) 62%, transparent);
+  background-color: color-mix(in srgb, var(--side-pane-control) 34%, transparent);
+}
+
+.workspace-switcher.is-open {
+  border-color: color-mix(in srgb, var(--accent-border) 44%, transparent);
+  background-color: color-mix(in srgb, var(--accent-soft) 40%, transparent);
+}
+
+.workspace-switcher:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent);
+  outline-offset: 2px;
+}
+
+.workspace-switcher-chevron {
+  color: var(--muted);
+  font-size: 15px !important;
+}
+
+.workspace-switcher-name {
+  min-width: 0;
+  max-width: calc(100% - 22px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: center;
+  font-size: 12.25px;
+  font-weight: 820;
+  line-height: 1.2;
+}
+
+.workspace-switcher-chevron {
+  flex: 0 0 auto;
+  margin-top: 1px;
+  transition: transform 150ms ease;
+}
+
+.workspace-switcher.is-open .workspace-switcher-chevron {
+  transform: rotate(180deg);
+}
+
+.sidebar-footer {
+  margin-top: auto;
+  margin-right: -12px;
+  margin-bottom: -12px;
+  margin-left: -12px;
+  padding: 8px 18px 9px;
+  border-top: 1px solid color-mix(in srgb, var(--side-pane-line) 76%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.025)),
+    linear-gradient(135deg, color-mix(in srgb, var(--side-pane-material) 82%, transparent), color-mix(in srgb, var(--side-pane-material-soft) 96%, transparent));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    0 -12px 24px rgba(31, 55, 90, 0.036);
+  backdrop-filter: blur(24px) saturate(1.16);
+  -webkit-backdrop-filter: blur(24px) saturate(1.16);
+}
+
+:root[data-style="mono"] .workspace-switcher {
+  border-color: transparent;
+  background-color: transparent;
+  box-shadow: none;
+}
+
+:root[data-style="mono"] .workspace-switcher:hover {
+  border-color: rgba(226, 232, 240, 0.07);
+  background-color: rgba(255, 255, 255, 0.022);
+}
+
+:root[data-style="mono"] .workspace-switcher.is-open {
+  border-color: rgba(226, 232, 240, 0.085);
+  background-color: rgba(255, 255, 255, 0.026);
+}
+
+:root[data-style="mono"] .workspace-switcher-name {
+  color: rgba(237, 241, 245, 0.88);
+}
+
+:root[data-style="mono"] .workspace-switcher-chevron {
+  color: rgba(221, 231, 229, 0.48);
+}
+
+:root[data-style="mono"] .sidebar-footer {
+  border-top-color: rgba(226, 232, 240, 0.048);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0.004)),
+    rgba(14, 18, 24, 0.66);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.028),
+    0 -8px 18px rgba(0, 0, 0, 0.08);
+}
+
+.workspace-menu-paper.MuiPaper-root {
+  min-width: 190px;
+  max-width: 230px;
+  margin-top: 6px;
+  border: 1px solid color-mix(in srgb, var(--side-pane-line) 82%, transparent);
+  border-radius: 13px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.55), rgba(255, 255, 255, 0.24)),
+    color-mix(in srgb, var(--panel-strong) 72%, transparent);
+  color: var(--text);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.78),
+    0 18px 42px rgba(28, 48, 72, 0.14);
+  backdrop-filter: blur(26px) saturate(1.2);
+  -webkit-backdrop-filter: blur(26px) saturate(1.2);
+  background-image: none;
+}
+
+.workspace-menu-list.MuiMenu-list {
+  display: grid;
+  gap: 4px;
+  padding: 5px;
+}
+
+.workspace-menu-item.MuiMenuItem-root {
+  min-height: 42px;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  color: var(--text);
+}
+
+.workspace-menu-item.MuiMenuItem-root:hover,
+.workspace-menu-item.MuiMenuItem-root.Mui-focusVisible {
+  background: color-mix(in srgb, var(--side-pane-control) 64%, transparent);
+  border-color: color-mix(in srgb, var(--side-pane-line) 72%, transparent);
+}
+
+.workspace-menu-item.Mui-selected,
+.workspace-menu-item.Mui-selected:hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0.12)),
+    color-mix(in srgb, var(--accent-soft) 72%, var(--side-pane-control));
+  border-color: color-mix(in srgb, var(--accent-border) 56%, transparent);
+}
+
+.workspace-menu-item-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-menu-item-name,
+.workspace-menu-item-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-menu-item-name {
+  font-size: 12.5px;
+  font-weight: 820;
+}
+
+.workspace-menu-item-meta {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.workspace-menu-item-check {
+  justify-self: end;
+  color: color-mix(in srgb, var(--accent-hover) 76%, var(--text));
+  font-size: 15px !important;
+}
+
+.workspace-menu-item--manage.MuiMenuItem-root {
+  margin-top: 4px;
+  border-top: 1px solid color-mix(in srgb, var(--side-pane-line) 64%, transparent);
+  border-radius: 9px;
+  color: color-mix(in srgb, var(--accent-hover) 72%, var(--text));
+}
+
+:root[data-style="mono"] .workspace-menu-paper.MuiPaper-root {
+  border-color: rgba(255, 255, 255, 0.078);
+  background:
+    linear-gradient(180deg, rgba(34, 43, 56, 0.94), rgba(20, 27, 36, 0.94)),
+    rgba(17, 23, 31, 0.96);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.065),
+    0 22px 46px rgba(0, 0, 0, 0.34);
+}
+
+:root[data-style="mono"] .workspace-menu-item.MuiMenuItem-root:hover,
+:root[data-style="mono"] .workspace-menu-item.MuiMenuItem-root.Mui-focusVisible {
+  background: rgba(255, 255, 255, 0.056);
+  border-color: rgba(255, 255, 255, 0.078);
+}
+
+:root[data-style="mono"] .workspace-menu-item.Mui-selected,
+:root[data-style="mono"] .workspace-menu-item.Mui-selected:hover {
+  background:
+    linear-gradient(180deg, rgba(143, 184, 234, 0.16), rgba(143, 184, 234, 0.06)),
+    rgba(255, 255, 255, 0.035);
+  border-color: rgba(182, 210, 244, 0.2);
+}
+
+:root[data-style="mono"] .workspace-menu-item-name {
+  color: rgba(237, 241, 245, 0.92);
+}
+
+:root[data-style="mono"] .workspace-menu-item-meta {
+  color: rgba(221, 231, 229, 0.55);
+}
+
+:root[data-style="mono"] .workspace-menu-item-check {
+  color: rgba(190, 216, 246, 0.88);
+}
+
+:root[data-style="mono"] .workspace-menu-item--manage.MuiMenuItem-root {
+  border-top-color: rgba(255, 255, 255, 0.07);
+  color: rgba(190, 216, 246, 0.88);
+}
+
+@media (max-width: 900px) {
+  .workspace-switcher {
+    flex: 0 0 106px;
+    width: 106px;
+    min-height: 34px;
+    gap: 2px;
+    padding: 5px 7px;
+    border-radius: 9px;
+  }
+
+  .workspace-switcher-name {
+    font-size: 12px;
+  }
+}
+
+@media (max-width: 560px) {
+  .workspace-switcher {
+    flex-basis: 96px;
+    width: 96px;
+  }
 }
 
 .settings-icon-toggle,
@@ -756,12 +1029,12 @@ body::-webkit-scrollbar-corner,
   padding: 18px;
   overflow: hidden;
   overscroll-behavior: none;
-  background: rgba(244, 247, 251, 0.42);
-  backdrop-filter: blur(6px);
+  background: rgba(236, 242, 249, 0.42);
+  backdrop-filter: blur(4px) saturate(1.04);
 }
 
 :root[data-style="mono"] .settings-overlay {
-  background: rgba(3, 6, 10, 0.34);
+  background: rgba(3, 7, 12, 0.42);
 }
 
 .settings-confirm-layer {
@@ -773,12 +1046,12 @@ body::-webkit-scrollbar-corner,
   padding: 18px;
   overflow: hidden;
   overscroll-behavior: none;
-  background: rgba(15, 23, 42, 0.18);
-  backdrop-filter: blur(4px);
+  background: rgba(15, 23, 42, 0.24);
+  backdrop-filter: blur(4px) saturate(1.04);
 }
 
 :root[data-style="mono"] .settings-confirm-layer {
-  background: rgba(0, 0, 0, 0.34);
+  background: rgba(0, 0, 0, 0.36);
 }
 
 .settings-confirm-card {
@@ -786,14 +1059,20 @@ body::-webkit-scrollbar-corner,
   padding: 16px;
   border-radius: 14px;
   border: 1px solid var(--line);
-  background: var(--panel-strong);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(247, 250, 254, 0.94)),
+    var(--panel-strong);
   color: var(--text);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.64),
-    0 20px 54px rgba(31, 46, 70, 0.24);
+    inset 0 1px 0 rgba(255, 255, 255, 0.74),
+    0 24px 64px rgba(31, 46, 70, 0.26);
+  backdrop-filter: blur(14px) saturate(1.08);
 }
 
 :root[data-style="mono"] .settings-confirm-card {
+  background:
+    linear-gradient(180deg, rgba(23, 31, 43, 0.94), rgba(13, 20, 30, 0.96)),
+    var(--panel-strong);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.04),
     0 24px 64px rgba(0, 0, 0, 0.5);
@@ -825,35 +1104,49 @@ body::-webkit-scrollbar-corner,
   font-weight: 850;
 }
 
+.MuiMenu-root .MuiBackdrop-root,
+.MuiMenu-root .MuiModal-backdrop,
+.MuiPopover-root .MuiBackdrop-root,
+.MuiPopover-root .MuiModal-backdrop {
+  background: transparent !important;
+  background-color: transparent !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+
 .settings-panel {
-  --settings-field-label-bg: #fbfdff;
+  --settings-field-label-bg: rgba(249, 252, 255, 0.96);
   width: min(420px, calc(100vw - 34px));
   overflow: hidden;
   overscroll-behavior: contain;
   padding: 18px;
-  border-radius: 14px;
-  border: 1px solid var(--line);
-  background: var(--panel-strong);
+  border-radius: 16px;
+  border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.84), rgba(247, 250, 254, 0.94)),
+    color-mix(in srgb, var(--panel-strong) 94%, transparent);
   color: var(--text);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.68),
-    0 24px 60px rgba(31, 46, 70, 0.2);
-  backdrop-filter: blur(24px) saturate(1.18);
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
+    0 28px 76px rgba(31, 46, 70, 0.23);
+  backdrop-filter: blur(16px) saturate(1.1);
   animation: settings-panel-in 140ms ease-out;
 }
 
 .settings-panel-wide {
-  width: min(840px, calc(100vw - 28px));
-  height: clamp(560px, 72vh, 660px);
-  max-height: calc(100vh - 28px);
+  width: min(920px, calc(100vw - 32px));
+  height: min(760px, calc(100vh - 32px));
+  max-height: calc(100vh - 32px);
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 13px;
+  gap: 12px;
 }
 
 :root[data-style="mono"] .settings-panel {
-  --settings-field-label-bg: #131c28;
-  background: var(--panel-strong);
+  --settings-field-label-bg: rgba(17, 25, 36, 0.98);
+  background:
+    linear-gradient(180deg, rgba(22, 31, 43, 0.94), rgba(12, 18, 28, 0.97)),
+    var(--panel-strong);
   border-color: var(--line);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.04),
@@ -983,7 +1276,7 @@ body::-webkit-scrollbar-corner,
 .settings-panel-body {
   min-height: 0;
   display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
+  grid-template-columns: 124px minmax(0, 1fr);
   align-items: stretch;
   gap: 14px;
   overflow: hidden;
@@ -994,27 +1287,34 @@ body::-webkit-scrollbar-corner,
   display: flex;
   flex-direction: column;
   align-self: stretch;
-  gap: 4px;
-  padding: 5px;
-  border-radius: 12px;
+  gap: 5px;
+  padding: 6px;
+  border-radius: 14px;
   border: 1px solid var(--line-soft);
-  background: rgba(255, 255, 255, 0.42);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.46);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.5), rgba(244, 248, 253, 0.62)),
+    color-mix(in srgb, var(--panel-strong) 64%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.62),
+    0 10px 24px rgba(22, 44, 59, 0.05);
+  backdrop-filter: blur(18px) saturate(1.08);
 }
 
 :root[data-style="mono"] .settings-section-nav {
-  background: rgba(255, 255, 255, 0.014);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.018)),
+    rgba(255, 255, 255, 0.014);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
 }
 
 .settings-section-nav button {
-  min-height: 34px;
+  min-height: 38px;
   border: 1px solid transparent;
-  border-radius: 8px;
+  border-radius: 10px;
   background: transparent;
   color: var(--muted);
   text-align: left;
-  padding: 0 11px;
+  padding: 0 12px;
   font-weight: 800;
   cursor: pointer;
   transition:
@@ -1025,18 +1325,23 @@ body::-webkit-scrollbar-corner,
 
 .settings-section-nav button:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.38);
 }
 
 .settings-section-nav button.is-active {
-  background: var(--accent-soft);
-  color: var(--accent);
-  border-color: var(--accent-border);
-  box-shadow: none;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 78%, #ffffff), var(--accent-soft));
+  color: var(--accent-hover);
+  border-color: color-mix(in srgb, var(--accent-border) 78%, var(--line-soft));
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.66),
+    0 8px 18px rgba(69, 94, 126, 0.1);
 }
 
 :root[data-style="mono"] .settings-section-nav button.is-active {
-  background: var(--accent-soft);
+  background:
+    linear-gradient(180deg, rgba(103, 128, 166, 0.22), rgba(84, 109, 146, 0.16)),
+    var(--accent-soft);
   color: var(--accent-hover);
 }
 
@@ -1046,18 +1351,19 @@ body::-webkit-scrollbar-corner,
   align-self: stretch;
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 12px;
   overflow: auto;
   overscroll-behavior: contain;
-  padding: 2px 4px 2px 0;
+  padding: 2px 8px 12px 0;
   scrollbar-gutter: stable;
 }
 
 .settings-overview {
-  min-height: 100%;
+  min-height: auto;
   display: grid;
   align-content: start;
-  gap: 10px;
+  gap: 12px;
+  padding-bottom: 2px;
 }
 
 .settings-overview-copy {
@@ -1081,17 +1387,30 @@ body::-webkit-scrollbar-corner,
 
 .settings-list-section {
   overflow: hidden;
-  border-radius: 12px;
+  border-radius: 14px;
   border: 1px solid var(--line-soft);
-  background: color-mix(in srgb, var(--panel-strong) 74%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
 }
 
+.settings-overview .settings-list-section {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.42), transparent 58%),
+    color-mix(in srgb, var(--panel-strong) 86%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 56%, transparent),
+    0 10px 28px rgba(22, 44, 59, 0.045);
+  backdrop-filter: blur(16px) saturate(1.08);
+}
+
+.settings-list-section--menu,
 .settings-list-section--appearance {
   overflow: visible;
 }
 
 :root[data-style="mono"] .settings-list-section {
-  background: rgba(255, 255, 255, 0.014);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 60%),
+    rgba(255, 255, 255, 0.014);
 }
 
 .settings-list-head {
@@ -1102,6 +1421,13 @@ body::-webkit-scrollbar-corner,
   gap: 12px;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line-soft);
+}
+
+.settings-overview .settings-list-head {
+  min-height: 40px;
+  align-items: center;
+  padding: 8px 11px;
+  background: color-mix(in srgb, var(--side-pane-control) 34%, transparent);
 }
 
 .settings-list-head .MuiTypography-subtitle2 {
@@ -1115,18 +1441,24 @@ body::-webkit-scrollbar-corner,
   font-weight: 760;
 }
 
+.settings-list-head-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
 .settings-list {
   display: grid;
 }
 
 .settings-list-row {
   min-width: 0;
-  min-height: 56px;
+  min-height: 52px;
   display: grid;
   grid-template-columns: 34px minmax(0, 1fr) auto;
   align-items: center;
   gap: 10px;
-  padding: 10px 12px;
+  padding: 9px 12px;
   border: 0;
   border-bottom: 1px solid var(--line-soft);
   background: transparent;
@@ -1139,7 +1471,73 @@ body::-webkit-scrollbar-corner,
 }
 
 .settings-list-row--split {
-  grid-template-columns: minmax(150px, 0.45fr) minmax(240px, 1fr);
+  grid-template-columns: minmax(150px, 0.36fr) minmax(0, 1fr);
+  align-items: center;
+}
+
+.settings-menu-choice {
+  width: min(100%, 520px);
+  display: grid !important;
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
+  gap: 6px !important;
+  justify-self: end;
+}
+
+.settings-menu-option.MuiFormControlLabel-root {
+  min-width: 0;
+  min-height: 36px;
+  margin: 0 !important;
+  padding: 0 10px 0 2px;
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 24%, transparent), transparent 70%),
+    color-mix(in srgb, var(--side-pane-control) 54%, transparent);
+  color: var(--muted);
+  transition:
+    color 120ms ease,
+    border-color 120ms ease,
+    background-color 120ms ease,
+    box-shadow 120ms ease;
+}
+
+.settings-menu-option.MuiFormControlLabel-root:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent-border) 74%, var(--line-soft));
+  background: color-mix(in srgb, var(--accent-soft) 42%, transparent);
+}
+
+.settings-menu-option.MuiFormControlLabel-root.is-active {
+  color: var(--text);
+  border-color: var(--accent-border);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 30%, transparent), transparent 72%),
+    color-mix(in srgb, var(--accent-soft) 78%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 48%, transparent),
+    0 6px 14px rgba(37, 99, 235, 0.08);
+}
+
+.settings-menu-option .MuiCheckbox-root {
+  padding: 6px;
+  color: var(--muted);
+}
+
+.settings-menu-option.is-active .MuiCheckbox-root {
+  color: var(--accent);
+}
+
+.settings-menu-option .MuiSvgIcon-root {
+  font-size: 18px;
+}
+
+.settings-menu-option .MuiFormControlLabel-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.74rem;
+  font-weight: 760;
 }
 
 .settings-list-button.MuiButton-root {
@@ -1198,6 +1596,507 @@ body::-webkit-scrollbar-corner,
   opacity: 0.72;
 }
 
+.settings-workspace-switch-row {
+  align-items: start;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.settings-workspace-switch {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.settings-list-section--workspace {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 28%, transparent), transparent 42%),
+    color-mix(in srgb, var(--panel-strong) 80%, transparent);
+}
+
+.settings-list-section--workspace .settings-list-head {
+  min-height: 42px;
+}
+
+.settings-workspace-head-action.MuiButton-root {
+  min-height: 30px;
+  padding: 0 9px;
+  border-radius: 9px;
+  border-color: color-mix(in srgb, var(--line-soft) 84%, transparent);
+  background: color-mix(in srgb, var(--side-pane-control) 28%, transparent);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 800;
+  text-transform: none;
+}
+
+.settings-workspace-head-action.MuiButton-root:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent-border) 56%, var(--line-soft));
+  background: color-mix(in srgb, var(--accent-soft) 42%, transparent);
+}
+
+.settings-workspace-list {
+  gap: 8px;
+  padding: 8px;
+}
+
+.settings-list-section--workspace .settings-list-row {
+  min-height: 0;
+  border-bottom: 0;
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 18%, transparent), transparent 72%),
+    color-mix(in srgb, var(--side-pane-control) 24%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 34%, transparent);
+}
+
+.settings-list-section--workspace .settings-list-icon {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+}
+
+.settings-workspace-choice {
+  min-width: 0;
+  max-height: 134px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 74%, transparent);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 24%, transparent), transparent 84%),
+    color-mix(in srgb, var(--panel-strong) 48%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 42%, transparent),
+    0 8px 18px rgba(22, 44, 59, 0.025);
+  overflow: auto;
+}
+
+.settings-workspace-choice-item {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 18px;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+
+.settings-workspace-choice-item::before {
+  content: "";
+  position: absolute;
+  inset: 9px auto 9px 5px;
+  width: 3px;
+  border-radius: 99px;
+  background: transparent;
+}
+
+.settings-workspace-choice-item:hover,
+.settings-workspace-choice-item:focus-visible {
+  background: color-mix(in srgb, var(--panel-strong) 68%, transparent);
+  border-color: color-mix(in srgb, var(--line-soft) 76%, transparent);
+  outline: 0;
+}
+
+.settings-workspace-choice-item.is-active {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.32), rgba(255, 255, 255, 0.1)),
+    color-mix(in srgb, var(--accent-soft) 58%, var(--side-pane-control));
+  border-color: color-mix(in srgb, var(--accent-border) 52%, transparent);
+}
+
+.settings-workspace-choice-item.is-active::before {
+  background: color-mix(in srgb, var(--accent-hover) 74%, var(--text));
+}
+
+.settings-workspace-choice-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.settings-workspace-choice-name,
+.settings-workspace-choice-meta-row,
+.settings-workspace-choice-meta-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-workspace-choice-name {
+  font-size: 0.82rem;
+  font-weight: 820;
+}
+
+.settings-workspace-choice-meta-row {
+  display: flex;
+  gap: 7px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.settings-workspace-choice-check {
+  color: color-mix(in srgb, var(--accent-hover) 82%, var(--text));
+}
+
+:root[data-style="mono"] .settings-list-section--workspace {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), transparent 42%),
+    rgba(255, 255, 255, 0.012);
+}
+
+:root[data-style="mono"] .settings-list-section--workspace .settings-list-row {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 72%),
+    rgba(255, 255, 255, 0.012);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+:root[data-style="mono"] .settings-workspace-head-action.MuiButton-root {
+  border-color: rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.018);
+  color: rgba(221, 231, 229, 0.64);
+}
+
+:root[data-style="mono"] .settings-workspace-head-action.MuiButton-root:hover {
+  border-color: rgba(182, 210, 244, 0.16);
+  background: rgba(143, 184, 234, 0.052);
+  color: rgba(237, 241, 245, 0.92);
+}
+
+:root[data-style="mono"] .settings-workspace-choice {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 82%),
+    rgba(255, 255, 255, 0.018);
+  border-color: rgba(255, 255, 255, 0.055);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 10px 22px rgba(0, 0, 0, 0.1);
+}
+
+:root[data-style="mono"] .settings-workspace-choice-item:hover,
+:root[data-style="mono"] .settings-workspace-choice-item:focus-visible {
+  background: rgba(255, 255, 255, 0.055);
+  border-color: rgba(255, 255, 255, 0.075);
+}
+
+:root[data-style="mono"] .settings-workspace-choice-item.is-active {
+  background:
+    linear-gradient(180deg, rgba(143, 184, 234, 0.13), rgba(143, 184, 234, 0.045)),
+    rgba(255, 255, 255, 0.035);
+  border-color: rgba(182, 210, 244, 0.18);
+}
+
+.settings-workspace-create-row {
+  align-items: start;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.settings-workspace-create {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.settings-workspace-create-head {
+  min-width: 0;
+  min-height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-workspace-create-head .MuiButton-root,
+.settings-workspace-editor-actions .MuiButton-root {
+  min-height: 32px;
+  border-radius: 10px;
+  padding: 0 12px;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 34%, transparent),
+    0 8px 18px rgba(30, 49, 72, 0.06);
+}
+
+.settings-workspace-create-fields {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(112px, 0.8fr) minmax(96px, 0.62fr) minmax(150px, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-workspace-copy.MuiFormControlLabel-root {
+  min-width: 108px;
+  min-height: 34px;
+  margin: 0;
+  padding: 0 9px 0 2px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-strong) 34%, transparent);
+  color: var(--muted);
+}
+
+.settings-workspace-copy .MuiCheckbox-root {
+  padding: 5px;
+}
+
+.settings-workspace-copy .MuiFormControlLabel-label {
+  font-size: 0.72rem;
+  font-weight: 760;
+  white-space: nowrap;
+}
+
+.settings-workspace-editor-row {
+  align-items: start;
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.settings-workspace-editor {
+  min-width: 0;
+  display: grid;
+  gap: 9px;
+}
+
+.settings-workspace-editor-head,
+.settings-workspace-editor-actions,
+.settings-workspace-scope-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+.settings-workspace-editor-head {
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-workspace-editor-actions {
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.settings-workspace-stat.MuiChip-root {
+  height: 28px;
+  border-radius: 9px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 84%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 18%, transparent), transparent 72%),
+    color-mix(in srgb, var(--panel-strong) 50%, transparent);
+  color: var(--muted);
+  font-weight: 780;
+}
+
+.settings-list-section--workspace .MuiOutlinedInput-root {
+  min-height: 38px;
+  border-radius: 11px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 16%, transparent), transparent 74%),
+    color-mix(in srgb, var(--panel-strong) 42%, transparent);
+}
+
+.settings-list-section--workspace .MuiInputBase-input {
+  padding-top: 8px;
+  padding-bottom: 8px;
+  font-size: 0.8rem;
+}
+
+.settings-workspace-meta-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(120px, 0.42fr) minmax(160px, 1fr);
+  gap: 8px;
+}
+
+.settings-workspace-scope-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+}
+
+.settings-workspace-scope-pane {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 76%, transparent);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 16%, transparent), transparent 78%),
+    color-mix(in srgb, var(--panel-strong) 34%, transparent);
+}
+
+.settings-workspace-scope-head {
+  min-height: 30px;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0;
+}
+
+.settings-workspace-scope-head .MuiTypography-caption {
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 820;
+}
+
+.settings-workspace-scope-head > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.settings-workspace-scope-hint.MuiTypography-caption {
+  font-weight: 760;
+  opacity: 0.72;
+}
+
+.settings-workspace-check-list {
+  min-width: 0;
+  max-height: min(30vh, 220px);
+  display: grid;
+  align-content: start;
+  gap: 1px;
+  padding: 3px;
+  overflow: auto;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 72%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--window-material-soft) 36%, transparent);
+}
+
+.settings-workspace-empty-note.MuiTypography-root {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 740;
+}
+
+.settings-workspace-check.MuiFormControlLabel-root {
+  min-width: 0;
+  min-height: 28px;
+  margin: 0;
+  padding: 0 8px 0 2px;
+  border-radius: 7px;
+  border-bottom: 0;
+  color: var(--muted);
+}
+
+.settings-workspace-check.MuiFormControlLabel-root:hover {
+  background: color-mix(in srgb, var(--panel-strong) 56%, transparent);
+}
+
+.settings-workspace-check .MuiCheckbox-root {
+  padding: 4px;
+}
+
+.settings-workspace-check .MuiFormControlLabel-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.74rem;
+  font-weight: 740;
+}
+
+.settings-workspace-check--strong.MuiFormControlLabel-root {
+  color: var(--text);
+  background: color-mix(in srgb, var(--side-pane-control) 44%, transparent);
+}
+
+.settings-workspace-check--entry.MuiFormControlLabel-root {
+  padding-left: 16px;
+}
+
+.settings-workspace-nav-group {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.settings-workspace-nav-group + .settings-workspace-nav-group {
+  border-top: 1px solid color-mix(in srgb, var(--line-soft) 66%, transparent);
+  padding-top: 1px;
+}
+
+.settings-workspace-system-note {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 72%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-strong) 42%, transparent);
+  color: var(--muted);
+}
+
+:root[data-style="mono"] .settings-workspace-create-head .MuiButton-root,
+:root[data-style="mono"] .settings-workspace-editor-actions .MuiButton-root {
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    0 8px 18px rgba(0, 0, 0, 0.14);
+}
+
+:root[data-style="mono"] .settings-workspace-stat.MuiChip-root {
+  border-color: rgba(255, 255, 255, 0.07);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 72%),
+    rgba(255, 255, 255, 0.02);
+  color: rgba(221, 231, 229, 0.68);
+}
+
+:root[data-style="mono"] .settings-list-section--workspace .MuiOutlinedInput-root {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 74%),
+    rgba(255, 255, 255, 0.018);
+}
+
+:root[data-style="mono"] .settings-workspace-copy.MuiFormControlLabel-root,
+:root[data-style="mono"] .settings-workspace-scope-pane,
+:root[data-style="mono"] .settings-workspace-system-note {
+  border-color: rgba(255, 255, 255, 0.058);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.026), transparent 78%),
+    rgba(255, 255, 255, 0.012);
+}
+
+:root[data-style="mono"] .settings-workspace-check-list {
+  border-color: rgba(255, 255, 255, 0.055);
+  background: rgba(4, 9, 15, 0.2);
+}
+
+:root[data-style="mono"] .settings-workspace-check.MuiFormControlLabel-root:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+:root[data-style="mono"] .settings-workspace-check--strong.MuiFormControlLabel-root {
+  background: rgba(255, 255, 255, 0.034);
+}
+
 .settings-list-row kbd {
   flex: 0 0 auto;
   padding: 6px 8px;
@@ -1210,59 +2109,232 @@ body::-webkit-scrollbar-corner,
 }
 
 .settings-style-choice {
-  min-width: 220px;
+  min-width: 0;
+  justify-self: stretch;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
+  gap: 10px;
+  padding: 0;
+  align-items: stretch;
+  border: 1px solid var(--line-soft);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 36%, transparent), transparent 76%),
+    color-mix(in srgb, var(--side-pane-control) 34%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 56%, transparent),
+    0 8px 18px rgba(22, 44, 59, 0.035);
 }
 
 .settings-style-choice button {
   min-width: 0;
-  min-height: 34px;
-  display: inline-flex;
+  min-height: 88px;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
   align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 0 10px;
-  border: 1px solid var(--line-soft);
-  border-radius: 10px;
+  gap: 12px;
+  padding: 13px 14px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 78%, transparent);
+  border-radius: 13px;
   background: transparent;
   color: var(--muted);
   font: inherit;
   font-weight: 850;
+  text-align: left;
   cursor: pointer;
+  box-shadow: none;
+  transition:
+    color 140ms ease,
+    border-color 140ms ease,
+    background-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
 }
 
 .settings-style-choice button:hover {
   color: var(--text);
-  background: rgba(255, 255, 255, 0.04);
+  border-color: color-mix(in srgb, var(--accent-border) 62%, var(--line-soft));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 42%, transparent), transparent 78%),
+    color-mix(in srgb, var(--panel-strong) 70%, transparent);
+  transform: translateY(-1px);
 }
 
 .settings-style-choice button.is-active {
-  color: var(--accent-hover);
-  border-color: var(--accent-border);
-  background: var(--accent-soft);
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent-border) 74%, var(--line-soft));
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--accent-soft) 72%, #ffffff), transparent 82%),
+    color-mix(in srgb, var(--panel-strong) 88%, transparent);
+  box-shadow:
+    0 12px 26px rgba(37, 99, 235, 0.1),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 58%, transparent);
 }
 
-.settings-style-swatch {
-  width: 14px;
-  height: 14px;
+.settings-style-card-icon {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(244, 248, 253, 0.62)),
+    color-mix(in srgb, var(--panel-strong) 82%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.72),
+    0 6px 14px rgba(22, 44, 59, 0.06);
+}
+
+.settings-style-card-copy {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.settings-style-card-copy span {
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.2;
+  font-weight: 900;
+}
+
+.settings-style-card-copy small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 730;
+}
+
+.settings-style-sun {
+  position: relative;
+  width: 15px;
+  height: 15px;
   border-radius: 999px;
-  border: 1px solid var(--line);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.32);
+  border: 2px solid #233248;
 }
 
-.settings-style-swatch--light {
-  background: linear-gradient(135deg, #fbfdff 0%, #dfe8f4 100%);
+.settings-style-sun::before {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: inherit;
+  background:
+    linear-gradient(#233248, #233248) center top / 2px 4px no-repeat,
+    linear-gradient(#233248, #233248) center bottom / 2px 4px no-repeat,
+    linear-gradient(90deg, #233248, #233248) left center / 4px 2px no-repeat,
+    linear-gradient(90deg, #233248, #233248) right center / 4px 2px no-repeat;
 }
 
-.settings-style-swatch--mono {
-  background: linear-gradient(135deg, #0f1722 0%, #25364c 100%);
+.settings-style-moon {
+  width: 17px;
+  height: 17px;
+  border-radius: 999px;
+  background: #1b2a3d;
+  box-shadow:
+    inset -5px 1px 0 #eef4fb,
+    0 0 0 1px rgba(27, 42, 61, 0.16);
+}
+
+.settings-style-choice button.is-active .settings-style-card-icon {
+  border-color: color-mix(in srgb, var(--accent-border) 72%, var(--line-soft));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 64%, #ffffff), rgba(255, 255, 255, 0.72)),
+    color-mix(in srgb, var(--panel-strong) 92%, transparent);
+}
+
+:root[data-style="mono"] .settings-style-choice {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), transparent 76%),
+    rgba(255, 255, 255, 0.014);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+:root[data-style="mono"] .settings-style-choice button {
+  border-color: rgba(143, 184, 234, 0.1);
+  background: rgba(255, 255, 255, 0.012);
+}
+
+:root[data-style="mono"] .settings-style-choice button:hover {
+  border-color: rgba(143, 184, 234, 0.22);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 78%),
+    rgba(255, 255, 255, 0.018);
+}
+
+:root[data-style="mono"] .settings-style-choice button.is-active {
+  border-color: rgba(143, 184, 234, 0.32);
+  background:
+    linear-gradient(145deg, rgba(92, 125, 174, 0.22), transparent 82%),
+    rgba(255, 255, 255, 0.026);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 14px 28px rgba(0, 0, 0, 0.18);
+}
+
+:root[data-style="mono"] .settings-style-card-icon {
+  border-color: rgba(143, 184, 234, 0.12);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.018)),
+    rgba(255, 255, 255, 0.018);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+:root[data-style="mono"] .settings-style-choice button.is-active .settings-style-card-icon {
+  border-color: rgba(143, 184, 234, 0.28);
+  background:
+    linear-gradient(180deg, rgba(92, 125, 174, 0.26), rgba(255, 255, 255, 0.025)),
+    rgba(255, 255, 255, 0.02);
+}
+
+:root[data-style="mono"] .settings-style-sun {
+  border-color: rgba(232, 238, 247, 0.86);
+}
+
+:root[data-style="mono"] .settings-style-sun::before {
+  background:
+    linear-gradient(rgba(232, 238, 247, 0.86), rgba(232, 238, 247, 0.86)) center top / 2px 4px no-repeat,
+    linear-gradient(rgba(232, 238, 247, 0.86), rgba(232, 238, 247, 0.86)) center bottom / 2px 4px no-repeat,
+    linear-gradient(90deg, rgba(232, 238, 247, 0.86), rgba(232, 238, 247, 0.86)) left center / 4px 2px no-repeat,
+    linear-gradient(90deg, rgba(232, 238, 247, 0.86), rgba(232, 238, 247, 0.86)) right center / 4px 2px no-repeat;
+}
+
+:root[data-style="mono"] .settings-style-moon {
+  background: rgba(232, 238, 247, 0.9);
+  box-shadow:
+    inset -5px 1px 0 #111927,
+    0 0 0 1px rgba(232, 238, 247, 0.18);
 }
 
 :root[data-style="mono"] .settings-list-icon {
   background: rgba(255, 255, 255, 0.018);
   color: rgba(238, 242, 248, 0.74);
+}
+
+.settings-access-list {
+  max-height: none;
+  overflow: visible;
+  overscroll-behavior: auto;
+  scrollbar-gutter: auto;
+}
+
+.settings-access-list .settings-overview-copy {
+  overflow: hidden;
+}
+
+.settings-access-list .settings-overview-copy .MuiTypography-subtitle2,
+.settings-access-list .settings-overview-copy .MuiTypography-caption {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-access-list .settings-list-row,
+.settings-access-list .settings-list-button.MuiButton-root {
+  min-height: 50px;
+  padding-block: 8px;
 }
 
 .settings-action-grid,
@@ -1295,6 +2367,62 @@ body::-webkit-scrollbar-corner,
   grid-column: 1 / -1;
 }
 
+.settings-build-config-stack {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-build-config-block {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.settings-build-config-head {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-build-config-head > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.settings-build-config-head .MuiTypography-subtitle2 {
+  color: var(--text);
+  font-weight: 850;
+}
+
+.settings-build-config-head .MuiTypography-caption {
+  color: var(--muted);
+  font-weight: 780;
+}
+
+.settings-path-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) max-content;
+  gap: 8px;
+  align-items: center;
+}
+
+.settings-path-field .MuiTextField-root {
+  min-width: 0;
+}
+
+.settings-path-field .MuiButton-root {
+  min-height: 38px;
+  border-radius: 10px;
+  white-space: nowrap;
+}
+
 .settings-form-block,
 .settings-deploy-item {
   display: grid;
@@ -1320,6 +2448,10 @@ body::-webkit-scrollbar-corner,
 :root[data-style="mono"] .settings-form-block,
 :root[data-style="mono"] .settings-deploy-item {
   background: rgba(255, 255, 255, 0.018);
+}
+
+:root[data-style="mono"] .settings-build-config-block {
+  background: rgba(255, 255, 255, 0.014);
 }
 
 :root[data-style="mono"] .settings-sub-block {
@@ -1639,8 +2771,13 @@ body::-webkit-scrollbar-corner,
 }
 
 .settings-panel .MuiTextField-root .MuiInputBase-root {
-  border-radius: 10px;
-  background: var(--panel-strong);
+  border-radius: 11px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.54), transparent 72%),
+    color-mix(in srgb, var(--panel-strong) 92%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.48),
+    0 5px 16px rgba(22, 44, 59, 0.035);
 }
 
 .settings-panel .MuiInputBase-input,
@@ -1662,17 +2799,26 @@ body::-webkit-scrollbar-corner,
 }
 
 .settings-panel .MuiOutlinedInput-notchedOutline {
-  border-color: var(--line);
+  border-color: color-mix(in srgb, var(--line) 88%, transparent);
 }
 
 .settings-panel .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline {
   border-color: var(--accent);
 }
 
+:root[data-style="mono"] .settings-panel .MuiTextField-root .MuiInputBase-root {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 72%),
+    color-mix(in srgb, var(--panel-strong) 92%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 8px 18px rgba(0, 0, 0, 0.16);
+}
+
 .nav-stack {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
   transition:
     opacity 160ms ease,
     transform 160ms ease;
@@ -1680,13 +2826,14 @@ body::-webkit-scrollbar-corner,
 
 .nav-item {
   width: 100%;
-  min-height: 40px;
+  min-height: 38px;
   padding-inline: 10px;
-  border-radius: 12px;
-  font-weight: 700;
-  font-size: 12px;
-  justify-content: flex-start;
-  letter-spacing: 0.01em;
+  border-radius: 11px;
+  font-weight: 780;
+  font-size: 12.5px;
+  justify-content: center;
+  letter-spacing: 0;
+  text-align: center;
 }
 
 .nav-item-label {
@@ -1696,50 +2843,62 @@ body::-webkit-scrollbar-corner,
 }
 
 .nav-item.MuiButton-outlined {
-  border-color: var(--side-pane-line);
+  border-color: color-mix(in srgb, var(--side-pane-line) 72%, transparent);
   color: var(--text);
-  background: var(--side-pane-control);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.38);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.28), rgba(255, 255, 255, 0.08)),
+    color-mix(in srgb, var(--side-pane-control) 54%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.46),
+    0 6px 14px rgba(30, 49, 72, 0.02);
   backdrop-filter: blur(18px) saturate(1.16);
   -webkit-backdrop-filter: blur(18px) saturate(1.16);
 }
 
+.nav-item.MuiButton-outlined:hover {
+  border-color: color-mix(in srgb, var(--accent-border) 46%, var(--side-pane-line));
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.38), rgba(255, 255, 255, 0.12)),
+    color-mix(in srgb, var(--side-pane-control-strong) 52%, transparent);
+}
+
 :root[data-style="mono"] .nav-item.MuiButton-outlined {
-  border-color: rgba(143, 184, 234, 0.08);
+  border-color: rgba(143, 184, 234, 0.07);
   color: rgba(229, 238, 247, 0.72);
   background:
-    linear-gradient(180deg, rgba(29, 37, 49, 0.66), rgba(12, 17, 24, 0.52));
+    linear-gradient(180deg, rgba(29, 37, 49, 0.54), rgba(12, 17, 24, 0.44));
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 8px 20px rgba(0, 0, 0, 0.14);
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    0 6px 16px rgba(0, 0, 0, 0.1);
 }
 
 :root[data-style="mono"] .nav-item.MuiButton-outlined:hover {
   border-color: rgba(164, 199, 240, 0.16);
   background:
-    linear-gradient(180deg, rgba(38, 49, 64, 0.78), rgba(18, 25, 34, 0.64));
+    linear-gradient(180deg, rgba(38, 49, 64, 0.66), rgba(18, 25, 34, 0.54));
   color: rgba(244, 249, 255, 0.92);
 }
 
 .nav-item.MuiButton-contained {
-  background: color-mix(in srgb, var(--accent) 76%, transparent);
-  border-color: color-mix(in srgb, var(--accent-border) 84%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 68%, #ffffff 6%), color-mix(in srgb, var(--accent) 76%, #1f2937 8%));
+  border-color: color-mix(in srgb, var(--accent-border) 70%, transparent);
   color: #ffffff;
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.34),
-    0 10px 24px rgba(70, 86, 104, 0.14);
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 8px 18px rgba(70, 86, 104, 0.11);
   backdrop-filter: blur(18px) saturate(1.16);
   -webkit-backdrop-filter: blur(18px) saturate(1.16);
 }
 
 :root[data-style="mono"] .nav-item.MuiButton-contained {
   background:
-    linear-gradient(180deg, rgba(79, 101, 124, 0.82), rgba(48, 62, 80, 0.78));
+    linear-gradient(180deg, rgba(79, 101, 124, 0.76), rgba(48, 62, 80, 0.7));
   color: #d6e9ff;
-  border-color: rgba(164, 199, 240, 0.28);
+  border-color: rgba(164, 199, 240, 0.24);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 14px 28px rgba(0, 0, 0, 0.24);
+    inset 0 1px 0 rgba(255, 255, 255, 0.1),
+    0 10px 22px rgba(0, 0, 0, 0.2);
 }
 
 :root[data-style="mono"] .MuiAlert-root {
@@ -1857,9 +3016,25 @@ body::-webkit-scrollbar-corner,
 }
 
 .content--merge,
-.content--deploy,
-.content--projects {
+.content--build,
+.content--projects,
+.content--proxy {
   overflow: hidden;
+}
+
+.content--merge,
+.content--build,
+.content--projects,
+.content--proxy {
+  gap: 8px;
+  padding: calc(var(--window-drag-height) + 8px) 8px 10px 10px;
+}
+
+.workspace-frame.has-activity-panel .content--merge,
+.workspace-frame.has-activity-panel .content--build,
+.workspace-frame.has-activity-panel .content--projects,
+.workspace-frame.has-activity-panel .content--proxy {
+  padding-right: 8px;
 }
 
 .workspace-frame {
@@ -1939,20 +3114,57 @@ body::-webkit-scrollbar-corner,
 }
 
 .activity-side-panel .activity-center-surface {
-  padding-top: calc(var(--window-drag-height) + 18px) !important;
+  padding: calc(var(--window-drag-height) + 12px) 8px 8px !important;
 }
 
 .activity-center-header {
   flex: 0 0 auto;
-  min-height: 40px;
+  position: relative;
+  min-height: 48px;
+  padding: 7px 8px 7px 12px;
+  border: 1px solid color-mix(in srgb, var(--side-pane-line) 72%, transparent);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.034)),
+    color-mix(in srgb, var(--side-pane-control) 34%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.28),
+    0 8px 18px rgba(31, 55, 90, 0.034);
+  overflow: hidden;
+  backdrop-filter: blur(24px) saturate(1.14);
+  -webkit-backdrop-filter: blur(24px) saturate(1.14);
+}
+
+.activity-center-header::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  border-radius: 0 999px 999px 0;
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 68%, transparent), color-mix(in srgb, var(--accent-hover) 44%, transparent));
+  opacity: 0.54;
+}
+
+.activity-header-copy {
+  position: relative;
+  display: grid;
+  gap: 2px;
+  padding-left: 1px;
 }
 
 .activity-header-actions {
-  padding: 3px;
-  border: 1px solid var(--side-pane-line);
-  border-radius: 11px;
-  background: color-mix(in srgb, var(--side-pane-control) 82%, transparent);
-  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 5%, transparent);
+  flex: 0 0 auto;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, var(--side-pane-line) 60%, transparent);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.025)),
+    color-mix(in srgb, var(--side-pane-control) 38%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.24),
+    0 6px 14px rgba(31, 55, 90, 0.028);
   backdrop-filter: blur(20px) saturate(1.12);
   -webkit-backdrop-filter: blur(20px) saturate(1.12);
 }
@@ -1965,6 +3177,46 @@ body::-webkit-scrollbar-corner,
 
 .activity-header-actions .MuiIconButton-root:hover {
   border-color: var(--side-pane-line);
+  background: color-mix(in srgb, var(--panel-strong) 48%, transparent);
+}
+
+.activity-header-actions .MuiIconButton-root.Mui-disabled {
+  opacity: 0.38;
+  border-color: transparent;
+  background: transparent;
+}
+
+:root[data-style="mono"] .activity-center-header {
+  border-color: rgba(226, 232, 240, 0.058);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.026), rgba(255, 255, 255, 0.006)),
+    rgba(13, 17, 23, 0.42);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.032),
+    0 8px 18px rgba(0, 0, 0, 0.08);
+}
+
+:root[data-style="mono"] .activity-center-header::before {
+  background: linear-gradient(180deg, rgba(178, 190, 204, 0.5), rgba(117, 128, 143, 0.22));
+  opacity: 0.42;
+}
+
+:root[data-style="mono"] .activity-header-actions {
+  border-color: rgba(226, 232, 240, 0.052);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.022), rgba(255, 255, 255, 0.004)),
+    rgba(8, 12, 17, 0.18);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.026),
+    0 6px 14px rgba(0, 0, 0, 0.08);
+}
+
+:root[data-style="mono"] .activity-header-actions .MuiIconButton-root {
+  background: transparent;
+}
+
+:root[data-style="mono"] .activity-header-actions .MuiIconButton-root:hover {
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .activity-queue-section {
@@ -2036,38 +3288,55 @@ body::-webkit-scrollbar-corner,
 }
 
 .activity-record-heading {
-  align-items: center !important;
+  align-items: flex-start !important;
   flex-wrap: nowrap !important;
   position: relative;
-}
-
-.activity-record-heading:has(> .activity-card-actions) {
-  padding-bottom: 34px;
 }
 
 .activity-card-actions {
   align-items: center;
   justify-content: flex-end;
+  align-self: flex-start;
   position: absolute;
   z-index: 1;
-  top: 27px;
+  top: 0;
   right: 0;
   margin-left: 0 !important;
 }
 
-.activity-queue-title-cluster > .MuiTypography-root:first-child {
-  margin-right: auto;
+.activity-record-heading:has(> .activity-card-actions) .activity-title-line,
+.activity-record-heading:has(> .activity-card-actions) > .activity-queue-title-cluster > .MuiTypography-root:first-child {
+  padding-right: 96px;
+}
+
+.activity-title-details {
+  min-width: 0;
+  min-height: 22px;
+  padding-top: 4px;
+}
+
+.activity-title-tags {
+  flex: 0 0 auto;
+}
+
+.activity-card-meta {
+  min-width: 0;
+  flex: 1 1 auto;
+  text-align: right;
+  font-size: 0.66rem !important;
+  font-weight: 680 !important;
+  line-height: 1.5 !important;
 }
 
 .activity-detail-stack {
-  border-left: 1px solid color-mix(in srgb, var(--muted) 20%, transparent);
+  border-left: 1px solid color-mix(in srgb, var(--muted) 16%, transparent);
 }
 
 .activity-chain-trail {
-  padding: 6px 8px;
-  border: 1px solid color-mix(in srgb, var(--muted) 13%, transparent);
-  border-radius: 9px;
-  background: color-mix(in srgb, var(--side-pane-control) 44%, transparent);
+  padding: 7px 8px;
+  border: 1px solid color-mix(in srgb, var(--muted) 11%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--side-pane-control) 36%, transparent);
 }
 
 .activity-side-panel,
@@ -2214,9 +3483,12 @@ body::-webkit-scrollbar-corner,
 
 .activity-confirm-dialog-paper {
   background:
-    radial-gradient(circle at 20% 0%, rgba(61, 111, 205, 0.1), transparent 40%),
-    var(--panel-strong) !important;
-  box-shadow: var(--shadow) !important;
+    radial-gradient(circle at 20% 0%, rgba(61, 111, 205, 0.09), transparent 40%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.985), rgba(247, 250, 254, 0.992) 52%),
+    #f8fbff !important;
+  box-shadow:
+    0 30px 86px rgba(20, 36, 54, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96) !important;
 }
 
 .activity-confirm-dialog-root {
@@ -2236,7 +3508,8 @@ body::-webkit-scrollbar-corner,
 :root[data-style="mono"] .activity-confirm-dialog-paper {
   background:
     radial-gradient(circle at 18% 0%, rgba(88, 119, 173, 0.13), transparent 42%),
-    var(--panel-strong) !important;
+    linear-gradient(180deg, rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.018) 48%),
+    rgba(14, 18, 24, 0.985) !important;
 }
 
 @keyframes activity-panel-in {
@@ -2271,8 +3544,9 @@ body::-webkit-scrollbar-corner,
 }
 
 .content--merge .content-stage,
-.content--deploy .content-stage,
-.content--projects .content-stage {
+.content--build .content-stage,
+.content--projects .content-stage,
+.content--proxy .content-stage {
   overflow: hidden;
 }
 
@@ -2386,12 +3660,13 @@ body::-webkit-scrollbar-corner,
 }
 
 .workspace--workflow {
+  --workflow-history-readable-min: clamp(168px, 23vh, 244px);
   height: 100%;
   min-height: 0;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, auto) minmax(var(--workflow-history-readable-min), 1fr);
   align-content: stretch;
-  gap: 10px;
+  gap: 8px;
   overflow: hidden;
 }
 
@@ -2406,7 +3681,69 @@ body::-webkit-scrollbar-corner,
 }
 
 .finder-list-scroll {
-  padding-right: 3px;
+  padding: 1px 4px 6px 1px;
+  scroll-padding-block: 6px;
+}
+
+.workspace--finder .MuiOutlinedInput-root {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 20%, transparent), transparent 72%),
+    color-mix(in srgb, var(--panel-strong) 82%, transparent) !important;
+  min-height: 34px;
+  border-radius: 11px !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 44%, transparent),
+    0 1px 0 rgba(20, 36, 54, 0.035) !important;
+  backdrop-filter: blur(18px) saturate(1.14);
+  -webkit-backdrop-filter: blur(18px) saturate(1.14);
+}
+
+.workspace--finder .MuiOutlinedInput-notchedOutline {
+  border-color: color-mix(in srgb, var(--line) 78%, transparent) !important;
+}
+
+.workspace--finder .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline,
+.workspace--finder .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline {
+  border-color: color-mix(in srgb, var(--accent-border) 82%, transparent) !important;
+}
+
+.finder-list-scroll > .MuiBox-root {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 12%, transparent), transparent 70%),
+    color-mix(in srgb, var(--panel-strong) 74%, transparent) !important;
+  border-color: color-mix(in srgb, var(--line) 68%, transparent) !important;
+  border-radius: 14px !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 34%, transparent),
+    0 5px 14px rgba(20, 36, 54, 0.04) !important;
+  backdrop-filter: blur(18px) saturate(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(1.1);
+  content-visibility: auto;
+  contain-intrinsic-size: 54px;
+}
+
+.finder-list-scroll > .MuiBox-root:hover {
+  border-color: color-mix(in srgb, var(--accent-border) 82%, transparent) !important;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 18%, transparent), transparent 72%),
+    color-mix(in srgb, var(--panel-strong) 84%, transparent) !important;
+}
+
+:root[data-style="mono"] .workspace--finder .MuiOutlinedInput-root,
+:root[data-style="mono"] .finder-list-scroll > .MuiBox-root {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.036), rgba(255, 255, 255, 0.012) 72%),
+    rgba(18, 22, 28, 0.58) !important;
+  border-color: rgba(143, 184, 234, 0.12) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.04),
+    0 6px 18px rgba(0, 0, 0, 0.18) !important;
+}
+
+:root[data-style="mono"] .finder-list-scroll > .MuiBox-root:hover {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.048), rgba(255, 255, 255, 0.018) 72%),
+    rgba(21, 27, 35, 0.66) !important;
 }
 
 .workspace--narrow {
@@ -2424,10 +3761,17 @@ body::-webkit-scrollbar-corner,
 
 .workflow-module--control {
   grid-row: 1;
-  padding: 0;
-  border: 0;
-  background: transparent;
-  box-shadow: none;
+  padding: 9px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 86%, transparent);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 16%, transparent), transparent 62%),
+    color-mix(in srgb, var(--panel-strong) 72%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 34%, transparent),
+    0 10px 24px rgba(22, 44, 59, 0.048);
+  backdrop-filter: blur(20px) saturate(1.12);
+  -webkit-backdrop-filter: blur(20px) saturate(1.12);
 }
 
 .workflow-panel {
@@ -2435,37 +3779,250 @@ body::-webkit-scrollbar-corner,
   flex-direction: column;
   min-height: 0;
   overflow: hidden;
-  padding: 12px;
-  border-radius: 13px;
+  padding: 10px;
+  border-radius: 12px;
   border: 1px solid var(--line-soft);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.24), transparent 58%),
-    var(--glass);
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 16%, transparent), transparent 56%),
+    color-mix(in srgb, var(--glass) 88%, transparent);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.36),
-    0 16px 42px rgba(22, 44, 59, 0.08);
-  backdrop-filter: blur(22px) saturate(1.16);
-  -webkit-backdrop-filter: blur(22px) saturate(1.16);
+    inset 0 1px 0 color-mix(in srgb, #ffffff 30%, transparent),
+    0 12px 32px rgba(22, 44, 59, 0.066);
+  backdrop-filter: blur(20px) saturate(1.14);
+  -webkit-backdrop-filter: blur(20px) saturate(1.14);
 }
 
 :root[data-style="mono"] .workflow-panel {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.026), transparent 58%),
-    rgba(18, 22, 28, 0.36);
-  border-color: rgba(143, 184, 234, 0.085);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.022), transparent 58%),
+    rgba(18, 22, 28, 0.32);
+  border-color: rgba(143, 184, 234, 0.078);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.032),
-    0 18px 44px rgba(0, 0, 0, 0.18);
+    inset 0 1px 0 rgba(255, 255, 255, 0.028),
+    0 14px 34px rgba(0, 0, 0, 0.15);
+}
+
+:root[data-style="mono"] .workflow-module--control {
+  border-color: rgba(143, 184, 234, 0.082);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), rgba(255, 255, 255, 0.009) 68%),
+    rgba(18, 22, 28, 0.28);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.026),
+    0 14px 34px rgba(0, 0, 0, 0.14);
+}
+
+.branch-mode-tabs {
+  min-height: 34px;
+  border-radius: 10px !important;
+  border-color: color-mix(in srgb, var(--line) 62%, transparent) !important;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 18%, transparent), transparent 72%),
+    color-mix(in srgb, var(--side-pane-control) 72%, transparent) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 38%, transparent),
+    0 1px 0 rgba(20, 36, 54, 0.026) !important;
+}
+
+.branch-mode-tabs .MuiButton-root {
+  min-height: 28px !important;
+  border-radius: 8px !important;
+  font-weight: 820 !important;
+}
+
+.branch-mode-tabs .MuiButton-contained {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 86%, #ffffff 14%), var(--accent)) !important;
+  box-shadow:
+    0 6px 15px color-mix(in srgb, var(--accent) 22%, transparent),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 28%, transparent) !important;
+}
+
+.workspace--workflow .MuiOutlinedInput-root,
+.workspace--workflow .MuiInputBase-root.MuiOutlinedInput-root {
+  min-height: 40px;
+  border-radius: 10px !important;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 16%, transparent), transparent 70%),
+    color-mix(in srgb, var(--panel-strong) 72%, transparent) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 34%, transparent),
+    0 1px 0 rgba(20, 36, 54, 0.025) !important;
+}
+
+.workspace--workflow .MuiOutlinedInput-input,
+.workspace--workflow .MuiSelect-select.MuiOutlinedInput-input {
+  padding-top: 9px !important;
+  padding-bottom: 9px !important;
+  font-size: 0.9rem;
+  line-height: 1.25;
+}
+
+.workspace--workflow .MuiAutocomplete-root .MuiOutlinedInput-root {
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+.workspace--workflow .MuiAutocomplete-root .MuiOutlinedInput-root .MuiAutocomplete-input {
+  padding-top: 9px !important;
+  padding-bottom: 9px !important;
+}
+
+.workspace--workflow .MuiInputLabel-root {
+  font-size: 0.83rem;
+  font-weight: 760;
+  transform: translate(12px, 10px) scale(1);
+}
+
+.workspace--workflow .MuiInputLabel-root.MuiInputLabel-shrink {
+  transform: translate(12px, -7px) scale(0.73);
+}
+
+.workspace--workflow .MuiOutlinedInput-notchedOutline {
+  border-color: color-mix(in srgb, var(--line) 68%, transparent) !important;
+}
+
+.workspace--workflow .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline,
+.workspace--workflow .MuiOutlinedInput-root.Mui-focused .MuiOutlinedInput-notchedOutline {
+  border-color: color-mix(in srgb, var(--accent-border) 82%, transparent) !important;
+}
+
+.workspace--workflow .MuiFormHelperText-root {
+  margin-top: 3px;
+  font-size: 0.72rem;
+  line-height: 1.32;
+}
+
+.workflow-module--control > .MuiStack-root {
+  gap: 7px;
+}
+
+.workspace--workflow .MuiButton-root {
+  text-transform: none;
+  font-weight: 820;
+}
+
+.workspace--workflow .MuiButton-contained:not(.Mui-disabled) {
+  min-height: 34px;
+  border-radius: 11px !important;
+  color: var(--accent-contrast);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent) 84%, #ffffff 16%), var(--accent)) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 26%, transparent),
+    0 8px 18px color-mix(in srgb, var(--accent) 18%, transparent) !important;
+}
+
+.workspace--workflow .MuiButton-contained:not(.Mui-disabled):hover {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent-hover) 84%, #ffffff 16%), var(--accent-hover)) !important;
+}
+
+.workflow-panel > .MuiStack-root:first-child .MuiTypography-h6 {
+  font-size: 0.94rem;
+  letter-spacing: 0;
+}
+
+.workflow-history-panel > .MuiStack-root:first-child,
+.workflow-result-panel > .MuiStack-root:first-child {
+  min-height: 30px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line-soft) 78%, transparent);
+}
+
+.workflow-panel .MuiIconButton-root {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 62%, transparent);
+  color: var(--muted);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 30%, transparent);
+}
+
+.workflow-panel .MuiIconButton-root:hover {
+  border-color: color-mix(in srgb, var(--accent-border) 80%, transparent);
+  background: color-mix(in srgb, var(--accent-soft) 60%, transparent);
+  color: var(--accent);
+}
+
+.workflow-result-panel {
+  padding-block: 9px;
+}
+
+.branch-result-item {
+  border-radius: 10px !important;
+  border-color: color-mix(in srgb, var(--line) 64%, transparent) !important;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 18%, transparent), transparent 68%),
+    color-mix(in srgb, var(--panel-strong) 62%, transparent) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 34%, transparent),
+    0 4px 14px rgba(22, 44, 59, 0.035);
+}
+
+.workflow-history-panel .MuiCard-root {
+  border-radius: 10px !important;
+}
+
+.workflow-history-panel .MuiCardContent-root {
+  padding: 9px !important;
+}
+
+.workflow-history-panel .MuiCardContent-root:last-child {
+  padding-bottom: 9px !important;
+}
+
+.workflow-history-panel .module-list-scroll {
+  padding-right: 4px;
+}
+
+.workflow-history-panel .MuiChip-root,
+.workflow-result-panel .MuiChip-root {
+  height: 20px !important;
+  min-height: 20px !important;
+  border-radius: 7px !important;
+  font-size: 0.65rem !important;
+  font-weight: 780 !important;
+}
+
+:root[data-style="mono"] .branch-mode-tabs,
+:root[data-style="mono"] .workspace--workflow .MuiOutlinedInput-root,
+:root[data-style="mono"] .workspace--workflow .MuiInputBase-root.MuiOutlinedInput-root,
+:root[data-style="mono"] .branch-result-item {
+  border-color: rgba(143, 184, 234, 0.11) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.034), rgba(255, 255, 255, 0.012) 70%),
+    rgba(18, 22, 28, 0.34) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.035),
+    0 1px 0 rgba(0, 0, 0, 0.08) !important;
+}
+
+:root[data-style="mono"] .workflow-panel .MuiIconButton-root {
+  border-color: rgba(143, 184, 234, 0.11);
+  background: rgba(255, 255, 255, 0.028);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
 }
 
 .workflow-result-panel {
   grid-row: 2;
   flex: 0 0 auto;
+  max-height: min(390px, 42vh);
+}
+
+.workflow-result-panel > .MuiCollapse-root {
+  min-height: 0;
+  max-height: min(285px, 31vh);
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding-right: 4px;
 }
 
 .workflow-history-panel {
   grid-row: 3;
   flex: 1;
+  min-height: var(--workflow-history-readable-min);
 }
 
 .workflow-history-panel > .MuiCollapse-root {
@@ -2481,8 +4038,14 @@ body::-webkit-scrollbar-corner,
 }
 
 .workflow-history-content {
+  display: flex;
+  flex-direction: column;
   height: 100%;
-  min-height: 0;
+  min-height: 132px;
+}
+
+.workflow-history-panel .module-list-scroll {
+  min-height: 92px;
 }
 
 .module-list-scroll {
@@ -2541,14 +4104,15 @@ body::-webkit-scrollbar-corner,
 
 .proxy-view-tabs {
   flex: 0 0 auto;
+  width: 100%;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 3px;
   padding: 3px;
-  border: 1px solid var(--line);
-  border-radius: 13px;
-  background: rgba(255, 255, 255, 0.01);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.014);
+  border: 1px solid var(--line-soft);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--side-pane-control) 64%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 34%, transparent);
 }
 
 .proxy-view-tab {
@@ -2558,7 +4122,7 @@ body::-webkit-scrollbar-corner,
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: 7px;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -2603,16 +4167,18 @@ body::-webkit-scrollbar-corner,
 }
 
 .proxy-view-tab.is-active {
-  color: #ffffff;
-  border-color: var(--accent-border);
-  background: var(--accent);
-  box-shadow: 0 7px 16px rgba(38, 105, 132, 0.14);
+  color: var(--text);
+  border-color: var(--line-soft);
+  background: color-mix(in srgb, var(--panel-strong) 90%, transparent);
+  box-shadow:
+    0 1px 3px rgba(22, 44, 59, 0.08),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 48%, transparent);
 }
 
 :root[data-style="mono"] .proxy-view-tabs {
-  background: rgba(255, 255, 255, 0.01);
-  border-color: var(--line);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.014);
+  background: rgba(255, 255, 255, 0.018);
+  border-color: rgba(143, 184, 234, 0.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
 :root[data-style="mono"] .proxy-view-tab:hover {
@@ -2620,12 +4186,12 @@ body::-webkit-scrollbar-corner,
 }
 
 :root[data-style="mono"] .proxy-view-tab.is-active {
-  color: #07111d;
-  background: var(--accent);
-  border-color: var(--accent-border);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.07);
+  border-color: rgba(143, 184, 234, 0.14);
   box-shadow:
-    0 12px 28px rgba(38, 84, 132, 0.28),
-    inset 0 1px 0 rgba(255, 255, 255, 0.3);
+    0 1px 4px rgba(0, 0, 0, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.055);
 }
 
 .proxy-main-grid {
@@ -2641,6 +4207,15 @@ body::-webkit-scrollbar-corner,
 .proxy-traffic-panel {
   min-height: 0;
   padding: 10px;
+}
+
+.proxy-control-panel {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .proxy-main-grid--config .proxy-control-panel,
@@ -2666,10 +4241,20 @@ body::-webkit-scrollbar-corner,
 }
 
 .proxy-workspace .MuiIconButton-root {
-  width: 28px !important;
-  height: 28px !important;
+  width: 26px !important;
+  height: 26px !important;
   padding: 4px !important;
-  border-radius: 8px !important;
+  border-radius: 7px !important;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--panel-strong) 68%, transparent);
+  color: var(--muted);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 34%, transparent);
+}
+
+.proxy-workspace .MuiIconButton-root:hover {
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent-soft) 58%, transparent);
+  color: var(--accent);
 }
 
 .proxy-list-actions .MuiIconButton-root .MuiSvgIcon-root {
@@ -2681,9 +4266,10 @@ body::-webkit-scrollbar-corner,
   min-width: 0;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(220px, 32%) minmax(0, 1fr);
-  align-items: start;
-  align-content: start;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  align-items: stretch;
+  align-content: stretch;
   gap: 8px;
 }
 
@@ -2692,20 +4278,25 @@ body::-webkit-scrollbar-corner,
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  border: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
-  border-radius: 11px;
+  gap: 7px;
+  padding: 10px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 88%, transparent);
+  border-radius: 12px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.2), rgba(255, 255, 255, 0.055) 72%),
-    color-mix(in srgb, var(--panel) 48%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22);
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 18%, transparent), transparent 64%),
+    color-mix(in srgb, var(--panel-strong) 78%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 46%, transparent),
+    0 9px 24px rgba(22, 44, 59, 0.045);
+  backdrop-filter: blur(22px) saturate(1.12);
+  -webkit-backdrop-filter: blur(22px) saturate(1.12);
 }
 
 .proxy-section + .proxy-section {
   margin-left: 0;
-  padding-left: 8px;
-  border-left: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
+  padding-left: 10px;
+  border-left: 1px solid var(--line-soft);
 }
 
 .proxy-service-panel,
@@ -2716,6 +4307,39 @@ body::-webkit-scrollbar-corner,
 
 .proxy-traffic-panel {
   grid-column: auto;
+}
+
+.proxy-panel-header {
+  flex: 0 0 auto;
+  min-height: 28px !important;
+  padding-bottom: 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
+}
+
+.proxy-panel-header > .MuiStack-root {
+  flex: 0 0 auto;
+  gap: 5px !important;
+}
+
+.proxy-panel-header .MuiTypography-h6 {
+  font-size: 0.92rem !important;
+  letter-spacing: 0;
+}
+
+.proxy-panel-header .MuiButton-root {
+  padding-inline: 7px !important;
+  font-size: 0.66rem !important;
+  font-weight: 780 !important;
+}
+
+.proxy-panel-header .MuiButton-startIcon {
+  margin-left: -1px !important;
+  margin-right: 3px !important;
+}
+
+.proxy-request-open-button {
+  min-width: 68px !important;
+  padding-inline: 8px !important;
 }
 
 .proxy-two-fields,
@@ -2742,14 +4366,15 @@ body::-webkit-scrollbar-corner,
   min-height: 0;
   overscroll-behavior: contain;
   scrollbar-gutter: auto;
+  overflow-x: hidden;
 }
 
 .proxy-card-list,
 .proxy-event-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding-right: 2px;
+  gap: 5px;
+  padding-right: 3px;
 }
 
 .proxy-event-list,
@@ -2769,13 +4394,31 @@ body::-webkit-scrollbar-corner,
 
 .proxy-card-list.module-list-scroll {
   flex: 0 1 auto;
-  max-height: min(184px, 24vh);
+  max-height: min(190px, 25vh);
   overflow: auto;
 }
 
 .proxy-main-grid--config .proxy-card-list.module-list-scroll {
   flex: 1 1 auto;
   max-height: none;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.proxy-main-grid--config .proxy-service-panel .proxy-card-list.module-list-scroll {
+  flex: 0 0 auto;
+  max-height: min(204px, 27vh);
+  justify-content: flex-start;
+  align-content: flex-start;
+}
+
+.proxy-main-grid--config .proxy-rules-panel .proxy-card-list.module-list-scroll {
+  flex: 1 1 auto;
+  max-height: none;
+}
+
+.proxy-card-list.is-empty {
+  justify-content: center;
 }
 
 .proxy-list-item,
@@ -2787,7 +4430,7 @@ body::-webkit-scrollbar-corner,
     linear-gradient(180deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.14)),
     color-mix(in srgb, var(--panel-strong) 34%, transparent);
   color: var(--text);
-  border-radius: 8px;
+  border-radius: 9px;
   text-align: left;
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.38),
@@ -2799,12 +4442,12 @@ body::-webkit-scrollbar-corner,
 }
 
 .proxy-list-item {
-  min-height: 38px;
-  padding: 3px 7px;
+  min-height: 52px;
+  padding: 7px 9px;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
 }
 
 .proxy-list-item:hover,
@@ -2819,9 +4462,12 @@ body::-webkit-scrollbar-corner,
 .proxy-event-item.is-active {
   border-color: color-mix(in srgb, var(--accent-border) 62%, transparent);
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--accent-soft) 72%, transparent), transparent 55%),
-    rgba(255, 255, 255, 0.18);
-  box-shadow: inset 2px 0 0 var(--accent);
+    linear-gradient(90deg, color-mix(in srgb, var(--accent-soft) 76%, transparent), transparent 58%),
+    color-mix(in srgb, var(--panel-strong) 54%, transparent);
+  box-shadow:
+    inset 2px 0 0 var(--accent),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 34%, transparent),
+    0 7px 18px rgba(37, 99, 235, 0.055);
 }
 
 .proxy-list-main-button:focus-visible,
@@ -2850,7 +4496,7 @@ body::-webkit-scrollbar-corner,
 .proxy-list-item-main {
   display: grid;
   align-content: center;
-  gap: 1px;
+  gap: 3px;
   min-width: 0;
 }
 
@@ -2865,7 +4511,7 @@ body::-webkit-scrollbar-corner,
 .proxy-list-detail-row {
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 6px;
   min-width: 0;
 }
 
@@ -2888,6 +4534,7 @@ body::-webkit-scrollbar-corner,
 
 .proxy-list-meta {
   flex-wrap: wrap;
+  overflow: hidden;
 }
 
 .proxy-service-panel .proxy-list-meta {
@@ -2905,12 +4552,41 @@ body::-webkit-scrollbar-corner,
 }
 
 .proxy-list-actions .MuiIconButton-root {
-  width: 22px !important;
-  height: 22px !important;
+  width: 24px !important;
+  height: 24px !important;
+  border-radius: 7px !important;
+  background: color-mix(in srgb, var(--panel-strong) 58%, transparent);
 }
 
 .proxy-empty-state {
-  padding: 3px 0;
+  width: 100%;
+  min-height: 74px;
+  justify-content: center;
+  align-items: center !important;
+  padding: 10px;
+  border: 1px dashed color-mix(in srgb, var(--muted) 24%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--side-pane-control) 38%, transparent);
+  text-align: center;
+}
+
+.proxy-empty-copy {
+  width: 100%;
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  text-align: center;
+}
+
+.proxy-event-list.is-empty,
+.proxy-event-detail.is-empty {
+  display: grid;
+  place-items: center;
+}
+
+.proxy-event-detail.is-empty {
+  min-height: 152px;
 }
 
 .proxy-list-item b,
@@ -2926,21 +4602,22 @@ body::-webkit-scrollbar-corner,
 
 .proxy-list-item b,
 .proxy-event-item b {
-  font-size: 0.76rem;
-  line-height: 1.08;
+  font-size: 0.78rem;
+  line-height: 1.12;
   letter-spacing: 0;
 }
 
 .proxy-list-item small,
 .proxy-event-item small {
   color: var(--muted);
-  font-size: 0.64rem;
-  line-height: 1.12;
+  font-size: 0.66rem;
+  line-height: 1.18;
 }
 
 .proxy-workspace .MuiChip-root {
-  height: 17px !important;
-  min-height: 17px !important;
+  height: 19px !important;
+  min-height: 19px !important;
+  border-radius: 6px !important;
   font-size: 0.6rem !important;
   font-weight: 760 !important;
   line-height: 1 !important;
@@ -2958,8 +4635,8 @@ body::-webkit-scrollbar-corner,
 }
 
 .proxy-workspace .MuiButton-root {
-  min-height: 27px !important;
-  border-radius: 8px !important;
+  min-height: 25px !important;
+  border-radius: 7px !important;
 }
 
 .proxy-traffic-grid {
@@ -2969,10 +4646,10 @@ body::-webkit-scrollbar-corner,
 }
 
 .proxy-event-item {
-  min-height: 56px;
-  padding: 5px 7px;
+  min-height: 62px;
+  padding: 7px 8px;
   content-visibility: auto;
-  contain-intrinsic-size: 56px;
+  contain-intrinsic-size: 62px;
 }
 
 .proxy-event-button {
@@ -3007,7 +4684,8 @@ body::-webkit-scrollbar-corner,
 
 .proxy-event-detail {
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .proxy-detail-grid {
@@ -3102,17 +4780,124 @@ body::-webkit-scrollbar-corner,
   border-color: rgba(182, 210, 244, 0.24);
 }
 
+.proxy-service-panel .proxy-list-item {
+  flex: 0 0 auto;
+  min-height: 62px;
+  padding: 8px 9px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.proxy-service-panel .proxy-list-item-main {
+  min-height: 42px;
+  grid-template-rows: auto auto;
+  align-content: center;
+  gap: 4px;
+}
+
+.proxy-service-panel .proxy-list-title-row,
+.proxy-service-panel .proxy-list-detail-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.proxy-service-panel .proxy-list-title-row .MuiChip-root,
+.proxy-service-panel .proxy-list-meta {
+  justify-self: end;
+}
+
+.proxy-service-panel .proxy-list-detail-row > small {
+  flex-basis: auto;
+  min-width: 0;
+}
+
+.proxy-rule-row {
+  min-height: 54px;
+}
+
+.proxy-rule-row .proxy-list-detail-row {
+  align-items: flex-end;
+}
+
+.proxy-rule-row .proxy-list-meta {
+  justify-content: flex-end;
+}
+
+.proxy-requests-modal-grid .proxy-event-button {
+  min-height: 0;
+}
+
+.proxy-requests-modal-grid .proxy-event-item {
+  min-height: 98px;
+  padding: 9px 10px;
+}
+
+.proxy-requests-modal-grid .proxy-event-meta {
+  row-gap: 4px;
+}
+
+.proxy-requests-modal-grid .proxy-event-meta .MuiChip-root {
+  max-width: 100%;
+}
+
+@container (max-width: 760px) {
+  .proxy-section {
+    padding: 10px;
+  }
+
+  .proxy-panel-header {
+    align-items: flex-start;
+  }
+
+  .proxy-panel-header > .MuiStack-root {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+
+  .proxy-list-item {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 7px;
+  }
+
+  .proxy-list-actions {
+    justify-content: flex-start;
+    padding-top: 1px;
+  }
+
+  .proxy-list-detail-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .proxy-service-panel .proxy-list-meta,
+  .proxy-list-meta {
+    flex-wrap: wrap;
+  }
+
+  .proxy-card-list.module-list-scroll,
+  .proxy-main-grid--config .proxy-service-panel .proxy-card-list.module-list-scroll {
+    max-height: min(260px, 34vh);
+  }
+}
+
 .proxy-config-dialog .MuiDialog-paper {
+  width: min(780px, calc(100vw - 36px)) !important;
+  max-width: min(780px, calc(100vw - 36px)) !important;
   border-radius: 14px;
   border: 1px solid var(--line-soft);
   color: var(--text);
   box-shadow: var(--shadow);
+  overflow: hidden;
 }
 
 .proxy-config-dialog .MuiBackdrop-root {
-  background-color: rgba(24, 32, 42, 0.46);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  background-color: rgba(30, 38, 48, 0.24);
+  backdrop-filter: blur(2px) saturate(1.02);
+  -webkit-backdrop-filter: blur(2px) saturate(1.02);
 }
 
 .proxy-config-dialog .MuiDialogTitle-root,
@@ -3120,19 +4905,169 @@ body::-webkit-scrollbar-corner,
   background: transparent;
 }
 
+.proxy-config-dialog .MuiDialogTitle-root {
+  padding: 18px 24px 14px;
+}
+
 .proxy-config-dialog .MuiDialogContent-root {
   overflow: auto;
   overscroll-behavior: contain;
+  padding: 14px 24px 16px;
+}
+
+.proxy-config-dialog .MuiDialogActions-root {
+  padding: 12px 18px 16px;
+}
+
+.proxy-profile-title .MuiTypography-h6 {
+  font-size: 1.02rem;
+  line-height: 1.24;
+  font-weight: 860;
+  letter-spacing: 0;
+}
+
+.proxy-profile-title .MuiTypography-body2 {
+  margin-top: 3px;
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.proxy-profile-url-chip {
+  max-width: 310px;
+  height: 25px !important;
+  border-radius: 999px !important;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 90%, transparent) !important;
+  background: color-mix(in srgb, var(--panel-strong) 68%, transparent) !important;
+  color: var(--muted) !important;
+  font-family: "SF Mono", "JetBrains Mono", monospace !important;
+}
+
+.proxy-profile-url-chip .MuiChip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.proxy-profile-form {
+  padding: 1px 0;
+}
+
+.proxy-profile-section {
+  min-width: 0;
+  padding: 12px;
+  border-radius: 13px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 88%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 18%, transparent), transparent 70%),
+    color-mix(in srgb, var(--panel-strong) 76%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 46%, transparent),
+    0 12px 28px rgba(22, 44, 59, 0.052);
+}
+
+.proxy-profile-section-head {
+  min-height: 30px;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line-soft) 78%, transparent);
+}
+
+.proxy-profile-section-head .MuiTypography-subtitle2 {
+  font-size: 0.8rem;
+  line-height: 1.2;
+  font-weight: 840;
+  letter-spacing: 0;
+}
+
+.proxy-profile-section-head .MuiTypography-caption {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.66rem;
+  line-height: 1.35;
+}
+
+.proxy-profile-section .MuiTextField-root {
+  min-width: 0;
+}
+
+.proxy-config-dialog .MuiTextField-root .MuiInputBase-input {
+  min-width: 0;
+  font-size: 0.86rem;
+  line-height: 1.28;
+  padding: 12px 13px;
+}
+
+.proxy-config-dialog .MuiFormHelperText-root {
+  margin: 5px 4px 0;
+  font-size: 0.64rem;
+  line-height: 1.32;
+}
+
+.proxy-config-dialog .MuiInputLabel-root {
+  font-size: 0.78rem;
+}
+
+.proxy-config-dialog .MuiInputLabel-shrink {
+  font-size: 0.72rem;
+}
+
+.proxy-profile-capture-grid {
+  align-items: stretch;
+}
+
+.proxy-profile-capture-card {
+  min-height: 57px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 64%, transparent);
+}
+
+.proxy-profile-env-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.proxy-profile-env-button {
+  min-width: 0 !important;
+  min-height: 42px !important;
+  justify-content: flex-start !important;
+  gap: 8px !important;
+  padding: 8px 10px !important;
+  border-radius: 12px !important;
+  text-transform: none !important;
+  font-weight: 760 !important;
+}
+
+.proxy-profile-env-button span {
+  flex: 0 0 auto;
+}
+
+.proxy-profile-env-button code {
+  min-width: 0;
+  margin-left: auto;
+  color: var(--muted);
+  font-family: "SF Mono", "JetBrains Mono", monospace;
+  font-size: 0.68rem;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 :root:not([data-style="mono"]) .proxy-config-dialog .MuiDialog-paper {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(247, 250, 254, 0.98) 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.985), rgba(247, 250, 254, 0.992) 42%),
     #f8fbff;
   border-color: rgba(52, 76, 96, 0.18);
   box-shadow:
-    0 28px 72px rgba(20, 36, 54, 0.24),
-    inset 0 1px 0 rgba(255, 255, 255, 0.92);
+    0 30px 86px rgba(20, 36, 54, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96);
 }
 
 :root:not([data-style="mono"]) .proxy-config-dialog .MuiDialogContent-root {
@@ -3144,6 +5079,25 @@ body::-webkit-scrollbar-corner,
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.9),
     0 1px 0 rgba(20, 36, 54, 0.04);
+}
+
+:root:not([data-style="mono"]) .proxy-profile-section {
+  border-color: rgba(52, 76, 96, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(246, 250, 254, 0.72)),
+    rgba(248, 251, 255, 0.88);
+}
+
+:root:not([data-style="mono"]) .proxy-profile-section--route {
+  background:
+    linear-gradient(135deg, rgba(255, 255, 255, 0.88), rgba(233, 241, 250, 0.74)),
+    rgba(248, 251, 255, 0.92);
+}
+
+:root:not([data-style="mono"]) .proxy-profile-capture-card,
+:root:not([data-style="mono"]) .proxy-profile-env-button {
+  border-color: rgba(52, 76, 96, 0.13) !important;
+  background-color: rgba(255, 255, 255, 0.86) !important;
 }
 
 :root:not([data-style="mono"]) .proxy-config-dialog .MuiInputLabel-root {
@@ -3160,14 +5114,736 @@ body::-webkit-scrollbar-corner,
 
 :root[data-style="mono"] .proxy-config-dialog .MuiDialog-paper {
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 60%),
-    rgba(15, 19, 25, 0.98);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.018) 58%),
+    rgba(14, 18, 24, 0.985);
   border-color: rgba(143, 184, 234, 0.12);
+}
+
+:root[data-style="mono"] .proxy-profile-url-chip,
+:root[data-style="mono"] .proxy-profile-section {
+  border-color: rgba(143, 184, 234, 0.12) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.044), rgba(255, 255, 255, 0.015)),
+    rgba(18, 22, 28, 0.72) !important;
+}
+
+:root[data-style="mono"] .proxy-profile-section-head {
+  border-bottom-color: rgba(143, 184, 234, 0.1);
+}
+
+:root[data-style="mono"] .proxy-profile-capture-card,
+:root[data-style="mono"] .proxy-profile-env-button {
+  border-color: rgba(143, 184, 234, 0.11) !important;
+  background-color: rgba(255, 255, 255, 0.026) !important;
+}
+
+:root[data-style="mono"] .proxy-profile-env-button code {
+  color: rgba(226, 232, 240, 0.64);
+}
+
+@media (max-width: 720px) {
+  .proxy-config-dialog .MuiDialog-paper {
+    width: calc(100vw - 22px) !important;
+    max-width: calc(100vw - 22px) !important;
+  }
+
+  .proxy-config-dialog .MuiDialogTitle-root {
+    padding: 16px 16px 12px;
+  }
+
+  .proxy-config-dialog .MuiDialogContent-root {
+    padding: 12px 16px 14px;
+  }
+
+  .proxy-profile-title {
+    flex-direction: column !important;
+  }
+
+  .proxy-profile-url-chip {
+    max-width: 100%;
+  }
+
+  .proxy-config-dialog .proxy-two-fields,
+  .proxy-profile-env-list {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.proxy-rule-dialog .MuiDialog-paper {
+  width: min(780px, calc(100vw - 42px)) !important;
+  max-width: min(780px, calc(100vw - 42px)) !important;
+  border-radius: 12px;
+}
+
+.proxy-rule-dialog .MuiDialogTitle-root {
+  min-height: 48px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  font-size: 1rem;
+  font-weight: 850;
+  letter-spacing: 0;
+}
+
+.proxy-rule-dialog .MuiDialogContent-root {
+  padding: 12px 18px 14px;
+}
+
+.proxy-rule-dialog .MuiDialogActions-root {
+  min-height: 52px;
+  padding: 10px 18px 12px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.proxy-rule-dialog .MuiTextField-root {
+  min-width: 0;
+}
+
+.proxy-rule-dialog .MuiOutlinedInput-root {
+  min-height: 36px;
+  border-radius: 10px;
+}
+
+.proxy-rule-dialog .MuiInputBase-input,
+.proxy-rule-dialog .MuiSelect-select {
+  padding: 8px 11px !important;
+  font-size: 0.82rem !important;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.proxy-rule-dialog .MuiInputBase-input::placeholder {
+  color: color-mix(in srgb, var(--muted) 74%, transparent);
+  opacity: 1;
+}
+
+.proxy-rule-dialog .MuiInputLabel-root {
+  transform: translate(11px, 8px) scale(1);
+  font-size: 0.76rem;
+  font-weight: 720;
+}
+
+.proxy-rule-dialog .MuiInputLabel-shrink {
+  transform: translate(10px, -8px) scale(0.78);
+}
+
+.proxy-rule-dialog textarea.MuiInputBase-input {
+  padding: 8px 11px !important;
+  line-height: 1.38;
+}
+
+.proxy-rule-dialog .MuiFormControlLabel-root {
+  min-height: 36px;
+  margin-inline: 0;
+  padding-inline: 4px 8px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 64%, transparent);
+  background: color-mix(in srgb, var(--panel-strong) 58%, transparent);
+}
+
+.proxy-rule-dialog .MuiFormControlLabel-label {
+  font-size: 0.82rem;
+  font-weight: 760;
+}
+
+.proxy-rule-dialog .MuiButton-root {
+  min-height: 34px;
+  border-radius: 10px;
+  font-weight: 820;
+}
+
+.proxy-rule-subsection {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 9px 10px 10px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 72%, transparent);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 14%, transparent), transparent 72%),
+    color-mix(in srgb, var(--panel-strong) 54%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 38%, transparent);
+}
+
+.proxy-rule-subsection > span {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.proxy-rule-subsection b {
+  font-size: 0.78rem;
+  line-height: 1.2;
+}
+
+.proxy-rule-subsection small {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 680;
+  line-height: 1.25;
+  text-align: right;
+}
+
+.proxy-rule-dialog .proxy-two-fields,
+.proxy-rule-dialog .proxy-three-fields {
+  gap: 8px;
+}
+
+.proxy-rule-dialog .proxy-three-fields {
+  grid-template-columns: 0.82fr minmax(0, 1fr) minmax(0, 1fr);
+}
+
+:root:not([data-style="mono"]) .proxy-rule-dialog .MuiDialog-paper {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.992), rgba(247, 250, 254, 0.986)),
+    #f8fbff;
+  box-shadow:
+    0 24px 62px rgba(20, 36, 54, 0.22),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96);
+}
+
+:root[data-style="mono"] .proxy-rule-dialog .MuiFormControlLabel-root {
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(143, 184, 234, 0.11);
+}
+
+:root[data-style="mono"] .proxy-rule-subsection {
+  background: rgba(255, 255, 255, 0.022);
+  border-color: rgba(143, 184, 234, 0.11);
+}
+
+.proxy-requests-dialog .MuiBackdrop-root {
+  background-color: rgba(30, 38, 48, 0.24);
+  backdrop-filter: blur(2px) saturate(1.02);
+  -webkit-backdrop-filter: blur(2px) saturate(1.02);
+}
+
+.proxy-requests-dialog .MuiDialog-paper {
+  width: min(1180px, calc(100vw - 34px));
+  max-height: calc(100vh - 38px);
+  border-radius: 14px;
+  border: 1px solid var(--line-soft);
+  color: var(--text);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.proxy-requests-dialog .MuiDialogTitle-root {
+  padding: 13px 15px 10px;
+  font-size: 0.95rem;
+  font-weight: 820;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.proxy-requests-dialog .MuiDialogContent-root {
+  padding: 12px;
+  overflow: hidden;
+}
+
+.proxy-requests-dialog .MuiButton-root {
+  min-height: 32px !important;
+  border-radius: 9px !important;
+  font-size: 0.72rem !important;
+  font-weight: 800 !important;
+}
+
+.proxy-requests-dialog .MuiChip-root {
+  height: 24px !important;
+  min-height: 24px !important;
+  border-radius: 7px !important;
+  font-size: 0.67rem !important;
+  font-weight: 780 !important;
+  line-height: 1 !important;
+}
+
+.proxy-requests-dialog .MuiChip-label {
+  padding-inline: 7px !important;
+  line-height: 1 !important;
+}
+
+.proxy-requests-dialog .MuiChip-icon {
+  margin-left: 5px !important;
+  margin-right: -3px !important;
+  font-size: 13px !important;
+}
+
+.proxy-requests-dialog .MuiIconButton-root {
+  width: 30px;
+  height: 30px;
+  border-radius: 9px;
+  border: 1px solid var(--line-soft);
+  color: var(--muted);
+  background: color-mix(in srgb, var(--panel-strong) 76%, transparent);
+}
+
+.proxy-requests-dialog .MuiIconButton-root:hover {
+  color: var(--accent);
+  border-color: var(--accent-border);
+  background: color-mix(in srgb, var(--accent-soft) 62%, transparent);
+}
+
+.proxy-requests-shell {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 10px;
+}
+
+.proxy-requests-toolbar {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 0 0 2px;
+}
+
+.proxy-requests-toolbar .MuiTextField-root {
+  min-width: 0;
+}
+
+.proxy-requests-toolbar .MuiOutlinedInput-root {
+  height: 34px;
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel-strong) 82%, transparent);
+}
+
+.proxy-requests-toolbar .MuiOutlinedInput-input {
+  font-size: 0.72rem;
+  font-weight: 680;
+}
+
+.proxy-request-filter-group {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px;
+  border-radius: 10px;
+  border: 1px solid var(--line-soft);
+  background: color-mix(in srgb, var(--side-pane-control) 62%, transparent);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.proxy-request-filter-group::-webkit-scrollbar {
+  display: none;
+}
+
+.proxy-request-filter-group .MuiChip-root {
+  flex: 0 0 auto;
+  height: 24px !important;
+  min-height: 24px !important;
+  border-radius: 7px !important;
+}
+
+.proxy-requests-modal-grid {
+  height: min(680px, 72vh);
+  min-height: 420px;
+  grid-template-columns: minmax(260px, 36%) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.proxy-requests-modal-grid .proxy-event-list,
+.proxy-requests-modal-grid .proxy-event-detail {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0.045) 70%),
+    color-mix(in srgb, var(--panel-strong) 86%, transparent);
+}
+
+.proxy-requests-modal-grid .proxy-event-list {
+  padding: 7px;
+  gap: 6px;
+}
+
+.proxy-requests-modal-grid .proxy-event-detail {
+  padding: 10px;
+}
+
+.proxy-requests-modal-grid .proxy-event-item {
+  min-height: 88px;
+  padding: 8px 10px;
+  border-radius: 9px;
+  overflow: visible;
+  content-visibility: visible;
+  contain-intrinsic-size: auto;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 12%, transparent), transparent 66%),
+    color-mix(in srgb, var(--panel-strong) 78%, transparent);
+}
+
+.proxy-requests-modal-grid .proxy-event-item.is-active {
+  border-color: color-mix(in srgb, var(--accent-border) 86%, transparent);
+  box-shadow:
+    inset 2px 0 0 var(--accent),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 28%, transparent),
+    0 7px 18px rgba(37, 99, 235, 0.08);
+}
+
+.proxy-requests-modal-grid .proxy-event-main {
+  align-items: center;
+}
+
+.proxy-requests-modal-grid .proxy-event-button {
+  display: grid;
+  gap: 6px;
+}
+
+.proxy-requests-modal-grid .proxy-event-main b {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 18px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 68%, transparent);
+  font-size: 0.62rem;
+  line-height: 1;
+}
+
+.proxy-requests-modal-grid .proxy-event-main small {
+  margin-top: 4px;
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 760;
+}
+
+.proxy-requests-modal-grid .proxy-event-meta {
+  margin-top: 0;
+  min-height: 24px;
+  align-items: center;
+}
+
+:root:not([data-style="mono"]) .proxy-requests-dialog .MuiDialog-paper {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.985), rgba(247, 250, 254, 0.992) 48%),
+    #f8fbff;
+  border-color: rgba(52, 76, 96, 0.16);
+  box-shadow:
+    0 30px 86px rgba(20, 36, 54, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96);
+}
+
+:root:not([data-style="mono"]) .proxy-requests-toolbar .MuiOutlinedInput-root {
+  background: rgba(255, 255, 255, 0.98);
+}
+
+:root[data-style="mono"] .proxy-requests-dialog .MuiBackdrop-root {
+  background-color: rgba(0, 0, 0, 0.34);
+}
+
+:root[data-style="mono"] .proxy-requests-dialog .MuiDialog-paper {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.018) 58%),
+    rgba(14, 18, 24, 0.985);
+  border-color: rgba(143, 184, 234, 0.13);
+  box-shadow:
+    0 30px 86px rgba(0, 0, 0, 0.58),
+    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+}
+
+:root[data-style="mono"] .proxy-request-filter-group {
+  background: rgba(255, 255, 255, 0.022);
+  border-color: rgba(143, 184, 234, 0.1);
+}
+
+.runtime-panel-drawer .MuiBackdrop-root {
+  background-color: rgba(30, 38, 48, 0.22);
+  backdrop-filter: blur(2px) saturate(1.02);
+  -webkit-backdrop-filter: blur(2px) saturate(1.02);
+}
+
+.runtime-panel-drawer .MuiDrawer-paper {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 16%, transparent), transparent 58%),
+    color-mix(in srgb, var(--panel) 98%, #ffffff 2%) !important;
+  box-shadow:
+    -24px 0 72px rgba(20, 36, 54, 0.2),
+    inset 1px 0 0 color-mix(in srgb, #ffffff 42%, transparent) !important;
+  backdrop-filter: blur(18px) saturate(1.1);
+  -webkit-backdrop-filter: blur(18px) saturate(1.1);
+}
+
+.runtime-panel-shell {
+  background:
+    radial-gradient(circle at 20% 0%, color-mix(in srgb, var(--accent-soft) 38%, transparent), transparent 36%),
+    transparent;
+}
+
+.runtime-panel-header {
+  padding: 1px 1px 0;
+}
+
+.runtime-panel-title-icon {
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 18%, transparent), transparent),
+    color-mix(in srgb, var(--panel-strong) 80%, transparent) !important;
+  border-color: color-mix(in srgb, var(--line) 80%, transparent) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 42%, transparent),
+    0 6px 16px rgba(20, 36, 54, 0.06);
+}
+
+.runtime-panel-title {
+  font-weight: 820 !important;
+  letter-spacing: 0 !important;
+}
+
+.runtime-panel-subtitle {
+  opacity: 0.84;
+}
+
+.runtime-panel-tabs {
+  min-height: 38px !important;
+  padding: 4px;
+  border-radius: 14px !important;
+  border: 1px solid color-mix(in srgb, var(--line) 74%, transparent) !important;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 14%, transparent), transparent),
+    color-mix(in srgb, var(--side-pane-control) 72%, transparent) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 36%, transparent),
+    0 8px 20px rgba(20, 36, 54, 0.045);
+}
+
+.runtime-panel-tabs .MuiTabs-flexContainer {
+  gap: 4px;
+}
+
+.runtime-panel-tabs .MuiTabs-indicator {
+  display: none;
+}
+
+.runtime-panel-tabs .MuiTab-root {
+  min-height: 30px !important;
+  border-radius: 10px !important;
+  border: 1px solid transparent;
+  color: var(--muted) !important;
+  opacity: 1;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    box-shadow 150ms ease;
+}
+
+.runtime-panel-tabs .MuiTab-root:hover {
+  color: var(--text) !important;
+  background: color-mix(in srgb, var(--accent-soft) 48%, transparent);
+}
+
+.runtime-panel-tabs .MuiTab-root.Mui-selected {
+  color: var(--text) !important;
+  border-color: color-mix(in srgb, var(--line) 78%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 24%, transparent), transparent 78%),
+    color-mix(in srgb, var(--panel-strong) 94%, transparent);
+  box-shadow:
+    0 8px 18px rgba(20, 36, 54, 0.07),
+    inset 0 1px 0 color-mix(in srgb, #ffffff 58%, transparent);
+}
+
+.runtime-panel-tabs .MuiTab-iconWrapper {
+  margin-right: 5px !important;
+  opacity: 0.9;
+}
+
+.runtime-panel-body {
+  gap: 10px !important;
+}
+
+.runtime-panel-body > .MuiBox-root {
+  border-color: color-mix(in srgb, var(--line) 72%, transparent) !important;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, #ffffff 12%, transparent), transparent 68%),
+    color-mix(in srgb, var(--panel-strong) 78%, transparent) !important;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, #ffffff 38%, transparent),
+    0 8px 22px rgba(20, 36, 54, 0.045) !important;
+  backdrop-filter: blur(20px) saturate(1.12);
+  -webkit-backdrop-filter: blur(20px) saturate(1.12);
+}
+
+.runtime-panel-body pre,
+.runtime-panel-body textarea,
+.runtime-panel-body .MuiInputBase-root {
+  border-radius: 11px !important;
+}
+
+.runtime-panel-drawer .MuiOutlinedInput-root,
+.runtime-panel-drawer .MuiInputBase-root,
+.runtime-panel-drawer .MuiSelect-select,
+.runtime-panel-drawer textarea,
+.runtime-panel-drawer pre {
+  background-color: color-mix(in srgb, var(--panel-strong) 92%, transparent) !important;
+}
+
+:root:not([data-style="mono"]) .runtime-panel-drawer .MuiDrawer-paper {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.988), rgba(247, 250, 254, 0.996) 50%),
+    #f8fbff !important;
+  border-left-color: rgba(52, 76, 96, 0.18) !important;
+}
+
+:root:not([data-style="mono"]) .runtime-panel-drawer .MuiOutlinedInput-root,
+:root:not([data-style="mono"]) .runtime-panel-drawer .MuiInputBase-root,
+:root:not([data-style="mono"]) .runtime-panel-drawer textarea,
+:root:not([data-style="mono"]) .runtime-panel-drawer pre {
+  background-color: rgba(255, 255, 255, 0.97) !important;
+}
+
+:root[data-style="mono"] .runtime-panel-drawer .MuiBackdrop-root {
+  background-color: rgba(0, 0, 0, 0.34);
+}
+
+:root[data-style="mono"] .runtime-panel-drawer .MuiDrawer-paper {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.056), rgba(255, 255, 255, 0.016) 58%),
+    rgba(13, 17, 23, 0.99) !important;
+  border-left-color: rgba(143, 184, 234, 0.12) !important;
+  box-shadow:
+    -24px 0 72px rgba(0, 0, 0, 0.5),
+    inset 1px 0 0 rgba(255, 255, 255, 0.035) !important;
+}
+
+:root[data-style="mono"] .runtime-panel-tabs {
+  border-color: rgba(143, 184, 234, 0.12) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.034), rgba(255, 255, 255, 0.012)),
+    rgba(255, 255, 255, 0.026) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+}
+
+:root[data-style="mono"] .runtime-panel-tabs .MuiTab-root.Mui-selected {
+  border-color: rgba(182, 210, 244, 0.2);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.07), rgba(255, 255, 255, 0.025)),
+    rgba(143, 184, 234, 0.1);
+  box-shadow:
+    0 10px 24px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+:root[data-style="mono"] .runtime-panel-title-icon,
+:root[data-style="mono"] .runtime-panel-body > .MuiBox-root {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.046), rgba(255, 255, 255, 0.014) 70%),
+    rgba(18, 22, 28, 0.72) !important;
+  border-color: rgba(143, 184, 234, 0.12) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 10px 26px rgba(0, 0, 0, 0.2) !important;
+}
+
+.runtime-profile-dialog .MuiBackdrop-root {
+  background-color: rgba(30, 38, 48, 0.24);
+  backdrop-filter: blur(2px) saturate(1.02);
+  -webkit-backdrop-filter: blur(2px) saturate(1.02);
+}
+
+.runtime-profile-dialog .MuiDialog-paper {
+  color: var(--text);
+  border: 1px solid var(--line);
+  box-shadow: var(--glass-shadow);
+}
+
+.runtime-profile-dialog .MuiDialogTitle-root,
+.runtime-profile-dialog .MuiDialogActions-root {
+  background: transparent;
+}
+
+.runtime-profile-dialog .MuiDialogContent-root {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.runtime-profile-dialog .MuiTextField-root .MuiInputBase-root {
+  border-radius: 10px;
+}
+
+.runtime-profile-dialog .MuiInputBase-input,
+.runtime-profile-dialog .MuiInputLabel-root {
+  color: var(--text);
+  font-weight: 720;
+}
+
+.runtime-profile-dialog .MuiInputLabel-root {
+  color: var(--muted);
+}
+
+.runtime-profile-dialog .MuiInputLabel-root.MuiInputLabel-shrink {
+  padding: 0 4px;
+  border-radius: 6px;
+  z-index: 1;
+}
+
+.runtime-profile-dialog .MuiOutlinedInput-notchedOutline {
+  border-color: var(--line);
+}
+
+.runtime-profile-dialog .MuiOutlinedInput-root:hover .MuiOutlinedInput-notchedOutline {
+  border-color: var(--accent-border);
+}
+
+.runtime-profile-dialog .MuiInputBase-root.Mui-disabled {
+  opacity: 1;
+}
+
+.runtime-profile-dialog .MuiInputBase-input.Mui-disabled {
+  -webkit-text-fill-color: var(--muted);
+}
+
+:root:not([data-style="mono"]) .runtime-profile-dialog .MuiDialog-paper {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.985), rgba(246, 250, 254, 0.992) 46%),
+    #f8fbff;
+  border-color: rgba(52, 76, 96, 0.18);
+  box-shadow:
+    0 30px 86px rgba(20, 36, 54, 0.28),
+    inset 0 1px 0 rgba(255, 255, 255, 0.96);
+}
+
+:root:not([data-style="mono"]) .runtime-profile-dialog .MuiTextField-root .MuiInputBase-root {
+  background: rgba(255, 255, 255, 0.98);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.88),
+    0 1px 0 rgba(20, 36, 54, 0.04);
+}
+
+:root:not([data-style="mono"]) .runtime-profile-dialog .MuiInputLabel-root.MuiInputLabel-shrink {
+  background: #f8fbff;
+}
+
+:root[data-style="mono"] .runtime-profile-dialog .MuiBackdrop-root {
+  background-color: rgba(0, 0, 0, 0.34);
+}
+
+:root[data-style="mono"] .runtime-profile-dialog .MuiDialog-paper {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.052), rgba(255, 255, 255, 0.018) 62%),
+    rgba(14, 18, 24, 0.985);
+  border-color: rgba(143, 184, 234, 0.13);
+  box-shadow:
+    0 30px 82px rgba(0, 0, 0, 0.56),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
+}
+
+:root[data-style="mono"] .runtime-profile-dialog .MuiTextField-root .MuiInputBase-root {
+  background: rgba(20, 26, 35, 0.94);
+}
+
+:root[data-style="mono"] .runtime-profile-dialog .MuiInputLabel-root.MuiInputLabel-shrink {
+  background: #111923;
 }
 
 @container (max-width: 900px) {
   .proxy-control-split {
-    grid-template-columns: minmax(200px, 280px) minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr);
   }
 
   .proxy-traffic-grid {
@@ -3178,6 +5854,8 @@ body::-webkit-scrollbar-corner,
 @container (max-width: 860px) {
   .proxy-control-split {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    align-content: start;
     gap: 8px;
   }
 
@@ -3190,6 +5868,10 @@ body::-webkit-scrollbar-corner,
   .proxy-main-grid--config .proxy-card-list.module-list-scroll {
     flex: 0 0 auto;
     max-height: min(170px, 24vh);
+  }
+
+  .proxy-main-grid--config .proxy-rules-panel .proxy-card-list.module-list-scroll {
+    max-height: min(260px, 34vh);
   }
 }
 
@@ -3225,6 +5907,32 @@ body::-webkit-scrollbar-corner,
   .proxy-list-item,
   .proxy-event-item {
     border-radius: 8px;
+  }
+}
+
+@media (max-width: 820px) {
+  .proxy-requests-dialog .MuiDialog-paper {
+    width: min(720px, calc(100vw - 18px));
+  }
+
+  .proxy-requests-dialog .MuiDialogContent-root {
+    padding: 10px;
+  }
+
+  .proxy-requests-toolbar {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .proxy-request-filter-group {
+    grid-column: 1 / -1;
+    order: 2;
+  }
+
+  .proxy-requests-modal-grid {
+    height: min(760px, 78vh);
+    min-height: 0;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(150px, 34%) minmax(0, 1fr);
   }
 }
 
@@ -3869,6 +6577,21 @@ body::-webkit-scrollbar-corner,
     min-width: 0;
   }
 
+  .sidebar-footer {
+    flex: 0 0 auto;
+    margin-top: 0;
+    margin-right: 0;
+    margin-bottom: 0;
+    margin-left: auto;
+    padding: 0 0 0 8px;
+    border-top: 0;
+    border-left: 1px solid color-mix(in srgb, var(--side-pane-line) 56%, transparent);
+    background: transparent;
+    box-shadow: none;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
   .shell-brand {
     padding: 0;
   }
@@ -3972,13 +6695,22 @@ body::-webkit-scrollbar-corner,
     padding: 10px 10px 14px;
   }
 
+  .settings-menu-choice {
+    width: 100%;
+    justify-self: stretch;
+  }
+
+  .settings-list-section--menu .MuiTextField-root {
+    width: min(220px, 100%) !important;
+  }
+
   .settings-list-section--appearance .settings-style-choice {
     width: 100%;
     min-width: 0;
   }
 
   .settings-list-section--appearance .settings-style-choice button {
-    min-height: 34px;
+    min-height: 82px;
   }
 
   .workspace-grid {
@@ -4062,17 +6794,19 @@ body::-webkit-scrollbar-corner,
   }
 
   .settings-section-nav {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(58px, 1fr));
+    display: flex;
     align-items: stretch;
     gap: 5px;
     padding: 5px;
-    overflow: visible;
+    overflow-x: auto;
+    overflow-y: hidden;
+    scrollbar-gutter: auto;
     border-radius: 12px;
   }
 
   .settings-section-nav button {
-    min-width: 0;
+    flex: 0 0 auto;
+    min-width: 56px;
     min-height: 30px;
     padding: 0 8px;
     text-align: center;
@@ -4082,7 +6816,7 @@ body::-webkit-scrollbar-corner,
   }
 
   .settings-section-content {
-    padding: 2px 8px 2px 0;
+    padding: 2px 8px 12px 0;
     scrollbar-gutter: stable;
   }
 
@@ -4091,6 +6825,14 @@ body::-webkit-scrollbar-corner,
   .settings-project-toolbar,
   .settings-finder-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .settings-path-field {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-path-field .MuiButton-root {
+    justify-self: start;
   }
 
   .settings-browser-route-head {
@@ -4126,12 +6868,54 @@ body::-webkit-scrollbar-corner,
   .settings-list-row--split .settings-style-choice {
     width: 100%;
     min-width: 0;
-    gap: 5px;
+    grid-template-columns: 1fr;
+    gap: 7px;
   }
 
   .settings-list-row--split .settings-style-choice button {
-    min-height: 32px;
-    border-radius: 9px;
+    min-height: 76px;
+    border-radius: 12px;
+    padding: 11px 12px;
+  }
+
+  .settings-workspace-switch-row,
+  .settings-workspace-create-row {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .settings-workspace-choice {
+    max-height: 150px;
+  }
+
+  .settings-workspace-create-fields {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-workspace-create-head {
+    align-items: start;
+    flex-direction: column;
+  }
+
+  .settings-workspace-create-head .MuiButton-root {
+    align-self: start;
+  }
+
+  .settings-workspace-editor-row {
+    grid-template-columns: 32px minmax(0, 1fr);
+  }
+
+  .settings-workspace-editor-head,
+  .settings-workspace-editor-actions {
+    align-items: start;
+  }
+
+  .settings-workspace-editor-head {
+    flex-direction: column;
+  }
+
+  .settings-workspace-meta-grid,
+  .settings-workspace-scope-grid {
+    grid-template-columns: 1fr;
   }
 
   .settings-list-row kbd,
@@ -4147,6 +6931,15 @@ body::-webkit-scrollbar-corner,
 
   .settings-deploy-switcher button {
     max-width: none;
+  }
+
+  .settings-build-config-head {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .settings-build-config-head .settings-inline-actions {
+    justify-content: flex-start;
   }
 
   .page-header,

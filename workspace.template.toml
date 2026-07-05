@@ -1,7 +1,9 @@
 [app]
 style_mode = "light"
+# active_workspace = "system"
 # default_page = "projects"
-# enabled_pages = ["projects", "merge", "deploy", "proxy"]
+# enabled_pages = ["projects", "merge", "build", "proxy"]
 # Leave enabled_pages empty to use the default menu set and default order.
 # If enabled_pages is provided, only those pages are shown and the order follows the list exactly.
+# active_workspace points to a file under workspaces/<key>.toml. The system workspace shows everything.
 # Keep dynamic data such as Git branch cache, recent selections, and histories in SQLite.

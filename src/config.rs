@@ -1,12 +1,14 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 const APP_CONFIG_DIR_NAME: &str = "rDevTool";
 const DEFAULT_PROJECTS_TEMPLATE: &str = include_str!("../projects.template.toml");
 const DEFAULT_WORKSPACE_TEMPLATE: &str = include_str!("../workspace.template.toml");
+const DEFAULT_PROJECT_WORKSPACE_TEMPLATE: &str = include_str!("../project-workspace.template.toml");
+pub const SYSTEM_PROJECT_WORKSPACE_KEY: &str = "system";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
@@ -28,6 +30,8 @@ pub struct WorkspaceAppConfig {
     pub default_page: Option<String>,
     #[serde(default = "default_workspace_enabled_pages")]
     pub enabled_pages: Vec<String>,
+    #[serde(default)]
+    pub active_workspace: Option<String>,
 }
 
 fn default_workspace_style_mode() -> String {
@@ -49,6 +53,7 @@ impl Default for WorkspaceAppConfig {
             style_mode: default_workspace_style_mode(),
             default_page: None,
             enabled_pages: default_workspace_enabled_pages(),
+            active_workspace: None,
         }
     }
 }
@@ -58,6 +63,86 @@ pub struct ConfigPaths {
     pub dir: PathBuf,
     pub projects: PathBuf,
     pub workspace: PathBuf,
+    pub project_workspaces: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectWorkspaceConfig {
+    pub key: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub include_all_projects: bool,
+    #[serde(default)]
+    pub include_all_navigation: bool,
+    #[serde(default)]
+    pub projects: Vec<String>,
+    #[serde(default)]
+    pub navigation_categories: Vec<String>,
+    #[serde(default)]
+    pub navigation_entries: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CreateProjectWorkspaceRequest {
+    pub key: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub copy_from: Option<ProjectWorkspaceConfig>,
+    pub activate: bool,
+}
+
+impl Default for ProjectWorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            key: SYSTEM_PROJECT_WORKSPACE_KEY.to_string(),
+            name: "系统工作区".to_string(),
+            description: Some("显示全部项目和入口，作为全局管理视图。".to_string()),
+            include_all_projects: true,
+            include_all_navigation: true,
+            projects: Vec::new(),
+            navigation_categories: Vec::new(),
+            navigation_entries: Vec::new(),
+        }
+    }
+}
+
+impl ProjectWorkspaceConfig {
+    pub fn normalized(mut self) -> Self {
+        self.key = normalize_project_workspace_key(&self.key)
+            .unwrap_or_else(|| SYSTEM_PROJECT_WORKSPACE_KEY.to_string());
+        self.name = normalize_text(&self.name).unwrap_or_else(|| self.key.clone());
+        self.description = normalize_optional_text(self.description);
+        self.projects = normalize_unique_strings(self.projects);
+        self.navigation_categories = normalize_unique_strings(self.navigation_categories);
+        self.navigation_entries = normalize_unique_strings(self.navigation_entries);
+        if self.key == SYSTEM_PROJECT_WORKSPACE_KEY {
+            self.include_all_projects = true;
+            self.include_all_navigation = true;
+        }
+        self
+    }
+
+    pub fn is_system(&self) -> bool {
+        self.key == SYSTEM_PROJECT_WORKSPACE_KEY
+    }
+
+    pub fn project_count_for(&self, config: &AppConfig) -> usize {
+        if self.include_all_projects {
+            return config.projects.len();
+        }
+        let keys = self.projects.iter().collect::<BTreeSet<_>>();
+        config
+            .projects
+            .iter()
+            .filter(|project| keys.contains(&project.key))
+            .count()
+    }
+
+    pub fn allows_project(&self, project_key: &str) -> bool {
+        self.include_all_projects || self.projects.iter().any(|key| key == project_key)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -201,6 +286,8 @@ pub struct RuntimeProfileConfig {
     pub browser_args: Vec<String>,
     #[serde(default)]
     pub proxy_url: String,
+    #[serde(default)]
+    pub rdev_proxy_profile_id: Option<String>,
     #[serde(default)]
     pub proxy_bypass: String,
     #[serde(default)]
@@ -412,10 +499,41 @@ fn default_target_branch_keywords() -> Vec<String> {
 pub struct DeployTargetConfig {
     pub key: String,
     pub label: String,
+    #[serde(default = "default_build_target_adapter")]
+    pub adapter: BuildTargetAdapter,
+    #[serde(default = "default_build_action_kind")]
+    pub action_kind: BuildActionKind,
+    #[serde(default)]
     pub jenkins_profile: String,
+    #[serde(default)]
     pub job_name: String,
     #[serde(default)]
     pub params: Vec<DeployParamConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildTargetAdapter {
+    Jenkins,
+    LocalCommand,
+    RSeriesPackage,
+}
+
+fn default_build_target_adapter() -> BuildTargetAdapter {
+    BuildTargetAdapter::Jenkins
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildActionKind {
+    Build,
+    Deploy,
+    Package,
+    Release,
+}
+
+fn default_build_action_kind() -> BuildActionKind {
+    BuildActionKind::Deploy
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -532,6 +650,14 @@ pub fn default_workspace_path() -> PathBuf {
     default_config_dir().join("workspace.toml")
 }
 
+pub fn default_project_workspaces_dir() -> PathBuf {
+    default_config_dir().join("workspaces")
+}
+
+pub fn default_project_workspace_path(key: &str) -> PathBuf {
+    default_project_workspaces_dir().join(format!("{key}.toml"))
+}
+
 pub fn legacy_projects_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("projects.toml")
 }
@@ -580,10 +706,28 @@ pub fn ensure_default_configs() -> Result<ConfigPaths> {
         })?;
     }
 
+    let project_workspaces = default_project_workspaces_dir();
+    fs::create_dir_all(&project_workspaces).with_context(|| {
+        format!(
+            "failed to create project workspaces directory: {}",
+            project_workspaces.display()
+        )
+    })?;
+    let system_workspace = project_workspaces.join(format!("{SYSTEM_PROJECT_WORKSPACE_KEY}.toml"));
+    if !system_workspace.exists() {
+        fs::write(&system_workspace, DEFAULT_PROJECT_WORKSPACE_TEMPLATE).with_context(|| {
+            format!(
+                "failed to write default project workspace: {}",
+                system_workspace.display()
+            )
+        })?;
+    }
+
     Ok(ConfigPaths {
         dir,
         projects,
         workspace,
+        project_workspaces,
     })
 }
 
@@ -640,6 +784,185 @@ impl AppConfig {
             },
         })
     }
+}
+
+pub fn normalize_project_workspace_key(value: &str) -> Option<String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    normalized
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+        .then_some(normalized)
+}
+
+pub fn active_project_workspace_key(config: &WorkspaceConfig) -> String {
+    config
+        .app
+        .active_workspace
+        .as_deref()
+        .and_then(normalize_project_workspace_key)
+        .unwrap_or_else(|| SYSTEM_PROJECT_WORKSPACE_KEY.to_string())
+}
+
+pub fn load_project_workspace_config(path: &Path) -> Result<ProjectWorkspaceConfig> {
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read project workspace: {}", path.display()))?;
+    let config: ProjectWorkspaceConfig = toml::from_str(&content)
+        .with_context(|| format!("failed to parse project workspace: {}", path.display()))?;
+    Ok(config.normalized())
+}
+
+pub fn save_project_workspace_config(path: &Path, config: &ProjectWorkspaceConfig) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create project workspace directory: {}",
+                parent.display()
+            )
+        })?;
+    }
+    let content = toml::to_string_pretty(&config.clone().normalized())
+        .with_context(|| format!("failed to serialize project workspace: {}", path.display()))?;
+    fs::write(path, content)
+        .with_context(|| format!("failed to write project workspace: {}", path.display()))?;
+    Ok(())
+}
+
+pub fn load_project_workspaces(dir: &Path) -> Result<Vec<ProjectWorkspaceConfig>> {
+    let mut workspaces = Vec::new();
+    for entry in fs::read_dir(dir)
+        .with_context(|| format!("failed to read project workspaces dir: {}", dir.display()))?
+    {
+        let entry = entry.with_context(|| {
+            format!(
+                "failed to read project workspace entry in {}",
+                dir.display()
+            )
+        })?;
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("toml") {
+            continue;
+        }
+        workspaces.push(load_project_workspace_config(&path)?);
+    }
+    if !workspaces
+        .iter()
+        .any(|workspace| workspace.key == SYSTEM_PROJECT_WORKSPACE_KEY)
+    {
+        workspaces.push(ProjectWorkspaceConfig::default());
+    }
+    workspaces.sort_by(|left, right| {
+        left.is_system()
+            .cmp(&right.is_system())
+            .reverse()
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    Ok(workspaces)
+}
+
+pub fn load_project_workspace_by_key(dir: &Path, key: &str) -> Result<ProjectWorkspaceConfig> {
+    let key = normalize_project_workspace_key(key)
+        .ok_or_else(|| anyhow::anyhow!("invalid project workspace key: {key}"))?;
+    let path = dir.join(format!("{key}.toml"));
+    if path.exists() {
+        return load_project_workspace_config(&path);
+    }
+    if key == SYSTEM_PROJECT_WORKSPACE_KEY {
+        return Ok(ProjectWorkspaceConfig::default());
+    }
+    bail!("project workspace not found: {key}")
+}
+
+pub fn create_project_workspace(
+    paths: &ConfigPaths,
+    request: CreateProjectWorkspaceRequest,
+) -> Result<ProjectWorkspaceConfig> {
+    let key = normalize_project_workspace_key(&request.key)
+        .ok_or_else(|| anyhow::anyhow!("invalid project workspace key: {}", request.key))?;
+    if key == SYSTEM_PROJECT_WORKSPACE_KEY {
+        bail!("cannot create reserved project workspace: {SYSTEM_PROJECT_WORKSPACE_KEY}");
+    }
+    let path = paths.project_workspaces.join(format!("{key}.toml"));
+    if path.exists() {
+        bail!("project workspace already exists: {key}");
+    }
+
+    let name = normalize_text(&request.name)
+        .ok_or_else(|| anyhow::anyhow!("project workspace name is required"))?;
+    let mut workspace = request.copy_from.unwrap_or_else(|| ProjectWorkspaceConfig {
+        key: key.clone(),
+        name: name.clone(),
+        description: None,
+        include_all_projects: false,
+        include_all_navigation: false,
+        projects: Vec::new(),
+        navigation_categories: Vec::new(),
+        navigation_entries: Vec::new(),
+    });
+    workspace.key = key;
+    workspace.name = name;
+    workspace.description = normalize_optional_text(request.description);
+    if workspace.is_system() {
+        workspace.include_all_projects = false;
+        workspace.include_all_navigation = false;
+    }
+    workspace = workspace.normalized();
+    save_project_workspace_config(&path, &workspace)?;
+
+    if request.activate {
+        let mut app_workspace = load_workspace_config(&paths.workspace)?;
+        app_workspace.app.active_workspace = Some(workspace.key.clone());
+        save_workspace_config(&paths.workspace, &app_workspace)?;
+    }
+
+    Ok(workspace)
+}
+
+pub fn load_active_project_workspace(paths: &ConfigPaths) -> Result<ProjectWorkspaceConfig> {
+    let workspace_config = load_workspace_config(&paths.workspace)?;
+    let active_key = active_project_workspace_key(&workspace_config);
+    load_project_workspace_by_key(&paths.project_workspaces, &active_key).or_else(|_| {
+        load_project_workspace_by_key(&paths.project_workspaces, SYSTEM_PROJECT_WORKSPACE_KEY)
+    })
+}
+
+pub fn apply_project_workspace_filter(
+    config: &AppConfig,
+    workspace: &ProjectWorkspaceConfig,
+) -> AppConfig {
+    if workspace.include_all_projects {
+        return config.clone();
+    }
+    let mut next = config.clone();
+    next.projects
+        .retain(|project| workspace.allows_project(&project.key));
+    next
+}
+
+fn normalize_text(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty()).then(|| value.to_string())
+}
+
+fn normalize_optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|value| normalize_text(&value))
+}
+
+fn normalize_unique_strings(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for value in values {
+        let Some(value) = normalize_text(&value) else {
+            continue;
+        };
+        if seen.insert(value.clone()) {
+            normalized.push(value);
+        }
+    }
+    normalized
 }
 
 impl ProjectConfig {

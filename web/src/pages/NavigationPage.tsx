@@ -13,6 +13,7 @@ import { type KeyboardEvent } from "react";
 import {
   AppWindowIcon,
   ClearIcon,
+  FolderIcon,
   OpenExternalIcon,
   TerminalIcon,
 } from "../components/AppIcons";
@@ -29,6 +30,7 @@ type NavigationEntry = {
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  path?: string | null;
   cwd?: string | null;
   note?: string | null;
 };
@@ -65,8 +67,10 @@ function navigationKindLabel(kind: string) {
       return "应用";
     case "script":
       return "脚本";
+    case "directory":
+      return "目录";
     default:
-      return "网页";
+      return "网站";
   }
 }
 
@@ -76,6 +80,8 @@ function NavigationKindIcon({ kind }: { kind: string }) {
       return <AppWindowIcon fontSize="inherit" />;
     case "script":
       return <TerminalIcon fontSize="inherit" />;
+    case "directory":
+      return <FolderIcon fontSize="inherit" />;
     default:
       return <OpenExternalIcon fontSize="inherit" />;
   }

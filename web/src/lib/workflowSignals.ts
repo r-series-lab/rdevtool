@@ -3,7 +3,7 @@ import type {
   BranchTaskReplayRequest,
   BranchTaskResponse,
   BranchWorkflowMode,
-  DeployHistoryEntry,
+  BuildHistoryEntry,
   FinderShortcutItem,
   ProjectRuntimeEntry,
   ProjectWorkflowAction,
@@ -24,7 +24,11 @@ export type WorkflowSignalSource =
   | "project.openDirectory.success"
   | "finder.shortcut.open.success";
 
-export type WorkflowReplayTarget = "deploy.replay" | "branch.replay" | "project.replay";
+export type WorkflowReplayTarget =
+  | "build.replay"
+  | "deploy.replay"
+  | "branch.replay"
+  | "project.replay";
 
 export type WorkflowBroadcastRule = {
   id: string;
@@ -36,9 +40,14 @@ export type WorkflowBroadcastRule = {
   replay?: WorkflowReplay;
 };
 
-export type WorkflowDeployReplay = {
+export type WorkflowBuildReplay = {
+  target: "build.replay";
+  entry: BuildHistoryEntry;
+};
+
+export type WorkflowLegacyDeployReplay = {
   target: "deploy.replay";
-  entry: DeployHistoryEntry;
+  entry: BuildHistoryEntry;
 };
 
 export type WorkflowBranchReplay = {
@@ -54,7 +63,11 @@ export type WorkflowProjectReplay = {
   shortcut?: FinderShortcutItem;
 };
 
-export type WorkflowReplay = WorkflowDeployReplay | WorkflowBranchReplay | WorkflowProjectReplay;
+export type WorkflowReplay =
+  | WorkflowBuildReplay
+  | WorkflowLegacyDeployReplay
+  | WorkflowBranchReplay
+  | WorkflowProjectReplay;
 
 export type WorkflowReceiveRule = {
   id: string;
@@ -92,7 +105,7 @@ export type WorkflowSignal = {
   };
 };
 
-export const DEFAULT_WORKFLOW_SIGNAL_ID = "merge-to-deploy";
+export const DEFAULT_WORKFLOW_SIGNAL_ID = "merge-to-build";
 
 export const WORKFLOW_BRANCH_EVENT_OPTIONS: Array<{
   source: WorkflowSignalSource;
@@ -145,8 +158,32 @@ function normalizeStringArray(value: unknown): string[] {
     : [];
 }
 
+function normalizeReplayKeyPrefix(value: string) {
+  return value.startsWith("deploy:") ? `build:${value.slice("deploy:".length)}` : value;
+}
+
 function cloneJson<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function isBuildReplayTarget(target?: string | null) {
+  return target === "build.replay" || target === "deploy.replay";
+}
+
+function isBuildReplay(
+  replay: WorkflowReplay,
+): replay is WorkflowBuildReplay | WorkflowLegacyDeployReplay {
+  return isBuildReplayTarget(replay.target);
+}
+
+export function workflowReplayTargetsEqual(
+  left: WorkflowReplayTarget,
+  right: WorkflowReplayTarget,
+) {
+  if (isBuildReplayTarget(left) && isBuildReplayTarget(right)) {
+    return true;
+  }
+  return left === right;
 }
 
 function normalizeProjectWorkflowAction(value: unknown): ProjectWorkflowAction | null {
@@ -179,7 +216,7 @@ function normalizeBroadcastRule(value: unknown): WorkflowBroadcastRule | null {
 
   const replayKey =
     typeof candidate.replayKey === "string" && candidate.replayKey
-      ? candidate.replayKey
+      ? normalizeReplayKeyPrefix(candidate.replayKey)
       : replay
         ? workflowReplayKey(replay)
         : undefined;
@@ -213,7 +250,7 @@ function normalizeReceiveRule(value: unknown): WorkflowReceiveRule | null {
 
   const replayKey =
     typeof candidate.replayKey === "string" && candidate.replayKey
-      ? candidate.replayKey
+      ? normalizeReplayKeyPrefix(candidate.replayKey)
       : workflowReplayKey(replay);
 
   return {
@@ -242,9 +279,11 @@ function normalizeReplay(value: unknown): WorkflowReplay | null {
   }
 
   const candidate = value as Partial<WorkflowReplay>;
-  if (candidate.target === "deploy.replay") {
-    const entry = normalizeDeployHistoryEntry((candidate as Partial<WorkflowDeployReplay>).entry);
-    return entry ? { target: "deploy.replay", entry } : null;
+  if (isBuildReplayTarget(candidate.target)) {
+    const entry = normalizeBuildHistoryEntry(
+      (candidate as Partial<WorkflowBuildReplay | WorkflowLegacyDeployReplay>).entry,
+    );
+    return entry ? { target: "build.replay", entry } : null;
   }
   if (candidate.target === "branch.replay") {
     const entry = normalizeBranchTaskHistoryEntry((candidate as Partial<WorkflowBranchReplay>).entry);
@@ -256,11 +295,11 @@ function normalizeReplay(value: unknown): WorkflowReplay | null {
   return null;
 }
 
-function normalizeDeployHistoryEntry(value: unknown): DeployHistoryEntry | null {
+function normalizeBuildHistoryEntry(value: unknown): BuildHistoryEntry | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
-  const candidate = value as Partial<DeployHistoryEntry>;
+  const candidate = value as Partial<BuildHistoryEntry>;
   if (
     typeof candidate.historyKey !== "string" ||
     typeof candidate.projectKey !== "string" ||
@@ -369,9 +408,15 @@ function normalizeFinderShortcutItem(value: unknown): FinderShortcutItem | null 
       kind: entry.kind,
       targetLabel: entry.targetLabel,
       url: typeof entry.url === "string" ? entry.url : null,
+      browser: typeof entry.browser === "string" ? entry.browser : null,
+      browserProfile:
+        typeof entry.browserProfile === "string" ? entry.browserProfile : null,
+      runtimeProfile:
+        typeof entry.runtimeProfile === "string" ? entry.runtimeProfile : null,
       bundleId: typeof entry.bundleId === "string" ? entry.bundleId : null,
       appName: typeof entry.appName === "string" ? entry.appName : null,
       script: typeof entry.script === "string" ? entry.script : null,
+      path: typeof entry.path === "string" ? entry.path : null,
       cwd: typeof entry.cwd === "string" ? entry.cwd : null,
       note: typeof entry.note === "string" ? entry.note : null,
     },
@@ -768,9 +813,9 @@ export function createProjectWorkflowSignals({
     }));
 }
 
-export function workflowReplayFromDeployHistory(entry: DeployHistoryEntry): WorkflowDeployReplay {
+export function workflowReplayFromBuildHistory(entry: BuildHistoryEntry): WorkflowBuildReplay {
   return {
-    target: "deploy.replay",
+    target: "build.replay",
     entry: cloneJson(entry),
   };
 }
@@ -809,8 +854,8 @@ export function workflowReplayFromFinderShortcut(
 }
 
 export function workflowReplayKey(replay: WorkflowReplay) {
-  if (replay.target === "deploy.replay") {
-    return `deploy:${replay.entry.projectKey}:${replay.entry.mode}:${stableJson(replay.entry.params ?? {})}`;
+  if (isBuildReplay(replay)) {
+    return `build:${replay.entry.projectKey}:${replay.entry.mode}:${stableJson(replay.entry.params ?? {})}`;
   }
   if (replay.target === "branch.replay") {
     return `branch:${replay.entry.taskKind}:${stableJson(replay.entry.replay?.request ?? {})}`;
@@ -822,7 +867,7 @@ export function workflowReplayKey(replay: WorkflowReplay) {
 }
 
 export function workflowReplayLabel(replay: WorkflowReplay) {
-  if (replay.target === "deploy.replay") {
+  if (isBuildReplay(replay)) {
     return `${replay.entry.projectName} / ${replay.entry.mode}`;
   }
   if (replay.target === "branch.replay") {
@@ -851,7 +896,7 @@ export function makeReceiveRulesForReplay({
   );
 
   const keptRules = existing.filter(
-    (rule) => !(rule.target === replay.target && rule.replayKey === replayKey),
+    (rule) => !(workflowReplayTargetsEqual(rule.target, replay.target) && rule.replayKey === replayKey),
   );
   const nextRules = normalizedIds.map((signalId) => ({
     id: makeRuleId("receive"),
@@ -924,8 +969,8 @@ export function defaultSignalIdForReplay(replay: WorkflowReplay) {
         return "branch-switch-success";
     }
   }
-  if (replay.target === "deploy.replay") {
-    return `${slugSignalPart(replay.entry.projectKey)}-deploy-success`;
+  if (isBuildReplay(replay)) {
+    return `${slugSignalPart(replay.entry.projectKey)}-build-success`;
   }
   if (replay.action === "finder.shortcut.open") {
     return `${slugSignalPart(replay.shortcut?.entry.name || "shortcut")}-open-success`;

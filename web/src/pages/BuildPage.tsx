@@ -5,6 +5,10 @@ import {
   Checkbox,
   Chip,
   Collapse,
+  Dialog,
+  DialogActions,
+  DialogContent,
+  DialogTitle,
   FormControl,
   IconButton,
   InputAdornment,
@@ -17,9 +21,14 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
+import { invoke } from "@tauri-apps/api/core";
 import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { SelectChangeEvent } from "@mui/material/Select";
-import type { BranchOption, DeployHistoryEntry } from "../app-types";
+import type {
+  BranchOption,
+  BuildHistoryEntry,
+  ProjectRuntimeLogResponse,
+} from "../app-types";
 import { HistoryCard } from "../components/AppCards";
 import {
   WorkflowLinkButton,
@@ -37,10 +46,13 @@ import {
   CollapseIcon,
   CopyIcon,
   ExpandIcon,
+  FolderIcon,
   OpenExternalIcon,
   RefreshIcon,
   ReplayIcon,
   StarIcon,
+  StopIcon,
+  TerminalIcon,
   TrashIcon,
 } from "../components/AppIcons";
 import { groupConsecutiveBy, stableStringify } from "../lib/historyGroups";
@@ -49,11 +61,11 @@ import type { TrayPinnedAction } from "../lib/trayPins";
 import { useTrayPinnedActions } from "../hooks/useTrayPinnedActions";
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 import type {
-  DeployParamMeta,
-  DeployPlan,
-  DeployTargetMeta,
-  DeployTargetSummary,
-} from "../hooks/useDeployContext";
+  BuildParamMeta,
+  BuildPlan,
+  BuildTargetMeta,
+  BuildTargetSummary,
+} from "../hooks/useBuildContext";
 import {
   type WorkflowReceiveRule,
 } from "../lib/workflowSignals";
@@ -61,7 +73,7 @@ import {
 type ProjectOption = {
   key: string;
   name: string;
-  deployTargets: DeployTargetSummary[];
+  deployTargets: BuildTargetSummary[];
 };
 
 type BuildResult = {
@@ -73,19 +85,40 @@ type BuildResult = {
   detail: string;
 };
 
+type BuildActionCopy = {
+  noun: string;
+  start: string;
+  config: string;
+};
+
 const HISTORY_PAGE_SIZE = 5;
 const BUILD_STATUS_STALE_MS = 45_000;
 const BUILD_STATUS_CLOCK_INTERVAL_MS = 15_000;
-const DEPLOY_HISTORY_PARAM_PREVIEW_LIMIT = 5;
-const DEPLOY_ENV_PARAM_KEYS = new Set(["ENV_PROFILE", "projectEnv", "env"]);
-const DEPLOY_BRANCH_PARAM_KEYS = new Set(["BRANCH", "branch", "Branch"]);
-const SENSITIVE_DEPLOY_PARAM_PATTERN = /(token|secret|password|passwd|pwd|credential|auth|private)/i;
+const BUILD_HISTORY_PARAM_PREVIEW_LIMIT = 5;
+const BUILD_ENV_PARAM_KEYS = new Set(["ENV_PROFILE", "projectEnv", "env"]);
+const BUILD_BRANCH_PARAM_KEYS = new Set(["BRANCH", "branch", "Branch"]);
+const SENSITIVE_BUILD_PARAM_PATTERN = /(token|secret|password|passwd|pwd|credential|auth|private)/i;
 
 function isActiveBuildState(stateKey?: string | null) {
   return stateKey === "accepted" || stateKey === "queued" || stateKey === "running";
 }
 
-function deployHistorySignature(item: DeployHistoryEntry) {
+function buildActionCopy(actionKind?: string | null): BuildActionCopy {
+  switch (actionKind) {
+    case "build":
+      return { noun: "构建", start: "开始构建", config: "构建配置" };
+    case "package":
+      return { noun: "打包", start: "开始打包", config: "打包配置" };
+    case "release":
+      return { noun: "发布", start: "开始发布", config: "发布配置" };
+    case "deploy":
+      return { noun: "部署", start: "开始部署", config: "部署配置" };
+    default:
+      return { noun: "构建", start: "开始构建", config: "构建配置" };
+  }
+}
+
+function buildHistorySignature(item: BuildHistoryEntry) {
   return stableStringify({
     projectKey: item.projectKey,
     mode: item.mode,
@@ -95,7 +128,7 @@ function deployHistorySignature(item: DeployHistoryEntry) {
   });
 }
 
-function normalizeDeployHistoryParams(params?: Record<string, string> | null) {
+function normalizeBuildHistoryParams(params?: Record<string, string> | null) {
   const normalized: Record<string, string> = {};
   for (const [key, value] of Object.entries(params ?? {})) {
     normalized[key] = value == null ? "" : String(value);
@@ -103,31 +136,32 @@ function normalizeDeployHistoryParams(params?: Record<string, string> | null) {
   return normalized;
 }
 
-function deployTrayDedupeKeyFromHistory(item: DeployHistoryEntry) {
-  return `deploy.replay:${stableStringify({
+function buildTrayDedupeKeyFromHistory(item: BuildHistoryEntry) {
+  return `build.replay:${stableStringify({
     historyKey: item.historyKey,
     projectKey: item.projectKey,
     mode: item.mode || "",
-    params: normalizeDeployHistoryParams(item.params),
+    params: normalizeBuildHistoryParams(item.params),
   })}`;
 }
 
-function deployLegacyTrayDedupeKeyFromHistory(item: DeployHistoryEntry) {
-  return `deploy.replay:${stableStringify({
+function buildLegacyTrayDedupeKeyFromHistory(item: BuildHistoryEntry) {
+  return `build.replay:${stableStringify({
     projectKey: item.projectKey,
     mode: item.mode || "",
-    params: normalizeDeployHistoryParams(item.params),
+    params: normalizeBuildHistoryParams(item.params),
   })}`;
 }
 
-function deployTrayActionFromHistory(
-  item: DeployHistoryEntry,
+function buildTrayActionFromHistory(
+  item: BuildHistoryEntry,
   targetLabel: string,
+  actionLabel = "部署",
 ): TrayPinnedAction {
-  const params = normalizeDeployHistoryParams(item.params);
+  const params = normalizeBuildHistoryParams(item.params);
   return {
-    kind: "deploy.replay",
-    label: `部署：${item.projectName} / ${targetLabel || item.mode || "默认配置"}`,
+    kind: "build.replay",
+    label: `${actionLabel}：${item.projectName} / ${targetLabel || item.mode || "默认配置"}`,
     detail: [item.env, item.branch].filter(Boolean).join(" · ") || item.stateLabel,
     projectKey: item.projectKey,
     entry: null,
@@ -136,7 +170,7 @@ function deployTrayActionFromHistory(
       target: item.mode || null,
       params,
     },
-    dedupeKey: deployTrayDedupeKeyFromHistory(item),
+    dedupeKey: buildTrayDedupeKeyFromHistory(item),
     updatedAtMs: Date.now(),
   };
 }
@@ -183,14 +217,14 @@ function FieldRow({ label, children }: FieldRowProps) {
     <Box
       sx={{
         display: "grid",
-        gridTemplateColumns: { xs: "82px minmax(0, 1fr)", sm: "104px minmax(0, 1fr)" },
+        gridTemplateColumns: { xs: "74px minmax(0, 1fr)", sm: "92px minmax(0, 1fr)" },
         alignItems: "center",
-        gap: { xs: 0.75, sm: 1 },
+        gap: { xs: 0.6, sm: 0.8 },
         minWidth: 0,
-        minHeight: 42,
-        px: { xs: 0.9, sm: 1 },
-        py: 0.55,
-        borderRadius: "13px",
+        minHeight: 38,
+        px: { xs: 0.78, sm: 0.9 },
+        py: 0.42,
+        borderRadius: "11px",
         border: "1px solid",
         borderColor: "divider",
         bgcolor: (theme) =>
@@ -213,7 +247,7 @@ function FieldRow({ label, children }: FieldRowProps) {
 }
 
 type BooleanRowProps = {
-  param: DeployParamMeta;
+  param: BuildParamMeta;
   value: string;
   disabled: boolean;
   onChange: (value: string) => void;
@@ -242,17 +276,17 @@ function BooleanRow({ param, value, disabled, onChange }: BooleanRowProps) {
   );
 }
 
-type DeployValueWarningProps = {
+type BuildValueWarningProps = {
   message: string;
   disabled: boolean;
   onReset: () => void;
 };
 
-function DeployValueWarning({
+function BuildValueWarning({
   message,
   disabled,
   onReset,
-}: DeployValueWarningProps) {
+}: BuildValueWarningProps) {
   if (!message) {
     return null;
   }
@@ -266,8 +300,8 @@ function DeployValueWarning({
   );
 }
 
-function deployParamResetValue(
-  param: DeployParamMeta,
+function buildParamResetValue(
+  param: BuildParamMeta,
   sourceBranchOptions: string[],
 ) {
   if (param.kind === "branch") {
@@ -286,8 +320,8 @@ function deployParamResetValue(
   return param.defaultValue;
 }
 
-function deployParamInvalidMessage(
-  param: DeployParamMeta,
+function buildParamInvalidMessage(
+  param: BuildParamMeta,
   value: string,
   sourceBranchOptions: string[],
 ) {
@@ -373,7 +407,7 @@ function BuildStatusFreshness({
   );
 }
 
-type DeployResultRowProps = {
+type BuildResultRowProps = {
   label: string;
   value?: string | number | null;
   copyKey?: string;
@@ -381,13 +415,13 @@ type DeployResultRowProps = {
   onCopy?: (field: string, value?: string | number | null) => void;
 };
 
-function DeployResultRow({
+function BuildResultRow({
   label,
   value,
   copyKey,
   copied = false,
   onCopy,
-}: DeployResultRowProps) {
+}: BuildResultRowProps) {
   const textValue = value === null || value === undefined || value === "" ? "-" : String(value);
   const canCopy = Boolean(copyKey && textValue !== "-" && onCopy);
 
@@ -437,7 +471,7 @@ function DeployResultRow({
   );
 }
 
-type DeployResultLinkRowProps = {
+type BuildResultLinkRowProps = {
   label: string;
   value?: string | null;
   copyKey: string;
@@ -446,14 +480,14 @@ type DeployResultLinkRowProps = {
   onOpen: (url: string) => void;
 };
 
-function DeployResultLinkRow({
+function BuildResultLinkRow({
   label,
   value,
   copyKey,
   copied,
   onCopy,
   onOpen,
-}: DeployResultLinkRowProps) {
+}: BuildResultLinkRowProps) {
   const url = value?.trim() ?? "";
 
   return (
@@ -510,7 +544,7 @@ function DeployResultLinkRow({
   );
 }
 
-type DeployHistoryParamEntry = {
+type BuildHistoryParamEntry = {
   key: string;
   label: string;
   valueLabel: string;
@@ -523,34 +557,34 @@ function hasRecordValue(record: Record<string, string>, key: string) {
   return Object.prototype.hasOwnProperty.call(record, key);
 }
 
-function deployHistoryParamLabel(key: string, param?: DeployParamMeta) {
+function buildHistoryParamLabel(key: string, param?: BuildParamMeta) {
   if (param?.label) {
     return param.label;
   }
-  if (DEPLOY_ENV_PARAM_KEYS.has(key)) {
+  if (BUILD_ENV_PARAM_KEYS.has(key)) {
     return "环境";
   }
-  if (DEPLOY_BRANCH_PARAM_KEYS.has(key)) {
+  if (BUILD_BRANCH_PARAM_KEYS.has(key)) {
     return "分支";
   }
   return key;
 }
 
-function shouldMaskDeployHistoryParam(key: string, param?: DeployParamMeta) {
-  return param?.kind === "hidden" || SENSITIVE_DEPLOY_PARAM_PATTERN.test(key);
+function shouldMaskBuildHistoryParam(key: string, param?: BuildParamMeta) {
+  return param?.kind === "hidden" || SENSITIVE_BUILD_PARAM_PATTERN.test(key);
 }
 
-function shouldSkipDeployHistoryParam(
-  item: DeployHistoryEntry,
+function shouldSkipBuildHistoryParam(
+  item: BuildHistoryEntry,
   key: string,
   value: string,
 ) {
   const normalizedValue = value.trim();
-  if (DEPLOY_ENV_PARAM_KEYS.has(key) && item.env && normalizedValue === item.env.trim()) {
+  if (BUILD_ENV_PARAM_KEYS.has(key) && item.env && normalizedValue === item.env.trim()) {
     return true;
   }
   if (
-    DEPLOY_BRANCH_PARAM_KEYS.has(key) &&
+    BUILD_BRANCH_PARAM_KEYS.has(key) &&
     item.branch &&
     normalizedValue === item.branch.trim()
   ) {
@@ -559,13 +593,13 @@ function shouldSkipDeployHistoryParam(
   return false;
 }
 
-function buildDeployHistoryParamEntries(
-  item: DeployHistoryEntry,
-  paramMetaByKey: Map<string, DeployParamMeta>,
+function buildHistoryParamEntries(
+  item: BuildHistoryEntry,
+  paramMetaByKey: Map<string, BuildParamMeta>,
   defaultParamValues: Record<string, string>,
-): DeployHistoryParamEntry[] {
+): BuildHistoryParamEntry[] {
   return Object.entries(item.params ?? {})
-    .filter(([key, value]) => !shouldSkipDeployHistoryParam(item, key, String(value ?? "")))
+    .filter(([key, value]) => !shouldSkipBuildHistoryParam(item, key, String(value ?? "")))
     .map(([key, value]) => {
       const param = paramMetaByKey.get(key);
       const textValue = String(value ?? "");
@@ -573,10 +607,10 @@ function buildDeployHistoryParamEntries(
       const defaultValue = hasRecordValue(defaultParamValues, key)
         ? defaultParamValues[key]
         : param?.defaultValue ?? "";
-      const hidden = shouldMaskDeployHistoryParam(key, param);
+      const hidden = shouldMaskBuildHistoryParam(key, param);
       return {
         key,
-        label: deployHistoryParamLabel(key, param),
+        label: buildHistoryParamLabel(key, param),
         valueLabel: hidden ? (textValue ? "已配置" : "未配置") : textValue || "-",
         hidden,
         changed: defaultKnown && textValue !== defaultValue,
@@ -585,29 +619,29 @@ function buildDeployHistoryParamEntries(
     });
 }
 
-function buildDeployHistoryParamMetaLabels(
-  item: DeployHistoryEntry,
-  paramMetaByKey: Map<string, DeployParamMeta>,
+function buildHistoryParamMetaLabels(
+  item: BuildHistoryEntry,
+  paramMetaByKey: Map<string, BuildParamMeta>,
   defaultParamValues: Record<string, string>,
 ) {
-  const entries = buildDeployHistoryParamEntries(item, paramMetaByKey, defaultParamValues);
+  const entries = buildHistoryParamEntries(item, paramMetaByKey, defaultParamValues);
   if (entries.length === 0) {
     return [];
   }
 
-  const visibleEntries = entries.slice(0, DEPLOY_HISTORY_PARAM_PREVIEW_LIMIT);
+  const visibleEntries = entries.slice(0, BUILD_HISTORY_PARAM_PREVIEW_LIMIT);
   const extraCount = Math.max(0, entries.length - visibleEntries.length);
   const labels = visibleEntries.map((entry) => `${entry.label}: ${entry.valueLabel}`);
   return extraCount > 0 ? [...labels, `+${extraCount}`] : labels;
 }
 
-export type DeployPageProps = {
+export type BuildPageProps = {
   projects: ProjectOption[];
   selectedProject: string;
   onProjectChange: (projectKey: string) => void;
   target: string;
   onTargetChange: (value: string) => void;
-  targetMeta: DeployTargetMeta | null;
+  targetMeta: BuildTargetMeta | null;
   paramValues: Record<string, string>;
   defaultParamValues: Record<string, string>;
   onParamChange: (key: string, value: string) => void;
@@ -620,33 +654,33 @@ export type DeployPageProps = {
   branchSyncText: string;
   busy: string;
   onTriggerBuild: () => void;
-  plan: DeployPlan | null;
+  plan: BuildPlan | null;
   buildResult: BuildResult | null;
   buildResultUpdatedAtMs: number;
   buildAutoRefreshTimedOut: boolean;
   onRefreshBuild: () => void;
   onOpenBuildRecord: () => void;
   onOpenBuildUrl: (url: string) => void;
-  deployHistory: DeployHistoryEntry[];
-  onReplayDeployHistory: (entry: DeployHistoryEntry) => void;
+  buildHistory: BuildHistoryEntry[];
+  onReplayBuildHistory: (entry: BuildHistoryEntry) => void;
   workflowReceiveRules: WorkflowReceiveRule[];
-  workflowSignalIdsForDeployReplay: (entry: DeployHistoryEntry) => string[];
+  workflowSignalIdsForBuildReplay: (entry: BuildHistoryEntry) => string[];
   workflowSignalOptions: string[];
   workflowSignalSummaries: WorkflowSignalSummary[];
-  onWorkflowDeployReplayReceiversChange: (
-    entry: DeployHistoryEntry,
+  onWorkflowBuildReplayReceiversChange: (
+    entry: BuildHistoryEntry,
     signalIds: string[],
   ) => void;
   onWorkflowReceiveRulesEnabledChange: (ruleIds: string[], enabled: boolean) => void;
   onWorkflowReceiveRulesDelete: (ruleIds: string[]) => void;
   onWorkflowSignalDelete: (signalId: string) => void;
   onWorkflowSignalsClear: () => void;
-  onRefreshDeployHistory: () => void;
-  onClearDeployHistory: () => void;
+  onRefreshBuildHistory: () => void;
+  onClearBuildHistory: () => void;
   formatRelativeTime: (value?: string) => string;
 };
 
-export function DeployPage({
+export function BuildPage({
   projects,
   selectedProject,
   onProjectChange,
@@ -672,124 +706,131 @@ export function DeployPage({
   onRefreshBuild,
   onOpenBuildRecord,
   onOpenBuildUrl,
-  deployHistory,
-  onReplayDeployHistory,
+  buildHistory,
+  onReplayBuildHistory,
   workflowReceiveRules,
-  workflowSignalIdsForDeployReplay,
+  workflowSignalIdsForBuildReplay,
   workflowSignalOptions,
   workflowSignalSummaries,
-  onWorkflowDeployReplayReceiversChange,
+  onWorkflowBuildReplayReceiversChange,
   onWorkflowReceiveRulesEnabledChange,
   onWorkflowReceiveRulesDelete,
   onWorkflowSignalDelete,
   onWorkflowSignalsClear,
-  onRefreshDeployHistory,
-  onClearDeployHistory,
+  onRefreshBuildHistory,
+  onClearBuildHistory,
   formatRelativeTime,
-}: DeployPageProps) {
+}: BuildPageProps) {
   const [resultExpanded, setResultExpanded] = useState(true);
   const [historyExpanded, setHistoryExpanded] = useState(true);
   const [historyPage, setHistoryPage] = useState(1);
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [workflowListOpen, setWorkflowListOpen] = useState(false);
-  const [workflowEntry, setWorkflowEntry] = useState<DeployHistoryEntry | null>(null);
+  const [workflowEntry, setWorkflowEntry] = useState<BuildHistoryEntry | null>(null);
   const [nowMs, setNowMs] = useState(Date.now());
   const [copiedResultField, setCopiedResultField] = useState("");
+  const [runtimeLogOpen, setRuntimeLogOpen] = useState(false);
+  const [runtimeLogLoading, setRuntimeLogLoading] = useState(false);
+  const [runtimeLogError, setRuntimeLogError] = useState("");
+  const [runtimeLogPath, setRuntimeLogPath] = useState("");
+  const [runtimeLogLines, setRuntimeLogLines] = useState<string[]>([]);
+  const [runtimeLogTruncated, setRuntimeLogTruncated] = useState(false);
+  const [localBuildAction, setLocalBuildAction] = useState("");
   const [expandedHistoryGroups, setExpandedHistoryGroups] = useState<Set<string>>(
     () => new Set(),
   );
   const {
-    scopedActions: pinnedDeployActions,
+    scopedActions: pinnedBuildActions,
     togglePinned,
     removePinned,
     replacePinnedActions,
-  } = useTrayPinnedActions("deploy.replay");
-  const deployHistoryByPinnedKey = useMemo(() => {
-    const next = new Map<string, DeployHistoryEntry>();
-    for (const item of deployHistory) {
-      const key = deployTrayDedupeKeyFromHistory(item);
+  } = useTrayPinnedActions("build.replay");
+  const buildHistoryByPinnedKey = useMemo(() => {
+    const next = new Map<string, BuildHistoryEntry>();
+    for (const item of buildHistory) {
+      const key = buildTrayDedupeKeyFromHistory(item);
       if (!next.has(key)) {
         next.set(key, item);
       }
     }
     return next;
-  }, [deployHistory]);
-  const deployLegacyHistoryByPinnedKey = useMemo(() => {
-    const next = new Map<string, DeployHistoryEntry>();
-    for (const item of deployHistory) {
-      const key = deployLegacyTrayDedupeKeyFromHistory(item);
+  }, [buildHistory]);
+  const buildLegacyHistoryByPinnedKey = useMemo(() => {
+    const next = new Map<string, BuildHistoryEntry>();
+    for (const item of buildHistory) {
+      const key = buildLegacyTrayDedupeKeyFromHistory(item);
       if (!next.has(key)) {
         next.set(key, item);
       }
     }
     return next;
-  }, [deployHistory]);
-  const deploySpecificLegacyPinnedKeys = useMemo(() => {
+  }, [buildHistory]);
+  const buildSpecificLegacyPinnedKeys = useMemo(() => {
     const next = new Set<string>();
-    for (const action of pinnedDeployActions) {
-      const item = deployHistoryByPinnedKey.get(action.dedupeKey);
+    for (const action of pinnedBuildActions) {
+      const item = buildHistoryByPinnedKey.get(action.dedupeKey);
       if (item) {
-        next.add(deployLegacyTrayDedupeKeyFromHistory(item));
+        next.add(buildLegacyTrayDedupeKeyFromHistory(item));
       }
     }
     return next;
-  }, [deployHistoryByPinnedKey, pinnedDeployActions]);
-  const duplicateLegacyDeployPinnedKeys = useMemo(
+  }, [buildHistoryByPinnedKey, pinnedBuildActions]);
+  const duplicateLegacyBuildPinnedKeys = useMemo(
     () =>
-      pinnedDeployActions
+      pinnedBuildActions
         .filter(
           (action) =>
-            deployLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
-            deploySpecificLegacyPinnedKeys.has(action.dedupeKey),
+            buildLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
+            buildSpecificLegacyPinnedKeys.has(action.dedupeKey),
         )
         .map((action) => action.dedupeKey)
         .sort(),
-    [deployLegacyHistoryByPinnedKey, deploySpecificLegacyPinnedKeys, pinnedDeployActions],
+    [buildLegacyHistoryByPinnedKey, buildSpecificLegacyPinnedKeys, pinnedBuildActions],
   );
-  const duplicateLegacyDeployPinnedKeySignature =
-    duplicateLegacyDeployPinnedKeys.join("\n");
+  const duplicateLegacyBuildPinnedKeySignature =
+    duplicateLegacyBuildPinnedKeys.join("\n");
   useEffect(() => {
-    if (!duplicateLegacyDeployPinnedKeySignature) {
+    if (!duplicateLegacyBuildPinnedKeySignature) {
       return;
     }
-    const duplicateKeys = new Set(duplicateLegacyDeployPinnedKeySignature.split("\n"));
+    const duplicateKeys = new Set(duplicateLegacyBuildPinnedKeySignature.split("\n"));
     replacePinnedActions((actions) =>
       actions.filter((action) => !duplicateKeys.has(action.dedupeKey)),
     ).catch((error) => {
-      console.error("failed to prune legacy deploy pinned actions", error);
+      console.error("failed to prune legacy build pinned actions", error);
     });
-  }, [duplicateLegacyDeployPinnedKeySignature, replacePinnedActions]);
-  const displayPinnedDeployActions = useMemo(
+  }, [duplicateLegacyBuildPinnedKeySignature, replacePinnedActions]);
+  const displayPinnedBuildActions = useMemo(
     () =>
-      pinnedDeployActions.filter((action) => {
-        if (deployHistoryByPinnedKey.has(action.dedupeKey)) {
+      pinnedBuildActions.filter((action) => {
+        if (buildHistoryByPinnedKey.has(action.dedupeKey)) {
           return true;
         }
         return (
-          deployLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
-          !deploySpecificLegacyPinnedKeys.has(action.dedupeKey)
+          buildLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
+          !buildSpecificLegacyPinnedKeys.has(action.dedupeKey)
         );
       }),
     [
-      deployHistoryByPinnedKey,
-      deployLegacyHistoryByPinnedKey,
-      deploySpecificLegacyPinnedKeys,
-      pinnedDeployActions,
+      buildHistoryByPinnedKey,
+      buildLegacyHistoryByPinnedKey,
+      buildSpecificLegacyPinnedKeys,
+      pinnedBuildActions,
     ],
   );
   const pinnedActionOrder = useMemo(
     () =>
       new Map(
-        displayPinnedDeployActions.map((action, index) => [action.dedupeKey, index]),
+        displayPinnedBuildActions.map((action, index) => [action.dedupeKey, index]),
       ),
-    [displayPinnedDeployActions],
+    [displayPinnedBuildActions],
   );
   const pinnedActionByKey = useMemo(
     () =>
       new Map(
-        displayPinnedDeployActions.map((action) => [action.dedupeKey, action]),
+        displayPinnedBuildActions.map((action) => [action.dedupeKey, action]),
       ),
-    [displayPinnedDeployActions],
+    [displayPinnedBuildActions],
   );
   const sourceBranchEntryMap = useMemo(
     () => new Map(sourceBranchEntries.map((item) => [item.name, item])),
@@ -804,6 +845,9 @@ export function DeployPage({
     () => new Map((targetMeta?.targets ?? []).map((item) => [item.key, item])),
     [targetMeta],
   );
+  const actionCopy = buildActionCopy(
+    plan?.actionKind || targetMetaByKey.get(target)?.actionKind,
+  );
   const targetOptions = targetMeta?.targets.length
     ? targetMeta.targets
     : projects.find((project) => project.key === selectedProject)?.deployTargets ?? [];
@@ -812,21 +856,25 @@ export function DeployPage({
     target && targetOptionKeys.length > 0 && !targetOptionKeys.includes(target),
   );
   const contextBlocked = contextLoading || contextError;
-  const canRefreshBuild = Boolean(buildResult?.queueUrl || buildResult?.buildUrl);
+  const isLocalBuildPlan = Boolean(plan && plan.adapter !== "jenkins");
+  const localBuildProjectKey = isLocalBuildPlan ? plan?.projectKey || selectedProject : "";
+  const canRefreshBuild = Boolean(
+    buildResult?.queueUrl || buildResult?.buildUrl || localBuildProjectKey,
+  );
   const buildResultActive = isActiveBuildState(buildResult?.stateKey);
-  const groupedDeployHistory = useMemo(
+  const groupedBuildHistory = useMemo(
     () =>
       groupConsecutiveBy(
-        deployHistory,
-        deployHistorySignature,
+        buildHistory,
+        buildHistorySignature,
         (item) => item.historyKey,
       ),
-    [deployHistory],
+    [buildHistory],
   );
-  function pinnedOrderForDeployGroup(group: (typeof groupedDeployHistory)[number]) {
+  function pinnedOrderForBuildGroup(group: (typeof groupedBuildHistory)[number]) {
     let order: number | undefined;
     for (const item of group.items) {
-      const itemOrder = pinnedActionOrder.get(deployTrayDedupeKeyFromHistory(item));
+      const itemOrder = pinnedActionOrder.get(buildTrayDedupeKeyFromHistory(item));
       if (itemOrder !== undefined) {
         order = order === undefined ? itemOrder : Math.min(order, itemOrder);
       }
@@ -834,16 +882,16 @@ export function DeployPage({
     if (order !== undefined) {
       return order;
     }
-    return pinnedActionOrder.get(deployLegacyTrayDedupeKeyFromHistory(group.latest));
+    return pinnedActionOrder.get(buildLegacyTrayDedupeKeyFromHistory(group.latest));
   }
 
-  const sortedDeployHistoryGroups = useMemo(() => {
+  const sortedBuildHistoryGroups = useMemo(() => {
     const originalOrder = new Map(
-      groupedDeployHistory.map((group, index) => [group.id, index]),
+      groupedBuildHistory.map((group, index) => [group.id, index]),
     );
-    return [...groupedDeployHistory].sort((left, right) => {
-      const leftPinnedOrder = pinnedOrderForDeployGroup(left);
-      const rightPinnedOrder = pinnedOrderForDeployGroup(right);
+    return [...groupedBuildHistory].sort((left, right) => {
+      const leftPinnedOrder = pinnedOrderForBuildGroup(left);
+      const rightPinnedOrder = pinnedOrderForBuildGroup(right);
       const leftPinned = leftPinnedOrder !== undefined;
       const rightPinned = rightPinnedOrder !== undefined;
 
@@ -858,26 +906,26 @@ export function DeployPage({
       }
       return (originalOrder.get(left.id) ?? 0) - (originalOrder.get(right.id) ?? 0);
     });
-  }, [groupedDeployHistory, pinnedActionOrder]);
-  const pinnedDeployHistoryGroups = useMemo(
+  }, [groupedBuildHistory, pinnedActionOrder]);
+  const pinnedBuildHistoryGroups = useMemo(
     () =>
-      sortedDeployHistoryGroups.filter(
-        (group) => pinnedOrderForDeployGroup(group) !== undefined,
+      sortedBuildHistoryGroups.filter(
+        (group) => pinnedOrderForBuildGroup(group) !== undefined,
       ),
-    [pinnedActionOrder, sortedDeployHistoryGroups],
+    [pinnedActionOrder, sortedBuildHistoryGroups],
   );
-  const unpinnedDeployHistoryGroups = useMemo(
+  const unpinnedBuildHistoryGroups = useMemo(
     () =>
-      sortedDeployHistoryGroups.filter(
-        (group) => pinnedOrderForDeployGroup(group) === undefined,
+      sortedBuildHistoryGroups.filter(
+        (group) => pinnedOrderForBuildGroup(group) === undefined,
       ),
-    [pinnedActionOrder, sortedDeployHistoryGroups],
+    [pinnedActionOrder, sortedBuildHistoryGroups],
   );
-  function pinnedActionForDeployGroup(group: (typeof groupedDeployHistory)[number]) {
+  function pinnedActionForBuildGroup(group: (typeof groupedBuildHistory)[number]) {
     let pinnedAction: TrayPinnedAction | null = null;
     let pinnedOrder = Number.POSITIVE_INFINITY;
     for (const item of group.items) {
-      const key = deployTrayDedupeKeyFromHistory(item);
+      const key = buildTrayDedupeKeyFromHistory(item);
       const order = pinnedActionOrder.get(key);
       const action = pinnedActionByKey.get(key);
       if (action && order !== undefined && order < pinnedOrder) {
@@ -888,24 +936,24 @@ export function DeployPage({
     if (pinnedAction) {
       return pinnedAction;
     }
-    const legacyKey = deployLegacyTrayDedupeKeyFromHistory(group.latest);
+    const legacyKey = buildLegacyTrayDedupeKeyFromHistory(group.latest);
     return pinnedActionByKey.get(legacyKey) ?? null;
   }
   const historyPageCount = Math.max(
     1,
-    Math.ceil(unpinnedDeployHistoryGroups.length / HISTORY_PAGE_SIZE),
+    Math.ceil(unpinnedBuildHistoryGroups.length / HISTORY_PAGE_SIZE),
   );
-  const pagedDeployHistoryGroups = useMemo(
+  const pagedBuildHistoryGroups = useMemo(
     () =>
-      unpinnedDeployHistoryGroups.slice(
+      unpinnedBuildHistoryGroups.slice(
         (historyPage - 1) * HISTORY_PAGE_SIZE,
         historyPage * HISTORY_PAGE_SIZE,
       ),
-    [historyPage, unpinnedDeployHistoryGroups],
+    [historyPage, unpinnedBuildHistoryGroups],
   );
-  const visibleDeployHistoryGroups = useMemo(
-    () => [...pinnedDeployHistoryGroups, ...pagedDeployHistoryGroups],
-    [pagedDeployHistoryGroups, pinnedDeployHistoryGroups],
+  const visibleBuildHistoryGroups = useMemo(
+    () => [...pinnedBuildHistoryGroups, ...pagedBuildHistoryGroups],
+    [pagedBuildHistoryGroups, pinnedBuildHistoryGroups],
   );
   const workflowReceiveGroups = useMemo(
     () => groupWorkflowReceiveRules(workflowReceiveRules),
@@ -918,11 +966,11 @@ export function DeployPage({
 
   useEffect(() => {
     setExpandedHistoryGroups((current) => {
-      const visibleIds = new Set(sortedDeployHistoryGroups.map((group) => group.id));
+      const visibleIds = new Set(sortedBuildHistoryGroups.map((group) => group.id));
       const next = new Set([...current].filter((id) => visibleIds.has(id)));
       return next.size === current.size ? current : next;
     });
-  }, [sortedDeployHistoryGroups]);
+  }, [sortedBuildHistoryGroups]);
 
   useEffect(() => {
     if (!buildResultUpdatedAtMs) {
@@ -955,7 +1003,7 @@ export function DeployPage({
     });
   }
 
-  function openWorkflowReceiveDialog(entry: DeployHistoryEntry) {
+  function openWorkflowReceiveDialog(entry: BuildHistoryEntry) {
     setWorkflowEntry(entry);
     setWorkflowOpen(true);
   }
@@ -995,15 +1043,80 @@ export function DeployPage({
     }
   }
 
-  function renderParam(param: DeployParamMeta) {
+  async function openLocalBuildLog() {
+    if (!localBuildProjectKey) {
+      return;
+    }
+
+    setRuntimeLogOpen(true);
+    setRuntimeLogLoading(true);
+    setRuntimeLogError("");
+    setRuntimeLogPath("");
+    setRuntimeLogLines([]);
+    setRuntimeLogTruncated(false);
+    try {
+      const response = await invoke<ProjectRuntimeLogResponse>(
+        "read_project_runtime_log",
+        {
+          project: localBuildProjectKey,
+          kind: "build",
+          maxLines: 220,
+        },
+      );
+      setRuntimeLogPath(response.path);
+      setRuntimeLogLines(response.lines);
+      setRuntimeLogTruncated(response.truncated);
+    } catch (reason) {
+      setRuntimeLogError(String(reason));
+    } finally {
+      setRuntimeLogLoading(false);
+    }
+  }
+
+  async function stopLocalBuild() {
+    if (!localBuildProjectKey) {
+      return;
+    }
+
+    setLocalBuildAction("stop");
+    setRuntimeLogError("");
+    try {
+      await invoke("stop_project_build", { project: localBuildProjectKey });
+      onRefreshBuild();
+    } catch (reason) {
+      setRuntimeLogError(String(reason));
+      setRuntimeLogOpen(true);
+    } finally {
+      setLocalBuildAction("");
+    }
+  }
+
+  async function openLocalBuildOutput() {
+    if (!localBuildProjectKey) {
+      return;
+    }
+
+    setLocalBuildAction("output");
+    setRuntimeLogError("");
+    try {
+      await invoke("open_project_build_output", { project: localBuildProjectKey });
+    } catch (reason) {
+      setRuntimeLogError(String(reason));
+      setRuntimeLogOpen(true);
+    } finally {
+      setLocalBuildAction("");
+    }
+  }
+
+  function renderParam(param: BuildParamMeta) {
     const value = paramValues[param.key] ?? param.defaultValue ?? "";
-    const invalidMessage = deployParamInvalidMessage(
+    const invalidMessage = buildParamInvalidMessage(
       param,
       value,
       sourceBranchOptions,
     );
     const handleResetParam = () =>
-      onParamChange(param.key, deployParamResetValue(param, sourceBranchOptions));
+      onParamChange(param.key, buildParamResetValue(param, sourceBranchOptions));
     if (param.kind === "select") {
       return (
         <Stack key={param.key} spacing={0.55}>
@@ -1037,7 +1150,7 @@ export function DeployPage({
               </Select>
             </FormControl>
           </FieldRow>
-          <DeployValueWarning
+          <BuildValueWarning
             message={invalidMessage}
             disabled={contextBlocked}
             onReset={handleResetParam}
@@ -1128,7 +1241,7 @@ export function DeployPage({
               )}
             />
           </FieldRow>
-          <DeployValueWarning
+          <BuildValueWarning
             message={invalidMessage}
             disabled={contextBlocked}
             onReset={handleResetParam}
@@ -1146,7 +1259,7 @@ export function DeployPage({
             disabled={contextBlocked}
             onChange={(nextValue) => onParamChange(param.key, nextValue)}
           />
-          <DeployValueWarning
+          <BuildValueWarning
             message={invalidMessage}
             disabled={contextBlocked}
             onReset={handleResetParam}
@@ -1173,7 +1286,7 @@ export function DeployPage({
             }}
           />
         </FieldRow>
-        <DeployValueWarning
+        <BuildValueWarning
           message={invalidMessage}
           disabled={contextBlocked}
           onReset={handleResetParam}
@@ -1185,12 +1298,12 @@ export function DeployPage({
   return (
     <Box className="workspace workspace--workflow" onKeyDown={handlePrimaryEnter}>
       <Box className="workflow-module workflow-module--control">
-          <Stack spacing={1.05}>
+          <Stack spacing={0.75}>
             <Box
               sx={{
                 display: "grid",
                 gridTemplateColumns: "minmax(0, 1fr)",
-                gap: 0.8,
+                gap: 0.65,
               }}
             >
               <FieldRow label="项目">
@@ -1250,10 +1363,10 @@ export function DeployPage({
                       </Select>
                     </FormControl>
                   </FieldRow>
-                  <DeployValueWarning
+                  <BuildValueWarning
                     message={
                       targetValueInvalid
-                        ? `部署配置不在当前项目配置中：${target}`
+                        ? `${actionCopy.config}不在当前项目配置中：${target}`
                         : ""
                     }
                     disabled={contextLoading}
@@ -1277,7 +1390,7 @@ export function DeployPage({
                 sx={{
                   display: "grid",
                   gridTemplateColumns: "minmax(0, 1fr)",
-                  gap: 0.8,
+                  gap: 0.65,
                 }}
               >
                 {visibleParams.map(renderParam)}
@@ -1296,13 +1409,13 @@ export function DeployPage({
               disabled={contextBlocked}
               size="medium"
               sx={{
-                mt: 0.35,
-                minHeight: 38,
-                borderRadius: "13px",
+                mt: 0.1,
+                minHeight: 34,
+                borderRadius: "11px",
                 width: "100%",
               }}
             >
-              开始部署
+              {actionCopy.start}
             </Button>
           </Stack>
       </Box>
@@ -1313,19 +1426,47 @@ export function DeployPage({
             direction="row"
             justifyContent="space-between"
             alignItems="center"
-            spacing={1}
+            spacing={0.8}
             flexWrap="wrap"
-            rowGap={0.6}
+            rowGap={0.45}
             minWidth={0}
-            mb={resultExpanded ? 1.2 : 0}
+            mb={resultExpanded ? 0.8 : 0}
           >
             <Typography variant="h6" sx={{ flexShrink: 0, fontWeight: 700 }}>
               结果
             </Typography>
-            <Stack direction="row" spacing={0.8} alignItems="center" flexWrap="wrap" rowGap={0.5} justifyContent="flex-end">
-              <IconButton onClick={onRefreshBuild} disabled={!buildResult?.queueUrl && !buildResult?.buildUrl} size="small" title="刷新部署状态">
+            <Stack direction="row" spacing={0.55} alignItems="center" flexWrap="wrap" rowGap={0.4} justifyContent="flex-end">
+              <IconButton onClick={onRefreshBuild} disabled={!canRefreshBuild} size="small" title={`刷新${actionCopy.noun}状态`}>
                 <RefreshIcon fontSize="small" />
               </IconButton>
+              {isLocalBuildPlan ? (
+                <>
+                  <IconButton
+                    onClick={openLocalBuildLog}
+                    disabled={!localBuildProjectKey || runtimeLogLoading}
+                    size="small"
+                    title="查看构建日志"
+                  >
+                    <TerminalIcon fontSize="small" />
+                  </IconButton>
+                  <IconButton
+                    onClick={stopLocalBuild}
+                    disabled={!buildResultActive || localBuildAction === "stop"}
+                    size="small"
+                    title="停止本地构建"
+                  >
+                    <StopIcon fontSize="small" />
+                  </IconButton>
+                  <IconButton
+                    onClick={openLocalBuildOutput}
+                    disabled={!localBuildProjectKey || localBuildAction === "output"}
+                    size="small"
+                    title="打开产物目录"
+                  >
+                    <FolderIcon fontSize="small" />
+                  </IconButton>
+                </>
+              ) : null}
               <IconButton onClick={onOpenBuildRecord} disabled={!buildResult?.queueUrl && !buildResult?.buildUrl} size="small" title="打开构建记录页">
                 <OpenExternalIcon fontSize="small" />
               </IconButton>
@@ -1337,16 +1478,19 @@ export function DeployPage({
                 canRefresh={canRefreshBuild}
                 onRefresh={onRefreshBuild}
               />
-              <IconButton size="small" onClick={() => setResultExpanded((current) => !current)} title={resultExpanded ? "收起部署结果" : "展开部署结果"}>
+              <IconButton size="small" onClick={() => setResultExpanded((current) => !current)} title={resultExpanded ? `收起${actionCopy.noun}结果` : `展开${actionCopy.noun}结果`}>
                 {resultExpanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
               </IconButton>
             </Stack>
           </Stack>
           <Collapse in={resultExpanded} timeout="auto" unmountOnExit>
               <Stack spacing={0.1} minWidth={0}>
-                <DeployResultRow label="状态" value={buildResult.stateLabel} />
-                <DeployResultRow label="HTTP" value={buildResult.status} />
-                <DeployResultLinkRow
+                <BuildResultRow label="状态" value={buildResult.stateLabel} />
+                <BuildResultRow
+                  label={plan?.adapter === "jenkins" ? "HTTP" : "退出码"}
+                  value={buildResult.status}
+                />
+                <BuildResultLinkRow
                   label="队列"
                   value={buildResult.queueUrl}
                   copyKey="queueUrl"
@@ -1354,7 +1498,7 @@ export function DeployPage({
                   onCopy={copyResultValue}
                   onOpen={onOpenBuildUrl}
                 />
-                <DeployResultLinkRow
+                <BuildResultLinkRow
                   label="构建"
                   value={buildResult.buildUrl}
                   copyKey="buildUrl"
@@ -1362,7 +1506,7 @@ export function DeployPage({
                   onCopy={copyResultValue}
                   onOpen={onOpenBuildUrl}
                 />
-                <DeployResultRow
+                <BuildResultRow
                   label="说明"
                   value={buildResult.detail}
                   copyKey="detail"
@@ -1375,41 +1519,47 @@ export function DeployPage({
       ) : null}
 
       <Box className="workflow-panel workflow-history-panel">
-          <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={1} flexWrap="wrap" rowGap={0.6} minWidth={0} mb={historyExpanded ? 1.2 : 0}>
+          <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.8} flexWrap="wrap" rowGap={0.45} minWidth={0} mb={historyExpanded ? 0.8 : 0}>
             <Typography variant="h6" sx={{ flexShrink: 0, fontWeight: 700 }}>
               记录
             </Typography>
-            <Stack direction="row" spacing={0.8} alignItems="center" flexWrap="wrap" rowGap={0.5} justifyContent="flex-end">
+            <Stack direction="row" spacing={0.55} alignItems="center" flexWrap="wrap" rowGap={0.4} justifyContent="flex-end">
               <WorkflowLinkSummaryButton
                 count={workflowReceiveGroups.length}
                 onClick={() => setWorkflowListOpen(true)}
               />
-              <IconButton size="small" onClick={onRefreshDeployHistory} title="刷新部署记录">
+              <IconButton size="small" onClick={onRefreshBuildHistory} title={`刷新${actionCopy.noun}记录`}>
                 <RefreshIcon fontSize="small" />
               </IconButton>
-              <IconButton size="small" onClick={onClearDeployHistory} title="清空部署记录">
+              <IconButton size="small" onClick={onClearBuildHistory} title={`清空${actionCopy.noun}记录`}>
                 <TrashIcon fontSize="small" />
               </IconButton>
-              <IconButton size="small" onClick={() => setHistoryExpanded((current) => !current)} title={historyExpanded ? "收起部署记录" : "展开部署记录"}>
+              <IconButton size="small" onClick={() => setHistoryExpanded((current) => !current)} title={historyExpanded ? `收起${actionCopy.noun}记录` : `展开${actionCopy.noun}记录`}>
                 {historyExpanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
               </IconButton>
             </Stack>
           </Stack>
           <Collapse in={historyExpanded} timeout="auto" unmountOnExit>
-            {deployHistory.length > 0 ? (
-              <Stack className="workflow-history-content" spacing={1} minWidth={0}>
+            {buildHistory.length > 0 ? (
+              <Stack className="workflow-history-content" spacing={0.65} minWidth={0}>
                 <Box className="module-list-scroll">
-                  <Stack spacing={1} minWidth={0}>
-                    {visibleDeployHistoryGroups.map((group) => {
+                  <Stack spacing={0.65} minWidth={0}>
+                    {visibleBuildHistoryGroups.map((group) => {
                       const item = group.latest;
                       const isGrouped = group.items.length > 1;
                       const groupExpanded = expandedHistoryGroups.has(group.id);
-                      const workflowSignalIds = workflowSignalIdsForDeployReplay(item);
-                      const targetLabel = targetMetaByKey.get(item.mode)?.label ?? item.mode;
-                      const trayAction = deployTrayActionFromHistory(item, targetLabel);
-                      const groupPinnedAction = pinnedActionForDeployGroup(group);
+                      const workflowSignalIds = workflowSignalIdsForBuildReplay(item);
+                      const historyTargetMeta = targetMetaByKey.get(item.mode);
+                      const historyActionCopy = buildActionCopy(historyTargetMeta?.actionKind);
+                      const targetLabel = historyTargetMeta?.label ?? item.mode;
+                      const trayAction = buildTrayActionFromHistory(
+                        item,
+                        targetLabel,
+                        historyActionCopy.noun,
+                      );
+                      const groupPinnedAction = pinnedActionForBuildGroup(group);
                       const pinned = Boolean(groupPinnedAction);
-                      const paramMetaLabels = buildDeployHistoryParamMetaLabels(
+                      const paramMetaLabels = buildHistoryParamMetaLabels(
                         item,
                         paramMetaByKey,
                         defaultParamValues,
@@ -1431,9 +1581,9 @@ export function DeployPage({
                             >
                               <IconButton
                                 size="small"
-                                onClick={() => onReplayDeployHistory(item)}
+                                onClick={() => onReplayBuildHistory(item)}
                                 disabled={Boolean(busy)}
-                                aria-label="重播部署"
+                                aria-label={`重播${historyActionCopy.noun}`}
                                 title="使用相同参数重播"
                               >
                                 <ReplayIcon fontSize="small" />
@@ -1481,8 +1631,8 @@ export function DeployPage({
                                 <IconButton
                                   size="small"
                                   onClick={() => toggleHistoryGroup(group.id)}
-                                  aria-label={groupExpanded ? "收起同参数部署" : "展开同参数部署"}
-                                  title={groupExpanded ? "收起同参数部署" : "展开同参数部署"}
+                                  aria-label={groupExpanded ? `收起同参数${historyActionCopy.noun}` : `展开同参数${historyActionCopy.noun}`}
+                                  title={groupExpanded ? `收起同参数${historyActionCopy.noun}` : `展开同参数${historyActionCopy.noun}`}
                                 >
                                   {groupExpanded ? (
                                     <CollapseIcon fontSize="small" />
@@ -1548,7 +1698,7 @@ export function DeployPage({
                   </Stack>
                 </Box>
                 {historyPageCount > 1 ? (
-                  <Stack direction="row" justifyContent="flex-end" sx={{ pt: 0.4 }}>
+                  <Stack direction="row" justifyContent="flex-end" sx={{ pt: 0.25 }}>
                     <Pagination
                       size="small"
                       page={historyPage}
@@ -1558,9 +1708,9 @@ export function DeployPage({
                       onChange={(_, nextPage) => setHistoryPage(nextPage)}
                       sx={{
                         "& .MuiPaginationItem-root": {
-                          minWidth: 28,
-                          height: 28,
-                          borderRadius: "10px",
+                          minWidth: 26,
+                          height: 26,
+                          borderRadius: "9px",
                           fontWeight: 800,
                         },
                       }}
@@ -1570,11 +1720,62 @@ export function DeployPage({
               </Stack>
             ) : (
               <Typography variant="body2" color="text.secondary">
-                暂无部署记录。
+                暂无{actionCopy.noun}记录。
               </Typography>
             )}
           </Collapse>
       </Box>
+
+      <Dialog
+        open={runtimeLogOpen}
+        onClose={() => setRuntimeLogOpen(false)}
+        maxWidth="md"
+        fullWidth
+      >
+        <DialogTitle>构建日志</DialogTitle>
+        <DialogContent dividers>
+          <Stack spacing={1.2}>
+            {runtimeLogPath ? (
+              <Typography variant="caption" color="text.secondary" noWrap title={runtimeLogPath}>
+                {runtimeLogPath}
+              </Typography>
+            ) : null}
+            {runtimeLogError ? <InlineWarningNotice title={runtimeLogError} /> : null}
+            <Box
+              component="pre"
+              sx={{
+                m: 0,
+                p: 1.4,
+                minHeight: 220,
+                maxHeight: "54vh",
+                overflow: "auto",
+                borderRadius: "14px",
+                border: "1px solid rgba(148, 163, 184, 0.22)",
+                bgcolor: "rgba(2, 6, 23, 0.28)",
+                color: "text.primary",
+                fontSize: "0.78rem",
+                lineHeight: 1.55,
+                whiteSpace: "pre-wrap",
+                wordBreak: "break-word",
+              }}
+            >
+              {runtimeLogLoading
+                ? "加载中..."
+                : runtimeLogLines.length > 0
+                  ? runtimeLogLines.join("\n")
+                  : "暂无构建日志。"}
+            </Box>
+            {runtimeLogTruncated ? (
+              <Typography variant="caption" color="text.secondary">
+                已显示最后 {runtimeLogLines.length} 行
+              </Typography>
+            ) : null}
+          </Stack>
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={() => setRuntimeLogOpen(false)}>关闭</Button>
+        </DialogActions>
+      </Dialog>
 
       <WorkflowRulesConfigDialog
         open={workflowOpen}
@@ -1594,7 +1795,7 @@ export function DeployPage({
           ) : null
         }
         receiveSignalIds={
-          workflowEntry ? workflowSignalIdsForDeployReplay(workflowEntry) : []
+          workflowEntry ? workflowSignalIdsForBuildReplay(workflowEntry) : []
         }
         broadcastSignalIds={[]}
         signalOptions={workflowSignalOptions}
@@ -1605,7 +1806,7 @@ export function DeployPage({
         onClose={() => setWorkflowOpen(false)}
         onSave={({ receiveSignalIds }) => {
           if (workflowEntry) {
-            onWorkflowDeployReplayReceiversChange(workflowEntry, receiveSignalIds);
+            onWorkflowBuildReplayReceiversChange(workflowEntry, receiveSignalIds);
           }
           setWorkflowOpen(false);
         }}

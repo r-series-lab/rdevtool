@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { DeployHistoryEntry } from "../app-types";
+import type { BuildHistoryEntry } from "../app-types";
 import type {
   ActivityBulkUpdater,
   ActivityResource,
@@ -9,19 +9,24 @@ import type {
   ActivityUpdater,
 } from "../lib/activityCenter";
 import {
-  DEPLOY_STATUS_SYNC_MAX_FAILURES,
+  BUILD_STATUS_SYNC_MAX_FAILURES,
   stableActivityJson,
 } from "../lib/activityCenter";
-import type { DeployPlan, DeployRequest } from "./useDeployContext";
+import type { BuildPlan, BuildRequest } from "./useBuildContext";
 
 const BUILD_STATUS_POLL_DELAY_MS = 3000;
 const ACCEPTED_STATUS_POLL_DELAY_MS = 1500;
 const BUILD_STATUS_POLL_TIMEOUT_MS = 5 * 60 * 1000;
-const MAX_DEPLOY_HISTORY_ITEMS = 20;
-const DEPLOY_HISTORY_STATUS_SYNC_LIMIT = 5;
+const MAX_BUILD_HISTORY_ITEMS = 20;
+const BUILD_HISTORY_STATUS_SYNC_LIMIT = 5;
+const BUILD_HISTORY_COMMANDS = {
+  list: "list_build_history",
+  save: "save_build_history",
+  clear: "clear_build_history",
+} as const;
 
 export type BuildResult = {
-  plan?: DeployPlan;
+  plan?: BuildPlan;
   status?: number;
   queueUrl?: string | null;
   buildUrl?: string | null;
@@ -30,8 +35,64 @@ export type BuildResult = {
   detail: string;
 };
 
+type BuildActionCopy = {
+  noun: string;
+  triggerTitle: string;
+  replayTitle: string;
+  triggerBusy: string;
+  replayBusy: string;
+  triggerFailed: string;
+  replayFailed: string;
+};
+
 function isActiveBuildState(stateKey?: string | null) {
   return stateKey === "accepted" || stateKey === "queued" || stateKey === "running";
+}
+
+function buildActionCopy(actionKind?: string | null): BuildActionCopy {
+  const noun =
+    actionKind === "deploy"
+      ? "部署"
+      : actionKind === "package"
+        ? "打包"
+        : actionKind === "release"
+          ? "发布"
+          : "构建";
+  return {
+    noun,
+    triggerTitle: `触发${noun}`,
+    replayTitle: `重播${noun}`,
+    triggerBusy: `正在触发${noun}`,
+    replayBusy: `正在重播${noun}`,
+    triggerFailed: `${noun}触发失败`,
+    replayFailed: `${noun}重播失败`,
+  };
+}
+
+function actionCopyForPlan(plan?: BuildPlan | null) {
+  return buildActionCopy(plan?.actionKind);
+}
+
+function actionCopyForHistoryItem(plan: BuildPlan | null, item: BuildHistoryEntry) {
+  if (plan?.projectKey === item.projectKey && plan.jobKind === item.mode) {
+    return buildActionCopy(plan.actionKind);
+  }
+  return buildActionCopy();
+}
+
+function isLocalBuildResult(result?: Pick<BuildResult, "plan"> | null) {
+  return Boolean(result?.plan && result.plan.adapter !== "jenkins");
+}
+
+function canRefreshBuildResult(result?: BuildResult | null) {
+  if (!result) {
+    return false;
+  }
+  return Boolean(
+    result.queueUrl ||
+      result.buildUrl ||
+      (isLocalBuildResult(result) && result.plan?.projectKey),
+  );
 }
 
 function activityStatusFromBuildState(stateKey?: string | null): ActivityStatus {
@@ -67,7 +128,7 @@ function buildResultChanged(current: BuildResult | null, next: BuildResult) {
   );
 }
 
-function normalizeDeployParams(params?: Record<string, string> | null) {
+function normalizeBuildParams(params?: Record<string, string> | null) {
   const normalized: Record<string, string> = {};
   for (const [key, value] of Object.entries(params ?? {})) {
     normalized[key] = value == null ? "" : String(value);
@@ -75,12 +136,12 @@ function normalizeDeployParams(params?: Record<string, string> | null) {
   return normalized;
 }
 
-function deployActivityExecutionKey(
+function buildActivityExecutionKey(
   projectKey: string,
   target: string | null | undefined,
   params?: Record<string, string> | null,
 ) {
-  return `deploy:${projectKey}:${target ?? ""}:${stableActivityJson(normalizeDeployParams(params))}`;
+  return `build:${projectKey}:${target ?? ""}:${stableActivityJson(normalizeBuildParams(params))}`;
 }
 
 function buildRecordResource(
@@ -111,8 +172,8 @@ function compactSyncError(reason: unknown) {
 }
 
 function activityProjectNameForRequest(
-  plan: DeployPlan | null,
-  request: DeployRequest,
+  plan: BuildPlan | null,
+  request: BuildRequest,
   fallbackProjectKey: string,
 ) {
   return plan?.projectKey === request.project
@@ -120,15 +181,15 @@ function activityProjectNameForRequest(
     : request.project || fallbackProjectKey;
 }
 
-type UseDeployHistoryOptions = {
+type UseBuildHistoryOptions = {
   enabled: boolean;
   selectedProject: string;
   target: string;
   env: string;
   branch: string;
-  currentPlan: DeployPlan | null;
-  currentDeployRequest: () => DeployRequest;
-  setPlan: (value: DeployPlan | null) => void;
+  currentPlan: BuildPlan | null;
+  currentBuildRequest: () => BuildRequest;
+  setPlan: (value: BuildPlan | null) => void;
   setBusy: (value: string) => void;
   setError: (value: string) => void;
   recordActivity?: ActivityRecorder;
@@ -136,31 +197,31 @@ type UseDeployHistoryOptions = {
   syncActivities?: ActivityBulkUpdater;
 };
 
-export type DeployReplayOptions = {
+export type BuildReplayOptions = {
   force?: boolean;
   chainId?: string | null;
   parentId?: string | null;
   stepLabel?: string | null;
 };
 
-export function useDeployHistory({
+export function useBuildHistoryState({
   enabled,
   selectedProject,
   target,
   env,
   branch,
   currentPlan,
-  currentDeployRequest,
+  currentBuildRequest,
   setPlan,
   setBusy,
   setError,
   recordActivity,
   updateActivity,
   syncActivities,
-}: UseDeployHistoryOptions) {
+}: UseBuildHistoryOptions) {
   const [buildResult, setBuildResult] = useState<BuildResult | null>(null);
   const [buildResultUpdatedAtMs, setBuildResultUpdatedAtMs] = useState(0);
-  const [deployHistory, setDeployHistory] = useState<DeployHistoryEntry[]>([]);
+  const [buildHistory, setBuildHistory] = useState<BuildHistoryEntry[]>([]);
   const [currentBuildHistoryKey, setCurrentBuildHistoryKey] = useState("");
   const [buildAutoRefreshStartedAtMs, setBuildAutoRefreshStartedAtMs] = useState<number | null>(
     null,
@@ -168,29 +229,29 @@ export function useDeployHistory({
   const [buildAutoRefreshTimedOut, setBuildAutoRefreshTimedOut] = useState(false);
   const currentBuildActivityIdRef = useRef("");
 
-  const deployViewScopeKey = useMemo(
+  const buildViewScopeKey = useMemo(
     () => (selectedProject ? `${selectedProject}:${target}` : ""),
     [selectedProject, target],
   );
 
-  const visibleDeployHistory = useMemo(
-    () => deployHistory.slice(0, MAX_DEPLOY_HISTORY_ITEMS),
-    [deployHistory],
+  const visibleBuildHistory = useMemo(
+    () => buildHistory.slice(0, MAX_BUILD_HISTORY_ITEMS),
+    [buildHistory],
   );
 
-  function upsertDeployHistoryEntry(entry: DeployHistoryEntry) {
-    setDeployHistory((current) => {
+  function upsertBuildHistoryEntry(entry: BuildHistoryEntry) {
+    setBuildHistory((current) => {
       const next = [entry, ...current.filter((item) => item.historyKey !== entry.historyKey)];
       next.sort(
         (a, b) =>
           b.updatedAt.localeCompare(a.updatedAt) ||
           b.createdAt.localeCompare(a.createdAt),
       );
-      return next.slice(0, MAX_DEPLOY_HISTORY_ITEMS);
+      return next.slice(0, MAX_BUILD_HISTORY_ITEMS);
     });
   }
 
-  function syncDeployActivityFromEntry(item: DeployHistoryEntry, result: BuildResult) {
+  function syncBuildActivityFromEntry(item: BuildHistoryEntry, result: BuildResult) {
     if (!syncActivities) {
       return;
     }
@@ -202,7 +263,7 @@ export function useDeployHistory({
     }
     syncActivities(
       {
-        kind: "deploy",
+        kind: "build",
         projectKey: item.projectKey,
         resourceValues,
       },
@@ -210,7 +271,7 @@ export function useDeployHistory({
         status: activityStatusFromBuildState(result.stateKey),
         summary: `${result.stateLabel} · ${result.detail}`,
         detail: buildUrl || queueUrl || null,
-        executionKey: deployActivityExecutionKey(item.projectKey, item.mode, item.params),
+        executionKey: buildActivityExecutionKey(item.projectKey, item.mode, item.params),
         projectKey: item.projectKey,
         projectName: result.plan?.projectName || item.projectName,
         resource: buildRecordResource({ queueUrl, buildUrl }),
@@ -218,11 +279,11 @@ export function useDeployHistory({
     );
   }
 
-  function syncDeployActivityFromHistory(item: DeployHistoryEntry) {
+  function syncBuildActivityFromHistory(item: BuildHistoryEntry) {
     if (isActiveBuildState(item.stateKey)) {
       return;
     }
-    syncDeployActivityFromEntry(item, {
+    syncBuildActivityFromEntry(item, {
       stateKey: item.stateKey,
       stateLabel: item.stateLabel,
       detail: item.detail,
@@ -231,7 +292,7 @@ export function useDeployHistory({
     });
   }
 
-  function syncDeployActivityStatusFailure(item: DeployHistoryEntry, reason: unknown) {
+  function syncBuildActivityStatusFailure(item: BuildHistoryEntry, reason: unknown) {
     if (!syncActivities) {
       return;
     }
@@ -241,15 +302,15 @@ export function useDeployHistory({
     }
     syncActivities(
       {
-        kind: "deploy",
+        kind: "build",
         projectKey: item.projectKey,
         resourceValues,
       },
       {
         status: "failed",
-        summary: `状态同步失败 · 请手动刷新（1/${DEPLOY_STATUS_SYNC_MAX_FAILURES}）`,
+        summary: `状态同步失败 · 请手动刷新（1/${BUILD_STATUS_SYNC_MAX_FAILURES}）`,
         detail: compactSyncError(reason),
-        executionKey: deployActivityExecutionKey(item.projectKey, item.mode, item.params),
+        executionKey: buildActivityExecutionKey(item.projectKey, item.mode, item.params),
         resource: buildRecordResource(item),
         syncFailureCount: 1,
         acknowledgedAt: new Date().toISOString(),
@@ -263,7 +324,7 @@ export function useDeployHistory({
       setBuildResultUpdatedAtMs(0);
       setCurrentBuildHistoryKey("");
       currentBuildActivityIdRef.current = "";
-      setDeployHistory([]);
+      setBuildHistory([]);
       setBuildAutoRefreshStartedAtMs(null);
       setBuildAutoRefreshTimedOut(false);
     }
@@ -280,7 +341,7 @@ export function useDeployHistory({
     currentBuildActivityIdRef.current = "";
     setBuildAutoRefreshStartedAtMs(null);
     setBuildAutoRefreshTimedOut(false);
-  }, [deployViewScopeKey, enabled, selectedProject]);
+  }, [buildViewScopeKey, enabled, selectedProject]);
 
   useEffect(() => {
     if (
@@ -289,7 +350,7 @@ export function useDeployHistory({
       !buildAutoRefreshStartedAtMs ||
       !buildResult ||
       !isActiveBuildState(buildResult.stateKey) ||
-      (!buildResult.queueUrl && !buildResult.buildUrl)
+      !canRefreshBuildResult(buildResult)
     ) {
       return;
     }
@@ -312,6 +373,8 @@ export function useDeployHistory({
     buildAutoRefreshStartedAtMs,
     buildAutoRefreshTimedOut,
     buildResult?.buildUrl,
+    buildResult?.plan?.adapter,
+    buildResult?.plan?.projectKey,
     buildResult?.queueUrl,
     buildResult?.stateKey,
     enabled,
@@ -323,7 +386,7 @@ export function useDeployHistory({
     }
     updateActivity?.(currentBuildActivityIdRef.current, {
       status: "info",
-      summary: "部署状态刷新已暂停",
+      summary: `${actionCopyForPlan(buildResult?.plan ?? currentPlan).noun}状态刷新已暂停`,
       detail: buildResult?.buildUrl || buildResult?.queueUrl || null,
       resource: buildResult ? buildRecordResource(buildResult) : null,
     });
@@ -340,7 +403,7 @@ export function useDeployHistory({
       !enabled ||
       !buildResult ||
       !isActiveBuildState(buildResult.stateKey) ||
-      (!buildResult.queueUrl && !buildResult.buildUrl) ||
+      !canRefreshBuildResult(buildResult) ||
       buildAutoRefreshTimedOut
     ) {
       return;
@@ -360,35 +423,37 @@ export function useDeployHistory({
   }, [
     buildAutoRefreshTimedOut,
     buildResult?.buildUrl,
+    buildResult?.plan?.adapter,
+    buildResult?.plan?.projectKey,
     buildResult?.queueUrl,
     buildResult?.stateKey,
     enabled,
   ]);
 
-  async function loadDeployHistory() {
+  async function loadBuildHistory() {
     if (!enabled) {
-      setDeployHistory([]);
+      setBuildHistory([]);
       return;
     }
     try {
-      const items = await invoke<DeployHistoryEntry[]>("list_deploy_history");
-      setDeployHistory(items);
-      for (const item of items.slice(0, MAX_DEPLOY_HISTORY_ITEMS)) {
-        syncDeployActivityFromHistory(item);
+      const items = await invoke<BuildHistoryEntry[]>(BUILD_HISTORY_COMMANDS.list);
+      setBuildHistory(items);
+      for (const item of items.slice(0, MAX_BUILD_HISTORY_ITEMS)) {
+        syncBuildActivityFromHistory(item);
       }
-      void refreshDeployHistoryStatusItems(items, { reportItemFailure: false });
+      void refreshBuildHistoryStatusItems(items, { reportItemFailure: false });
     } catch (reason) {
       setError(String(reason));
     }
   }
 
-  async function persistDeployHistory(historyKey: string, result: BuildResult) {
+  async function persistBuildHistory(historyKey: string, result: BuildResult) {
     const plan = result.plan ?? buildResult?.plan ?? currentPlan;
     if (!plan) {
       return;
     }
-    const previousEntry = deployHistory.find((item) => item.historyKey === historyKey);
-    const entry: DeployHistoryEntry = {
+    const previousEntry = buildHistory.find((item) => item.historyKey === historyKey);
+    const entry: BuildHistoryEntry = {
       historyKey,
       projectKey: plan.projectKey,
       projectName: plan.projectName,
@@ -404,13 +469,13 @@ export function useDeployHistory({
       createdAt: previousEntry?.createdAt ?? new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
-    await invoke("save_deploy_history", { request: entry });
-    upsertDeployHistoryEntry(entry);
-    syncDeployActivityFromEntry(entry, result);
+    await invoke(BUILD_HISTORY_COMMANDS.save, { request: entry });
+    upsertBuildHistoryEntry(entry);
+    syncBuildActivityFromEntry(entry, result);
   }
 
-  async function persistDeployHistoryFromEntry(item: DeployHistoryEntry, result: BuildResult) {
-    const entry: DeployHistoryEntry = {
+  async function persistBuildHistoryFromEntry(item: BuildHistoryEntry, result: BuildResult) {
+    const entry: BuildHistoryEntry = {
       historyKey: item.historyKey,
       projectKey: item.projectKey,
       projectName: item.projectName,
@@ -426,30 +491,31 @@ export function useDeployHistory({
       createdAt: item.createdAt,
       updatedAt: new Date().toISOString(),
     };
-    await invoke("save_deploy_history", { request: entry });
-    upsertDeployHistoryEntry(entry);
-    syncDeployActivityFromEntry(entry, result);
+    await invoke(BUILD_HISTORY_COMMANDS.save, { request: entry });
+    upsertBuildHistoryEntry(entry);
+    syncBuildActivityFromEntry(entry, result);
   }
 
-  async function triggerDeployRequest(request: DeployRequest, busyText: string) {
+  async function triggerBuildRequest(request: BuildRequest, busyText: string) {
     if (!enabled || !request.project) {
       return;
     }
+    const actionCopy = actionCopyForPlan(currentPlan);
     setBusy(busyText);
     setError("");
     const activityProjectName =
       activityProjectNameForRequest(currentPlan, request, selectedProject);
     const activityId =
       recordActivity?.({
-        kind: "deploy",
+        kind: "build",
         status: "running",
-        title: "触发部署",
+        title: actionCopy.triggerTitle,
         summary: `${activityProjectName} · ${request.target || target || "默认目标"}`,
-        executionKey: deployActivityExecutionKey(request.project, request.target, request.params),
+        executionKey: buildActivityExecutionKey(request.project, request.target, request.params),
         projectKey: request.project,
         projectName: activityProjectName,
         target: {
-          page: "deploy",
+          page: "build",
           projectKey: request.project,
         },
       }) || "";
@@ -462,7 +528,7 @@ export function useDeployHistory({
       setBuildResult(result);
       setBuildResultUpdatedAtMs(Date.now());
       setBuildAutoRefreshStartedAtMs(
-        isActiveBuildState(result.stateKey) && (result.queueUrl || result.buildUrl)
+        isActiveBuildState(result.stateKey) && canRefreshBuildResult(result)
           ? Date.now()
           : null,
       );
@@ -472,7 +538,7 @@ export function useDeployHistory({
         result.buildUrl ??
         `${request.project}:${request.target ?? target}:${Date.now()}`;
       setCurrentBuildHistoryKey(historyKey);
-      await persistDeployHistory(historyKey, result);
+      await persistBuildHistory(historyKey, result);
       if (activityId) {
         updateActivity?.(activityId, {
           status: activityStatusFromBuildState(result.stateKey),
@@ -486,7 +552,7 @@ export function useDeployHistory({
       if (activityId) {
         updateActivity?.(activityId, {
           status: "failed",
-          summary: "部署触发失败",
+          summary: actionCopy.triggerFailed,
           detail: String(reason),
         });
       }
@@ -497,35 +563,39 @@ export function useDeployHistory({
   }
 
   async function handleTriggerBuild() {
-    await triggerDeployRequest(currentDeployRequest(), "正在触发部署");
+    await triggerBuildRequest(
+      currentBuildRequest(),
+      actionCopyForPlan(currentPlan).triggerBusy,
+    );
   }
 
-  async function handleReplayDeployHistory(
-    item: DeployHistoryEntry,
-    options: DeployReplayOptions = {},
+  async function handleReplayBuildHistory(
+    item: BuildHistoryEntry,
+    options: BuildReplayOptions = {},
   ) {
     if (!enabled && !options.force) {
       return;
     }
-    setBusy("正在重播部署");
+    const actionCopy = actionCopyForHistoryItem(currentPlan, item);
+    setBusy(actionCopy.replayBusy);
     setError("");
     const replayTarget = item.mode || null;
-    const replayParams = normalizeDeployParams(item.params);
+    const replayParams = normalizeBuildParams(item.params);
     const activityId =
       recordActivity?.({
-        kind: "deploy",
+        kind: "build",
         status: "running",
-        title: "重播部署",
+        title: actionCopy.replayTitle,
         summary: `${item.projectName} · ${replayTarget || "默认目标"}`,
-        executionKey: deployActivityExecutionKey(item.projectKey, replayTarget, replayParams),
+        executionKey: buildActivityExecutionKey(item.projectKey, replayTarget, replayParams),
         chainId: options.chainId ?? null,
         parentId: options.parentId ?? null,
-        stepLabel: options.stepLabel ?? "触发部署",
+        stepLabel: options.stepLabel ?? actionCopy.triggerTitle,
         chainLabel: options.chainId ? "联动链路" : null,
         projectKey: item.projectKey,
         projectName: item.projectName,
         target: {
-          page: "deploy",
+          page: "build",
           projectKey: item.projectKey,
         },
       }) || "";
@@ -542,7 +612,7 @@ export function useDeployHistory({
       setBuildResult(result);
       setBuildResultUpdatedAtMs(Date.now());
       setBuildAutoRefreshStartedAtMs(
-        isActiveBuildState(result.stateKey) && (result.queueUrl || result.buildUrl)
+        isActiveBuildState(result.stateKey) && canRefreshBuildResult(result)
           ? Date.now()
           : null,
       );
@@ -552,7 +622,7 @@ export function useDeployHistory({
         result.buildUrl ??
         `${item.projectKey}:${item.mode}:${Date.now()}`;
       setCurrentBuildHistoryKey(historyKey);
-      await persistDeployHistory(historyKey, result);
+      await persistBuildHistory(historyKey, result);
       if (activityId) {
         updateActivity?.(activityId, {
           status: activityStatusFromBuildState(result.stateKey),
@@ -560,7 +630,7 @@ export function useDeployHistory({
           detail: result.buildUrl || result.queueUrl || null,
           chainId: options.chainId ?? undefined,
           parentId: options.parentId ?? undefined,
-          stepLabel: options.stepLabel ?? "触发部署",
+          stepLabel: options.stepLabel ?? buildActionCopy(result.plan?.actionKind).triggerTitle,
           chainLabel: options.chainId ? "联动链路" : undefined,
           projectName: result.plan?.projectName || item.projectName,
           resource: buildRecordResource(result),
@@ -570,7 +640,7 @@ export function useDeployHistory({
       if (activityId) {
         updateActivity?.(activityId, {
           status: "failed",
-          summary: "部署重播失败",
+          summary: actionCopy.replayFailed,
           detail: String(reason),
         });
       }
@@ -584,7 +654,8 @@ export function useDeployHistory({
     if (!enabled) {
       return;
     }
-    if (!buildResult?.queueUrl && !buildResult?.buildUrl) {
+    const currentResult = buildResult;
+    if (!currentResult || !canRefreshBuildResult(currentResult)) {
       return;
     }
     if (!silent) {
@@ -594,25 +665,26 @@ export function useDeployHistory({
     try {
       const result = await invoke<BuildResult>("refresh_build_status", {
         request: {
-          queueUrl: buildResult.queueUrl,
-          buildUrl: buildResult.buildUrl,
+          queueUrl: currentResult.queueUrl,
+          buildUrl: currentResult.buildUrl,
+          project: isLocalBuildResult(currentResult) ? currentResult.plan?.projectKey : null,
         },
       });
       const nextResult = {
         ...result,
-        plan: result.plan ?? buildResult.plan ?? currentPlan ?? undefined,
+        plan: result.plan ?? currentResult.plan ?? currentPlan ?? undefined,
       };
-      const changed = buildResultChanged(buildResult, nextResult);
+      const changed = buildResultChanged(currentResult, nextResult);
       setBuildResult(nextResult);
       setBuildResultUpdatedAtMs(Date.now());
       const historyKey =
         currentBuildHistoryKey ||
-        buildResult.queueUrl ||
-        buildResult.buildUrl ||
+        currentResult.queueUrl ||
+        currentResult.buildUrl ||
         `${selectedProject}:${target}:${Date.now()}`;
       setCurrentBuildHistoryKey(historyKey);
       if (changed) {
-        await persistDeployHistory(historyKey, nextResult);
+        await persistBuildHistory(historyKey, nextResult);
       }
       if (changed && currentBuildActivityIdRef.current) {
         updateActivity?.(currentBuildActivityIdRef.current, {
@@ -633,14 +705,14 @@ export function useDeployHistory({
     }
   }
 
-  async function refreshDeployHistoryStatusItems(
-    items: DeployHistoryEntry[],
+  async function refreshBuildHistoryStatusItems(
+    items: BuildHistoryEntry[],
     { reportItemFailure }: { reportItemFailure: boolean },
   ) {
     const activeItems = items
       .filter((item) => isActiveBuildState(item.stateKey))
-      .filter((item) => item.queueUrl || item.buildUrl)
-      .slice(0, DEPLOY_HISTORY_STATUS_SYNC_LIMIT);
+      .filter((item) => item.queueUrl || item.buildUrl || item.projectKey)
+      .slice(0, BUILD_HISTORY_STATUS_SYNC_LIMIT);
 
     for (const item of activeItems) {
       try {
@@ -648,9 +720,10 @@ export function useDeployHistory({
           request: {
             queueUrl: item.queueUrl,
             buildUrl: item.buildUrl,
+            project: item.queueUrl || item.buildUrl ? null : item.projectKey,
           },
         });
-        await persistDeployHistoryFromEntry(item, result);
+        await persistBuildHistoryFromEntry(item, result);
         if (currentBuildHistoryKey === item.historyKey) {
           setBuildResult((current) =>
             current
@@ -664,23 +737,23 @@ export function useDeployHistory({
         }
       } catch (reason) {
         if (reportItemFailure) {
-          syncDeployActivityStatusFailure(item, reason);
+          syncBuildActivityStatusFailure(item, reason);
         }
       }
     }
   }
 
-  async function refreshDeployHistoryStatuses() {
+  async function refreshBuildHistoryStatuses() {
     if (!enabled) {
-      setDeployHistory([]);
+      setBuildHistory([]);
       return;
     }
-    setBusy("正在刷新部署记录");
+    setBusy("正在刷新构建记录");
     setError("");
     try {
-      const items = await invoke<DeployHistoryEntry[]>("list_deploy_history");
-      setDeployHistory(items);
-      await refreshDeployHistoryStatusItems(items, { reportItemFailure: true });
+      const items = await invoke<BuildHistoryEntry[]>(BUILD_HISTORY_COMMANDS.list);
+      setBuildHistory(items);
+      await refreshBuildHistoryStatusItems(items, { reportItemFailure: true });
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -688,16 +761,16 @@ export function useDeployHistory({
     }
   }
 
-  async function handleClearDeployHistory() {
+  async function handleClearBuildHistory() {
     if (!enabled) {
-      setDeployHistory([]);
+      setBuildHistory([]);
       return;
     }
-    setBusy("正在清空部署记录");
+    setBusy("正在清空构建记录");
     setError("");
     try {
-      await invoke("clear_deploy_history");
-      setDeployHistory([]);
+      await invoke(BUILD_HISTORY_COMMANDS.clear);
+      setBuildHistory([]);
       setBuildResult(null);
       setBuildResultUpdatedAtMs(0);
       setCurrentBuildHistoryKey("");
@@ -723,9 +796,9 @@ export function useDeployHistory({
     }
   }
 
-  function syncDeployActivitiesFromHistory() {
-    for (const item of deployHistory.slice(0, MAX_DEPLOY_HISTORY_ITEMS)) {
-      syncDeployActivityFromHistory(item);
+  function syncBuildActivitiesFromHistory() {
+    for (const item of buildHistory.slice(0, MAX_BUILD_HISTORY_ITEMS)) {
+      syncBuildActivityFromHistory(item);
     }
   }
 
@@ -733,12 +806,12 @@ export function useDeployHistory({
     buildResult,
     buildResultUpdatedAtMs,
     buildAutoRefreshTimedOut,
-    visibleDeployHistory,
+    visibleBuildHistory,
     handleTriggerBuild,
-    handleTriggerDeployRequest: (request: DeployRequest, busyText = "正在重播部署") =>
-      triggerDeployRequest(request, busyText),
+    handleTriggerBuildRequest: (request: BuildRequest, busyText = "正在重播构建") =>
+      triggerBuildRequest(request, busyText),
     handleRefreshBuild: () => refreshCurrentBuildStatus(),
-    handleReplayDeployHistory,
+    handleReplayBuildHistory,
     handleOpenBuildRecord: async () => {
       const url = buildResult?.buildUrl ?? buildResult?.queueUrl;
       if (!url) {
@@ -746,10 +819,10 @@ export function useDeployHistory({
       }
       await openBuildUrl(url, "正在打开构建记录页");
     },
-    handleOpenBuildUrl: (url: string) => openBuildUrl(url, "正在打开部署链接"),
-    loadDeployHistory,
-    refreshDeployHistoryStatuses,
-    syncDeployActivitiesFromHistory,
-    handleClearDeployHistory,
+    handleOpenBuildUrl: (url: string) => openBuildUrl(url, "正在打开构建链接"),
+    loadBuildHistory,
+    refreshBuildHistoryStatuses,
+    syncBuildActivitiesFromHistory,
+    handleClearBuildHistory,
   };
 }

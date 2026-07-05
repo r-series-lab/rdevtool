@@ -10,6 +10,8 @@ export type ProjectSummary = {
   deployTargets: Array<{
     key: string;
     label: string;
+    adapter: string;
+    actionKind: string;
     jobName: string;
   }>;
   supportsDeploy: boolean;

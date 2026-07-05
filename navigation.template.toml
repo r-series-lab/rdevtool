@@ -14,13 +14,41 @@ url = "https://example.com/"
 note = "Replace with your team's internal platform entry."
 
 [[categories.entries]]
+name = "示例目录"
+kind = "directory"
+path = "/path/to/workspace"
+note = "Use an absolute directory path."
+
+[[categories.entries]]
 name = "示例应用"
 kind = "app"
 bundle_id = "com.example.app"
-note = "优先使用 bundle_id；也可以改成 app_name"
+note = "工具入口：优先使用 bundle_id；也可以改成 app_name"
 
 [[categories.entries]]
 name = "示例脚本"
 kind = "script"
 script = "/path/to/scripts/example.sh"
-note = "Use an absolute path when possible; if script is relative, configure an absolute cwd."
+note = "工具入口：use an absolute path when possible; if script is relative, configure an absolute cwd."
+
+[[categories]]
+title = "R系列开发"
+short_label = "R系列"
+
+[[categories.entries]]
+name = "R 系列根目录"
+kind = "directory"
+path = "/Users/ikiru/Documents/r-series-public"
+note = "R 系列工具仓库根目录"
+
+[[categories.entries]]
+name = "rDevTool 目录"
+kind = "directory"
+path = "/Users/ikiru/Documents/r-series-public/rdevtool"
+note = "R 系列项目目录"
+
+[[categories.entries]]
+name = "rDevTool App"
+kind = "app"
+bundle_id = "app.rseries.rdevtool"
+note = "打开 rDevTool 桌面应用"

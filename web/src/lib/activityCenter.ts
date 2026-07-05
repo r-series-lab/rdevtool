@@ -10,7 +10,7 @@ export type ActivityKind =
 
 export type ActivityStatus = "running" | "success" | "failed" | "info";
 
-export const DEPLOY_STATUS_SYNC_MAX_FAILURES = 3;
+export const BUILD_STATUS_SYNC_MAX_FAILURES = 3;
 
 export type ActivityTarget = {
   page: PageKey;
@@ -85,7 +85,7 @@ export type ActivityMatch = {
 
 export type ActivityRecorder = (draft: ActivityDraft) => string;
 export type ActivityUpdater = (id: string, patch: ActivityPatch) => void;
-export type ActivityBulkUpdater = (match: ActivityMatch, patch: ActivityPatch) => void;
+export type ActivityBulkUpdater = (match: ActivityMatch, patch: ActivityPatch) => boolean;
 
 const ACTIVITY_KINDS = new Set<ActivityKind>([
   "runtime",
@@ -123,7 +123,18 @@ function normalizeNonNegativeInteger(value: unknown) {
   return Math.max(0, Math.floor(number));
 }
 
-function normalizeDeploySyncFailureCount(summary: string, value: unknown) {
+export function isBuildActivityKind(kind?: ActivityKind | string | null) {
+  return kind === "build" || kind === "deploy";
+}
+
+function normalizeActivityKind(value: unknown): ActivityKind | null {
+  if (!ACTIVITY_KINDS.has(value as ActivityKind)) {
+    return null;
+  }
+  return value === "deploy" ? "build" : (value as ActivityKind);
+}
+
+function normalizeBuildSyncFailureCount(summary: string, value: unknown) {
   const explicitCount = normalizeNonNegativeInteger(value);
   if (!summary.startsWith("状态同步失败")) {
     return explicitCount;
@@ -134,10 +145,10 @@ function normalizeDeploySyncFailureCount(summary: string, value: unknown) {
     ? normalizeNonNegativeInteger(summaryCountMatch[1])
     : 0;
   const stoppedCount = summary.includes("已停止自动重试")
-    ? DEPLOY_STATUS_SYNC_MAX_FAILURES
+    ? BUILD_STATUS_SYNC_MAX_FAILURES
     : 0;
   return Math.min(
-    DEPLOY_STATUS_SYNC_MAX_FAILURES,
+    BUILD_STATUS_SYNC_MAX_FAILURES,
     Math.max(explicitCount, summaryCount, stoppedCount),
   );
 }
@@ -147,16 +158,19 @@ function normalizeActivityTarget(value: unknown): ActivityTarget | null {
     return null;
   }
   const candidate = value as Partial<ActivityTarget>;
+  const rawPageValue = (value as Record<string, unknown>).page;
+  const rawPage = typeof rawPageValue === "string" ? rawPageValue : "";
+  const page = rawPage === "deploy" ? "build" : rawPage;
   if (
-    candidate.page !== "projects" &&
-    candidate.page !== "merge" &&
-    candidate.page !== "deploy"
+    page !== "projects" &&
+    page !== "merge" &&
+    page !== "build"
   ) {
     return null;
   }
 
   return {
-    page: candidate.page,
+    page,
     projectKey: normalizeNullableString(candidate.projectKey),
     branchMode:
       candidate.branchMode === "sync" ||
@@ -248,9 +262,10 @@ export function normalizeActivityEntry(value: unknown): ActivityEntry | null {
     return null;
   }
   const candidate = value as Partial<ActivityEntry>;
+  const kind = normalizeActivityKind(candidate.kind);
   if (
     typeof candidate.id !== "string" ||
-    !ACTIVITY_KINDS.has(candidate.kind as ActivityKind) ||
+    !kind ||
     !ACTIVITY_STATUSES.has(candidate.status as ActivityStatus) ||
     typeof candidate.title !== "string" ||
     typeof candidate.summary !== "string"
@@ -263,7 +278,7 @@ export function normalizeActivityEntry(value: unknown): ActivityEntry | null {
   const summary = candidate.summary;
   return {
     id: candidate.id,
-    kind: candidate.kind as ActivityKind,
+    kind,
     status: candidate.status as ActivityStatus,
     title: candidate.title,
     summary,
@@ -277,7 +292,7 @@ export function normalizeActivityEntry(value: unknown): ActivityEntry | null {
     projectName: normalizeNullableString(candidate.projectName),
     target: normalizeActivityTarget(candidate.target),
     resource: normalizeActivityResource(candidate.resource),
-    syncFailureCount: normalizeDeploySyncFailureCount(summary, candidate.syncFailureCount),
+    syncFailureCount: normalizeBuildSyncFailureCount(summary, candidate.syncFailureCount),
     acknowledgedAt: normalizeNullableString(candidate.acknowledgedAt),
     createdAt,
     updatedAt,

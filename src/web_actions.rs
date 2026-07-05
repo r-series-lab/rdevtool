@@ -7,7 +7,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tungstenite::{Message, connect};
 
 use crate::config::{RuntimeProfileConfig, default_config_dir};
@@ -55,6 +55,20 @@ return { ok: true, keyword: params.keyword || '' };
 [actions.params.keyword]
 label = "关键词"
 default = "rDevTool"
+
+[[actions]]
+key = "current-page-request"
+name = "请求当前页面"
+scope = ""
+match = ["http://*", "https://*"]
+run_manually = true
+kind = "request"
+
+[actions.request]
+method = "GET"
+url = "."
+headers = { accept = "text/html,application/json" }
+timeout_ms = 15000
 "#;
 
 pub fn default_web_actions_path() -> PathBuf {
@@ -120,19 +134,66 @@ fn default_cdp_port() -> u16 {
     DEFAULT_CDP_PORT
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum WebActionKind {
+    Script,
+    Request,
+}
+
+impl Default for WebActionKind {
+    fn default() -> Self {
+        Self::Script
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct WebActionConfig {
     key: String,
     name: String,
+    #[serde(default)]
+    kind: WebActionKind,
     #[serde(default)]
     scope: String,
     #[serde(default, rename = "match")]
     match_patterns: Vec<String>,
     #[serde(default = "default_true")]
     run_manually: bool,
+    #[serde(default)]
     script: String,
     #[serde(default)]
+    request: WebActionRequestConfig,
+    #[serde(default)]
     params: BTreeMap<String, WebActionParamConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct WebActionRequestConfig {
+    #[serde(default = "default_request_method")]
+    method: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    body: String,
+    #[serde(default = "default_request_timeout_ms")]
+    timeout_ms: u64,
+    #[serde(default = "default_request_max_body_bytes")]
+    max_body_bytes: usize,
+}
+
+impl Default for WebActionRequestConfig {
+    fn default() -> Self {
+        Self {
+            method: default_request_method(),
+            url: String::new(),
+            headers: BTreeMap::new(),
+            body: String::new(),
+            timeout_ms: default_request_timeout_ms(),
+            max_body_bytes: default_request_max_body_bytes(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -147,6 +208,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_request_method() -> String {
+    "GET".to_string()
+}
+
+fn default_request_timeout_ms() -> u64 {
+    30_000
+}
+
+fn default_request_max_body_bytes() -> usize {
+    64 * 1024
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WebActionListResponse {
@@ -159,11 +232,24 @@ pub struct WebActionListResponse {
 pub struct WebActionSummary {
     pub key: String,
     pub name: String,
+    pub kind: WebActionKind,
     pub scope: String,
     pub match_patterns: Vec<String>,
     pub run_manually: bool,
     pub params: Vec<WebActionParamSummary>,
     pub script: String,
+    pub request: Option<WebActionRequestSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WebActionRequestSummary {
+    pub method: String,
+    pub url: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: String,
+    pub timeout_ms: u64,
+    pub max_body_bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -255,8 +341,7 @@ pub fn open_web_action_navigation_target(
         .ok_or_else(|| anyhow!("网站入口缺少 URL"))?;
     let normalized_url = normalize_http_url(url)?;
     let config = load_web_actions_config()?;
-    let browser =
-        effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
+    let browser = effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
     open_web_action_target_with_browser(&browser, normalized_url)
 }
 
@@ -379,8 +464,7 @@ pub fn list_web_action_navigation_targets(
     runtime_profiles: &[RuntimeProfileConfig],
 ) -> Result<Vec<WebActionTarget>> {
     let config = load_web_actions_config()?;
-    let browser =
-        effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
+    let browser = effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
     list_web_action_targets_for_browser(&browser)
 }
 
@@ -408,8 +492,7 @@ pub fn run_web_action_navigation(
     request: WebActionRunRequest,
 ) -> Result<WebActionRunResult> {
     let config = load_web_actions_config()?;
-    let browser =
-        effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
+    let browser = effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
     run_web_action_with_browser(&config, &browser, request)
 }
 
@@ -425,6 +508,17 @@ fn run_web_action_with_browser(
         .cloned()
         .ok_or_else(|| anyhow!("网页动作不存在: {}", request.action_key))?;
 
+    match action.kind {
+        WebActionKind::Script => run_script_web_action(browser, action, request),
+        WebActionKind::Request => run_request_web_action(action, request),
+    }
+}
+
+fn run_script_web_action(
+    browser: &EffectiveWebActionsBrowserConfig,
+    action: WebActionConfig,
+    request: WebActionRunRequest,
+) -> Result<WebActionRunResult> {
     let target = resolve_action_target(browser, &action, &request)?;
     if !action_matches_context(&action, request.scope.as_deref(), Some(&target.url)) {
         bail!(
@@ -450,6 +544,33 @@ fn run_web_action_with_browser(
     })
 }
 
+fn run_request_web_action(
+    action: WebActionConfig,
+    request: WebActionRunRequest,
+) -> Result<WebActionRunResult> {
+    let context_url = request.url.as_deref();
+    if !action_matches_context(&action, request.scope.as_deref(), context_url) {
+        bail!(
+            "当前页面不匹配动作范围：{} 不在 {:?}",
+            context_url.unwrap_or("-"),
+            action.match_patterns
+        );
+    }
+
+    let result = execute_request_action(&action.request, &request.params, context_url)?;
+    Ok(WebActionRunResult {
+        action_key: action.key,
+        target_id: request.target_id.unwrap_or_default(),
+        title: action.name,
+        url: result.url,
+        success: result.success,
+        result: Some(result.value.clone()),
+        result_text: serde_json::to_string_pretty(&result.value)
+            .unwrap_or_else(|_| result.value.to_string()),
+        error: None,
+    })
+}
+
 pub fn run_web_action_script(request: WebActionScriptRunRequest) -> Result<WebActionRunResult> {
     let config = load_web_actions_config()?;
     let browser = EffectiveWebActionsBrowserConfig::from_config(&config.browser);
@@ -462,8 +583,7 @@ pub fn run_web_action_navigation_script(
     request: WebActionScriptRunRequest,
 ) -> Result<WebActionRunResult> {
     let config = load_web_actions_config()?;
-    let browser =
-        effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
+    let browser = effective_browser_for_navigation_entry(&config.browser, entry, runtime_profiles)?;
     run_web_action_script_with_browser(&browser, request)
 }
 
@@ -524,9 +644,18 @@ fn load_web_actions_config() -> Result<WebActionsFileConfig> {
 }
 
 fn web_action_summary(action: WebActionConfig) -> WebActionSummary {
+    let request = (action.kind == WebActionKind::Request).then(|| WebActionRequestSummary {
+        method: action.request.method,
+        url: action.request.url,
+        headers: action.request.headers,
+        body: action.request.body,
+        timeout_ms: action.request.timeout_ms,
+        max_body_bytes: action.request.max_body_bytes,
+    });
     WebActionSummary {
         key: action.key,
         name: action.name,
+        kind: action.kind,
         scope: action.scope,
         match_patterns: action.match_patterns,
         run_manually: action.run_manually,
@@ -540,6 +669,7 @@ fn web_action_summary(action: WebActionConfig) -> WebActionSummary {
             })
             .collect(),
         script: action.script,
+        request,
     }
 }
 
@@ -644,6 +774,134 @@ fn resolve_action_target(
         .ok_or_else(|| anyhow!("未找到匹配网页动作的受控页面"))
 }
 
+struct RequestActionExecution {
+    url: String,
+    success: bool,
+    value: Value,
+}
+
+fn execute_request_action(
+    config: &WebActionRequestConfig,
+    params: &BTreeMap<String, String>,
+    context_url: Option<&str>,
+) -> Result<RequestActionExecution> {
+    let method_text = render_template(&config.method, params)
+        .trim()
+        .to_ascii_uppercase();
+    if method_text.is_empty() {
+        bail!("请求动作缺少 method");
+    }
+    let method = reqwest::Method::from_bytes(method_text.as_bytes())
+        .with_context(|| format!("请求方法无效: {}", method_text))?;
+    let request_url = resolve_request_action_url(&config.url, params, context_url)?;
+    let timeout_ms = config.timeout_ms.clamp(1, 300_000);
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(timeout_ms))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .context("failed to build request action HTTP client")?;
+
+    let mut request_headers = BTreeMap::new();
+    let mut builder = client.request(method.clone(), request_url.clone());
+    for (name, value) in &config.headers {
+        let header_name = reqwest::header::HeaderName::from_bytes(name.as_bytes())
+            .with_context(|| format!("请求 Header 名无效: {}", name))?;
+        let rendered = render_template(value, params);
+        if rendered.is_empty() {
+            continue;
+        }
+        let header_value = reqwest::header::HeaderValue::from_str(&rendered)
+            .with_context(|| format!("请求 Header 值无效: {}", name))?;
+        request_headers.insert(name.clone(), rendered);
+        builder = builder.header(header_name, header_value);
+    }
+
+    let request_body = render_template(&config.body, params);
+    if !request_body.is_empty() {
+        builder = builder.body(request_body.clone());
+    }
+
+    let started_at = Instant::now();
+    let response = builder
+        .send()
+        .with_context(|| format!("请求动作发送失败: {} {}", method, request_url))?;
+    let duration_ms = started_at.elapsed().as_millis() as u64;
+    let final_url = response.url().to_string();
+    let status = response.status();
+    let response_headers = response
+        .headers()
+        .iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_string(),
+                value.to_str().unwrap_or("<binary>").to_string(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let bytes = response
+        .bytes()
+        .context("failed to read request action body")?;
+    let response_bytes = bytes.len();
+    let max_body_bytes = config.max_body_bytes.max(1);
+    let preview_len = response_bytes.min(max_body_bytes);
+    let body_preview = String::from_utf8_lossy(&bytes[..preview_len]).to_string();
+    let truncated = response_bytes > preview_len;
+    let success = status.is_success();
+    let value = json!({
+        "kind": "request",
+        "method": method.as_str(),
+        "url": final_url,
+        "status": status.as_u16(),
+        "success": success,
+        "durationMs": duration_ms,
+        "requestHeaders": request_headers,
+        "requestBodyBytes": request_body.as_bytes().len(),
+        "responseHeaders": response_headers,
+        "responseBytes": response_bytes,
+        "responseBody": body_preview,
+        "responseBodyTruncated": truncated
+    });
+
+    Ok(RequestActionExecution {
+        url: final_url,
+        success,
+        value,
+    })
+}
+
+fn resolve_request_action_url(
+    value: &str,
+    params: &BTreeMap<String, String>,
+    context_url: Option<&str>,
+) -> Result<String> {
+    let rendered = render_template(value, params);
+    let trimmed = rendered.trim();
+    if trimmed.is_empty() {
+        bail!("请求动作缺少 URL");
+    }
+    if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        return Ok(trimmed.to_string());
+    }
+    let base_url = context_url
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .ok_or_else(|| anyhow!("相对请求 URL 需要当前页面 URL 作为基准"))?;
+    let base = reqwest::Url::parse(base_url)
+        .with_context(|| format!("当前页面 URL 无效，无法解析相对请求: {}", base_url))?;
+    base.join(trimmed)
+        .with_context(|| format!("请求 URL 无效: {}", trimmed))
+        .map(|url| url.to_string())
+}
+
+fn render_template(value: &str, params: &BTreeMap<String, String>) -> String {
+    let mut rendered = value.to_string();
+    for (key, param_value) in params {
+        rendered = rendered.replace(&format!("${{{key}}}"), param_value);
+        rendered = rendered.replace(&format!("{{{{{key}}}}}"), param_value);
+    }
+    rendered
+}
+
 fn ensure_cdp_browser(browser: &EffectiveWebActionsBrowserConfig, url: Option<&str>) -> Result<()> {
     if cdp_version(browser.port).is_ok() {
         if let Some(url) = url {
@@ -741,7 +999,11 @@ fn launch_chrome(browser: &EffectiveWebActionsBrowserConfig, url: Option<&str>) 
     if let Some(profile) = browser.browser_profile.as_deref() {
         command.arg(format!("--profile-directory={profile}"));
     }
-    for arg in browser.browser_args.iter().filter(|arg| !is_managed_browser_arg(arg)) {
+    for arg in browser
+        .browser_args
+        .iter()
+        .filter(|arg| !is_managed_browser_arg(arg))
+    {
         command.arg(arg);
     }
     if let Some(url) = url {
@@ -755,8 +1017,7 @@ fn launch_chrome(browser: &EffectiveWebActionsBrowserConfig, url: Option<&str>) 
 
 fn is_managed_browser_arg(arg: &&String) -> bool {
     let normalized = arg.trim().to_ascii_lowercase();
-    normalized.starts_with("--remote-debugging-port")
-        || normalized.starts_with("--user-data-dir")
+    normalized.starts_with("--remote-debugging-port") || normalized.starts_with("--user-data-dir")
 }
 
 fn resolve_chrome_path(browser: &EffectiveWebActionsBrowserConfig) -> Result<PathBuf> {
@@ -840,9 +1101,7 @@ fn resolve_browser_app_executable(app_name: &str) -> Option<PathBuf> {
             _ => vec![app_name],
         };
         for alias in aliases {
-            let path = PathBuf::from(format!(
-                "/Applications/{alias}.app/Contents/MacOS/{alias}"
-            ));
+            let path = PathBuf::from(format!("/Applications/{alias}.app/Contents/MacOS/{alias}"));
             if path.exists() {
                 return Some(path);
             }
@@ -1018,6 +1277,9 @@ mod tests {
                 .iter()
                 .any(|action| action.key == "baidu-search")
         );
+        assert!(config.actions.iter().any(|action| {
+            action.key == "current-page-request" && action.kind == WebActionKind::Request
+        }));
     }
 
     #[test]
@@ -1025,10 +1287,12 @@ mod tests {
         let action = WebActionConfig {
             key: "baidu-search".to_string(),
             name: "百度搜索".to_string(),
+            kind: WebActionKind::Script,
             scope: "url:baidu".to_string(),
             match_patterns: vec!["https://www.baidu.com/*".to_string()],
             run_manually: true,
             script: "return true;".to_string(),
+            request: WebActionRequestConfig::default(),
             params: BTreeMap::new(),
         };
 
@@ -1047,6 +1311,21 @@ mod tests {
             Some("url:baidu"),
             Some("https://example.com/")
         ));
+    }
+
+    #[test]
+    fn resolves_request_action_url_with_params() {
+        let mut params = BTreeMap::new();
+        params.insert("id".to_string(), "42".to_string());
+
+        let url = resolve_request_action_url(
+            "/api/projects/${id}",
+            &params,
+            Some("https://example.com/workbench/index.html"),
+        )
+        .unwrap();
+
+        assert_eq!(url, "https://example.com/api/projects/42");
     }
 
     #[test]

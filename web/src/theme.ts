@@ -52,6 +52,14 @@ export function createAppTheme(styleMode: AppStyleMode) {
     : "0 22px 52px rgba(28,48,68,0.18), inset 0 1px 0 rgba(255,255,255,0.72)";
   const menuItemHoverBg = mono ? "rgba(143,184,234,0.09)" : "rgba(92,112,133,0.08)";
   const menuItemSelectedBg = mono ? "rgba(143,184,234,0.13)" : "rgba(92,112,133,0.12)";
+  const dialogBackdropBg = mono ? "rgba(0,0,0,0.34)" : "rgba(30,38,48,0.22)";
+  const dialogPaperBg = mono
+    ? "linear-gradient(180deg, rgba(255,255,255,0.052), rgba(255,255,255,0.018) 48%, rgba(255,255,255,0.01)), rgba(14,18,24,0.985)"
+    : "linear-gradient(180deg, rgba(255,255,255,0.985), rgba(247,250,254,0.992) 48%, rgba(241,246,252,0.988)), rgba(248,251,255,0.99)";
+  const dialogChromeBg = mono ? "rgba(15,19,25,0.94)" : "rgba(248,251,255,0.94)";
+  const dialogPaperShadow = mono
+    ? "0 34px 92px rgba(0,0,0,0.58), inset 0 1px 0 rgba(255,255,255,0.055)"
+    : "0 30px 86px rgba(20,36,54,0.28), inset 0 1px 0 rgba(255,255,255,0.96)";
 
   return createTheme({
     palette: {
@@ -124,6 +132,53 @@ export function createAppTheme(styleMode: AppStyleMode) {
                 backgroundImage: "none",
               }
             : {},
+        },
+      },
+      MuiBackdrop: {
+        styleOverrides: {
+          root: {
+            backgroundColor: dialogBackdropBg,
+            backdropFilter: "blur(2px) saturate(1.02)",
+            WebkitBackdropFilter: "blur(2px) saturate(1.02)",
+          },
+        },
+      },
+      MuiDialog: {
+        styleOverrides: {
+          paper: {
+            borderRadius: 18,
+            border: `1px solid ${mono ? "rgba(143,184,234,0.14)" : "rgba(52,76,96,0.18)"}`,
+            background: dialogPaperBg,
+            backgroundImage: "none",
+            color: tokens.text,
+            boxShadow: dialogPaperShadow,
+            backdropFilter: "blur(18px) saturate(1.1)",
+            WebkitBackdropFilter: "blur(18px) saturate(1.1)",
+          },
+        },
+      },
+      MuiDialogTitle: {
+        styleOverrides: {
+          root: {
+            background: dialogChromeBg,
+            color: tokens.text,
+            borderBottom: `1px solid ${tokens.lineSoft}`,
+          },
+        },
+      },
+      MuiDialogActions: {
+        styleOverrides: {
+          root: {
+            background: dialogChromeBg,
+            borderTop: `1px solid ${tokens.lineSoft}`,
+          },
+        },
+      },
+      MuiDialogContent: {
+        styleOverrides: {
+          root: {
+            backgroundColor: "transparent",
+          },
         },
       },
       MuiButton: {
@@ -207,6 +262,7 @@ export function createAppTheme(styleMode: AppStyleMode) {
       MuiTextField: {
         defaultProps: {
           size: "small",
+          autoComplete: "off",
         },
       },
       MuiFormControl: {
@@ -238,6 +294,14 @@ export function createAppTheme(styleMode: AppStyleMode) {
         },
       },
       MuiInputBase: {
+        defaultProps: {
+          inputProps: {
+            autoCapitalize: "none",
+            autoComplete: "off",
+            autoCorrect: "off",
+            spellCheck: false,
+          },
+        },
         styleOverrides: {
           root: {
             fontSize: "0.9rem",
@@ -345,8 +409,8 @@ export function createAppTheme(styleMode: AppStyleMode) {
             background: menuPaperBg,
             color: tokens.text,
             boxShadow: menuPaperShadow,
-            backdropFilter: "blur(18px) saturate(1.16)",
-            WebkitBackdropFilter: "blur(18px) saturate(1.16)",
+            backdropFilter: "blur(10px) saturate(1.08)",
+            WebkitBackdropFilter: "blur(10px) saturate(1.08)",
             backgroundImage: "none",
           },
           listbox: {
@@ -376,8 +440,8 @@ export function createAppTheme(styleMode: AppStyleMode) {
             background: menuPaperBg,
             color: tokens.text,
             boxShadow: menuPaperShadow,
-            backdropFilter: "blur(18px) saturate(1.16)",
-            WebkitBackdropFilter: "blur(18px) saturate(1.16)",
+            backdropFilter: "blur(10px) saturate(1.08)",
+            WebkitBackdropFilter: "blur(10px) saturate(1.08)",
             backgroundImage: "none",
           },
           list: {

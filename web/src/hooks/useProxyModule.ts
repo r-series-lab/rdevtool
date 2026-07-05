@@ -5,26 +5,14 @@ import type {
   ProxyProfile,
   ProxyRule,
 } from "../app-types";
-import { createProxyDemoDashboard } from "../lib/proxyDemoData";
 
 type UseProxyModuleOptions = {
   enabled: boolean;
   setError: (value: string) => void;
 };
 
-type ImportMetaWithEnv = ImportMeta & {
-  env?: {
-    DEV?: boolean;
-  };
-};
-
 function firstProfileId(dashboard: ProxyDashboard | null) {
   return dashboard?.config.profiles[0]?.id ?? "";
-}
-
-function canUseDemoFallback(reason: unknown) {
-  const text = String(reason);
-  return text.includes("invoke") || text.includes("__TAURI__") || text.includes("__TAURI_INTERNALS__");
 }
 
 export function useProxyModule({ enabled: _enabled, setError }: UseProxyModuleOptions) {
@@ -33,7 +21,6 @@ export function useProxyModule({ enabled: _enabled, setError }: UseProxyModuleOp
   const [loading, setLoading] = useState(false);
   const [busy, setBusy] = useState("");
   const [localError, setLocalError] = useState("");
-  const demoAvailable = Boolean((import.meta as ImportMetaWithEnv).env?.DEV);
 
   const selectedProfileExists = useMemo(
     () =>
@@ -91,23 +78,12 @@ export function useProxyModule({ enabled: _enabled, setError }: UseProxyModuleOp
     try {
       applyDashboard(await invoke<ProxyDashboard>("get_proxy_dashboard"));
     } catch (reason) {
-      if (demoAvailable && canUseDemoFallback(reason)) {
-        applyDashboard(createProxyDemoDashboard());
-        setError("");
-        return;
-      }
       const text = String(reason);
       setLocalError(text);
       setError(text);
     } finally {
       setLoading(false);
     }
-  }, [applyDashboard, demoAvailable, setError]);
-
-  const loadProxyDemoData = useCallback(() => {
-    setLocalError("");
-    setError("");
-    applyDashboard(createProxyDemoDashboard());
   }, [applyDashboard, setError]);
 
   const saveProxyProfile = useCallback(
@@ -166,6 +142,22 @@ export function useProxyModule({ enabled: _enabled, setError }: UseProxyModuleOp
     [runDashboardTask],
   );
 
+  const exportProxyProfilePack = useCallback(
+    (profileId: string, path: string) =>
+      runDashboardTask("正在导出代理包", () =>
+        invoke<ProxyDashboard>("export_proxy_profile_pack", { profileId, path }),
+      ),
+    [runDashboardTask],
+  );
+
+  const importProxyProfilePack = useCallback(
+    (path: string) =>
+      runDashboardTask("正在导入代理包", () =>
+        invoke<ProxyDashboard>("import_proxy_profile_pack", { path }),
+      ),
+    [runDashboardTask],
+  );
+
   return {
     dashboard,
     selectedProfileId,
@@ -181,7 +173,7 @@ export function useProxyModule({ enabled: _enabled, setError }: UseProxyModuleOp
     startProxyProfile,
     stopProxyProfile,
     clearProxyEvents,
-    demoAvailable,
-    loadProxyDemoData,
+    exportProxyProfilePack,
+    importProxyProfilePack,
   };
 }

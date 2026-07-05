@@ -147,7 +147,7 @@ export function BranchPushStatusCard({
             color="text.secondary"
             sx={{ display: "block", fontSize: "0.72rem", lineHeight: 1.35 }}
           >
-            当前工作区没有未提交文件。
+            当前工作副本没有未提交文件。
           </Typography>
         )}
       </Stack>

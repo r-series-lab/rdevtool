@@ -1,14 +1,17 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import {
   Alert,
   Button,
+  Menu,
+  MenuItem,
 } from "@mui/material";
 import type { PageKey } from "../app-shell";
+import type { CreateProjectWorkspacePayload, ProjectWorkspaceSummary } from "../app-types";
 import type { ActivityEntry } from "../lib/activityCenter";
 import type { AppStyleMode } from "../theme";
-import { PanelSideIcon, SettingsIcon } from "./AppIcons";
+import { CheckIcon, ExpandIcon, PanelSideIcon, SettingsIcon } from "./AppIcons";
 import { ActivityCenter } from "./ActivityCenter";
-import { SettingsPanel } from "./SettingsPanel";
+import { SettingsPanel, type SettingsSection } from "./SettingsPanel";
 
 type NavItem = {
   key: PageKey;
@@ -26,10 +29,15 @@ type AppShellLayoutProps = {
   onDefaultPageChange: (page: PageKey) => void;
   styleMode: AppStyleMode;
   onStyleModeChange: (mode: AppStyleMode) => void;
+  projectWorkspaces: ProjectWorkspaceSummary[];
+  activeProjectWorkspaceKey: string;
+  onProjectWorkspaceChange: (workspaceKey: string) => Promise<void> | void;
   selectedProjectKey: string;
   onOpenConfigDir: () => void;
   onOpenConfigFile: () => void;
+  onOpenProjectWorkspacesDir: () => void;
   onOpenNavigationConfigFile: () => void;
+  onCreateProjectWorkspace: (payload: CreateProjectWorkspacePayload) => Promise<void> | void;
   onProjectConfigSaved: () => Promise<void> | void;
   activityItems: ActivityEntry[];
   activityAlertCount: number;
@@ -66,10 +74,15 @@ export function AppShellLayout({
   onDefaultPageChange,
   styleMode,
   onStyleModeChange,
+  projectWorkspaces,
+  activeProjectWorkspaceKey,
+  onProjectWorkspaceChange,
   selectedProjectKey,
   onOpenConfigDir,
   onOpenConfigFile,
+  onOpenProjectWorkspacesDir,
   onOpenNavigationConfigFile,
+  onCreateProjectWorkspace,
   onProjectConfigSaved,
   activityItems,
   activityAlertCount,
@@ -84,7 +97,11 @@ export function AppShellLayout({
   children,
 }: AppShellLayoutProps) {
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] =
+    useState<SettingsSection | undefined>();
   const [activityOpen, setActivityOpen] = useState(false);
+  const [workspaceMenuAnchor, setWorkspaceMenuAnchor] = useState<HTMLElement | null>(null);
+  const [workspaceSwitchingKey, setWorkspaceSwitchingKey] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [activityPanelMode, setActivityPanelMode] = useState(() =>
     typeof window === "undefined"
@@ -102,7 +119,8 @@ export function AppShellLayout({
     };
   }, []);
 
-  function openSettings() {
+  function openSettings(section?: SettingsSection) {
+    setSettingsInitialSection(section);
     setSettingsOpen(true);
   }
 
@@ -110,8 +128,39 @@ export function AppShellLayout({
     setSettingsOpen(false);
   }
 
+  function openWorkspaceMenu(event: MouseEvent<HTMLButtonElement>) {
+    setWorkspaceMenuAnchor(event.currentTarget);
+  }
+
+  function closeWorkspaceMenu() {
+    setWorkspaceMenuAnchor(null);
+  }
+
+  async function selectProjectWorkspace(workspaceKey: string) {
+    closeWorkspaceMenu();
+    if (!workspaceKey || workspaceKey === activeProjectWorkspaceKey) {
+      return;
+    }
+    setWorkspaceSwitchingKey(workspaceKey);
+    try {
+      await onProjectWorkspaceChange(workspaceKey);
+    } finally {
+      setWorkspaceSwitchingKey("");
+    }
+  }
+
+  function openWorkspaceSettingsFromMenu() {
+    closeWorkspaceMenu();
+    openSettings("workspace");
+  }
+
   const visibleBusy = shouldShowBusyMessage(busy) ? busy : "";
   const desktopSidebarCollapsed = activityPanelMode && sidebarCollapsed;
+  const activeProjectWorkspace =
+    projectWorkspaces.find((workspace) => workspace.key === activeProjectWorkspaceKey) ??
+    projectWorkspaces[0] ??
+    null;
+  const workspaceMenuOpen = Boolean(workspaceMenuAnchor);
 
   return (
       <div
@@ -151,7 +200,7 @@ export function AppShellLayout({
           className="settings-icon-toggle"
           aria-label="打开设置"
           title="设置"
-          onClick={openSettings}
+          onClick={() => openSettings()}
           aria-expanded={settingsOpen}
         >
           <SettingsIcon fontSize="small" />
@@ -179,6 +228,77 @@ export function AppShellLayout({
             </Button>
           ))}
         </nav>
+        {projectWorkspaces.length > 0 ? (
+          <div className="sidebar-footer">
+            <button
+              type="button"
+              className={`workspace-switcher${workspaceMenuOpen ? " is-open" : ""}`}
+              aria-label="切换工作区"
+              aria-haspopup="menu"
+              aria-expanded={workspaceMenuOpen}
+              onClick={openWorkspaceMenu}
+              title={
+                activeProjectWorkspace
+                  ? `${activeProjectWorkspace.name} · 切换工作区`
+                  : "切换工作区"
+              }
+            >
+              <span className="workspace-switcher-name">
+                {activeProjectWorkspace?.name ?? "工作区"}
+              </span>
+              <ExpandIcon className="workspace-switcher-chevron" fontSize="small" />
+            </button>
+            <Menu
+              anchorEl={workspaceMenuAnchor}
+              open={workspaceMenuOpen}
+              onClose={closeWorkspaceMenu}
+              anchorOrigin={{ vertical: "top", horizontal: "left" }}
+              transformOrigin={{ vertical: "bottom", horizontal: "left" }}
+              MenuListProps={{
+                "aria-label": "切换工作区",
+                className: "workspace-menu-list",
+              }}
+              slotProps={{
+                paper: {
+                  className: "workspace-menu-paper",
+                },
+              }}
+            >
+              {projectWorkspaces.map((workspace) => {
+                const selected = workspace.key === activeProjectWorkspaceKey;
+                const switching = workspace.key === workspaceSwitchingKey;
+                return (
+                  <MenuItem
+                    key={workspace.key}
+                    className={`workspace-menu-item${selected ? " is-active" : ""}`}
+                    selected={selected}
+                    disabled={switching}
+                    onClick={() => void selectProjectWorkspace(workspace.key)}
+                  >
+                    <span className="workspace-menu-item-copy">
+                      <span className="workspace-menu-item-name">{workspace.name}</span>
+                      <span className="workspace-menu-item-meta">
+                        {workspace.projectScopeLabel}
+                      </span>
+                    </span>
+                    {selected ? (
+                      <CheckIcon className="workspace-menu-item-check" fontSize="small" />
+                    ) : null}
+                  </MenuItem>
+                );
+              })}
+              <MenuItem
+                className="workspace-menu-item workspace-menu-item--manage"
+                onClick={openWorkspaceSettingsFromMenu}
+              >
+                <span className="workspace-menu-item-copy">
+                  <span className="workspace-menu-item-name">管理工作区...</span>
+                </span>
+                <SettingsIcon className="workspace-menu-item-check" fontSize="small" />
+              </MenuItem>
+            </Menu>
+          </div>
+        ) : null}
       </aside>
 
       {settingsOpen ? (
@@ -188,7 +308,13 @@ export function AppShellLayout({
           selectedProjectKey={selectedProjectKey}
           onOpenConfigDir={onOpenConfigDir}
           onOpenConfigFile={onOpenConfigFile}
+          onOpenProjectWorkspacesDir={onOpenProjectWorkspacesDir}
           onOpenNavigationConfigFile={onOpenNavigationConfigFile}
+          onCreateProjectWorkspace={onCreateProjectWorkspace}
+          projectWorkspaces={projectWorkspaces}
+          activeProjectWorkspaceKey={activeProjectWorkspaceKey}
+          onProjectWorkspaceChange={onProjectWorkspaceChange}
+          initialSection={settingsInitialSection}
           activePage={activePage}
           enabledPages={enabledPages}
           onEnabledPagesChange={onEnabledPagesChange}

@@ -66,6 +66,8 @@ function shortcutKindLabel(kind: string) {
       return "应用";
     case "script":
       return "脚本";
+    case "directory":
+      return "目录";
     default:
       return "入口";
   }
@@ -74,6 +76,9 @@ function shortcutKindLabel(kind: string) {
 function shortcutIcon(kind: string) {
   if (kind === "url") {
     return <WebsiteIcon fontSize="small" />;
+  }
+  if (kind === "directory") {
+    return <FolderIcon fontSize="small" />;
   }
   if (kind === "script") {
     return <TerminalIcon fontSize="small" />;
@@ -294,9 +299,11 @@ export function CommandPalette({
           item.entry.targetLabel,
           item.entry.note ?? "",
           item.entry.url ?? "",
+          item.entry.runtimeProfile ?? "",
           item.entry.bundleId ?? "",
           item.entry.appName ?? "",
           item.entry.script ?? "",
+          item.entry.path ?? "",
           item.entry.cwd ?? "",
           kindLabel,
         ].join(" "),

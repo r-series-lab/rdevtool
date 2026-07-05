@@ -74,47 +74,47 @@ export function HistoryCard({
     <Card
       variant="outlined"
       sx={(theme) => ({
-        borderRadius: "16px",
+        borderRadius: "12px",
         bgcolor:
           pinned && theme.palette.mode === "dark"
-            ? alpha(theme.palette.primary.main, 0.06)
+            ? alpha(theme.palette.primary.main, 0.055)
             : pinned
-              ? alpha(theme.palette.primary.main, 0.045)
+              ? alpha(theme.palette.primary.main, 0.04)
               : theme.palette.mode === "dark"
-                ? "rgba(18,22,28,0.42)"
-                : "rgba(246,249,252,0.34)",
+                ? "rgba(18,22,28,0.34)"
+                : "rgba(246,249,252,0.42)",
         borderColor: pinned
-          ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.3 : 0.24)
+          ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.26 : 0.22)
           : theme.palette.mode === "dark"
-            ? "rgba(143,184,234,0.1)"
-            : "rgba(52,76,96,0.1)",
+            ? "rgba(143,184,234,0.085)"
+            : "rgba(52,76,96,0.092)",
         boxShadow: pinned
-          ? `inset 3px 0 0 ${alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.58 : 0.5)}`
+          ? `inset 2px 0 0 ${alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.52 : 0.46)}`
           : theme.palette.mode === "dark"
-            ? "inset 0 1px 0 rgba(255,255,255,0.03), 0 10px 26px rgba(0,0,0,0.14)"
-            : "inset 0 1px 0 rgba(255,255,255,0.48), 0 10px 24px rgba(24,48,62,0.045)",
-        backdropFilter: "blur(18px) saturate(1.12)",
-        WebkitBackdropFilter: "blur(18px) saturate(1.12)",
+            ? "inset 0 1px 0 rgba(255,255,255,0.028), 0 7px 18px rgba(0,0,0,0.12)"
+            : "inset 0 1px 0 rgba(255,255,255,0.44), 0 7px 18px rgba(24,48,62,0.038)",
+        backdropFilter: "blur(16px) saturate(1.1)",
+        WebkitBackdropFilter: "blur(16px) saturate(1.1)",
         minWidth: 0,
         maxWidth: "100%",
       })}
     >
-      <CardContent sx={{ minWidth: 0, maxWidth: "100%", "&:last-child": { pb: 1.5 } }}>
-        <Stack spacing={0.5} minWidth={0} maxWidth="100%">
+      <CardContent sx={{ minWidth: 0, maxWidth: "100%", p: 1.05, "&:last-child": { pb: 1.05 } }}>
+        <Stack spacing={0.38} minWidth={0} maxWidth="100%">
           <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1} minWidth={0}>
             <Box sx={{ minWidth: 0, flex: 1 }}>
-              <Stack direction="row" spacing={0.65} alignItems="center" minWidth={0}>
+              <Stack direction="row" spacing={0.55} alignItems="center" minWidth={0}>
                 {pinned ? (
                   <Box
                     component="span"
                     sx={(theme) => ({
                       flexShrink: 0,
-                      px: 0.65,
+                      px: 0.58,
                       py: 0.14,
                       borderRadius: "999px",
                       bgcolor: alpha(theme.palette.primary.main, 0.12),
                       color: theme.palette.primary.main,
-                      fontSize: "0.66rem",
+                      fontSize: "0.62rem",
                       lineHeight: 1.35,
                       fontWeight: 820,
                     })}
@@ -122,7 +122,7 @@ export function HistoryCard({
                     已标记
                   </Box>
                 ) : null}
-                <Typography variant="subtitle2" sx={{ minWidth: 0, fontWeight: 700 }} noWrap>
+                <Typography variant="subtitle2" sx={{ minWidth: 0, fontWeight: 740, fontSize: "0.9rem" }} noWrap>
                   {title}
                 </Typography>
               </Stack>
@@ -135,7 +135,7 @@ export function HistoryCard({
                   overflow: "hidden",
                   textOverflow: "ellipsis",
                   whiteSpace: "nowrap",
-                  lineHeight: 1.45,
+                  lineHeight: 1.35,
                 }}
               >
                 {subtitle}
@@ -146,17 +146,25 @@ export function HistoryCard({
           <Typography
             variant="caption"
             color="text.secondary"
-            sx={{ display: "block", overflowWrap: "anywhere", lineHeight: 1.45 }}
+            title={detail}
+            sx={{
+              display: "-webkit-box",
+              overflow: "hidden",
+              WebkitBoxOrient: "vertical",
+              WebkitLineClamp: 2,
+              overflowWrap: "anywhere",
+              lineHeight: 1.38,
+            }}
           >
             {detail}
           </Typography>
           <Stack
             direction="row"
-            spacing={0.7}
+            spacing={0.55}
             flexWrap="wrap"
             useFlexGap
             minWidth={0}
-            rowGap={0.45}
+            rowGap={0.35}
           >
             {meta.filter(Boolean).map((item, index) => (
               <Box
@@ -167,8 +175,8 @@ export function HistoryCard({
                   display: "inline-flex",
                   alignItems: "center",
                   maxWidth: "100%",
-                  minHeight: 23,
-                  px: 0.85,
+                  minHeight: 20,
+                  px: 0.72,
                   py: 0.12,
                   borderRadius: "999px",
                   border: "1px solid",
@@ -188,7 +196,7 @@ export function HistoryCard({
                     theme.palette.mode === "dark"
                       ? "inset 0 1px 0 rgba(255,255,255,0.035)"
                       : "inset 0 1px 0 rgba(255,255,255,0.72)",
-                  fontSize: "0.72rem",
+                  fontSize: "0.67rem",
                   fontWeight: 680,
                   lineHeight: 1.25,
                   letterSpacing: 0,

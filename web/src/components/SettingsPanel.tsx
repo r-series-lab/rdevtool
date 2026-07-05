@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type ChangeEvent,
+  type FocusEvent,
+  type ReactNode,
+} from "react";
 import {
   Alert,
   Button,
@@ -11,8 +18,10 @@ import {
   Typography,
 } from "@mui/material";
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 import { ALL_PAGE_KEYS, NAV_ITEM_MAP, type PageKey } from "../app-shell";
 import type {
+  CreateProjectWorkspacePayload,
   DeployParamConfigKind,
   DeployParamConfigSummary,
   DeployTargetConfigSummary,
@@ -24,6 +33,9 @@ import type {
   ProjectCommandConfigDraft,
   ProjectConfigDraft,
   ProjectConfigEditorState,
+  ProjectWorkspaceEditorDraft,
+  ProjectWorkspaceEditorState,
+  ProjectWorkspaceSummary,
   ProjectAuthHelperDraft,
   ProjectAuthHelperItemDraft,
   ProjectDebugLocalFileDraft,
@@ -43,7 +55,13 @@ import {
   TrashIcon,
 } from "./AppIcons";
 
-type SettingsSection = "general" | "projects" | "finder" | "branch" | "deploy";
+export type SettingsSection =
+  | "general"
+  | "workspace"
+  | "projects"
+  | "finder"
+  | "branch"
+  | "build";
 
 type SettingsPanelProps = {
   styleMode: AppStyleMode;
@@ -51,7 +69,13 @@ type SettingsPanelProps = {
   selectedProjectKey: string;
   onOpenConfigDir: () => void;
   onOpenConfigFile: () => void;
+  onOpenProjectWorkspacesDir: () => void;
   onOpenNavigationConfigFile: () => void;
+  onCreateProjectWorkspace: (payload: CreateProjectWorkspacePayload) => Promise<void> | void;
+  projectWorkspaces: ProjectWorkspaceSummary[];
+  activeProjectWorkspaceKey: string;
+  onProjectWorkspaceChange: (workspaceKey: string) => Promise<void> | void;
+  initialSection?: SettingsSection;
   activePage: PageKey;
   enabledPages: PageKey[];
   onEnabledPagesChange: (pages: PageKey[]) => void;
@@ -71,9 +95,10 @@ type SettingsConfirmState = {
 
 const SECTION_ITEMS: Array<{ key: SettingsSection; label: string }> = [
   { key: "general", label: "全局" },
+  { key: "workspace", label: "工作区" },
   { key: "projects", label: "项目" },
   { key: "branch", label: "分支" },
-  { key: "deploy", label: "部署" },
+  { key: "build", label: "构建" },
   { key: "finder", label: "访达" },
 ];
 
@@ -85,14 +110,136 @@ const DEPLOY_PARAM_KIND_OPTIONS: Array<{ value: DeployParamConfigKind; label: st
   { value: "hidden", label: "隐藏" },
 ];
 
+const BUILD_ADAPTER_OPTIONS: Array<{ value: DeployTargetConfigSummary["adapter"]; label: string }> =
+  [
+    { value: "jenkins", label: "Jenkins" },
+    { value: "local_command", label: "本地命令" },
+    { value: "r_series_package", label: "R 系列打包" },
+  ];
+
+const BUILD_ACTION_KIND_OPTIONS: Array<{
+  value: DeployTargetConfigSummary["actionKind"];
+  label: string;
+}> = [
+  { value: "deploy", label: "部署" },
+  { value: "build", label: "构建" },
+  { value: "package", label: "打包" },
+  { value: "release", label: "发布" },
+];
+
+type BuildAdapterDetail = {
+  title: string;
+  meta: string;
+  commandLabel: string;
+  commandPlaceholder: string;
+  emptyJobText: string;
+};
+
+const BUILD_ADAPTER_DETAILS: Record<DeployTargetConfigSummary["adapter"], BuildAdapterDetail> = {
+  jenkins: {
+    title: "Jenkins",
+    meta: "Profile / Job",
+    commandLabel: "Job Name",
+    commandPlaceholder: "Marketing/example-web",
+    emptyJobText: "未设置 Job Name",
+  },
+  local_command: {
+    title: "本地命令",
+    meta: "Command",
+    commandLabel: "命令覆盖",
+    commandPlaceholder: "留空继承项目构建命令",
+    emptyJobText: "继承项目构建命令",
+  },
+  r_series_package: {
+    title: "R 系列打包",
+    meta: "Package",
+    commandLabel: "打包命令覆盖",
+    commandPlaceholder: "留空继承项目构建命令",
+    emptyJobText: "继承项目构建命令",
+  },
+};
+
+const R_SERIES_PACKAGE_PARAM_PRESETS: DeployParamConfigSummary[] = [
+  {
+    key: "platform",
+    label: "系统",
+    kind: "select",
+    defaultValue: "macos",
+    options: ["macos", "windows", "linux"],
+    required: false,
+    trueValue: null,
+    falseValue: null,
+  },
+  {
+    key: "profile",
+    label: "配置",
+    kind: "select",
+    defaultValue: "release",
+    options: ["release", "debug"],
+    required: false,
+    trueValue: null,
+    falseValue: null,
+  },
+  {
+    key: "channel",
+    label: "渠道",
+    kind: "select",
+    defaultValue: "stable",
+    options: ["stable", "beta"],
+    required: false,
+    trueValue: null,
+    falseValue: null,
+  },
+];
+
 const NAVIGATION_ENTRY_KIND_OPTIONS: Array<{
   value: NavigationEditorEntryKind;
   label: string;
 }> = [
   { value: "url", label: "网站" },
+  { value: "directory", label: "目录" },
   { value: "app", label: "应用" },
   { value: "script", label: "脚本" },
 ];
+
+const NAVIGATION_ENTRY_CREATE_OPTIONS: Array<{
+  value: NavigationEditorEntryKind;
+  label: string;
+}> = [
+  { value: "url", label: "网站" },
+  { value: "directory", label: "目录" },
+  { value: "app", label: "工具" },
+];
+
+function navigationEntryKindLabel(kind: string) {
+  return (
+    NAVIGATION_ENTRY_KIND_OPTIONS.find((item) => item.value === kind)?.label ?? "入口"
+  );
+}
+
+function buildActionKindLabel(actionKind: DeployTargetConfigSummary["actionKind"]) {
+  return BUILD_ACTION_KIND_OPTIONS.find((item) => item.value === actionKind)?.label ?? "构建";
+}
+
+function defaultBuildActionKindForAdapter(
+  adapter: DeployTargetConfigSummary["adapter"],
+): DeployTargetConfigSummary["actionKind"] {
+  if (adapter === "r_series_package") {
+    return "package";
+  }
+  if (adapter === "local_command") {
+    return "build";
+  }
+  return "deploy";
+}
+
+function missingBuildParamPresets(
+  target: DeployTargetConfigSummary,
+  presets: DeployParamConfigSummary[],
+) {
+  const keys = new Set(target.params.map((param) => param.key));
+  return presets.filter((param) => !keys.has(param.key));
+}
 
 const CUSTOM_NAVIGATION_BROWSER_VALUE = "__custom_browser__";
 const NAVIGATION_BROWSER_OPTIONS = [
@@ -211,7 +358,7 @@ function uniqueConfigKey(prefix: string, existingKeys: string[]) {
 
 function uniqueCopiedConfigKey(sourceKey: string, existingKeys: string[]) {
   const existing = new Set(existingKeys);
-  const normalizedSource = sourceKey.trim().replace(/\s+/g, "-") || "deploy";
+  const normalizedSource = sourceKey.trim().replace(/\s+/g, "-") || "build";
   const baseKey = `${normalizedSource}-copy`;
   if (!existing.has(baseKey)) {
     return baseKey;
@@ -225,16 +372,38 @@ function uniqueCopiedConfigKey(sourceKey: string, existingKeys: string[]) {
   return key;
 }
 
+function normalizeWorkspaceKey(value: string) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function toggleStringValue(values: string[], value: string, checked: boolean) {
+  const next = new Set(values);
+  if (checked) {
+    next.add(value);
+  } else {
+    next.delete(value);
+  }
+  return Array.from(next);
+}
+
+function selectedCount(values: string[], total: number, includeAll: boolean) {
+  return includeAll ? total : values.length;
+}
+
 function parseParamOptions(value: string) {
   return value
-    .split(",")
+    .split(/[,，]/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
 
 function parseKeywordList(value: string) {
   return value
-    .split(",")
+    .split(/[,，]/)
     .map((item) => item.trim())
     .filter(Boolean);
 }
@@ -305,6 +474,7 @@ function emptyNavigationEntry(kind: NavigationEditorEntryKind = "url"): Navigati
     bundleId: null,
     appName: null,
     script: null,
+    path: null,
     cwd: null,
     note: null,
   };
@@ -322,8 +492,8 @@ function uniqueNavigationCategoryTitle(categories: NavigationEditorCategory[]) {
 }
 
 function sectionForPage(page: PageKey): SettingsSection {
-  if (page === "deploy") {
-    return "deploy";
+  if (page === "build") {
+    return "build";
   }
   if (page === "merge") {
     return "branch";
@@ -340,7 +510,13 @@ export function SettingsPanel({
   selectedProjectKey,
   onOpenConfigDir,
   onOpenConfigFile,
+  onOpenProjectWorkspacesDir,
   onOpenNavigationConfigFile,
+  onCreateProjectWorkspace,
+  projectWorkspaces,
+  activeProjectWorkspaceKey,
+  onProjectWorkspaceChange,
+  initialSection,
   activePage,
   enabledPages,
   onEnabledPagesChange,
@@ -350,7 +526,7 @@ export function SettingsPanel({
   onClose,
 }: SettingsPanelProps) {
   const [activeSection, setActiveSection] = useState<SettingsSection>(() =>
-    sectionForPage(activePage),
+    initialSection ?? sectionForPage(activePage),
   );
   const [editorState, setEditorState] = useState<ProjectConfigEditorState | null>(null);
   const [navigationEditor, setNavigationEditor] = useState<NavigationEditorState | null>(null);
@@ -366,12 +542,23 @@ export function SettingsPanel({
   const [navigationDirty, setNavigationDirty] = useState(false);
   const [newProjectKey, setNewProjectKey] = useState("");
   const [newProjectName, setNewProjectName] = useState("");
+  const [newWorkspaceName, setNewWorkspaceName] = useState("");
+  const [newWorkspaceKey, setNewWorkspaceKey] = useState("");
+  const [newWorkspaceDescription, setNewWorkspaceDescription] = useState("");
+  const [copyCurrentWorkspace, setCopyCurrentWorkspace] = useState(true);
+  const [creatingWorkspace, setCreatingWorkspace] = useState(false);
+  const [workspaceEditor, setWorkspaceEditor] = useState<ProjectWorkspaceEditorState | null>(null);
+  const [workspaceDraft, setWorkspaceDraft] = useState<ProjectWorkspaceEditorDraft | null>(null);
+  const [workspaceLoading, setWorkspaceLoading] = useState(false);
+  const [workspaceSaving, setWorkspaceSaving] = useState(false);
   const [loading, setLoading] = useState(false);
   const [navigationLoading, setNavigationLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
   const [confirmState, setConfirmState] = useState<SettingsConfirmState | null>(null);
+  const [keywordDrafts, setKeywordDrafts] = useState<Record<string, string>>({});
+  const [deployParamOptionsDrafts, setDeployParamOptionsDrafts] = useState<Record<string, string>>({});
 
   const selectedProject = useMemo(
     () => editorState?.projects.find((project) => project.key === selectedKey) ?? null,
@@ -389,11 +576,17 @@ export function SettingsPanel({
   const hasDirtySelectedDeployProject = Boolean(
     selectedProject && dirtyDeployProjectKeys.has(selectedProject.key),
   );
+  const workspaceDirty = Boolean(
+    workspaceEditor &&
+      workspaceDraft &&
+      JSON.stringify(workspaceDraft) !== JSON.stringify(workspaceEditor.workspace),
+  );
   const hasUnsavedChanges =
     dirtyKeys.size > 0 ||
     dirtyDeployProjectKeys.size > 0 ||
     defaultBranchRulesDirty ||
-    navigationDirty;
+    navigationDirty ||
+    workspaceDirty;
 
   async function loadProjectConfig(preferredKey = selectedKey || selectedProjectKey) {
     setLoading(true);
@@ -439,9 +632,115 @@ export function SettingsPanel({
     }
   }
 
+  async function loadProjectWorkspaceEditor() {
+    setWorkspaceLoading(true);
+    setError("");
+    try {
+      const nextState = await invoke<ProjectWorkspaceEditorState>("get_project_workspace_editor");
+      setWorkspaceEditor(nextState);
+      setWorkspaceDraft(nextState.workspace);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorkspaceLoading(false);
+    }
+  }
+
+  async function saveProjectWorkspaceEditor() {
+    if (!workspaceDraft || workspaceDraft.system) {
+      return;
+    }
+    setWorkspaceSaving(true);
+    setError("");
+    setStatus("");
+    try {
+      const nextState = await invoke<ProjectWorkspaceEditorState>(
+        "save_project_workspace_editor",
+        { draft: workspaceDraft },
+      );
+      setWorkspaceEditor(nextState);
+      setWorkspaceDraft(nextState.workspace);
+      await onProjectConfigSaved();
+      setStatus(`已更新工作区 ${nextState.workspace.name}`);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorkspaceSaving(false);
+    }
+  }
+
+  async function handleCreateWorkspace() {
+    const name = newWorkspaceName.trim();
+    const key = normalizeWorkspaceKey(newWorkspaceKey || name);
+    const description = newWorkspaceDescription.trim();
+    if (!name) {
+      setError("请填写工作区名称");
+      return;
+    }
+    if (!key) {
+      setError("请填写工作区 key");
+      return;
+    }
+    setCreatingWorkspace(true);
+    setError("");
+    setStatus("");
+    try {
+      await onCreateProjectWorkspace({
+        key,
+        name,
+        description: description || null,
+        copyCurrent: copyCurrentWorkspace,
+        activate: true,
+      });
+      setNewWorkspaceName("");
+      setNewWorkspaceKey("");
+      setNewWorkspaceDescription("");
+      setCopyCurrentWorkspace(true);
+      await loadProjectWorkspaceEditor();
+      setStatus(`已创建并切换到 ${name}`);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setCreatingWorkspace(false);
+    }
+  }
+
+  function switchProjectWorkspace(workspaceKey: string) {
+    if (!workspaceKey || workspaceKey === activeProjectWorkspaceKey) {
+      return;
+    }
+    const workspaceName =
+      projectWorkspaces.find((workspace) => workspace.key === workspaceKey)?.name ?? workspaceKey;
+    if (workspaceDirty) {
+      setConfirmState({
+        title: "切换工作区？",
+        message: `当前工作区范围有未保存修改，切换到「${workspaceName}」会丢弃这些修改。`,
+        confirmLabel: "切换",
+        onConfirm: () => switchProjectWorkspaceConfirmed(workspaceKey),
+      });
+      return;
+    }
+    void switchProjectWorkspaceConfirmed(workspaceKey);
+  }
+
+  async function switchProjectWorkspaceConfirmed(workspaceKey: string) {
+    const workspaceName =
+      projectWorkspaces.find((workspace) => workspace.key === workspaceKey)?.name ?? workspaceKey;
+    setError("");
+    setStatus("");
+    try {
+      await onProjectWorkspaceChange(workspaceKey);
+      await loadProjectWorkspaceEditor();
+      setStatus(`已切换到 ${workspaceName}`);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   useEffect(() => {
     void loadProjectConfig();
     void loadNavigationEditor();
+    void loadProjectWorkspaceEditor();
   }, []);
 
   useEffect(() => {
@@ -1079,6 +1378,28 @@ export function SettingsPanel({
     }));
   }
 
+  async function chooseNavigationDirectory(
+    categoryIndex: number,
+    entryIndex: number,
+  ) {
+    try {
+      const selected = await open({
+        title: "选择目录入口",
+        multiple: false,
+        directory: true,
+      });
+      if (typeof selected !== "string") {
+        return;
+      }
+      updateNavigationEntryAt(categoryIndex, entryIndex, {
+        path: selected,
+      });
+      setError("");
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   function updateDeployTargets(
     updater: (deployTargets: DeployTargetConfigSummary[]) => DeployTargetConfigSummary[],
   ) {
@@ -1116,6 +1437,19 @@ export function SettingsPanel({
     );
   }
 
+  function updateDeployTargetAdapterAt(
+    targetIndex: number,
+    adapter: DeployTargetConfigSummary["adapter"],
+  ) {
+    const current = selectedProject?.deployTargets[targetIndex];
+    updateDeployTargetAt(targetIndex, {
+      adapter,
+      actionKind: defaultBuildActionKindForAdapter(adapter),
+      jenkinsProfile:
+        adapter === "jenkins" ? current?.jenkinsProfile || jenkinsProfileOptions[0] || "" : "",
+    });
+  }
+
   function updateDeployParamAt(
     targetIndex: number,
     paramIndex: number,
@@ -1141,9 +1475,11 @@ export function SettingsPanel({
     updateDeployTargets((deployTargets) => [
       ...deployTargets,
       {
-        key: uniqueConfigKey("deploy", deployTargets.map((target) => target.key)),
-        label: "新部署配置",
-        jenkinsProfile: deployTargets[0]?.jenkinsProfile ?? "",
+        key: uniqueConfigKey("build", deployTargets.map((target) => target.key)),
+        label: "新构建配置",
+        adapter: "local_command",
+        actionKind: "build",
+        jenkinsProfile: "",
         jobName: "",
         params: [],
       },
@@ -1161,10 +1497,10 @@ export function SettingsPanel({
         return deployTargets;
       }
       const nextKey = uniqueCopiedConfigKey(
-        source.key || "deploy",
+        source.key || "build",
         deployTargets.map((target) => target.key),
       );
-      const nextLabel = `${source.label || source.key || "部署配置"} 副本`;
+      const nextLabel = `${source.label || source.key || "构建配置"} 副本`;
       const copiedTarget: DeployTargetConfigSummary = {
         ...source,
         key: nextKey,
@@ -1183,7 +1519,7 @@ export function SettingsPanel({
     });
     setSelectedDeployTargetIndex(targetIndex + 1);
     setError("");
-    setStatus("已复制部署配置，调整 Key 和名称后保存");
+    setStatus("已复制构建配置，调整 Key 和名称后保存");
   }
 
   function deleteDeployTargetAt(targetIndex: number) {
@@ -1213,7 +1549,7 @@ export function SettingsPanel({
       ];
     });
     setSelectedDeployTargetIndex(0);
-    setStatus("已设为默认部署配置，保存后生效");
+    setStatus("已设为默认构建配置，保存后生效");
   }
 
   function addDeployParam(targetIndex: number) {
@@ -1246,6 +1582,35 @@ export function SettingsPanel({
           : item,
       ),
     );
+  }
+
+  function addDeployParamPresets(targetIndex: number, presets: DeployParamConfigSummary[]) {
+    const target = selectedProject?.deployTargets[targetIndex];
+    if (!target) {
+      return;
+    }
+    const missingParams = missingBuildParamPresets(target, presets);
+    if (missingParams.length === 0) {
+      setStatus("参数已完整");
+      return;
+    }
+    updateDeployTargets((deployTargets) =>
+      deployTargets.map((item, index) =>
+        index === targetIndex
+          ? {
+              ...item,
+              params: [
+                ...item.params,
+                ...missingParams.map((param) => ({
+                  ...param,
+                  options: [...param.options],
+                })),
+              ],
+            }
+          : item,
+      ),
+    );
+    setStatus(`已补齐 ${missingParams.length} 个参数，保存后生效`);
   }
 
   function deleteDeployParamAt(targetIndex: number, paramIndex: number) {
@@ -1403,7 +1768,7 @@ export function SettingsPanel({
       });
       setSelectedKey(projectKey);
       await onProjectConfigSaved();
-      setStatus("已保存部署配置");
+      setStatus("已保存构建配置");
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1447,10 +1812,473 @@ export function SettingsPanel({
     }
   }
 
+  function renderWorkspaceScopeEditor() {
+    if (workspaceLoading && !workspaceDraft) {
+      return (
+        <div className="settings-list-row">
+          <span className="settings-list-icon">
+            <RefreshIcon fontSize="small" />
+          </span>
+          <div className="settings-overview-copy">
+            <Typography variant="subtitle2">当前工作区</Typography>
+            <Typography variant="caption">正在读取范围配置</Typography>
+          </div>
+        </div>
+      );
+    }
+    if (!workspaceEditor || !workspaceDraft) {
+      return null;
+    }
+
+    const projectTotal = workspaceEditor.projects.length;
+    const entryTotal = workspaceEditor.navigationCategories.reduce(
+      (total, category) => total + category.entries.length,
+      0,
+    );
+    const navigationTotal = workspaceEditor.navigationCategories.length + entryTotal;
+    const proxyTotal = workspaceEditor.proxyProfiles.length;
+    const selectedProjects = selectedCount(
+      workspaceDraft.projects,
+      projectTotal,
+      workspaceDraft.includeAllProjects,
+    );
+    const selectedNavigation = selectedCount(
+      [...workspaceDraft.navigationCategories, ...workspaceDraft.navigationEntries],
+      navigationTotal,
+      workspaceDraft.includeAllNavigation,
+    );
+    const selectedProxyProfiles = workspaceDraft.system
+      ? proxyTotal
+      : workspaceDraft.proxyProfiles.length;
+    const updateDraft = (patch: Partial<ProjectWorkspaceEditorDraft>) => {
+      setWorkspaceDraft((current) => (current ? { ...current, ...patch } : current));
+    };
+
+    return (
+      <div className="settings-list-row settings-workspace-editor-row">
+        <span className="settings-list-icon">
+          <FolderIcon fontSize="small" />
+        </span>
+        <div className="settings-workspace-editor">
+          <div className="settings-workspace-editor-head">
+            <div className="settings-overview-copy">
+              <Typography component="span" variant="subtitle2">
+                当前工作区
+              </Typography>
+              <Typography component="span" variant="caption">
+                {workspaceDraft.key}
+              </Typography>
+            </div>
+            <div className="settings-workspace-editor-actions">
+              <Chip
+                className="settings-workspace-stat"
+                size="small"
+                label={
+                  workspaceDraft.system
+                    ? "全局"
+                    : `${selectedProjects}/${projectTotal} 项目`
+                }
+              />
+              {!workspaceDraft.system ? (
+                <Chip
+                  className="settings-workspace-stat"
+                  size="small"
+                  label={`${selectedNavigation}/${navigationTotal} 入口`}
+                />
+              ) : null}
+              {!workspaceDraft.system ? (
+                <Chip
+                  className="settings-workspace-stat"
+                  size="small"
+                  label={`${selectedProxyProfiles}/${proxyTotal} 代理`}
+                />
+              ) : null}
+              <Button
+                variant="contained"
+                size="small"
+                startIcon={<CheckIcon fontSize="small" />}
+                onClick={() => void saveProjectWorkspaceEditor()}
+                disabled={workspaceDraft.system || workspaceSaving || !workspaceDirty}
+              >
+                保存
+              </Button>
+            </div>
+          </div>
+          {workspaceDraft.system ? (
+            <Typography className="settings-workspace-system-note" variant="caption">
+              全局工作区显示全部项目、入口和代理。
+            </Typography>
+          ) : (
+            <>
+              <div className="settings-workspace-meta-grid">
+                <TextField
+                  size="small"
+                  label="名称"
+                  value={workspaceDraft.name}
+                  onChange={(event) => updateDraft({ name: event.target.value })}
+                  disabled={workspaceSaving}
+                />
+                <TextField
+                  size="small"
+                  label="备注"
+                  value={workspaceDraft.description ?? ""}
+                  onChange={(event) => updateDraft({ description: event.target.value })}
+                  disabled={workspaceSaving}
+                />
+              </div>
+              <div className="settings-workspace-scope-grid">
+                <section className="settings-workspace-scope-pane">
+                  <header className="settings-workspace-scope-head">
+                    <Typography variant="caption">项目</Typography>
+                    <FormControlLabel
+                      className="settings-workspace-copy"
+                      control={
+                        <Checkbox
+                          size="small"
+                          checked={workspaceDraft.includeAllProjects}
+                          onChange={(event) =>
+                            updateDraft({
+                              includeAllProjects: event.target.checked,
+                              projects: event.target.checked ? [] : workspaceDraft.projects,
+                            })
+                          }
+                          disabled={workspaceSaving}
+                        />
+                      }
+                      label="全部"
+                    />
+                  </header>
+                  {!workspaceDraft.includeAllProjects ? (
+                    <div className="settings-workspace-check-list">
+                      {workspaceEditor.projects.map((project) => {
+                        const checked = workspaceDraft.projects.includes(project.key);
+                        return (
+                          <FormControlLabel
+                            key={project.key}
+                            className="settings-workspace-check"
+                            control={
+                              <Checkbox
+                                size="small"
+                                checked={checked}
+                                onChange={(event) =>
+                                  updateDraft({
+                                    projects: toggleStringValue(
+                                      workspaceDraft.projects,
+                                      project.key,
+                                      event.target.checked,
+                                    ),
+                                  })
+                                }
+                                disabled={workspaceSaving}
+                              />
+                            }
+                            label={`${project.name || project.key} · ${project.category}`}
+                          />
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </section>
+
+                <section className="settings-workspace-scope-pane">
+                  <header className="settings-workspace-scope-head">
+                    <span>
+                      <Typography variant="caption">入口</Typography>
+                      <Typography className="settings-workspace-scope-hint" variant="caption">
+                        网站 / 目录 / 工具
+                      </Typography>
+                    </span>
+                    <FormControlLabel
+                      className="settings-workspace-copy"
+                      control={
+                        <Checkbox
+                          size="small"
+                          checked={workspaceDraft.includeAllNavigation}
+                          onChange={(event) =>
+                            updateDraft({
+                              includeAllNavigation: event.target.checked,
+                              navigationCategories: event.target.checked
+                                ? []
+                                : workspaceDraft.navigationCategories,
+                              navigationEntries: event.target.checked
+                                ? []
+                                : workspaceDraft.navigationEntries,
+                            })
+                          }
+                          disabled={workspaceSaving}
+                        />
+                      }
+                      label="全部"
+                    />
+                  </header>
+                  {!workspaceDraft.includeAllNavigation ? (
+                    <div className="settings-workspace-check-list">
+                      {workspaceEditor.navigationCategories.map((category) => {
+                        const categoryChecked = workspaceDraft.navigationCategories.includes(
+                          category.title,
+                        );
+                        return (
+                          <div key={category.title} className="settings-workspace-nav-group">
+                            <FormControlLabel
+                              className="settings-workspace-check settings-workspace-check--strong"
+                              control={
+                                <Checkbox
+                                  size="small"
+                                  checked={categoryChecked}
+                                  onChange={(event) =>
+                                    updateDraft({
+                                      navigationCategories: toggleStringValue(
+                                        workspaceDraft.navigationCategories,
+                                        category.title,
+                                        event.target.checked,
+                                      ),
+                                    })
+                                  }
+                                  disabled={workspaceSaving}
+                                />
+                              }
+                              label={category.title}
+                            />
+                            {!categoryChecked
+                              ? category.entries.map((entry) => {
+                                  const checked =
+                                    workspaceDraft.navigationEntries.includes(entry.scopedName) ||
+                                    workspaceDraft.navigationEntries.includes(entry.name);
+                                  return (
+                                    <FormControlLabel
+                                      key={entry.scopedName}
+                                      className="settings-workspace-check settings-workspace-check--entry"
+                                      control={
+                                        <Checkbox
+                                          size="small"
+                                          checked={checked}
+                                          onChange={(event) =>
+                                            updateDraft({
+                                              navigationEntries: toggleStringValue(
+                                                workspaceDraft.navigationEntries.filter(
+                                                  (value) => value !== entry.name,
+                                                ),
+                                                entry.scopedName,
+                                                event.target.checked,
+                                              ),
+                                            })
+                                          }
+                                          disabled={workspaceSaving}
+                                        />
+                                      }
+                                      label={`${entry.name} · ${navigationEntryKindLabel(entry.kind)}`}
+                                    />
+                                  );
+                                })
+                              : null}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </section>
+
+                <section className="settings-workspace-scope-pane">
+                  <header className="settings-workspace-scope-head">
+                    <Typography variant="caption">代理</Typography>
+                    <Typography className="settings-workspace-scope-hint" variant="caption">
+                      归属当前
+                    </Typography>
+                  </header>
+                  <div className="settings-workspace-check-list">
+                    {workspaceEditor.proxyProfiles.length > 0 ? (
+                      workspaceEditor.proxyProfiles.map((profile) => {
+                        const checked = workspaceDraft.proxyProfiles.includes(profile.id);
+                        const endpoint = `${profile.listenHost}:${profile.listenPort}`;
+                        const label =
+                          profile.workspaceKey && profile.workspaceKey !== workspaceDraft.key
+                            ? `${profile.name} · ${endpoint} · ${profile.workspaceLabel}`
+                            : `${profile.name} · ${endpoint}`;
+                        return (
+                          <FormControlLabel
+                            key={profile.id}
+                            className="settings-workspace-check"
+                            control={
+                              <Checkbox
+                                size="small"
+                                checked={checked}
+                                onChange={(event) =>
+                                  updateDraft({
+                                    proxyProfiles: toggleStringValue(
+                                      workspaceDraft.proxyProfiles,
+                                      profile.id,
+                                      event.target.checked,
+                                    ),
+                                  })
+                                }
+                                disabled={workspaceSaving}
+                              />
+                            }
+                            label={label}
+                          />
+                        );
+                      })
+                    ) : (
+                      <Typography className="settings-workspace-empty-note" variant="caption">
+                        暂无代理配置
+                      </Typography>
+                    )}
+                  </div>
+                </section>
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function renderWorkspaceSection() {
+    return (
+      <Stack className="settings-overview" spacing={1.15}>
+        <section
+          className="settings-list-section settings-list-section--workspace"
+          aria-labelledby="settings-workspace-title"
+        >
+          <header className="settings-list-head">
+            <span className="settings-list-head-copy">
+              <Typography id="settings-workspace-title" variant="subtitle2">
+                工作区
+              </Typography>
+              <Typography variant="caption">需求上下文与范围配置</Typography>
+            </span>
+            <Button
+              className="settings-workspace-head-action"
+              variant="outlined"
+              color="inherit"
+              size="small"
+              startIcon={<OpenExternalIcon fontSize="small" />}
+              onClick={onOpenProjectWorkspacesDir}
+            >
+              目录
+            </Button>
+          </header>
+          <div className="settings-list settings-workspace-list module-list-scroll">
+            {projectWorkspaces.length > 0 ? (
+              <div className="settings-list-row settings-workspace-switch-row">
+                <span className="settings-list-icon">
+                  <FolderIcon fontSize="small" />
+                </span>
+                <div className="settings-workspace-switch">
+                  <div className="settings-overview-copy">
+                    <Typography component="span" variant="subtitle2">切换工作区</Typography>
+                    <Typography component="span" variant="caption">
+                      选择当前需求上下文
+                    </Typography>
+                  </div>
+                  <div className="settings-workspace-choice" role="listbox" aria-label="切换工作区">
+                    {projectWorkspaces.map((workspace) => {
+                      const selected = workspace.key === activeProjectWorkspaceKey;
+                      return (
+                        <button
+                          key={workspace.key}
+                          type="button"
+                          className={`settings-workspace-choice-item${
+                            selected ? " is-active" : ""
+                          }`}
+                          role="option"
+                          aria-selected={selected}
+                          onClick={() => switchProjectWorkspace(workspace.key)}
+                        >
+                          <span className="settings-workspace-choice-copy">
+                            <span className="settings-workspace-choice-name">
+                              {workspace.name}
+                            </span>
+                            <span className="settings-workspace-choice-meta-row">
+                              <span>{workspace.projectScopeLabel}</span>
+                              <span>{workspace.navigationScopeLabel}</span>
+                            </span>
+                          </span>
+                          {selected ? (
+                            <CheckIcon
+                              className="settings-workspace-choice-check"
+                              fontSize="small"
+                            />
+                          ) : null}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : null}
+            <div className="settings-list-row settings-workspace-create-row">
+              <span className="settings-list-icon">
+                <CopyIcon fontSize="small" />
+              </span>
+              <div className="settings-workspace-create">
+                <div className="settings-workspace-create-head">
+                  <div className="settings-overview-copy">
+                    <Typography component="span" variant="subtitle2">新建工作区</Typography>
+                    <Typography component="span" variant="caption">生成 TOML 并切换</Typography>
+                  </div>
+                  <Button
+                    variant="contained"
+                    size="small"
+                    startIcon={<CheckIcon fontSize="small" />}
+                    onClick={() => void handleCreateWorkspace()}
+                    disabled={creatingWorkspace || !newWorkspaceName.trim()}
+                  >
+                    创建
+                  </Button>
+                </div>
+                <div className="settings-workspace-create-fields">
+                  <TextField
+                    size="small"
+                    label="名称"
+                    value={newWorkspaceName}
+                    onChange={(event) => setNewWorkspaceName(event.target.value)}
+                    disabled={creatingWorkspace}
+                  />
+                  <TextField
+                    size="small"
+                    label="key"
+                    value={newWorkspaceKey}
+                    placeholder={normalizeWorkspaceKey(newWorkspaceName) || "marketing-rework"}
+                    onChange={(event) => setNewWorkspaceKey(event.target.value)}
+                    disabled={creatingWorkspace}
+                  />
+                  <TextField
+                    size="small"
+                    label="备注"
+                    value={newWorkspaceDescription}
+                    onChange={(event) => setNewWorkspaceDescription(event.target.value)}
+                    disabled={creatingWorkspace}
+                  />
+                  <FormControlLabel
+                    className="settings-workspace-copy"
+                    control={
+                      <Checkbox
+                        size="small"
+                        checked={copyCurrentWorkspace}
+                        onChange={(event) => setCopyCurrentWorkspace(event.target.checked)}
+                        disabled={creatingWorkspace}
+                      />
+                    }
+                    label="复制当前范围"
+                  />
+                </div>
+              </div>
+            </div>
+            {renderWorkspaceScopeEditor()}
+          </div>
+        </section>
+      </Stack>
+    );
+  }
+
   function renderGeneralSection() {
     return (
       <Stack className="settings-overview" spacing={1.15}>
-        <section className="settings-list-section" aria-labelledby="settings-menu-title">
+        <section
+          className="settings-list-section settings-list-section--menu"
+          aria-labelledby="settings-menu-title"
+        >
           <header className="settings-list-head">
             <Typography id="settings-menu-title" variant="subtitle2">
               菜单
@@ -1464,6 +2292,7 @@ export function SettingsPanel({
                 <Typography variant="caption">至少保留一个工作台菜单。</Typography>
               </div>
               <Stack
+                className="settings-menu-choice"
                 direction="row"
                 spacing={0.4}
                 useFlexGap
@@ -1475,6 +2304,7 @@ export function SettingsPanel({
                   return (
                     <FormControlLabel
                       key={page}
+                      className={`settings-menu-option${checked ? " is-active" : ""}`}
                       control={
                         <Checkbox
                           size="small"
@@ -1486,17 +2316,7 @@ export function SettingsPanel({
                         />
                       }
                       label={NAV_ITEM_MAP[page].shortLabel}
-                      sx={{
-                        m: 0,
-                        pr: 0.65,
-                        borderRadius: "9px",
-                        border: "1px solid var(--line-soft)",
-                        bgcolor: "rgba(255,255,255,0.018)",
-                        "& .MuiFormControlLabel-label": {
-                          fontSize: "0.76rem",
-                          fontWeight: 700,
-                        },
-                      }}
+                      sx={{ m: 0 }}
                     />
                   );
                 })}
@@ -1514,7 +2334,7 @@ export function SettingsPanel({
                 onChange={(event) =>
                   onDefaultPageChange(event.target.value as PageKey)
                 }
-                sx={{ width: 156, flexShrink: 0 }}
+                sx={{ width: "min(220px, 100%)", flexShrink: 0 }}
                 inputProps={{ "aria-label": "默认菜单" }}
               >
                 {enabledPages.map((page) => (
@@ -1545,34 +2365,51 @@ export function SettingsPanel({
             <div className="settings-style-choice" role="group" aria-label="换肤">
               <button
                 type="button"
-                className={styleMode === "light" ? "is-active" : ""}
+                className={`settings-style-card settings-style-card--light${
+                  styleMode === "light" ? " is-active" : ""
+                }`}
                 aria-pressed={styleMode === "light"}
                 onClick={() => onStyleModeChange("light")}
               >
-                <span className="settings-style-swatch settings-style-swatch--light" />
-                <span>亮色</span>
+                <span className="settings-style-card-icon" aria-hidden="true">
+                  <span className="settings-style-sun" />
+                </span>
+                <span className="settings-style-card-copy">
+                  <span>亮色</span>
+                  <small>使用明亮、通透的窗口界面。</small>
+                </span>
               </button>
               <button
                 type="button"
-                className={styleMode === "mono" ? "is-active" : ""}
+                className={`settings-style-card settings-style-card--mono${
+                  styleMode === "mono" ? " is-active" : ""
+                }`}
                 aria-pressed={styleMode === "mono"}
                 onClick={() => onStyleModeChange("mono")}
               >
-                <span className="settings-style-swatch settings-style-swatch--mono" />
-                <span>暗色</span>
+                <span className="settings-style-card-icon" aria-hidden="true">
+                  <span className="settings-style-moon" />
+                </span>
+                <span className="settings-style-card-copy">
+                  <span>暗色</span>
+                  <small>使用低亮度、高对比的工作界面。</small>
+                </span>
               </button>
             </div>
           </div>
         </section>
 
-        <section className="settings-list-section" aria-labelledby="settings-access-title">
+        <section
+          className="settings-list-section settings-list-section--access"
+          aria-labelledby="settings-access-title"
+        >
           <header className="settings-list-head">
             <Typography id="settings-access-title" variant="subtitle2">
               快捷入口
             </Typography>
             <Typography variant="caption">命令与配置文件</Typography>
           </header>
-          <div className="settings-list">
+          <div className="settings-list settings-access-list module-list-scroll">
             <div className="settings-list-row">
               <div className="settings-list-icon">
                 <span>⌘</span>
@@ -1610,7 +2447,7 @@ export function SettingsPanel({
               </span>
               <span className="settings-overview-copy">
                 <Typography component="span" variant="subtitle2">projects.toml</Typography>
-                <Typography component="span" variant="caption">项目与部署配置</Typography>
+                <Typography component="span" variant="caption">项目与构建配置</Typography>
               </span>
               <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
             </Button>
@@ -2607,7 +3444,7 @@ export function SettingsPanel({
         {renderNewProjectBlock()}
         {renderProjectSectionBlock(
           "项目身份",
-          "分支、部署和本地运行共用这组项目基础信息",
+          "分支、构建和本地运行共用这组项目基础信息",
           <div className="settings-form-grid">
             <TextField size="small" label="Key" value={selectedProject.key} disabled />
             <TextField
@@ -2763,6 +3600,32 @@ export function SettingsPanel({
       );
     }
 
+    if (entry.kind === "directory") {
+      return (
+        <div className="settings-path-field settings-form-grid-wide">
+          <TextField
+            size="small"
+            label="目录路径"
+            value={entry.path ?? ""}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                path: event.target.value,
+              })
+            }
+          />
+          <Button
+            variant="outlined"
+            color="inherit"
+            startIcon={<FolderIcon fontSize="small" />}
+            onClick={() => void chooseNavigationDirectory(categoryIndex, entryIndex)}
+            disabled={saving}
+          >
+            选择
+          </Button>
+        </div>
+      );
+    }
+
     const browserSelectValue = navigationBrowserSelectValue(entry.browser);
     const browserSupportsProfile = navigationBrowserSupportsProfile(entry.browser);
     const isCustomBrowser = browserSelectValue === CUSTOM_NAVIGATION_BROWSER_VALUE;
@@ -2887,8 +3750,7 @@ export function SettingsPanel({
     entry: NavigationEditorEntry,
     entryIndex: number,
   ) {
-    const kindLabel =
-      NAVIGATION_ENTRY_KIND_OPTIONS.find((item) => item.value === entry.kind)?.label ?? "入口";
+    const kindLabel = navigationEntryKindLabel(entry.kind);
 
     return (
       <div className="settings-param-editor settings-finder-entry" key={`entry-${categoryIndex}-${entryIndex}`}>
@@ -2999,7 +3861,7 @@ export function SettingsPanel({
       <Stack spacing={1.3}>
         {renderProjectSectionBlock(
           "访达配置",
-          "管理访达页的网站、应用和脚本入口",
+          "管理访达页的网站、目录和工具入口",
           <>
             <div className="settings-finder-toolbar">
               <TextField
@@ -3123,7 +3985,7 @@ export function SettingsPanel({
               <div className="settings-param-list-head">
                 <Typography variant="caption">入口</Typography>
                 <div className="settings-inline-actions">
-                  {NAVIGATION_ENTRY_KIND_OPTIONS.map((item) => (
+                  {NAVIGATION_ENTRY_CREATE_OPTIONS.map((item) => (
                     <Button
                       key={item.value}
                       variant="outlined"
@@ -3176,6 +4038,43 @@ export function SettingsPanel({
     if (loading && !editorState) {
       return <Alert severity="info">正在读取分支配置</Alert>;
     }
+    function keywordListFieldProps(
+      draftKey: string,
+      keywords: string[],
+      onUpdate: (keywords: string[]) => void,
+    ) {
+      const text = keywordDrafts[draftKey] ?? keywords.join(", ");
+      return {
+        value: text,
+        onFocus: () =>
+          setKeywordDrafts((current) => ({
+            ...current,
+            [draftKey]: text,
+          })),
+        onBlur: (event: FocusEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+          onUpdate(parseKeywordList(event.target.value));
+          setKeywordDrafts((current) => {
+            const next = { ...current };
+            delete next[draftKey];
+            return next;
+          });
+        },
+        onChange: (event: ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+          const value = event.target.value;
+          setKeywordDrafts((current) => ({
+            ...current,
+            [draftKey]: value,
+          }));
+        },
+        inputProps: {
+          autoCapitalize: "none",
+          autoComplete: "off",
+          autoCorrect: "off",
+          spellCheck: false,
+        },
+      };
+    }
+
     const projectOverridesSourceRules = Boolean(
       selectedProject?.branchRules.sourceKeywords.length,
     );
@@ -3201,22 +4100,28 @@ export function SettingsPanel({
               <TextField
                 size="small"
                 label="默认源分支关键词"
-                value={defaultBranchRules.sourceKeywords.join(", ")}
-                onChange={(event) =>
-                  updateDefaultBranchRules({
-                    sourceKeywords: parseKeywordList(event.target.value),
-                  })
-                }
+                {...keywordListFieldProps(
+                  "default-branch-source",
+                  defaultBranchRules.sourceKeywords,
+                  (sourceKeywords) => {
+                    updateDefaultBranchRules({
+                      sourceKeywords,
+                    });
+                  },
+                )}
               />
               <TextField
                 size="small"
                 label="默认目标分支关键词"
-                value={defaultBranchRules.targetKeywords.join(", ")}
-                onChange={(event) =>
-                  updateDefaultBranchRules({
-                    targetKeywords: parseKeywordList(event.target.value),
-                  })
-                }
+                {...keywordListFieldProps(
+                  "default-branch-target",
+                  defaultBranchRules.targetKeywords,
+                  (targetKeywords) => {
+                    updateDefaultBranchRules({
+                      targetKeywords,
+                    });
+                  },
+                )}
               />
             </div>,
           )}
@@ -3246,22 +4151,28 @@ export function SettingsPanel({
             <TextField
               size="small"
               label="默认源分支关键词"
-              value={defaultBranchRules.sourceKeywords.join(", ")}
-              onChange={(event) =>
-                updateDefaultBranchRules({
-                  sourceKeywords: parseKeywordList(event.target.value),
-                })
-              }
+              {...keywordListFieldProps(
+                "default-branch-source",
+                defaultBranchRules.sourceKeywords,
+                (sourceKeywords) => {
+                  updateDefaultBranchRules({
+                    sourceKeywords,
+                  });
+                },
+              )}
             />
             <TextField
               size="small"
               label="默认目标分支关键词"
-              value={defaultBranchRules.targetKeywords.join(", ")}
-              onChange={(event) =>
-                updateDefaultBranchRules({
-                  targetKeywords: parseKeywordList(event.target.value),
-                })
-              }
+              {...keywordListFieldProps(
+                "default-branch-target",
+                defaultBranchRules.targetKeywords,
+                (targetKeywords) => {
+                  updateDefaultBranchRules({
+                    targetKeywords,
+                  });
+                },
+              )}
             />
           </div>,
         )}
@@ -3305,12 +4216,15 @@ export function SettingsPanel({
                     ? "源分支关键词"
                     : "源分支关键词（继承默认）"
                 }
-                value={projectSourceKeywords.join(", ")}
-                onChange={(event) =>
-                  updateSelectedProjectBranchRules({
-                    sourceKeywords: parseKeywordList(event.target.value),
-                  })
-                }
+                {...keywordListFieldProps(
+                  `project-branch-source:${selectedProject.key}`,
+                  projectSourceKeywords,
+                  (sourceKeywords) => {
+                    updateSelectedProjectBranchRules({
+                      sourceKeywords,
+                    });
+                  },
+                )}
               />
               <TextField
                 size="small"
@@ -3319,12 +4233,15 @@ export function SettingsPanel({
                     ? "目标分支关键词"
                     : "目标分支关键词（继承默认）"
                 }
-                value={projectTargetKeywords.join(", ")}
-                onChange={(event) =>
-                  updateSelectedProjectBranchRules({
-                    targetKeywords: parseKeywordList(event.target.value),
-                  })
-                }
+                {...keywordListFieldProps(
+                  `project-branch-target:${selectedProject.key}`,
+                  projectTargetKeywords,
+                  (targetKeywords) => {
+                    updateSelectedProjectBranchRules({
+                      targetKeywords,
+                    });
+                  },
+                )}
               />
             </div>
           </Stack>,
@@ -3341,6 +4258,9 @@ export function SettingsPanel({
   ) {
     const showOptions = param.kind === "select";
     const showBooleanValues = param.kind === "boolean";
+    const targetKey = selectedProject?.deployTargets[targetIndex]?.key ?? String(targetIndex);
+    const optionsDraftKey = `${selectedProject?.key ?? ""}:${targetKey}:${paramIndex}:${param.key}`;
+    const optionsText = deployParamOptionsDrafts[optionsDraftKey] ?? param.options.join(", ");
 
     return (
       <div className="settings-param-editor" key={`deploy-param-${targetIndex}-${paramIndex}`}>
@@ -3405,12 +4325,36 @@ export function SettingsPanel({
               size="small"
               label="选项"
               className="settings-form-grid-wide"
-              value={param.options.join(", ")}
-              onChange={(event) =>
+              value={optionsText}
+              onFocus={() =>
+                setDeployParamOptionsDrafts((current) => ({
+                  ...current,
+                  [optionsDraftKey]: optionsText,
+                }))
+              }
+              onBlur={(event) => {
                 updateDeployParamAt(targetIndex, paramIndex, {
                   options: parseParamOptions(event.target.value),
-                })
-              }
+                });
+                setDeployParamOptionsDrafts((current) => {
+                  const next = { ...current };
+                  delete next[optionsDraftKey];
+                  return next;
+                });
+              }}
+              onChange={(event) => {
+                const value = event.target.value;
+                setDeployParamOptionsDrafts((current) => ({
+                  ...current,
+                  [optionsDraftKey]: value,
+                }));
+              }}
+              inputProps={{
+                autoCapitalize: "none",
+                autoComplete: "off",
+                autoCorrect: "off",
+                spellCheck: false,
+              }}
             />
           ) : null}
           {showBooleanValues ? (
@@ -3457,7 +4401,7 @@ export function SettingsPanel({
 
   function renderDeploySection() {
     if (loading && !editorState) {
-      return <Alert severity="info">正在读取部署配置</Alert>;
+      return <Alert severity="info">正在读取构建配置</Alert>;
     }
     if (!selectedProject) {
       return <Alert severity="warning">暂无项目配置</Alert>;
@@ -3468,13 +4412,19 @@ export function SettingsPanel({
         ? 0
         : Math.min(selectedDeployTargetIndex, deployTargetCount - 1);
     const activeDeployTarget = selectedProject.deployTargets[activeDeployTargetIndex] ?? null;
+    const activeDeployTargetDetail = activeDeployTarget
+      ? BUILD_ADAPTER_DETAILS[activeDeployTarget.adapter]
+      : null;
+    const missingRSeriesPackageParams = activeDeployTarget
+      ? missingBuildParamPresets(activeDeployTarget, R_SERIES_PACKAGE_PARAM_PRESETS)
+      : [];
 
     return (
       <Stack spacing={1.2}>
         {renderProjectSelector()}
         <div className="settings-save-row">
           <Typography variant="caption">
-            {selectedProject.deployTargets.length} 个部署配置
+            {selectedProject.deployTargets.length} 个构建配置
           </Typography>
           <div className="settings-inline-actions">
             <Button
@@ -3491,15 +4441,15 @@ export function SettingsPanel({
               onClick={() => void saveDeployTargets()}
               disabled={!hasDirtySelectedDeployProject || saving}
             >
-              保存部署
+              保存构建
             </Button>
           </div>
         </div>
         {deployTargetCount === 0 ? (
-          <Alert severity="info">该项目未配置部署目标</Alert>
+          <Alert severity="info">该项目未配置构建目标</Alert>
         ) : activeDeployTarget ? (
           <>
-            <div className="settings-deploy-switcher" role="tablist" aria-label="部署配置">
+            <div className="settings-deploy-switcher" role="tablist" aria-label="构建配置">
               {selectedProject.deployTargets.map((target, targetIndex) => (
                 <button
                   key={`${target.key}-${targetIndex}`}
@@ -3523,7 +4473,9 @@ export function SettingsPanel({
                     {activeDeployTarget.label || activeDeployTarget.key}
                   </Typography>
                   <Typography variant="caption">
-                    {activeDeployTarget.jobName || "未设置 Job Name"}
+                    {activeDeployTarget.jobName ||
+                      activeDeployTargetDetail?.emptyJobText ||
+                      "未设置任务"}
                   </Typography>
                 </div>
                 <div className="settings-inline-actions">
@@ -3566,48 +4518,147 @@ export function SettingsPanel({
                   </Button>
                 </div>
               </div>
-              <div className="settings-form-grid">
-                <TextField
-                  size="small"
-                  label="Key"
-                  value={activeDeployTarget.key}
-                  onChange={(event) =>
-                    updateDeployTargetAt(activeDeployTargetIndex, { key: event.target.value })
-                  }
-                />
-                <TextField
-                  size="small"
-                  label="名称"
-                  value={activeDeployTarget.label}
-                  onChange={(event) =>
-                    updateDeployTargetAt(activeDeployTargetIndex, { label: event.target.value })
-                  }
-                />
-                <TextField
-                  select={jenkinsProfileOptions.length > 0}
-                  size="small"
-                  label="Jenkins Profile"
-                  value={activeDeployTarget.jenkinsProfile}
-                  onChange={(event) =>
-                    updateDeployTargetAt(activeDeployTargetIndex, {
-                      jenkinsProfile: event.target.value,
-                    })
-                  }
-                >
-                  {jenkinsProfileOptions.map((profileKey) => (
-                    <MenuItem key={profileKey} value={profileKey}>
-                      {profileKey}
-                    </MenuItem>
-                  ))}
-                </TextField>
-                <TextField
-                  size="small"
-                  label="Job Name"
-                  value={activeDeployTarget.jobName}
-                  onChange={(event) =>
-                    updateDeployTargetAt(activeDeployTargetIndex, { jobName: event.target.value })
-                  }
-                />
+              <div className="settings-build-config-stack">
+                <section className="settings-build-config-block">
+                  <div className="settings-build-config-head">
+                    <Typography variant="caption">基础</Typography>
+                  </div>
+                  <div className="settings-form-grid">
+                    <TextField
+                      size="small"
+                      label="Key"
+                      value={activeDeployTarget.key}
+                      onChange={(event) =>
+                        updateDeployTargetAt(activeDeployTargetIndex, { key: event.target.value })
+                      }
+                    />
+                    <TextField
+                      size="small"
+                      label="名称"
+                      value={activeDeployTarget.label}
+                      onChange={(event) =>
+                        updateDeployTargetAt(activeDeployTargetIndex, { label: event.target.value })
+                      }
+                    />
+                    <TextField
+                      select
+                      size="small"
+                      label="Adapter"
+                      value={activeDeployTarget.adapter}
+                      onChange={(event) =>
+                        updateDeployTargetAdapterAt(
+                          activeDeployTargetIndex,
+                          event.target.value as DeployTargetConfigSummary["adapter"],
+                        )
+                      }
+                    >
+                      {BUILD_ADAPTER_OPTIONS.map((item) => (
+                        <MenuItem key={item.value} value={item.value}>
+                          {item.label}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                    <TextField
+                      select
+                      size="small"
+                      label="动作"
+                      value={activeDeployTarget.actionKind}
+                      onChange={(event) =>
+                        updateDeployTargetAt(activeDeployTargetIndex, {
+                          actionKind: event.target.value as DeployTargetConfigSummary["actionKind"],
+                        })
+                      }
+                    >
+                      {BUILD_ACTION_KIND_OPTIONS.map((item) => (
+                        <MenuItem key={item.value} value={item.value}>
+                          {item.label}
+                        </MenuItem>
+                      ))}
+                    </TextField>
+                  </div>
+                </section>
+
+                {activeDeployTargetDetail ? (
+                  <section className="settings-build-config-block">
+                    <div className="settings-build-config-head">
+                      <div>
+                        <Typography variant="subtitle2">
+                          {activeDeployTargetDetail.title}
+                        </Typography>
+                        <Typography variant="caption">
+                          {activeDeployTargetDetail.meta}
+                        </Typography>
+                      </div>
+                      <div className="settings-inline-actions">
+                        <Chip
+                          size="small"
+                          label={buildActionKindLabel(activeDeployTarget.actionKind)}
+                          variant="outlined"
+                        />
+                        {activeDeployTarget.adapter === "r_series_package" ? (
+                          <Button
+                            variant="outlined"
+                            color="inherit"
+                            onClick={() =>
+                              addDeployParamPresets(
+                                activeDeployTargetIndex,
+                                R_SERIES_PACKAGE_PARAM_PRESETS,
+                              )
+                            }
+                            disabled={saving || missingRSeriesPackageParams.length === 0}
+                          >
+                            补齐 R 参数
+                          </Button>
+                        ) : null}
+                      </div>
+                    </div>
+                    {activeDeployTarget.adapter === "jenkins" ? (
+                      <div className="settings-form-grid">
+                        <TextField
+                          select={jenkinsProfileOptions.length > 0}
+                          size="small"
+                          label="Jenkins Profile"
+                          value={activeDeployTarget.jenkinsProfile}
+                          onChange={(event) =>
+                            updateDeployTargetAt(activeDeployTargetIndex, {
+                              jenkinsProfile: event.target.value,
+                            })
+                          }
+                        >
+                          {jenkinsProfileOptions.map((profileKey) => (
+                            <MenuItem key={profileKey} value={profileKey}>
+                              {profileKey}
+                            </MenuItem>
+                          ))}
+                        </TextField>
+                        <TextField
+                          size="small"
+                          label={activeDeployTargetDetail.commandLabel}
+                          placeholder={activeDeployTargetDetail.commandPlaceholder}
+                          value={activeDeployTarget.jobName}
+                          onChange={(event) =>
+                            updateDeployTargetAt(activeDeployTargetIndex, {
+                              jobName: event.target.value,
+                            })
+                          }
+                        />
+                      </div>
+                    ) : (
+                      <TextField
+                        size="small"
+                        className="settings-form-grid-wide"
+                        label={activeDeployTargetDetail.commandLabel}
+                        placeholder={activeDeployTargetDetail.commandPlaceholder}
+                        value={activeDeployTarget.jobName}
+                        onChange={(event) =>
+                          updateDeployTargetAt(activeDeployTargetIndex, {
+                            jobName: event.target.value,
+                          })
+                        }
+                      />
+                    )}
+                  </section>
+                ) : null}
               </div>
               <div
                 className="settings-param-list"
@@ -3710,10 +4761,11 @@ export function SettingsPanel({
               </Alert>
             ) : null}
             {activeSection === "general" ? renderGeneralSection() : null}
+            {activeSection === "workspace" ? renderWorkspaceSection() : null}
             {activeSection === "projects" ? renderProjectsSection() : null}
             {activeSection === "finder" ? renderFinderSection() : null}
             {activeSection === "branch" ? renderBranchSection() : null}
-            {activeSection === "deploy" ? renderDeploySection() : null}
+            {activeSection === "build" ? renderDeploySection() : null}
           </div>
         </div>
       </div>

@@ -83,6 +83,9 @@ pub struct SaveDeployHistoryRequest {
     pub params: Value,
 }
 
+pub type BuildHistoryEntry = DeployHistoryEntry;
+pub type SaveBuildHistoryRequest = SaveDeployHistoryRequest;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MergeHistoryEntry {
@@ -559,6 +562,26 @@ impl Storage {
             .map_err(|error| error.to_string())
     }
 
+    pub fn clear_deploy_history_for_projects(
+        &self,
+        project_keys: &[String],
+    ) -> Result<usize, String> {
+        if project_keys.is_empty() {
+            return Ok(0);
+        }
+        let connection = self.open()?;
+        let mut deleted = 0;
+        for project_key in project_keys {
+            deleted += connection
+                .execute(
+                    "DELETE FROM deploy_history WHERE project_key = ?1",
+                    params![project_key],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(deleted)
+    }
+
     pub fn list_all_deploy_history(&self) -> Result<Vec<DeployHistoryEntry>, String> {
         let connection = self.open()?;
         let mut statement = connection
@@ -759,6 +782,26 @@ impl Storage {
         connection
             .execute("DELETE FROM merge_history", [])
             .map_err(|error| error.to_string())
+    }
+
+    pub fn clear_merge_history_for_projects(
+        &self,
+        project_keys: &[String],
+    ) -> Result<usize, String> {
+        if project_keys.is_empty() {
+            return Ok(0);
+        }
+        let connection = self.open()?;
+        let mut deleted = 0;
+        for project_key in project_keys {
+            deleted += connection
+                .execute(
+                    "DELETE FROM merge_history WHERE project_key = ?1",
+                    params![project_key],
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(deleted)
     }
 
     pub fn list_all_merge_history(&self) -> Result<Vec<MergeHistoryEntry>, String> {

@@ -19,12 +19,12 @@ export const BRANCH_MODE_OPTIONS: Array<{
   {
     key: "push",
     label: "推送",
-    hint: "检查当前工作区状态，并执行推送或提交后推送",
+    hint: "检查当前工作副本状态，并执行推送或提交后推送",
   },
   {
     key: "switch",
-    label: "工作区",
-    hint: "切换绑定目录，或克隆分支到目标目录",
+    label: "副本",
+    hint: "选择本地工作副本，切换分支或克隆新目录",
   },
 ];
 
@@ -33,7 +33,7 @@ export function branchWorkflowModeLabel(mode: BranchWorkflowMode) {
     return "克隆";
   }
   if (mode === "switch") {
-    return "工作区";
+    return "工作副本";
   }
   return BRANCH_MODE_OPTIONS.find((item) => item.key === mode)?.label ?? mode;
 }
@@ -49,14 +49,15 @@ export function BranchModeTabs({
 }: BranchModeTabsProps) {
   return (
     <Box
+      className="branch-mode-tabs"
       sx={{
         display: "grid",
         gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-        gap: { xs: 0.24, sm: 0.35 },
-        p: { xs: 0.24, sm: 0.35 },
+        gap: { xs: 0.2, sm: 0.28 },
+        p: { xs: 0.2, sm: 0.28 },
         border: "1px solid",
         borderColor: "divider",
-        borderRadius: "14px",
+        borderRadius: "11px",
         bgcolor: "rgba(255,255,255,0.01)",
         boxShadow: "inset 0 1px 0 rgba(255,255,255,0.014)",
       }}
@@ -69,11 +70,11 @@ export function BranchModeTabs({
           onClick={() => onModeChange(item.key)}
           sx={{
             minWidth: 0,
-            minHeight: { xs: 28, sm: 32 },
-            borderRadius: { xs: "9px", sm: "10px" },
+            minHeight: { xs: 26, sm: 29 },
+            borderRadius: { xs: "8px", sm: "8px" },
             px: { xs: 0.2, sm: 1 },
             py: 0,
-            fontSize: { xs: "0.72rem", sm: "0.84rem" },
+            fontSize: { xs: "0.72rem", sm: "0.8rem" },
             lineHeight: 1,
             whiteSpace: "nowrap",
             letterSpacing: "0.01em",
