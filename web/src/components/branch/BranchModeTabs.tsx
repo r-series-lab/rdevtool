@@ -8,22 +8,22 @@ export const BRANCH_MODE_OPTIONS: Array<{
 }> = [
   {
     key: "sync",
-    label: "合并",
-    hint: "单项目，源分支合并到多个目标分支",
+    label: "合并分支",
+    hint: "源分支合并到多个目标分支",
   },
   {
     key: "create",
-    label: "创建",
-    hint: "",
+    label: "创建分支",
+    hint: "批量创建目标分支",
   },
   {
     key: "push",
-    label: "推送",
-    hint: "检查当前工作副本状态，并执行推送或提交后推送",
+    label: "提交推送",
+    hint: "检查工作副本状态，并执行提交推送或仅推送",
   },
   {
     key: "switch",
-    label: "副本",
+    label: "副本管理",
     hint: "选择本地工作副本，切换分支或克隆新目录",
   },
 ];
@@ -33,7 +33,7 @@ export function branchWorkflowModeLabel(mode: BranchWorkflowMode) {
     return "克隆";
   }
   if (mode === "switch") {
-    return "工作副本";
+    return "副本管理";
   }
   return BRANCH_MODE_OPTIONS.find((item) => item.key === mode)?.label ?? mode;
 }

@@ -693,39 +693,7 @@ pub fn clone_branch_to_directory(
     if branch.is_empty() {
         anyhow::bail!("源分支不能为空");
     }
-    let output_path = destination_path;
-    if output_path.as_os_str().is_empty() {
-        anyhow::bail!("目标目录不能为空");
-    }
-
-    if output_path.exists() {
-        if !output_path.is_dir() {
-            anyhow::bail!("目标目录不是文件夹：{}", output_path.display());
-        }
-        let has_entries = fs::read_dir(output_path)
-            .with_context(|| {
-                format!(
-                    "failed to inspect target directory {}",
-                    output_path.display()
-                )
-            })?
-            .next()
-            .transpose()
-            .with_context(|| {
-                format!(
-                    "failed to inspect target directory {}",
-                    output_path.display()
-                )
-            })?
-            .is_some();
-        if has_entries {
-            anyhow::bail!("目标目录不是空目录：{}", output_path.display());
-        }
-    } else if let Some(parent) = output_path.parent() {
-        if !parent.exists() || !parent.is_dir() {
-            anyhow::bail!("目标目录的父路径不存在：{}", parent.display());
-        }
-    }
+    let output_path = ensure_checkout_destination(destination_path)?;
 
     let output = git_command()
         .args(["clone", "--branch", branch, "--single-branch"])
@@ -768,6 +736,126 @@ pub fn clone_branch_to_directory(
             detail
         },
     })
+}
+
+pub fn add_worktree_from_branch(
+    repo_path: &Path,
+    branch: &str,
+    destination_path: &Path,
+) -> Result<BranchCheckoutResult> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        anyhow::bail!("源分支不能为空");
+    }
+    let output_path = ensure_checkout_destination(destination_path)?;
+
+    run_git_capture(repo_path, &["fetch", "--all", "--prune"])?;
+    let local_ref = format!("refs/heads/{branch}");
+    let local_exists = verify_ref(repo_path, &local_ref)?;
+    let remote_name = preferred_remote_name(repo_path)?;
+    let remote_ref = resolve_remote_branch_ref(repo_path, branch).ok();
+    let branch_checked_out = list_worktrees(repo_path)
+        .map(|items| {
+            items
+                .into_iter()
+                .any(|item| item.branch.as_deref() == Some(branch))
+        })
+        .unwrap_or(false);
+
+    let output = if !branch_checked_out && local_exists {
+        run_git_capture_owned(
+            repo_path,
+            vec![
+                "worktree".to_string(),
+                "add".to_string(),
+                output_path.display().to_string(),
+                branch.to_string(),
+            ],
+        )?
+    } else if !branch_checked_out {
+        let remote_ref = remote_ref
+            .as_deref()
+            .with_context(|| format!("远端分支不存在：{remote_name}/{branch}"))?;
+        run_git_capture_owned(
+            repo_path,
+            vec![
+                "worktree".to_string(),
+                "add".to_string(),
+                "--track".to_string(),
+                "-b".to_string(),
+                branch.to_string(),
+                output_path.display().to_string(),
+                remote_ref.to_string(),
+            ],
+        )?
+    } else {
+        let source_ref = remote_ref
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(local_ref.as_str());
+        run_git_capture_owned(
+            repo_path,
+            vec![
+                "worktree".to_string(),
+                "add".to_string(),
+                "--detach".to_string(),
+                output_path.display().to_string(),
+                source_ref.to_string(),
+            ],
+        )?
+    };
+
+    let mut detail = if output.trim().is_empty() {
+        format!("已创建工作区副本 {branch}")
+    } else {
+        output.trim().to_string()
+    };
+    if branch_checked_out {
+        detail.push_str("\n\n源分支已被其他工作副本占用，本次以 detached HEAD 创建副本。");
+    }
+
+    Ok(BranchCheckoutResult {
+        output_path: output_path.to_path_buf(),
+        detail,
+    })
+}
+
+fn ensure_checkout_destination(destination_path: &Path) -> Result<&Path> {
+    let output_path = destination_path;
+    if output_path.as_os_str().is_empty() {
+        anyhow::bail!("目标目录不能为空");
+    }
+
+    if output_path.exists() {
+        if !output_path.is_dir() {
+            anyhow::bail!("目标目录不是文件夹：{}", output_path.display());
+        }
+        let has_entries = fs::read_dir(output_path)
+            .with_context(|| {
+                format!(
+                    "failed to inspect target directory {}",
+                    output_path.display()
+                )
+            })?
+            .next()
+            .transpose()
+            .with_context(|| {
+                format!(
+                    "failed to inspect target directory {}",
+                    output_path.display()
+                )
+            })?
+            .is_some();
+        if has_entries {
+            anyhow::bail!("目标目录不是空目录：{}", output_path.display());
+        }
+    } else if let Some(parent) = output_path.parent() {
+        if !parent.exists() || !parent.is_dir() {
+            anyhow::bail!("目标目录的父路径不存在：{}", parent.display());
+        }
+    }
+
+    Ok(output_path)
 }
 
 fn create_target_branch_from_source(
@@ -1112,6 +1200,11 @@ fn run_git_capture(repo_path: &Path, args: &[&str]) -> Result<String> {
         format!("{stdout}\n{stderr}")
     };
     Ok(combined)
+}
+
+fn run_git_capture_owned(repo_path: &Path, args: Vec<String>) -> Result<String> {
+    let borrowed = args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_git_capture(repo_path, &borrowed)
 }
 
 fn sanitize_branch_name(value: &str) -> String {

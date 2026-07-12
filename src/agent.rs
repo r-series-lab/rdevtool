@@ -11,6 +11,7 @@ use crate::core::{
 use crate::navigation::{
     NavigationIndexEntry, search_navigation_entries, search_navigation_entries_for_workspace,
 };
+use crate::replay::{ReplayAction, replay_actions_from_history};
 use crate::storage::{
     DeployHistoryEntry, MergeHistoryEntry, NoteSummary, Storage, default_storage_path,
 };
@@ -36,6 +37,7 @@ pub struct AgentContext {
     pub build_history: Vec<DeployHistoryEntry>,
     pub deploy_history: Vec<DeployHistoryEntry>,
     pub merge_history: Vec<MergeHistoryEntry>,
+    pub replay_actions: Vec<ReplayAction>,
     pub navigation: Vec<NavigationIndexEntry>,
 }
 
@@ -87,14 +89,24 @@ pub fn capabilities() -> AgentCapabilities {
             "proxy-read".to_string(),
             "proxy-profile-crud".to_string(),
             "proxy-rule-crud".to_string(),
+            "proxy-runtime-bind".to_string(),
+            "runtime-cli".to_string(),
+            "runtime-preflight".to_string(),
+            "runtime-start".to_string(),
+            "runtime-focus".to_string(),
+            "runtime-log".to_string(),
+            "web-actions-cli".to_string(),
             "workspace-context".to_string(),
             "workspace-scope-cli".to_string(),
+            "workspace-init-demand".to_string(),
             "workspace-filtered-history".to_string(),
             "navigation-crud".to_string(),
             "doctor".to_string(),
             "project-domain-cli".to_string(),
             "project-config-crud".to_string(),
             "build-domain-cli".to_string(),
+            "history-replay".to_string(),
+            "agent-replay-context".to_string(),
             "build-adapter-jenkins".to_string(),
             "deploy-domain-compat".to_string(),
             "app-preferences-cli".to_string(),
@@ -105,7 +117,7 @@ pub fn capabilities() -> AgentCapabilities {
             "capabilities".to_string(),
             "context".to_string(),
             "app preferences|set-preferences".to_string(),
-            "workspace list|show|create|use|scope".to_string(),
+            "workspace list|show|create|init-demand|use|scope".to_string(),
             "projects list|show|add|update|delete|set-command|build-target-add|build-target-update|build-target-delete|build-param-add|build-param-update|build-param-delete|branch|branches|envs|options".to_string(),
             "build targets|plan|run|trigger|status|history".to_string(),
             "deploy targets|plan|trigger|status|history".to_string(),
@@ -130,9 +142,11 @@ pub fn capabilities() -> AgentCapabilities {
             "push-status".to_string(),
             "push-branch".to_string(),
             "notes list|get|create|save|delete|search".to_string(),
-            "history build|deploy|merge".to_string(),
+            "history build|deploy|merge|replay-plan|replay-run".to_string(),
             "navigation path|list|search|open|add|update|delete".to_string(),
-            "proxy path|list|show|add|update|delete|export|import|rule-list|rule-show|rule-add|rule-update|rule-delete".to_string(),
+            "proxy path|list|show|add|update|delete|export|import|rule-list|rule-show|rule-add|rule-update|rule-delete|bind-runtime".to_string(),
+            "runtime profiles|profile-show|preflight|start|focus|log".to_string(),
+            "web-actions path|list|targets|open|run|script".to_string(),
             "agent capabilities|context".to_string(),
         ],
     }
@@ -174,6 +188,14 @@ pub fn context_for_workspace(
         workspace_project_filter.as_deref(),
         normalized_limit,
     )?;
+    let merge_history = filtered_merge_history(
+        storage,
+        filter_project_key,
+        workspace_project_filter.as_deref(),
+        normalized_limit,
+    )?;
+    let replay_actions =
+        replay_actions_from_history(&build_history, &merge_history, normalized_limit);
 
     Ok(AgentContext {
         app: capabilities(),
@@ -185,12 +207,8 @@ pub fn context_for_workspace(
             .map_err(anyhow::Error::msg)?,
         build_history: build_history.clone(),
         deploy_history: build_history,
-        merge_history: filtered_merge_history(
-            storage,
-            filter_project_key,
-            workspace_project_filter.as_deref(),
-            normalized_limit,
-        )?,
+        merge_history,
+        replay_actions,
         navigation: match workspace {
             Some(workspace) => {
                 search_navigation_entries_for_workspace(workspace, query, normalized_limit)?

@@ -9,7 +9,7 @@ import {
   Box,
   Button,
   Chip,
-  Drawer,
+  Dialog,
   IconButton,
   MenuItem,
   Stack,
@@ -23,6 +23,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   FinderEntry,
   WebActionListResponse,
+  WebActionParamSummary,
   WebActionRunResult,
   WebActionSummary,
   WebActionTarget,
@@ -30,6 +31,7 @@ import type {
 import {
   AppWindowIcon,
   ClearIcon,
+  CopyIcon,
   OpenExternalIcon,
   PlayIcon,
   RefreshIcon,
@@ -48,6 +50,7 @@ export type WebActionsDialogContext = {
   scope: string;
   url: string;
   entry?: FinderEntry | null;
+  contextParams?: Record<string, string>;
 };
 
 type WebActionsPanelProps = {
@@ -88,10 +91,101 @@ export type RuntimePanelDrawerProps<T extends string = string> = {
   children?: ReactNode;
 };
 
-function defaultParamValues(action: WebActionSummary | null) {
+function lookupContextParam(
+  contextParams: Record<string, string> | undefined,
+  namespaces: string[],
+  sourceKey: string,
+) {
+  const key = sourceKey.trim();
+  if (!key) {
+    return undefined;
+  }
+  const candidates = [
+    key,
+    ...namespaces.map((namespace) => `${namespace}.${key}`),
+  ];
+  return candidates
+    .map((candidate) => contextParams?.[candidate])
+    .find((value) => value != null);
+}
+
+function webActionParamSourceNamespaces(source: string) {
+  switch (source.trim().toLowerCase()) {
+    case "project":
+      return ["project"];
+    case "workspace":
+      return ["workspace"];
+    case "debug":
+    case "debugprofile":
+    case "debug_profile":
+    case "debug-profile":
+      return ["debugProfile", "debug_profile"];
+    case "runtime":
+    case "runtimeprofile":
+    case "runtime_profile":
+    case "runtime-profile":
+      return ["runtimeProfile", "runtime_profile"];
+    case "context":
+      return [];
+    default:
+      return [source.trim()];
+  }
+}
+
+function resolveParamInitialValue(
+  param: WebActionParamSummary,
+  contextParams?: Record<string, string>,
+) {
+  const source = (param.source || "default").trim().toLowerCase();
+  if (!source || source === "default" || source === "fixed" || source === "value") {
+    return param.defaultValue ?? "";
+  }
+  const sourceKey = param.sourceKey?.trim() || param.key;
+  return (
+    lookupContextParam(
+      contextParams,
+      webActionParamSourceNamespaces(source),
+      sourceKey,
+    ) ??
+    param.defaultValue ??
+    ""
+  );
+}
+
+function webActionParamSourceLabel(
+  param: WebActionParamSummary,
+  contextParams?: Record<string, string>,
+) {
+  const source = (param.source || "default").trim().toLowerCase();
+  if (!source || source === "default" || source === "fixed" || source === "value") {
+    return "";
+  }
+  const sourceKey = param.sourceKey?.trim() || param.key;
+  const resolved = resolveParamInitialValue(param, contextParams);
+  const sourceLabel =
+    {
+      project: "项目",
+      workspace: "工作区",
+      debug: "调试档案",
+      debugprofile: "调试档案",
+      debug_profile: "调试档案",
+      "debug-profile": "调试档案",
+      runtime: "运行配置",
+      runtimeprofile: "运行配置",
+      runtime_profile: "运行配置",
+      "runtime-profile": "运行配置",
+      context: "上下文",
+    }[source] ?? source;
+  return `来源：${sourceLabel} · ${sourceKey}${resolved ? ` · ${resolved}` : ""}`;
+}
+
+function defaultParamValues(
+  action: WebActionSummary | null,
+  contextParams?: Record<string, string>,
+) {
   const values: Record<string, string> = {};
   for (const param of action?.params ?? []) {
-    values[param.key] = param.defaultValue ?? "";
+    values[param.key] = resolveParamInitialValue(param, contextParams);
   }
   return values;
 }
@@ -203,6 +297,71 @@ function formatRequestPreview(action: WebActionSummary | null) {
   return lines.join("\n");
 }
 
+function shellQuote(value: string) {
+  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) {
+    return value;
+  }
+  return `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
+function appendCliFlag(parts: string[], flag: string, value?: string | null) {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return;
+  }
+  parts.push(flag, shellQuote(trimmed));
+}
+
+function webActionCliCommand(options: {
+  context: WebActionsDialogContext | null;
+  selectedAction: WebActionSummary | null;
+  selectedActionKey: string;
+  selectedTargetId: string;
+  selectedActionNeedsTarget: boolean;
+  paramValues: Record<string, string>;
+  temporaryScript: string;
+}) {
+  const {
+    context,
+    selectedAction,
+    selectedActionKey,
+    selectedTargetId,
+    selectedActionNeedsTarget,
+    paramValues,
+    temporaryScript,
+  } = options;
+  if (!context?.url) {
+    return "";
+  }
+  if (selectedActionNeedsTarget && !selectedTargetId) {
+    return `rdevtool --json web-actions open --url ${shellQuote(context.url)}`;
+  }
+
+  if (selectedActionKey === TEMPORARY_ACTION_KEY) {
+    const parts = ["rdevtool", "--json", "web-actions", "script"];
+    appendCliFlag(parts, "--target", selectedTargetId);
+    appendCliFlag(parts, "--script", temporaryScript);
+    return parts.join(" ");
+  }
+
+  if (!selectedAction) {
+    return `rdevtool --json web-actions list --url ${shellQuote(context.url)}`;
+  }
+
+  const parts = ["rdevtool", "--json", "web-actions", "run"];
+  appendCliFlag(parts, "--action", selectedAction.key);
+  appendCliFlag(parts, "--target", selectedTargetId);
+  appendCliFlag(parts, "--scope", context.scope);
+  appendCliFlag(parts, "--url", context.url);
+  for (const [key, value] of Object.entries(paramValues)) {
+    appendCliFlag(parts, "--param", `${key}=${value}`);
+  }
+  for (const [key, value] of Object.entries(context.contextParams ?? {})) {
+    appendCliFlag(parts, "--context", `${key}=${value}`);
+  }
+  return parts.join(" ");
+}
+
 export function RuntimePanelDrawer<T extends string = string>({
   open,
   onClose,
@@ -221,23 +380,14 @@ export function RuntimePanelDrawer<T extends string = string>({
   children,
 }: RuntimePanelDrawerProps<T>) {
   return (
-    <Drawer
-      className="runtime-panel-drawer"
-      anchor="right"
+    <Dialog
+      className="runtime-panel-dialog"
       open={open}
       onClose={closeDisabled ? undefined : onClose}
-      ModalProps={{ keepMounted: true }}
-      slotProps={{
-        paper: {
-          sx: {
-            width: { xs: "100%", sm: 456 },
-            maxWidth: "100%",
-            bgcolor: "var(--panel)",
-            color: "var(--text)",
-            borderLeft: "1px solid var(--line)",
-            boxShadow: "var(--shadow)",
-          },
-        },
+      keepMounted
+      maxWidth={false}
+      PaperProps={{
+        className: "runtime-panel-paper",
       }}
     >
       <Box
@@ -413,7 +563,7 @@ export function RuntimePanelDrawer<T extends string = string>({
           {children}
         </Box>
       </Box>
-    </Drawer>
+    </Dialog>
   );
 }
 
@@ -435,6 +585,7 @@ export function WebActionsPanel({
   const [temporaryScript, setTemporaryScript] = useState(DEFAULT_TEMPORARY_SCRIPT);
   const [temporaryParamsText, setTemporaryParamsText] = useState("{}");
   const [result, setResult] = useState<WebActionRunResult | null>(null);
+  const [copiedCliCommand, setCopiedCliCommand] = useState(false);
 
   const selectedAction = useMemo(
     () => actions.find((item) => item.key === selectedActionKey) ?? null,
@@ -448,6 +599,27 @@ export function WebActionsPanel({
     : selectedAction?.kind === "request"
       ? formatRequestPreview(selectedAction)
       : selectedAction?.script ?? "";
+  const cliCommand = useMemo(
+    () =>
+      webActionCliCommand({
+        context,
+        selectedAction,
+        selectedActionKey,
+        selectedTargetId,
+        selectedActionNeedsTarget,
+        paramValues,
+        temporaryScript,
+      }),
+    [
+      context,
+      selectedAction,
+      selectedActionKey,
+      selectedTargetId,
+      selectedActionNeedsTarget,
+      paramValues,
+      temporaryScript,
+    ],
+  );
 
   async function loadPanelData(nextContext = context) {
     if (!nextContext?.url) {
@@ -502,8 +674,8 @@ export function WebActionsPanel({
   }, [active, context?.scope, context?.url]);
 
   useEffect(() => {
-    setParamValues(defaultParamValues(selectedAction));
-  }, [selectedAction?.key]);
+    setParamValues(defaultParamValues(selectedAction, context?.contextParams));
+  }, [context?.contextParams, selectedAction?.key]);
 
   useEffect(() => {
     onRunningChange?.(running);
@@ -572,6 +744,15 @@ export function WebActionsPanel({
     }
   }
 
+  async function copyCliCommand() {
+    if (!cliCommand || !navigator.clipboard?.writeText) {
+      return;
+    }
+    await navigator.clipboard.writeText(cliCommand);
+    setCopiedCliCommand(true);
+    window.setTimeout(() => setCopiedCliCommand(false), 1200);
+  }
+
   function parseTemporaryParams() {
     try {
       const parsed = JSON.parse(temporaryParamsText.trim() || "{}") as unknown;
@@ -632,6 +813,7 @@ export function WebActionsPanel({
                 scope: context.scope,
                 url: context.url,
                 params: paramValues,
+                contextParams: context.contextParams ?? {},
               },
             },
           );
@@ -655,7 +837,7 @@ export function WebActionsPanel({
   const resultFailed = Boolean(error || (result && !result.success));
 
   return (
-    <Stack spacing={compact ? 1 : 1.15}>
+    <Stack className="web-actions-panel" spacing={compact ? 1 : 1.15}>
       <Box
         sx={{
           p: compact ? 0.95 : 1.1,
@@ -793,6 +975,10 @@ export function WebActionsPanel({
                   size="small"
                   label={param.label || param.key}
                   value={paramValues[param.key] ?? ""}
+                  helperText={webActionParamSourceLabel(
+                    param,
+                    context?.contextParams,
+                  )}
                   onChange={(event) =>
                     setParamValues((current) => ({
                       ...current,
@@ -922,6 +1108,7 @@ export function WebActionsPanel({
       ) : null}
 
       <Stack
+        className="web-actions-panel-actions"
         direction="row"
         spacing={0.75}
         alignItems="center"
@@ -953,6 +1140,28 @@ export function WebActionsPanel({
           }}
         >
           配置
+        </Button>
+        <Button
+          size="small"
+          color="inherit"
+          startIcon={<CopyIcon fontSize="small" />}
+          disabled={!cliCommand || running}
+          onClick={() => void copyCliCommand()}
+          sx={{
+            minWidth: 0,
+            height: 32,
+            px: 1.1,
+            borderRadius: "10px",
+            border: "1px solid var(--line-soft)",
+            color: copiedCliCommand ? "var(--success)" : "var(--muted)",
+            bgcolor: "rgba(255,255,255,0.018)",
+            "&:hover": {
+              bgcolor: "rgba(255,255,255,0.04)",
+              color: "var(--text)",
+            },
+          }}
+        >
+          {copiedCliCommand ? "已复制" : "复制命令"}
         </Button>
         <Button
           variant="contained"

@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export const TRAY_PINNED_LIMIT = 5;
+export const TRAY_PINNED_STORAGE_LIMIT = 60;
 const BUILD_REPLAY_KIND = "build.replay";
 const LEGACY_DEPLOY_REPLAY_KIND = "deploy.replay";
 
@@ -63,7 +63,7 @@ export function normalizeTrayPinnedActions(actions: unknown[]): TrayPinnedAction
       dedupeKey,
       updatedAtMs: Number(action.updatedAtMs) || Date.now(),
     });
-    if (normalized.length >= TRAY_PINNED_LIMIT) {
+    if (normalized.length >= TRAY_PINNED_STORAGE_LIMIT) {
       break;
     }
   }

@@ -11,6 +11,7 @@ import {
   Typography,
 } from "@mui/material";
 import { ClearIcon, TrashIcon } from "./AppIcons";
+import { AppEmptyState } from "./AppEmptyState";
 
 export type WorkflowLinkListItem = {
   key: string;
@@ -254,21 +255,7 @@ export function WorkflowLinksDialog({
               </Box>
             ))
           ) : (
-            <Box
-              sx={{
-                minHeight: 64,
-                display: "grid",
-                placeItems: "center",
-                border: "1px dashed",
-                borderColor: "divider",
-                borderRadius: "14px",
-                color: "text.secondary",
-              }}
-            >
-              <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 750 }}>
-                暂无联动
-              </Typography>
-            </Box>
+            <AppEmptyState compact title="暂无联动" description="关联动作后会显示在这里。" />
           )}
         </Stack>
       </DialogContent>

@@ -54,7 +54,7 @@ function buildActionCopy(actionKind?: string | null): BuildActionCopy {
     actionKind === "deploy"
       ? "部署"
       : actionKind === "package"
-        ? "打包"
+        ? "产物构建"
         : actionKind === "release"
           ? "发布"
           : "构建";
@@ -76,6 +76,10 @@ function actionCopyForPlan(plan?: BuildPlan | null) {
 function actionCopyForHistoryItem(plan: BuildPlan | null, item: BuildHistoryEntry) {
   if (plan?.projectKey === item.projectKey && plan.jobKind === item.mode) {
     return buildActionCopy(plan.actionKind);
+  }
+  const mode = item.mode.trim().toLowerCase();
+  if (mode === "package" || mode === "release") {
+    return buildActionCopy(mode);
   }
   return buildActionCopy();
 }
@@ -112,6 +116,20 @@ function activityStatusFromBuildState(stateKey?: string | null): ActivityStatus 
     return "success";
   }
   return "info";
+}
+
+function activityStatusFromBuildResult(
+  stateKey?: string | null,
+  links?: Pick<BuildResult, "buildUrl" | "queueUrl">,
+): ActivityStatus {
+  if (
+    (stateKey === "canceled" || stateKey === "cancelled") &&
+    !links?.queueUrl &&
+    !links?.buildUrl
+  ) {
+    return "info";
+  }
+  return activityStatusFromBuildState(stateKey);
 }
 
 function buildResultChanged(current: BuildResult | null, next: BuildResult) {
@@ -258,20 +276,18 @@ export function useBuildHistoryState({
     const queueUrl = result.queueUrl ?? item.queueUrl ?? null;
     const buildUrl = result.buildUrl ?? item.buildUrl ?? null;
     const resourceValues = buildActivityResourceValues(queueUrl, buildUrl);
-    if (resourceValues.length === 0) {
-      return;
-    }
+    const executionKey = buildActivityExecutionKey(item.projectKey, item.mode, item.params);
     syncActivities(
       {
         kind: "build",
         projectKey: item.projectKey,
-        resourceValues,
+        ...(resourceValues.length > 0 ? { resourceValues } : { executionKey }),
       },
       {
-        status: activityStatusFromBuildState(result.stateKey),
+        status: activityStatusFromBuildResult(result.stateKey, { queueUrl, buildUrl }),
         summary: `${result.stateLabel} · ${result.detail}`,
         detail: buildUrl || queueUrl || null,
-        executionKey: buildActivityExecutionKey(item.projectKey, item.mode, item.params),
+        executionKey,
         projectKey: item.projectKey,
         projectName: result.plan?.projectName || item.projectName,
         resource: buildRecordResource({ queueUrl, buildUrl }),
@@ -297,20 +313,18 @@ export function useBuildHistoryState({
       return;
     }
     const resourceValues = buildActivityResourceValues(item.queueUrl, item.buildUrl);
-    if (resourceValues.length === 0) {
-      return;
-    }
+    const executionKey = buildActivityExecutionKey(item.projectKey, item.mode, item.params);
     syncActivities(
       {
         kind: "build",
         projectKey: item.projectKey,
-        resourceValues,
+        ...(resourceValues.length > 0 ? { resourceValues } : { executionKey }),
       },
       {
         status: "failed",
         summary: `状态同步失败 · 请手动刷新（1/${BUILD_STATUS_SYNC_MAX_FAILURES}）`,
         detail: compactSyncError(reason),
-        executionKey: buildActivityExecutionKey(item.projectKey, item.mode, item.params),
+        executionKey,
         resource: buildRecordResource(item),
         syncFailureCount: 1,
         acknowledgedAt: new Date().toISOString(),
@@ -541,7 +555,7 @@ export function useBuildHistoryState({
       await persistBuildHistory(historyKey, result);
       if (activityId) {
         updateActivity?.(activityId, {
-          status: activityStatusFromBuildState(result.stateKey),
+          status: activityStatusFromBuildResult(result.stateKey, result),
           summary: `${result.stateLabel} · ${result.detail}`,
           detail: result.buildUrl || result.queueUrl || null,
           projectName: result.plan?.projectName || activityProjectName,
@@ -625,7 +639,7 @@ export function useBuildHistoryState({
       await persistBuildHistory(historyKey, result);
       if (activityId) {
         updateActivity?.(activityId, {
-          status: activityStatusFromBuildState(result.stateKey),
+          status: activityStatusFromBuildResult(result.stateKey, result),
           summary: `${result.stateLabel} · ${result.detail}`,
           detail: result.buildUrl || result.queueUrl || null,
           chainId: options.chainId ?? undefined,
@@ -688,7 +702,7 @@ export function useBuildHistoryState({
       }
       if (changed && currentBuildActivityIdRef.current) {
         updateActivity?.(currentBuildActivityIdRef.current, {
-          status: activityStatusFromBuildState(nextResult.stateKey),
+          status: activityStatusFromBuildResult(nextResult.stateKey, nextResult),
           summary: `${nextResult.stateLabel} · ${nextResult.detail}`,
           detail: nextResult.buildUrl || nextResult.queueUrl || null,
           resource: buildRecordResource(nextResult),
@@ -805,6 +819,7 @@ export function useBuildHistoryState({
   return {
     buildResult,
     buildResultUpdatedAtMs,
+    currentBuildHistoryKey,
     buildAutoRefreshTimedOut,
     visibleBuildHistory,
     handleTriggerBuild,

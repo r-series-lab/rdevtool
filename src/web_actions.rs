@@ -202,6 +202,10 @@ struct WebActionParamConfig {
     label: String,
     #[serde(default)]
     default: String,
+    #[serde(default)]
+    source: String,
+    #[serde(default)]
+    source_key: String,
 }
 
 fn default_true() -> bool {
@@ -258,6 +262,8 @@ pub struct WebActionParamSummary {
     pub key: String,
     pub label: String,
     pub default_value: String,
+    pub source: String,
+    pub source_key: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -272,6 +278,8 @@ pub struct WebActionRunRequest {
     pub url: Option<String>,
     #[serde(default)]
     pub params: BTreeMap<String, String>,
+    #[serde(default)]
+    pub context_params: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -531,7 +539,8 @@ fn run_script_web_action(
         .web_socket_debugger_url
         .as_deref()
         .ok_or_else(|| anyhow!("页面缺少 CDP WebSocket 地址"))?;
-    let result = evaluate_action_script(ws_url, &action.script, &request.params)?;
+    let params = resolve_action_params(&action, &request);
+    let result = evaluate_action_script(ws_url, &action.script, &params)?;
     Ok(WebActionRunResult {
         action_key: action.key,
         target_id: target.id,
@@ -557,7 +566,8 @@ fn run_request_web_action(
         );
     }
 
-    let result = execute_request_action(&action.request, &request.params, context_url)?;
+    let params = resolve_action_params(&action, &request);
+    let result = execute_request_action(&action.request, &params, context_url)?;
     Ok(WebActionRunResult {
         action_key: action.key,
         target_id: request.target_id.unwrap_or_default(),
@@ -666,11 +676,91 @@ fn web_action_summary(action: WebActionConfig) -> WebActionSummary {
                 key,
                 label: param.label,
                 default_value: param.default,
+                source: param.source,
+                source_key: param.source_key,
             })
             .collect(),
         script: action.script,
         request,
     }
+}
+
+fn resolve_action_params(
+    action: &WebActionConfig,
+    request: &WebActionRunRequest,
+) -> BTreeMap<String, String> {
+    let mut params = BTreeMap::new();
+
+    for (key, config) in &action.params {
+        let value = request
+            .params
+            .get(key)
+            .cloned()
+            .or_else(|| resolve_action_param_source(key, config, &request.context_params))
+            .unwrap_or_else(|| config.default.clone());
+        params.insert(key.clone(), value);
+    }
+
+    for (key, value) in &request.params {
+        params.insert(key.clone(), value.clone());
+    }
+
+    params
+}
+
+fn resolve_action_param_source(
+    param_key: &str,
+    config: &WebActionParamConfig,
+    context_params: &BTreeMap<String, String>,
+) -> Option<String> {
+    let source = config.source.trim().to_ascii_lowercase();
+    let source_key = config
+        .source_key
+        .trim()
+        .is_empty()
+        .then_some(param_key)
+        .unwrap_or_else(|| config.source_key.trim());
+
+    match source.as_str() {
+        "" | "default" | "fixed" | "value" => Some(config.default.clone()),
+        "project" => lookup_context_param(context_params, &["project"], source_key),
+        "workspace" => lookup_context_param(context_params, &["workspace"], source_key),
+        "debug" | "debugprofile" | "debug_profile" | "debug-profile" => lookup_context_param(
+            context_params,
+            &["debugProfile", "debug_profile"],
+            source_key,
+        ),
+        "runtime" | "runtimeprofile" | "runtime_profile" | "runtime-profile" => {
+            lookup_context_param(
+                context_params,
+                &["runtimeProfile", "runtime_profile"],
+                source_key,
+            )
+        }
+        "context" => lookup_context_param(context_params, &[], source_key),
+        _ => lookup_context_param(context_params, &[source.as_str()], source_key),
+    }
+}
+
+fn lookup_context_param(
+    context_params: &BTreeMap<String, String>,
+    namespaces: &[&str],
+    source_key: &str,
+) -> Option<String> {
+    let key = source_key.trim();
+    if key.is_empty() {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    candidates.push(key.to_string());
+    for namespace in namespaces {
+        candidates.push(format!("{}.{}", namespace, key));
+    }
+
+    candidates
+        .into_iter()
+        .find_map(|candidate| context_params.get(&candidate).cloned())
 }
 
 fn action_matches_context(
@@ -1329,6 +1419,63 @@ mod tests {
     }
 
     #[test]
+    fn resolves_action_params_from_context_and_overrides() {
+        let mut action_params = BTreeMap::new();
+        action_params.insert(
+            "projectName".to_string(),
+            WebActionParamConfig {
+                label: "项目名称".to_string(),
+                default: "fallback".to_string(),
+                source: "project".to_string(),
+                source_key: "name".to_string(),
+            },
+        );
+        action_params.insert(
+            "env".to_string(),
+            WebActionParamConfig {
+                label: "环境".to_string(),
+                default: "uat1".to_string(),
+                source: "debugProfile".to_string(),
+                source_key: "env.APP_ENV".to_string(),
+            },
+        );
+        let action = WebActionConfig {
+            key: "test".to_string(),
+            name: "测试".to_string(),
+            kind: WebActionKind::Request,
+            scope: String::new(),
+            match_patterns: Vec::new(),
+            run_manually: true,
+            script: String::new(),
+            request: WebActionRequestConfig::default(),
+            params: action_params,
+        };
+        let mut request_params = BTreeMap::new();
+        request_params.insert("env".to_string(), "pre".to_string());
+        let mut context_params = BTreeMap::new();
+        context_params.insert("project.name".to_string(), "智能营销".to_string());
+        context_params.insert("debugProfile.env.APP_ENV".to_string(), "uat3".to_string());
+
+        let resolved = resolve_action_params(
+            &action,
+            &WebActionRunRequest {
+                action_key: "test".to_string(),
+                target_id: None,
+                scope: None,
+                url: None,
+                params: request_params,
+                context_params,
+            },
+        );
+
+        assert_eq!(
+            resolved.get("projectName").map(String::as_str),
+            Some("智能营销")
+        );
+        assert_eq!(resolved.get("env").map(String::as_str), Some("pre"));
+    }
+
+    #[test]
     fn rejects_empty_temporary_script() {
         let error = run_web_action_script(WebActionScriptRunRequest {
             target_id: "page-1".to_string(),
@@ -1350,6 +1497,7 @@ mod tests {
             scope: None,
             url: None,
             params: BTreeMap::new(),
+            context_params: BTreeMap::new(),
         })
         .unwrap();
 

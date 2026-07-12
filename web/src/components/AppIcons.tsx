@@ -150,6 +150,17 @@ export function ClearIcon(props: SvgIconProps) {
   );
 }
 
+export function SearchIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M10.7 4a6.7 6.7 0 0 1 5.3 10.8l4 4-1.4 1.4-4-4A6.7 6.7 0 1 1 10.7 4Zm0 2a4.7 4.7 0 1 0 0 9.4 4.7 4.7 0 0 0 0-9.4Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
 export function CheckIcon(props: SvgIconProps) {
   return (
     <SvgIcon viewBox="0 0 24 24" {...props}>
@@ -204,6 +215,17 @@ export function MoreIcon(props: SvgIconProps) {
     <SvgIcon viewBox="0 0 24 24" {...props}>
       <path
         d="M6 10.2a1.8 1.8 0 1 1 0 3.6 1.8 1.8 0 0 1 0-3.6Zm6 0a1.8 1.8 0 1 1 0 3.6 1.8 1.8 0 0 1 0-3.6Zm6 0a1.8 1.8 0 1 1 0 3.6 1.8 1.8 0 0 1 0-3.6Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
+export function ClockIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17Zm0 2a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm1 2.5v3.5l2.8 1.7-.9 1.6-3.9-2.3V8h2Z"
         fill="currentColor"
       />
     </SvgIcon>

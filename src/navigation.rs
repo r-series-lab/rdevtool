@@ -9,7 +9,10 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use crate::config::{ProjectWorkspaceConfig, RuntimeProfileConfig, default_config_dir};
+use crate::config::{
+    ProjectWorkspaceConfig, ProjectWorkspaceResourceCategoryConfig,
+    ProjectWorkspaceResourceEntryConfig, RuntimeProfileConfig, default_config_dir,
+};
 
 const DEFAULT_NAVIGATION_TEMPLATE: &str = include_str!("../navigation.template.toml");
 const LEGACY_NAVIGATION_MARKDOWN_PATH: &str = "navigation.md";
@@ -196,7 +199,10 @@ pub fn load_navigation_data_for_workspace(
     workspace: &ProjectWorkspaceConfig,
 ) -> Result<NavigationData> {
     let data = load_navigation_data()?;
-    Ok(filter_navigation_data_for_workspace(data, workspace))
+    Ok(merge_workspace_resource_categories(
+        filter_navigation_data_for_workspace(data, workspace),
+        workspace,
+    ))
 }
 
 pub fn filter_navigation_data_for_workspace(
@@ -259,6 +265,116 @@ pub fn filter_navigation_data_for_workspace(
         preferred_category,
         categories,
     }
+}
+
+fn merge_workspace_resource_categories(
+    mut data: NavigationData,
+    workspace: &ProjectWorkspaceConfig,
+) -> NavigationData {
+    let workspace_categories = workspace_resource_categories(workspace);
+    if workspace_categories.is_empty() {
+        return data;
+    }
+
+    for category in workspace_categories.into_iter().rev() {
+        if let Some(existing) = data
+            .categories
+            .iter_mut()
+            .find(|existing| existing.title == category.title)
+        {
+            let mut entries = category.entries;
+            entries.append(&mut existing.entries);
+            existing.entries = entries;
+            if existing.short_label.trim().is_empty() {
+                existing.short_label = category.short_label;
+            }
+        } else {
+            data.categories.insert(0, category);
+        }
+    }
+
+    if data.preferred_category.is_none()
+        || !data.categories.iter().any(|category| {
+            data.preferred_category
+                .as_deref()
+                .is_some_and(|target| target == category.title)
+        })
+    {
+        data.preferred_category = preferred_navigation_category(&data.categories);
+    }
+
+    data
+}
+
+fn workspace_resource_categories(workspace: &ProjectWorkspaceConfig) -> Vec<NavigationCategory> {
+    workspace
+        .resource_categories
+        .iter()
+        .filter_map(|category| workspace_resource_category(category, workspace.root_dir.as_deref()))
+        .collect()
+}
+
+fn workspace_resource_category(
+    category: &ProjectWorkspaceResourceCategoryConfig,
+    root_dir: Option<&Path>,
+) -> Option<NavigationCategory> {
+    let title = category.title.trim().to_string();
+    if title.is_empty() {
+        return None;
+    }
+    let entries = category
+        .entries
+        .iter()
+        .filter_map(|entry| workspace_resource_entry(entry, root_dir))
+        .collect::<Vec<_>>();
+    if entries.is_empty() {
+        return None;
+    }
+    Some(NavigationCategory {
+        short_label: category
+            .short_label
+            .as_deref()
+            .and_then(|value| normalize_optional_text(Some(value.to_string())))
+            .unwrap_or_else(|| navigation_category_label(&title)),
+        title,
+        entries,
+    })
+}
+
+fn workspace_resource_entry(
+    entry: &ProjectWorkspaceResourceEntryConfig,
+    root_dir: Option<&Path>,
+) -> Option<NavigationEntry> {
+    navigation_entry_from_config(workspace_resource_entry_config(entry, root_dir))
+}
+
+fn workspace_resource_entry_config(
+    entry: &ProjectWorkspaceResourceEntryConfig,
+    root_dir: Option<&Path>,
+) -> NavigationEntryConfig {
+    NavigationEntryConfig {
+        name: entry.name.clone(),
+        kind: entry.kind.clone(),
+        url: entry.url.clone(),
+        browser: entry.browser.clone(),
+        browser_profile: entry.browser_profile.clone(),
+        runtime_profile: entry.runtime_profile.clone(),
+        bundle_id: entry.bundle_id.clone(),
+        app_name: entry.app_name.clone(),
+        script: resolve_workspace_resource_path(entry.script.as_deref(), root_dir),
+        path: resolve_workspace_resource_path(entry.path.as_deref(), root_dir),
+        cwd: resolve_workspace_resource_path(entry.cwd.as_deref(), root_dir),
+        note: entry.note.clone(),
+    }
+}
+
+fn resolve_workspace_resource_path(value: Option<&str>, root_dir: Option<&Path>) -> Option<String> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(value);
+    if path.is_absolute() {
+        return Some(path.display().to_string());
+    }
+    root_dir.map(|root| root.join(path).display().to_string())
 }
 
 pub fn load_navigation_editor_data() -> Result<NavigationEditorData> {
@@ -733,6 +849,15 @@ fn parse_navigation_markdown(content: &str, file_path: String) -> NavigationData
 
 pub fn open_navigation_entry(entry: &NavigationEntry) -> Result<NavigationOpenResult> {
     open_navigation_entry_with_runtime_profiles(entry, &[])
+}
+
+pub fn validate_workspace_resource_entry(
+    entry: &ProjectWorkspaceResourceEntryConfig,
+    root_dir: Option<&Path>,
+) -> Result<()> {
+    workspace_resource_entry(entry, root_dir)
+        .ok_or_else(|| anyhow!("invalid workspace resource entry: {}", entry.name))?;
+    Ok(())
 }
 
 pub fn open_navigation_entry_with_runtime_profiles(

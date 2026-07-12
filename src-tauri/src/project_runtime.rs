@@ -1,10 +1,22 @@
 use rdevtool_core::config::{
     AppConfig, ProjectAuthHelperConfig, ProjectAuthHelperItemConfig, ProjectCommandConfig,
     ProjectConfig, ProjectDebugProfileConfig, ProjectLocalProxyConfig,
-    ProjectLocalProxyRouteConfig, RuntimeProfileConfig, default_config_dir,
+    ProjectLocalProxyRouteConfig, ProjectReadyConfig, RuntimeProfileConfig, default_config_dir,
 };
-use rdevtool_core::navigation::open_in_current_chrome;
-use serde::{Deserialize, Serialize};
+use rdevtool_core::navigation::{NavigationEntry, open_in_current_chrome};
+pub use rdevtool_core::runtime::{
+    ProjectRuntimeLogKind, ProjectRuntimeLogResponse, ProjectRuntimeLogSessionSummary,
+    ProjectRuntimePreflightResponse, ProjectRuntimeReadySummary,
+};
+use rdevtool_core::runtime::{
+    clear_project_runtime_log as core_clear_project_runtime_log,
+    project_runtime_preflight_for_project,
+    read_project_runtime_log as core_read_project_runtime_log,
+};
+use rdevtool_core::web_actions::{
+    WebActionRunRequest, open_web_action_navigation_target, run_web_action_navigation,
+};
+use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
@@ -25,6 +37,7 @@ pub struct ProjectRuntimeSnapshot {
     pub command: Option<String>,
     pub cwd: Option<String>,
     pub focus_url: Option<String>,
+    pub ready_url: Option<String>,
     pub status_key: String,
     pub status_label: String,
     pub detail: String,
@@ -120,21 +133,6 @@ pub struct ProjectAuthHelperItemSummary {
     pub cookie_same_site: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum ProjectRuntimeLogKind {
-    Dev,
-    Build,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProjectRuntimeLogResponse {
-    pub path: String,
-    pub lines: Vec<String>,
-    pub truncated: bool,
-}
-
 #[derive(Clone, Default)]
 pub struct ProjectRuntimeState {
     inner: Arc<ProjectRuntimeRegistry>,
@@ -224,6 +222,7 @@ struct TaskSnapshotState {
     status_key: String,
     status_label: String,
     detail: String,
+    ready_url: Option<String>,
     pid: Option<u32>,
     started_at_ms: Option<u64>,
     updated_at_ms: u64,
@@ -231,7 +230,7 @@ struct TaskSnapshotState {
     is_available: bool,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum ProjectCommandKind {
     Dev,
     Build,
@@ -316,9 +315,12 @@ if (proxyUrl && proxyUrl.protocol === 'http:') {
     }
 
     const headers = Object.assign({}, normalized.options.headers || {});
-    if (!headers.Host && !headers.host) {
-      headers.Host = normalized.url.host;
+    for (const key of Object.keys(headers)) {
+      if (key.toLowerCase() === 'host') {
+        delete headers[key];
+      }
     }
+    headers.Host = normalized.url.host;
 
     const proxyOptions = Object.assign({}, normalized.options, {
       protocol: 'http:',
@@ -635,24 +637,10 @@ server.listen(listen.port, listen.host, () => {
 });
 "#;
 
-impl ProjectRuntimeLogKind {
-    fn command_kind(&self) -> ProjectCommandKind {
-        match self {
-            Self::Dev => ProjectCommandKind::Dev,
-            Self::Build => ProjectCommandKind::Build,
-        }
-    }
-}
-
 impl Drop for ProjectRuntimeRegistry {
     fn drop(&mut self) {
         if let Ok(mut store) = self.state.lock() {
-            for (_, mut process) in store.running.drain() {
-                let _ = terminate_running_project_process(&mut process);
-            }
-            for (_, mut process) in store.running_builds.drain() {
-                let _ = terminate_running_project_process(&mut process);
-            }
+            shutdown_runtime_store(&mut store);
         }
     }
 }
@@ -690,6 +678,22 @@ impl ProjectRuntimeState {
             snapshots.push(snapshot_for_project(&mut store, project)?);
         }
         Ok(snapshots)
+    }
+
+    pub fn preflight(
+        &self,
+        config: &AppConfig,
+        project_key: &str,
+        debug_profile_key: Option<&str>,
+    ) -> Result<ProjectRuntimePreflightResponse, String> {
+        let project = config
+            .find_project(project_key)
+            .map_err(|error| error.to_string())?;
+        Ok(project_runtime_preflight_for_project(
+            config,
+            project,
+            debug_profile_key,
+        ))
     }
 
     pub fn start(
@@ -777,6 +781,14 @@ impl ProjectRuntimeState {
                 resolved.command
             ));
         }
+        let launched = store.running.contains_key(&project.key);
+        if launched && should_watch_project_ready(project) {
+            spawn_ready_focus_watcher(
+                project.clone(),
+                debug_profile.clone(),
+                inherited_runtime_profile.clone(),
+            );
+        }
 
         snapshot_for_project(&mut store, project)
     }
@@ -806,8 +818,7 @@ impl ProjectRuntimeState {
             .map_err(|_| "project runtime lock poisoned".to_string())?;
         let already_running = {
             let (running, last_results) = store.build_parts();
-            task_running_state(running, last_results, project, ProjectCommandKind::Build)?
-                .is_some()
+            task_running_state(running, last_results, project, ProjectCommandKind::Build)?.is_some()
         };
         if already_running {
             return snapshot_for_project(&mut store, project);
@@ -989,6 +1000,12 @@ impl ProjectRuntimeState {
         snapshot_for_project(&mut store, project)
     }
 
+    pub fn shutdown_all(&self) {
+        if let Ok(mut store) = self.inner.state.lock() {
+            shutdown_runtime_store(&mut store);
+        }
+    }
+
     pub fn open_build_output(
         &self,
         config: &AppConfig,
@@ -1073,17 +1090,16 @@ impl ProjectRuntimeState {
         kind: ProjectRuntimeLogKind,
         max_lines: usize,
     ) -> Result<ProjectRuntimeLogResponse, String> {
-        let project = config
-            .find_project(project_key)
-            .map_err(|error| error.to_string())?;
-        let path = task_log_path(project, kind.command_kind());
-        let normalized_limit = max_lines.clamp(20, 500);
-        let (lines, truncated) = tail_log_lines(&path, normalized_limit)?;
-        Ok(ProjectRuntimeLogResponse {
-            path: path.display().to_string(),
-            lines,
-            truncated,
-        })
+        core_read_project_runtime_log(config, project_key, kind, max_lines)
+    }
+
+    pub fn clear_log(
+        &self,
+        config: &AppConfig,
+        project_key: &str,
+        kind: ProjectRuntimeLogKind,
+    ) -> Result<ProjectRuntimeLogResponse, String> {
+        core_clear_project_runtime_log(config, project_key, kind)
     }
 }
 
@@ -1152,6 +1168,7 @@ fn snapshot_for_project(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToString::to_string),
+        ready_url: dev_state.ready_url,
         status_key: dev_state.status_key,
         status_label: dev_state.status_label,
         detail: dev_state.detail,
@@ -1286,6 +1303,7 @@ fn task_state_for_project(
                     status_key: last.status_key,
                     status_label: last.status_label,
                     detail: last.detail,
+                    ready_url: None,
                     pid: None,
                     started_at_ms: None,
                     updated_at_ms,
@@ -1299,6 +1317,7 @@ fn task_state_for_project(
                 status_key: status_key.to_string(),
                 status_label: status_label.to_string(),
                 detail: detail.to_string(),
+                ready_url: None,
                 pid: None,
                 started_at_ms: None,
                 updated_at_ms,
@@ -1318,6 +1337,7 @@ fn task_state_for_project(
                 "未配置".to_string()
             },
             detail: error,
+            ready_url: None,
             pid: None,
             started_at_ms: None,
             updated_at_ms,
@@ -1343,11 +1363,27 @@ fn task_running_state(
         {
             Some(status) => remove_exited = Some(status.code()),
             None => {
-                let (status_key, status_label, detail) = kind.running_state();
+                let (mut status_key, mut status_label, mut detail) = kind.running_state();
+                let ready_summary = runtime_ready_summary_from_file(project, kind)?;
+                let ready_url = ready_summary.url.clone();
+                if ready_summary.ready {
+                    status_key = "running";
+                    status_label = "已启动";
+                    detail = ready_summary
+                        .url
+                        .as_deref()
+                        .or(ready_summary.detail.as_deref())
+                        .unwrap_or("dev 服务已启动");
+                } else if ready_summary.failed {
+                    status_key = "failed";
+                    status_label = "启动异常";
+                    detail = ready_summary.detail.as_deref().unwrap_or("检测到启动异常");
+                }
                 return Ok(Some(TaskSnapshotState {
                     status_key: status_key.to_string(),
                     status_label: status_label.to_string(),
                     detail: detail.to_string(),
+                    ready_url,
                     pid: Some(process.pid),
                     started_at_ms: Some(process.started_at_ms),
                     updated_at_ms: now_ms(),
@@ -1590,14 +1626,36 @@ fn open_task_log(
         .append(true)
         .open(&path)
         .map_err(|error| format!("打开运行日志失败: {}", error))?;
+    let started_at_ms = now_ms();
+    let run_id = format!(
+        "{}-{}-{}",
+        sanitize_log_name(&project.key),
+        kind.log_file_suffix(),
+        started_at_ms
+    );
     writeln!(
         file,
         "\n[{}] {} key={} cwd={} command={}",
-        now_ms(),
+        started_at_ms,
         kind.log_label(),
         project.key,
         resolved.cwd.display(),
         resolved.command
+    )
+    .map_err(|error| format!("写入运行日志失败: {}", error))?;
+    writeln!(
+        file,
+        "{}",
+        json!({
+            "rdevtool": "runtimeSession",
+            "version": 1,
+            "runId": run_id,
+            "projectKey": &project.key,
+            "kind": kind.log_file_suffix(),
+            "startedAtMs": started_at_ms,
+            "cwd": resolved.cwd.display().to_string(),
+            "command": &resolved.command,
+        })
     )
     .map_err(|error| format!("写入运行日志失败: {}", error))?;
     Ok(file)
@@ -1631,26 +1689,575 @@ fn sanitize_log_name(value: &str) -> String {
     }
 }
 
-fn tail_log_lines(path: &Path, max_lines: usize) -> Result<(Vec<String>, bool), String> {
+fn tail_log_lines(
+    path: &Path,
+    max_lines: usize,
+) -> Result<(Vec<String>, bool, ProjectRuntimeLogSessionSummary), String> {
     let file = match File::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((Vec::new(), false));
+            return Ok((Vec::new(), false, ProjectRuntimeLogSessionSummary::empty(0)));
         }
         Err(error) => return Err(format!("读取运行日志失败: {}", error)),
     };
     let reader = BufReader::new(file);
     let mut lines = VecDeque::with_capacity(max_lines.saturating_add(1));
     let mut total = 0usize;
+    let mut session_summary = ProjectRuntimeLogSessionSummary::empty(0);
     for line in reader.lines() {
         total += 1;
         let line = line.map_err(|error| format!("读取运行日志失败: {}", error))?;
+        if let Some(mut next_session) = parse_runtime_session_marker(&line) {
+            next_session.total_line_count = total;
+            session_summary = next_session;
+        } else {
+            if session_summary.active {
+                session_summary.current_line_count += 1;
+                if session_summary.pid.is_none() {
+                    session_summary.pid = parse_running_pid(&line);
+                }
+                if is_runtime_session_end_line(&line) {
+                    session_summary.active = false;
+                }
+            }
+            session_summary.total_line_count = total;
+        }
         if lines.len() == max_lines {
             lines.pop_front();
         }
         lines.push_back(line);
     }
-    Ok((lines.into_iter().collect(), total > max_lines))
+    session_summary.total_line_count = total;
+    Ok((
+        lines.into_iter().collect(),
+        total > max_lines,
+        session_summary,
+    ))
+}
+
+fn parse_runtime_session_marker(line: &str) -> Option<ProjectRuntimeLogSessionSummary> {
+    let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    if value.get("rdevtool")?.as_str()? != "runtimeSession" {
+        return None;
+    }
+    Some(ProjectRuntimeLogSessionSummary {
+        active: true,
+        run_id: value
+            .get("runId")
+            .and_then(|item| item.as_str())
+            .map(ToString::to_string),
+        project_key: value
+            .get("projectKey")
+            .and_then(|item| item.as_str())
+            .map(ToString::to_string),
+        kind: value
+            .get("kind")
+            .and_then(|item| item.as_str())
+            .map(ToString::to_string),
+        started_at_ms: value.get("startedAtMs").and_then(|item| item.as_u64()),
+        cwd: value
+            .get("cwd")
+            .and_then(|item| item.as_str())
+            .map(ToString::to_string),
+        command: value
+            .get("command")
+            .and_then(|item| item.as_str())
+            .map(ToString::to_string),
+        pid: None,
+        current_line_count: 0,
+        total_line_count: 0,
+    })
+}
+
+fn parse_running_pid(line: &str) -> Option<u32> {
+    let (_, suffix) = line.split_once("running pid=")?;
+    suffix
+        .split_whitespace()
+        .next()
+        .and_then(|value| value.parse::<u32>().ok())
+}
+
+fn is_runtime_session_end_line(line: &str) -> bool {
+    line.contains("exited quickly status=")
+}
+
+fn runtime_ready_summary_from_file(
+    project: &ProjectConfig,
+    kind: ProjectCommandKind,
+) -> Result<ProjectRuntimeReadySummary, String> {
+    if kind != ProjectCommandKind::Dev || !project.focus.ready.enabled {
+        return Ok(ProjectRuntimeReadySummary::disabled());
+    }
+    let path = task_log_path(project, kind);
+    let (lines, _, _) = tail_log_lines(&path, 500)?;
+    Ok(runtime_ready_summary(project, kind, &lines))
+}
+
+fn runtime_ready_summary(
+    project: &ProjectConfig,
+    kind: ProjectCommandKind,
+    lines: &[String],
+) -> ProjectRuntimeReadySummary {
+    if kind != ProjectCommandKind::Dev || !project.focus.ready.enabled {
+        return ProjectRuntimeReadySummary::disabled();
+    }
+
+    let ready = &project.focus.ready;
+    let mut summary = ProjectRuntimeReadySummary::pending();
+    let start_index = latest_task_start_index(lines, kind);
+    let recent_lines = &lines[start_index..];
+    let mut saw_success_marker = false;
+    let mut failure_detail = None;
+
+    for line in recent_lines {
+        if let Some(url) = extract_ready_url(line, ready) {
+            if line.to_ascii_lowercase().contains("network") {
+                summary.network_url = Some(url.clone());
+            } else {
+                summary.local_url = Some(url.clone());
+            }
+            if summary.url.is_none() || line.to_ascii_lowercase().contains("local") {
+                summary.url = Some(url);
+            }
+            summary.ready = true;
+            saw_success_marker = true;
+            continue;
+        }
+
+        if contains_any_marker(
+            line,
+            &ready.success_markers,
+            default_ready_success_markers(),
+        ) {
+            saw_success_marker = true;
+        }
+
+        if !summary.ready {
+            if let Some(marker) = matched_marker(
+                line,
+                &ready.failure_markers,
+                default_ready_failure_markers(),
+            ) {
+                failure_detail = Some(format!("检测到启动异常: {}", marker));
+            }
+        }
+    }
+
+    if summary.ready || saw_success_marker {
+        summary.ready = true;
+        summary.failed = false;
+        summary.status_key = "ready".to_string();
+        summary.status_label = "已启动".to_string();
+        if summary.url.is_none() {
+            summary.url = project
+                .focus
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string);
+        }
+        summary.detail = summary
+            .url
+            .as_ref()
+            .map(|url| format!("检测到可访问地址 {}", url))
+            .or_else(|| Some("检测到启动成功标记".to_string()));
+        return summary;
+    }
+
+    if let Some(detail) = failure_detail {
+        summary.failed = true;
+        summary.status_key = "failed".to_string();
+        summary.status_label = "启动异常".to_string();
+        summary.detail = Some(detail);
+    }
+
+    summary
+}
+
+fn latest_task_start_index(lines: &[String], kind: ProjectCommandKind) -> usize {
+    lines
+        .iter()
+        .rposition(|line| line.contains(kind.log_label()) && line.contains(" key="))
+        .unwrap_or(0)
+}
+
+fn extract_ready_url(line: &str, ready: &ProjectReadyConfig) -> Option<String> {
+    ready
+        .url_patterns
+        .iter()
+        .find_map(|pattern| extract_url_with_pattern(line, pattern))
+}
+
+fn extract_url_with_pattern(line: &str, pattern: &str) -> Option<String> {
+    let trimmed_pattern = pattern.trim();
+    if trimmed_pattern.is_empty() {
+        return None;
+    }
+    let Some((prefix, suffix)) = trimmed_pattern.split_once("{url}") else {
+        return line
+            .contains(trimmed_pattern)
+            .then(|| extract_first_http_url(line))
+            .flatten();
+    };
+
+    let prefix = prefix.trim();
+    let suffix = suffix.trim();
+    let start = if prefix.is_empty() {
+        0
+    } else {
+        line.find(prefix)? + prefix.len()
+    };
+    let mut value = &line[start..];
+    if !suffix.is_empty() {
+        let suffix_start = value.find(suffix)?;
+        value = &value[..suffix_start];
+    }
+    extract_first_http_url(value)
+}
+
+fn extract_first_http_url(value: &str) -> Option<String> {
+    value.split_whitespace().find_map(|token| {
+        let token = token.trim_matches(|ch: char| {
+            matches!(
+                ch,
+                ',' | ';' | ')' | '(' | '"' | '\'' | '<' | '>' | '。' | '，'
+            )
+        });
+        if token.starts_with("http://") || token.starts_with("https://") {
+            Some(token.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn contains_any_marker(line: &str, markers: &[String], fallback: Vec<String>) -> bool {
+    matched_marker(line, markers, fallback).is_some()
+}
+
+fn matched_marker(line: &str, markers: &[String], fallback: Vec<String>) -> Option<String> {
+    let normalized_line = line.to_ascii_lowercase();
+    let source = if markers.is_empty() {
+        fallback
+    } else {
+        markers.to_vec()
+    };
+    source.into_iter().find(|marker| {
+        let marker = marker.trim();
+        !marker.is_empty() && normalized_line.contains(&marker.to_ascii_lowercase())
+    })
+}
+
+fn default_ready_success_markers() -> Vec<String> {
+    Vec::new()
+}
+
+fn default_ready_failure_markers() -> Vec<String> {
+    vec![
+        "Failed to compile".to_string(),
+        "Compilation failed".to_string(),
+        "EADDRINUSE".to_string(),
+    ]
+}
+
+fn shutdown_runtime_store(store: &mut ProjectRuntimeStore) {
+    for (_, mut process) in store.running.drain() {
+        let _ = terminate_running_project_process(&mut process);
+    }
+    for (_, mut process) in store.running_builds.drain() {
+        let _ = terminate_running_project_process(&mut process);
+    }
+}
+
+fn should_auto_focus_when_ready(project: &ProjectConfig) -> bool {
+    project.focus.auto_on_start
+        && project.focus.ready.enabled
+        && project
+            .focus
+            .auto_open_mode
+            .trim()
+            .eq_ignore_ascii_case("ready")
+}
+
+fn should_watch_project_ready(project: &ProjectConfig) -> bool {
+    project.focus.ready.enabled
+        && (should_auto_focus_when_ready(project) || !project.focus.after_ready_actions.is_empty())
+}
+
+fn spawn_ready_focus_watcher(
+    project: ProjectConfig,
+    debug_profile: Option<ProjectDebugProfileConfig>,
+    runtime_profile: Option<RuntimeProfileConfig>,
+) {
+    thread::spawn(move || {
+        let timeout_ms = project.focus.ready.timeout_ms.clamp(1_000, 600_000);
+        let deadline = now_ms().saturating_add(timeout_ms);
+        loop {
+            match runtime_ready_summary_from_file(&project, ProjectCommandKind::Dev) {
+                Ok(summary) if summary.ready => {
+                    let url = summary.url.or_else(|| {
+                        project
+                            .focus
+                            .url
+                            .as_deref()
+                            .map(str::trim)
+                            .filter(|value| !value.is_empty())
+                            .map(ToString::to_string)
+                    });
+                    if let Some(url) = url {
+                        log_project_runtime_event(format!(
+                            "auto focus ready key={} url={}",
+                            project.key, url
+                        ));
+                        if should_auto_focus_when_ready(&project) {
+                            if let Err(error) = open_focus_url(
+                                &url,
+                                debug_profile.as_ref(),
+                                runtime_profile.as_ref(),
+                            ) {
+                                eprintln!("failed to auto focus ready project: {}", error);
+                            }
+                        }
+                        if let Err(error) = run_project_after_ready_actions(
+                            &project,
+                            &url,
+                            debug_profile.as_ref(),
+                            runtime_profile.as_ref(),
+                        ) {
+                            eprintln!("failed to run after-ready project actions: {}", error);
+                        }
+                    }
+                    break;
+                }
+                Ok(summary) if summary.failed => {
+                    log_project_runtime_event(format!(
+                        "auto focus skipped key={} reason={}",
+                        project.key,
+                        summary
+                            .detail
+                            .unwrap_or_else(|| "ready check failed".to_string())
+                    ));
+                    break;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("failed to inspect project ready log: {}", error);
+                }
+            }
+
+            if now_ms() >= deadline {
+                log_project_runtime_event(format!("auto focus timeout key={}", project.key));
+                break;
+            }
+            thread::sleep(Duration::from_millis(700));
+        }
+    });
+}
+
+fn run_project_after_ready_actions(
+    project: &ProjectConfig,
+    url: &str,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    runtime_profile: Option<&RuntimeProfileConfig>,
+) -> Result<(), String> {
+    let action_keys = project
+        .focus
+        .after_ready_actions
+        .iter()
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+        .collect::<Vec<_>>();
+    if action_keys.is_empty() {
+        return Ok(());
+    }
+
+    append_project_task_log(
+        project,
+        ProjectCommandKind::Dev,
+        format!(
+            "after-ready actions start count={} url={}",
+            action_keys.len(),
+            url
+        ),
+    );
+    let entry = project_ready_navigation_entry(project, url, debug_profile, runtime_profile);
+    let runtime_profiles = runtime_profile.cloned().into_iter().collect::<Vec<_>>();
+    let target = match open_web_action_navigation_target(&entry, &runtime_profiles) {
+        Ok(target) => target,
+        Err(error) => {
+            let message = format!("after-ready open target failed: {}", error);
+            append_project_task_log(project, ProjectCommandKind::Dev, &message);
+            return Err(message);
+        }
+    };
+
+    for action_key in action_keys {
+        let request = WebActionRunRequest {
+            action_key: action_key.to_string(),
+            target_id: Some(target.id.clone()),
+            scope: Some(format!("project:{}", project.key)),
+            url: Some(url.to_string()),
+            params: BTreeMap::new(),
+            context_params: project_web_action_context_params(
+                project,
+                url,
+                debug_profile,
+                runtime_profile,
+            ),
+        };
+        match run_web_action_navigation(&entry, &runtime_profiles, request) {
+            Ok(result) if result.success => append_project_task_log(
+                project,
+                ProjectCommandKind::Dev,
+                format!(
+                    "after-ready action {} success target={} url={}",
+                    action_key, result.target_id, result.url
+                ),
+            ),
+            Ok(result) => append_project_task_log(
+                project,
+                ProjectCommandKind::Dev,
+                format!(
+                    "after-ready action {} failed target={} error={}",
+                    action_key,
+                    result.target_id,
+                    result.error.unwrap_or_else(|| result.result_text)
+                ),
+            ),
+            Err(error) => append_project_task_log(
+                project,
+                ProjectCommandKind::Dev,
+                format!("after-ready action {} error={}", action_key, error),
+            ),
+        }
+    }
+
+    Ok(())
+}
+
+fn project_web_action_context_params(
+    project: &ProjectConfig,
+    url: &str,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    runtime_profile: Option<&RuntimeProfileConfig>,
+) -> BTreeMap<String, String> {
+    let mut params = BTreeMap::new();
+    insert_context_param(&mut params, "project.key", &project.key);
+    insert_context_param(&mut params, "project.name", &project.name);
+    insert_context_param(&mut params, "project.category", &project.category);
+    if let Some(path) = &project.repo_path {
+        insert_context_param(&mut params, "project.repoPath", path.display().to_string());
+        insert_context_param(&mut params, "project.repo_path", path.display().to_string());
+    }
+    if let Some(url) = optional_trimmed(project.focus.url.as_deref()) {
+        insert_context_param(&mut params, "project.focusUrl", url);
+        insert_context_param(&mut params, "project.focus_url", url);
+    }
+    insert_context_param(&mut params, "project.readyUrl", url);
+    insert_context_param(&mut params, "project.ready_url", url);
+    insert_context_param(&mut params, "context.url", url);
+
+    if let Some(profile) = debug_profile {
+        insert_context_param(&mut params, "debugProfile.key", &profile.key);
+        insert_context_param(&mut params, "debug_profile.key", &profile.key);
+        insert_context_param(&mut params, "debugProfile.label", &profile.label);
+        insert_context_param(&mut params, "debug_profile.label", &profile.label);
+        if let Some(runtime_profile) = optional_trimmed(profile.runtime_profile.as_deref()) {
+            insert_context_param(&mut params, "debugProfile.runtimeProfile", runtime_profile);
+            insert_context_param(
+                &mut params,
+                "debug_profile.runtime_profile",
+                runtime_profile,
+            );
+        }
+        for (key, value) in &profile.env {
+            insert_context_param(&mut params, format!("debugProfile.env.{}", key), value);
+            insert_context_param(&mut params, format!("debug_profile.env.{}", key), value);
+        }
+    }
+
+    if let Some(profile) = runtime_profile {
+        insert_context_param(&mut params, "runtimeProfile.key", &profile.key);
+        insert_context_param(&mut params, "runtime_profile.key", &profile.key);
+        insert_context_param(&mut params, "runtimeProfile.label", &profile.label);
+        insert_context_param(&mut params, "runtime_profile.label", &profile.label);
+        insert_context_param(
+            &mut params,
+            "runtimeProfile.webActionsPort",
+            profile.web_actions_port.to_string(),
+        );
+        insert_context_param(
+            &mut params,
+            "runtime_profile.web_actions_port",
+            profile.web_actions_port.to_string(),
+        );
+        if let Some(proxy_url) = optional_trimmed(Some(profile.proxy_url.as_str())) {
+            insert_context_param(&mut params, "runtimeProfile.proxyUrl", proxy_url);
+            insert_context_param(&mut params, "runtime_profile.proxy_url", proxy_url);
+        }
+    }
+
+    params
+}
+
+fn insert_context_param(
+    params: &mut BTreeMap<String, String>,
+    key: impl Into<String>,
+    value: impl AsRef<str>,
+) {
+    let value = value.as_ref().trim();
+    if !value.is_empty() {
+        params.insert(key.into(), value.to_string());
+    }
+}
+
+fn project_ready_navigation_entry(
+    project: &ProjectConfig,
+    url: &str,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    runtime_profile: Option<&RuntimeProfileConfig>,
+) -> NavigationEntry {
+    NavigationEntry {
+        name: project.name.clone(),
+        kind: "url".to_string(),
+        target_label: project.category_label().to_string(),
+        url: Some(url.to_string()),
+        browser: debug_profile
+            .and_then(|profile| optional_trimmed(profile.browser.as_deref()))
+            .map(ToString::to_string),
+        browser_profile: debug_profile
+            .and_then(|profile| optional_trimmed(profile.browser_profile.as_deref()))
+            .map(ToString::to_string),
+        runtime_profile: debug_profile
+            .and_then(|profile| optional_trimmed(profile.runtime_profile.as_deref()))
+            .map(ToString::to_string)
+            .or_else(|| runtime_profile.map(|profile| profile.key.clone())),
+        bundle_id: None,
+        app_name: None,
+        script: None,
+        path: None,
+        cwd: project
+            .repo_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        note: Some("项目 ready 后动作".to_string()),
+    }
+}
+
+fn append_project_task_log(
+    project: &ProjectConfig,
+    kind: ProjectCommandKind,
+    message: impl AsRef<str>,
+) {
+    let path = task_log_path(project, kind);
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "[{}] {}", now_ms(), message.as_ref());
+    }
+    log_project_runtime_event(format!("key={} {}", project.key, message.as_ref()));
 }
 
 fn scrub_launcher_env(command: &mut Command) {

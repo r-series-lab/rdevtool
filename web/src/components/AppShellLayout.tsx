@@ -1,6 +1,5 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
 import {
-  Alert,
   Button,
   Menu,
   MenuItem,
@@ -9,9 +8,21 @@ import type { PageKey } from "../app-shell";
 import type { CreateProjectWorkspacePayload, ProjectWorkspaceSummary } from "../app-types";
 import type { ActivityEntry } from "../lib/activityCenter";
 import type { AppStyleMode } from "../theme";
-import { CheckIcon, ExpandIcon, PanelSideIcon, SettingsIcon } from "./AppIcons";
+import {
+  CheckIcon,
+  ExpandIcon,
+  FolderIcon,
+  AppWindowIcon,
+  PackageIcon,
+  PanelSideIcon,
+  SettingsIcon,
+  TerminalIcon,
+  WorkflowIcon,
+} from "./AppIcons";
 import { ActivityCenter } from "./ActivityCenter";
+import { AppToast } from "./AppToast";
 import { SettingsPanel, type SettingsSection } from "./SettingsPanel";
+import { OPEN_SETTINGS_EVENT } from "./settingsEvents";
 
 type NavItem = {
   key: PageKey;
@@ -62,6 +73,23 @@ function shouldShowBusyMessage(value: string) {
     message === "正在同步分支" ||
     message === "正在同步状态"
   );
+}
+
+function navIconForPage(key: PageKey) {
+  switch (key) {
+    case "overview":
+      return <AppWindowIcon className="nav-item-icon" fontSize="small" />;
+    case "projects":
+      return <FolderIcon className="nav-item-icon" fontSize="small" />;
+    case "merge":
+      return <WorkflowIcon className="nav-item-icon" fontSize="small" />;
+    case "build":
+      return <PackageIcon className="nav-item-icon" fontSize="small" />;
+    case "proxy":
+      return <TerminalIcon className="nav-item-icon" fontSize="small" />;
+    default:
+      return <FolderIcon className="nav-item-icon" fontSize="small" />;
+  }
 }
 
 export function AppShellLayout({
@@ -149,10 +177,21 @@ export function AppShellLayout({
     }
   }
 
-  function openWorkspaceSettingsFromMenu() {
+  function openWorkspaceWorkbenchFromMenu() {
     closeWorkspaceMenu();
     openSettings("workspace");
   }
+
+  useEffect(() => {
+    const handleOpenSettings = (event: Event) => {
+      const section = (event as CustomEvent<{ section?: SettingsSection }>).detail?.section;
+      openSettings(section);
+    };
+    window.addEventListener(OPEN_SETTINGS_EVENT, handleOpenSettings);
+    return () => {
+      window.removeEventListener(OPEN_SETTINGS_EVENT, handleOpenSettings);
+    };
+  }, []);
 
   const visibleBusy = shouldShowBusyMessage(busy) ? busy : "";
   const desktopSidebarCollapsed = activityPanelMode && sidebarCollapsed;
@@ -161,11 +200,17 @@ export function AppShellLayout({
     projectWorkspaces[0] ??
     null;
   const workspaceMenuOpen = Boolean(workspaceMenuAnchor);
+  const toastMessage = error || visibleBusy;
 
   return (
       <div
         className={`shell${activityPanelMode && activityOpen ? " shell--activity-open" : ""}${desktopSidebarCollapsed ? " shell--sidebar-collapsed" : ""}`}
       >
+      <AppToast
+        message={toastMessage}
+        severity={error ? "error" : "info"}
+        autoHideDuration={error ? 5200 : 2800}
+      />
       <div className="window-drag-region" data-tauri-drag-region />
       {activityPanelMode ? (
         <button
@@ -217,13 +262,14 @@ export function AppShellLayout({
           {visibleNavItems.map((item) => (
             <Button
               key={item.key}
-              variant={item.key === activePage ? "contained" : "outlined"}
-              color={item.key === activePage ? "primary" : "inherit"}
-              className="nav-item"
+              variant="text"
+              color="inherit"
+              className={`nav-item${item.key === activePage ? " is-active" : ""}`}
               onClick={() => onPageChange(item.key)}
               title={item.label}
               aria-current={item.key === activePage ? "page" : undefined}
             >
+              {navIconForPage(item.key)}
               <span className="nav-item-label">{item.shortLabel}</span>
             </Button>
           ))}
@@ -289,10 +335,11 @@ export function AppShellLayout({
               })}
               <MenuItem
                 className="workspace-menu-item workspace-menu-item--manage"
-                onClick={openWorkspaceSettingsFromMenu}
+                onClick={openWorkspaceWorkbenchFromMenu}
               >
                 <span className="workspace-menu-item-copy">
-                  <span className="workspace-menu-item-name">管理工作区...</span>
+                  <span className="workspace-menu-item-name">工作区设置...</span>
+                  <span className="workspace-menu-item-meta">范围、目录与入口配置</span>
                 </span>
                 <SettingsIcon className="workspace-menu-item-check" fontSize="small" />
               </MenuItem>
@@ -313,7 +360,6 @@ export function AppShellLayout({
           onCreateProjectWorkspace={onCreateProjectWorkspace}
           projectWorkspaces={projectWorkspaces}
           activeProjectWorkspaceKey={activeProjectWorkspaceKey}
-          onProjectWorkspaceChange={onProjectWorkspaceChange}
           initialSection={settingsInitialSection}
           activePage={activePage}
           enabledPages={enabledPages}
@@ -343,20 +389,6 @@ export function AppShellLayout({
 
       <div className={`workspace-frame${activityPanelMode && activityOpen ? " has-activity-panel" : ""}`}>
         <main className={`content content--${activePage}`}>
-          {visibleBusy || error ? (
-            <div className="content-status-stack">
-              {visibleBusy ? (
-                <Alert severity="info" sx={{ py: 0 }}>
-                  {visibleBusy}
-                </Alert>
-              ) : null}
-              {error ? (
-                <Alert severity="error" sx={{ py: 0 }}>
-                  {error}
-                </Alert>
-              ) : null}
-            </div>
-          ) : null}
           <div className="content-stage">{children}</div>
         </main>
         {activityPanelMode ? (

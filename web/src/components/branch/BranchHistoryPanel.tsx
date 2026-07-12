@@ -1,14 +1,16 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type UIEvent } from "react";
 import {
   Box,
+  Button,
+  Chip,
   Collapse,
   IconButton,
-  Pagination,
   Stack,
   Typography,
 } from "@mui/material";
 import type { BranchTaskHistoryEntry } from "../../app-types";
 import type { TrayPinnedAction } from "../../lib/trayPins";
+import { AppEmptyState } from "../AppEmptyState";
 import { HistoryCard } from "../AppCards";
 import {
   WorkflowLinkButton,
@@ -17,6 +19,7 @@ import {
 import {
   CollapseIcon,
   ExpandIcon,
+  OpenExternalIcon,
   RefreshIcon,
   ReplayIcon,
   StarIcon,
@@ -26,7 +29,7 @@ import { groupConsecutiveBy, stableStringify } from "../../lib/historyGroups";
 import { useTrayPinnedActions } from "../../hooks/useTrayPinnedActions";
 import { branchWorkflowModeLabel } from "./BranchModeTabs";
 
-const HISTORY_PAGE_SIZE = 5;
+const HISTORY_SCROLL_PAGE_SIZE = 8;
 
 function branchHistorySignature(item: BranchTaskHistoryEntry) {
   if (item.replay) {
@@ -92,9 +95,16 @@ function branchTrayActionFromHistory(item: BranchTaskHistoryEntry): TrayPinnedAc
   };
 }
 
+function branchTaskOutputPath(item: BranchTaskHistoryEntry) {
+  return item.items.find((taskItem) => taskItem.success && taskItem.outputPath)
+    ?.outputPath ?? "";
+}
+
 type BranchHistoryPanelProps = {
   expanded: boolean;
   history: BranchTaskHistoryEntry[];
+  currentHistoryId: string;
+  currentTaskLabel: string;
   busy: string;
   workflowGroupCount: number;
   workflowSignalIdsForBranchReplay: (entry: BranchTaskHistoryEntry) => string[];
@@ -104,12 +114,15 @@ type BranchHistoryPanelProps = {
   onClearHistory: () => void;
   onReplayHistory: (entry: BranchTaskHistoryEntry) => void;
   onConfigureWorkflow: (entry: BranchTaskHistoryEntry) => void;
+  onOpenTaskOutput: (path: string) => void;
   formatRelativeTime: (value?: string) => string;
 };
 
 export function BranchHistoryPanel({
   expanded,
   history,
+  currentHistoryId,
+  currentTaskLabel,
   busy,
   workflowGroupCount,
   workflowSignalIdsForBranchReplay,
@@ -119,9 +132,12 @@ export function BranchHistoryPanel({
   onClearHistory,
   onReplayHistory,
   onConfigureWorkflow,
+  onOpenTaskOutput,
   formatRelativeTime,
 }: BranchHistoryPanelProps) {
-  const [historyPage, setHistoryPage] = useState(1);
+  const [historyVisibleCount, setHistoryVisibleCount] = useState(
+    HISTORY_SCROLL_PAGE_SIZE,
+  );
   const [expandedHistoryGroups, setExpandedHistoryGroups] = useState<Set<string>>(
     () => new Set(),
   );
@@ -296,26 +312,51 @@ export function BranchHistoryPanel({
     const legacyKey = branchLegacyTrayDedupeKeyFromHistory(group.latest);
     return legacyKey ? pinnedActionByKey.get(legacyKey) ?? null : null;
   }
-  const historyPageCount = Math.max(
-    1,
-    Math.ceil(unpinnedHistoryGroups.length / HISTORY_PAGE_SIZE),
-  );
-  const pagedHistoryGroups = useMemo(
+  const visibleUnpinnedHistoryGroups = useMemo(
     () =>
       unpinnedHistoryGroups.slice(
-        (historyPage - 1) * HISTORY_PAGE_SIZE,
-        historyPage * HISTORY_PAGE_SIZE,
+        0,
+        historyVisibleCount,
       ),
-    [historyPage, unpinnedHistoryGroups],
+    [historyVisibleCount, unpinnedHistoryGroups],
   );
   const visibleHistoryGroups = useMemo(
-    () => [...pinnedHistoryGroups, ...pagedHistoryGroups],
-    [pagedHistoryGroups, pinnedHistoryGroups],
+    () => [...pinnedHistoryGroups, ...visibleUnpinnedHistoryGroups],
+    [pinnedHistoryGroups, visibleUnpinnedHistoryGroups],
   );
+  const hasMoreHistoryGroups = historyVisibleCount < unpinnedHistoryGroups.length;
+  const hasDisplayHistory = history.length > 0 || Boolean(currentTaskLabel);
+  const latestTaskEntry = useMemo(() => {
+    if (currentHistoryId) {
+      const matched = history.find((item) => item.id === currentHistoryId);
+      if (matched) {
+        return matched;
+      }
+    }
+    return history[0] ?? null;
+  }, [currentHistoryId, history]);
+  const currentHistoryGroupId = useMemo(() => {
+    if (!latestTaskEntry) {
+      return "";
+    }
+    return (
+      sortedHistoryGroups.find((group) =>
+        group.items.some((item) => item.id === latestTaskEntry.id),
+      )?.id ?? ""
+    );
+  }, [latestTaskEntry, sortedHistoryGroups]);
 
   useEffect(() => {
-    setHistoryPage((current) => Math.min(current, historyPageCount));
-  }, [historyPageCount]);
+    setHistoryVisibleCount((current) => {
+      if (current <= HISTORY_SCROLL_PAGE_SIZE) {
+        return HISTORY_SCROLL_PAGE_SIZE;
+      }
+      return Math.min(
+        current,
+        Math.max(HISTORY_SCROLL_PAGE_SIZE, unpinnedHistoryGroups.length),
+      );
+    });
+  }, [unpinnedHistoryGroups.length]);
 
   useEffect(() => {
     setExpandedHistoryGroups((current) => {
@@ -324,6 +365,20 @@ export function BranchHistoryPanel({
       return next.size === current.size ? current : next;
     });
   }, [sortedHistoryGroups]);
+
+  useEffect(() => {
+    if (!currentHistoryGroupId) {
+      return;
+    }
+    setExpandedHistoryGroups((current) => {
+      if (current.has(currentHistoryGroupId)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(currentHistoryGroupId);
+      return next;
+    });
+  }, [currentHistoryGroupId]);
 
   function toggleHistoryGroup(groupId: string) {
     setExpandedHistoryGroups((current) => {
@@ -342,7 +397,7 @@ export function BranchHistoryPanel({
       return;
     }
     togglePinned(action)
-      .then(() => setHistoryPage(1))
+      .then(() => setHistoryVisibleCount(HISTORY_SCROLL_PAGE_SIZE))
       .catch((error) => {
         console.error("failed to update tray pinned action", error);
       });
@@ -350,10 +405,26 @@ export function BranchHistoryPanel({
 
   function handleRemovePinned(dedupeKey: string) {
     removePinned(dedupeKey)
-      .then(() => setHistoryPage(1))
+      .then(() => setHistoryVisibleCount(HISTORY_SCROLL_PAGE_SIZE))
       .catch((error) => {
         console.error("failed to remove tray pinned action", error);
       });
+  }
+
+  function loadMoreHistoryGroups() {
+    setHistoryVisibleCount((current) =>
+      Math.min(current + HISTORY_SCROLL_PAGE_SIZE, unpinnedHistoryGroups.length),
+    );
+  }
+
+  function handleHistoryScroll(event: UIEvent<HTMLDivElement>) {
+    if (!hasMoreHistoryGroups) {
+      return;
+    }
+    const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
+    if (scrollHeight - scrollTop - clientHeight <= 84) {
+      loadMoreHistoryGroups();
+    }
   }
 
   return (
@@ -416,18 +487,38 @@ export function BranchHistoryPanel({
         </Stack>
 
         <Collapse in={expanded} timeout="auto" unmountOnExit>
-          {history.length > 0 ? (
+          {hasDisplayHistory ? (
             <Stack className="workflow-history-content" spacing={0.65} minWidth={0}>
-              <Box className="module-list-scroll">
+              <Box className="module-list-scroll" onScroll={handleHistoryScroll}>
                 <Stack spacing={0.65} minWidth={0}>
+                  {currentTaskLabel ? (
+                    <HistoryCard
+                      title={currentTaskLabel}
+                      subtitle="执行中"
+                      detail="等待任务完成"
+                      meta={[]}
+                      badge={
+                        <Chip
+                          size="small"
+                          label="正在执行"
+                          color="warning"
+                          variant="filled"
+                        />
+                      }
+                    />
+                  ) : null}
                   {visibleHistoryGroups.map((group) => {
                     const item = group.latest;
                     const isGrouped = group.items.length > 1;
                     const groupExpanded = expandedHistoryGroups.has(group.id);
+                    const isTaskAnchorGroup =
+                      latestTaskEntry !== null &&
+                      group.items.some((historyItem) => historyItem.id === latestTaskEntry.id);
                     const workflowSignalIds = workflowSignalIdsForBranchReplay(item);
                     const trayAction = branchTrayActionFromHistory(item);
                     const groupPinnedAction = pinnedActionForBranchGroup(group);
                     const pinned = Boolean(groupPinnedAction);
+                    const outputPath = branchTaskOutputPath(item);
                     return (
                       <HistoryCard
                         key={group.id}
@@ -443,6 +534,25 @@ export function BranchHistoryPanel({
                             rowGap={0.4}
                             justifyContent="flex-end"
                           >
+                            {isTaskAnchorGroup ? (
+                              <Chip
+                                size="small"
+                                label="最新任务"
+                                color="primary"
+                                variant="filled"
+                              />
+                            ) : null}
+                            {outputPath ? (
+                              <IconButton
+                                size="small"
+                                onClick={() => onOpenTaskOutput(outputPath)}
+                                disabled={Boolean(busy)}
+                                aria-label="打开目录"
+                                title="打开目录"
+                              >
+                                <OpenExternalIcon fontSize="small" />
+                              </IconButton>
+                            ) : null}
                             <IconButton
                               size="small"
                               onClick={() => onReplayHistory(item)}
@@ -579,33 +689,35 @@ export function BranchHistoryPanel({
                       </HistoryCard>
                     );
                   })}
+                  {history.length > 0 ? (
+                    <Box
+                      className={
+                        hasMoreHistoryGroups
+                          ? "workflow-history-footer"
+                          : "workflow-history-footer workflow-history-footer--done"
+                      }
+                    >
+                      {hasMoreHistoryGroups ? (
+                        <Button
+                          size="small"
+                          variant="text"
+                          onClick={loadMoreHistoryGroups}
+                          className="workflow-history-footer-action"
+                        >
+                          下滑加载更多
+                        </Button>
+                      ) : (
+                        <Typography variant="caption" className="workflow-history-footer-text">
+                          没有更多了
+                        </Typography>
+                      )}
+                    </Box>
+                  ) : null}
                 </Stack>
               </Box>
-              {historyPageCount > 1 ? (
-                <Stack direction="row" justifyContent="flex-end" sx={{ pt: 0.25 }}>
-                  <Pagination
-                    size="small"
-                    page={historyPage}
-                    count={historyPageCount}
-                    siblingCount={0}
-                    boundaryCount={1}
-                    onChange={(_, nextPage) => setHistoryPage(nextPage)}
-                    sx={{
-                      "& .MuiPaginationItem-root": {
-                        minWidth: 26,
-                        height: 26,
-                        borderRadius: "9px",
-                        fontWeight: 800,
-                      },
-                    }}
-                  />
-                </Stack>
-              ) : null}
             </Stack>
           ) : (
-            <Typography variant="body2" color="text.secondary">
-              暂无分支任务记录。
-            </Typography>
+            <AppEmptyState compact title="暂无分支任务" description="合并、创建或推送后会保留记录。" />
           )}
         </Collapse>
     </Box>

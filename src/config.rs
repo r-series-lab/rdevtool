@@ -9,6 +9,8 @@ const DEFAULT_PROJECTS_TEMPLATE: &str = include_str!("../projects.template.toml"
 const DEFAULT_WORKSPACE_TEMPLATE: &str = include_str!("../workspace.template.toml");
 const DEFAULT_PROJECT_WORKSPACE_TEMPLATE: &str = include_str!("../project-workspace.template.toml");
 pub const SYSTEM_PROJECT_WORKSPACE_KEY: &str = "system";
+const SYSTEM_PROJECT_WORKSPACE_TYPE: &str = "system";
+const DEFAULT_PROJECT_WORKSPACE_TYPE: &str = "custom";
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
@@ -40,6 +42,7 @@ fn default_workspace_style_mode() -> String {
 
 fn default_workspace_enabled_pages() -> Vec<String> {
     vec![
+        "overview".to_string(),
         "projects".to_string(),
         "merge".to_string(),
         "deploy".to_string(),
@@ -72,6 +75,12 @@ pub struct ProjectWorkspaceConfig {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default = "default_project_workspace_type")]
+    pub workspace_type: String,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub root_dir: Option<PathBuf>,
     #[serde(default)]
     pub include_all_projects: bool,
     #[serde(default)]
@@ -82,6 +91,54 @@ pub struct ProjectWorkspaceConfig {
     pub navigation_categories: Vec<String>,
     #[serde(default)]
     pub navigation_entries: Vec<String>,
+    #[serde(default)]
+    pub project_instances: Vec<ProjectWorkspaceProjectInstanceConfig>,
+    #[serde(default)]
+    pub resource_categories: Vec<ProjectWorkspaceResourceCategoryConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectWorkspaceProjectInstanceConfig {
+    pub project: String,
+    pub path: PathBuf,
+    #[serde(default)]
+    pub managed: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectWorkspaceResourceCategoryConfig {
+    pub title: String,
+    #[serde(default)]
+    pub short_label: Option<String>,
+    #[serde(default)]
+    pub entries: Vec<ProjectWorkspaceResourceEntryConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectWorkspaceResourceEntryConfig {
+    pub name: String,
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub browser: Option<String>,
+    #[serde(default)]
+    pub browser_profile: Option<String>,
+    #[serde(default)]
+    pub runtime_profile: Option<String>,
+    #[serde(default)]
+    pub bundle_id: Option<String>,
+    #[serde(default)]
+    pub app_name: Option<String>,
+    #[serde(default)]
+    pub script: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -89,6 +146,8 @@ pub struct CreateProjectWorkspaceRequest {
     pub key: String,
     pub name: String,
     pub description: Option<String>,
+    pub workspace_type: Option<String>,
+    pub root_dir: Option<PathBuf>,
     pub copy_from: Option<ProjectWorkspaceConfig>,
     pub activate: bool,
 }
@@ -99,11 +158,16 @@ impl Default for ProjectWorkspaceConfig {
             key: SYSTEM_PROJECT_WORKSPACE_KEY.to_string(),
             name: "系统工作区".to_string(),
             description: Some("显示全部项目和入口，作为全局管理视图。".to_string()),
+            workspace_type: SYSTEM_PROJECT_WORKSPACE_TYPE.to_string(),
+            metadata: BTreeMap::new(),
+            root_dir: None,
             include_all_projects: true,
             include_all_navigation: true,
             projects: Vec::new(),
             navigation_categories: Vec::new(),
             navigation_entries: Vec::new(),
+            project_instances: Vec::new(),
+            resource_categories: Vec::new(),
         }
     }
 }
@@ -114,12 +178,25 @@ impl ProjectWorkspaceConfig {
             .unwrap_or_else(|| SYSTEM_PROJECT_WORKSPACE_KEY.to_string());
         self.name = normalize_text(&self.name).unwrap_or_else(|| self.key.clone());
         self.description = normalize_optional_text(self.description);
+        self.workspace_type = normalize_project_workspace_type(&self.workspace_type);
+        self.metadata = normalize_metadata(self.metadata);
+        self.root_dir = normalize_optional_path(self.root_dir);
         self.projects = normalize_unique_strings(self.projects);
         self.navigation_categories = normalize_unique_strings(self.navigation_categories);
         self.navigation_entries = normalize_unique_strings(self.navigation_entries);
+        self.project_instances = normalize_project_instances(self.project_instances);
+        self.resource_categories =
+            normalize_workspace_resource_categories(self.resource_categories);
         if self.key == SYSTEM_PROJECT_WORKSPACE_KEY {
+            self.workspace_type = SYSTEM_PROJECT_WORKSPACE_TYPE.to_string();
             self.include_all_projects = true;
             self.include_all_navigation = true;
+            self.root_dir = None;
+            self.metadata.clear();
+            self.project_instances.clear();
+            self.resource_categories.clear();
+        } else if self.workspace_type == SYSTEM_PROJECT_WORKSPACE_TYPE {
+            self.workspace_type = DEFAULT_PROJECT_WORKSPACE_TYPE.to_string();
         }
         self
     }
@@ -142,6 +219,13 @@ impl ProjectWorkspaceConfig {
 
     pub fn allows_project(&self, project_key: &str) -> bool {
         self.include_all_projects || self.projects.iter().any(|key| key == project_key)
+    }
+
+    pub fn project_instance_path(&self, project_key: &str) -> Option<&Path> {
+        self.project_instances
+            .iter()
+            .find(|instance| instance.project == project_key)
+            .map(|instance| instance.path.as_path())
     }
 }
 
@@ -232,7 +316,7 @@ pub struct ProjectCommandConfig {
     pub env: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ProjectFocusConfig {
     #[serde(default)]
     pub url: Option<String>,
@@ -240,6 +324,85 @@ pub struct ProjectFocusConfig {
     pub bundle_id: Option<String>,
     #[serde(default)]
     pub auto_on_start: bool,
+    #[serde(default = "default_project_focus_auto_open_mode")]
+    pub auto_open_mode: String,
+    #[serde(default)]
+    pub after_ready_actions: Vec<String>,
+    #[serde(default)]
+    pub ready: ProjectReadyConfig,
+}
+
+impl Default for ProjectFocusConfig {
+    fn default() -> Self {
+        Self {
+            url: None,
+            bundle_id: None,
+            auto_on_start: false,
+            auto_open_mode: default_project_focus_auto_open_mode(),
+            after_ready_actions: Vec::new(),
+            ready: ProjectReadyConfig::default(),
+        }
+    }
+}
+
+fn default_project_focus_auto_open_mode() -> String {
+    "ready".to_string()
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectReadyConfig {
+    #[serde(default = "default_project_ready_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_project_ready_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_project_ready_url_patterns")]
+    pub url_patterns: Vec<String>,
+    #[serde(default = "default_project_ready_success_markers")]
+    pub success_markers: Vec<String>,
+    #[serde(default = "default_project_ready_failure_markers")]
+    pub failure_markers: Vec<String>,
+}
+
+impl Default for ProjectReadyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_project_ready_enabled(),
+            timeout_ms: default_project_ready_timeout_ms(),
+            url_patterns: default_project_ready_url_patterns(),
+            success_markers: default_project_ready_success_markers(),
+            failure_markers: default_project_ready_failure_markers(),
+        }
+    }
+}
+
+fn default_project_ready_enabled() -> bool {
+    true
+}
+
+fn default_project_ready_timeout_ms() -> u64 {
+    180_000
+}
+
+fn default_project_ready_url_patterns() -> Vec<String> {
+    vec![
+        "- Local: {url}".to_string(),
+        "Local: {url}".to_string(),
+        "- Network: {url}".to_string(),
+        "Network: {url}".to_string(),
+        "ready - {url}".to_string(),
+    ]
+}
+
+fn default_project_ready_success_markers() -> Vec<String> {
+    Vec::new()
+}
+
+fn default_project_ready_failure_markers() -> Vec<String> {
+    vec![
+        "Failed to compile".to_string(),
+        "Compilation failed".to_string(),
+        "EADDRINUSE".to_string(),
+    ]
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -450,6 +613,10 @@ fn default_debug_local_file_mode() -> String {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_project_workspace_type() -> String {
+    DEFAULT_PROJECT_WORKSPACE_TYPE.to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -896,15 +1063,36 @@ pub fn create_project_workspace(
         key: key.clone(),
         name: name.clone(),
         description: None,
+        workspace_type: DEFAULT_PROJECT_WORKSPACE_TYPE.to_string(),
+        metadata: BTreeMap::new(),
+        root_dir: None,
         include_all_projects: false,
         include_all_navigation: false,
         projects: Vec::new(),
         navigation_categories: Vec::new(),
         navigation_entries: Vec::new(),
+        project_instances: Vec::new(),
+        resource_categories: Vec::new(),
     });
     workspace.key = key;
     workspace.name = name;
     workspace.description = normalize_optional_text(request.description);
+    if let Some(workspace_type) = request.workspace_type {
+        workspace.workspace_type = workspace_type;
+    }
+    workspace.project_instances.clear();
+    workspace.resource_categories.clear();
+    workspace.root_dir = normalize_optional_path(request.root_dir);
+    if workspace.root_dir.is_none() {
+        workspace.project_instances.clear();
+    } else if let Some(root_dir) = workspace.root_dir.as_ref() {
+        fs::create_dir_all(root_dir).with_context(|| {
+            format!(
+                "failed to create project workspace root: {}",
+                root_dir.display()
+            )
+        })?;
+    }
     if workspace.is_system() {
         workspace.include_all_projects = false;
         workspace.include_all_navigation = false;
@@ -942,13 +1130,238 @@ pub fn apply_project_workspace_filter(
     next
 }
 
+pub fn apply_project_workspace_context(
+    config: &AppConfig,
+    workspace: &ProjectWorkspaceConfig,
+) -> AppConfig {
+    let mut next = apply_project_workspace_filter(config, workspace);
+    if workspace.is_system() {
+        return next;
+    }
+
+    for project in &mut next.projects {
+        let Some(instance_path) = workspace.project_instance_path(&project.key) else {
+            continue;
+        };
+        apply_project_instance_path(project, instance_path);
+    }
+
+    next
+}
+
+pub fn default_project_workspace_root_dir(key: &str) -> PathBuf {
+    let base = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Documents"))
+        .filter(|path| path.exists())
+        .unwrap_or_else(default_config_dir)
+        .join("rdevtool-workspaces");
+    base.join(normalize_project_workspace_key(key).unwrap_or_else(|| "workspace".to_string()))
+}
+
+pub fn set_project_workspace_instance(
+    paths: &ConfigPaths,
+    workspace_key: &str,
+    project_key: &str,
+    path: PathBuf,
+    managed: bool,
+) -> Result<ProjectWorkspaceConfig> {
+    let mut workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    if workspace.is_system() {
+        return Ok(workspace);
+    }
+    let project_key =
+        normalize_text(project_key).ok_or_else(|| anyhow::anyhow!("project key is required"))?;
+    let path = normalize_optional_path(Some(path))
+        .ok_or_else(|| anyhow::anyhow!("project instance path is required"))?;
+
+    if !workspace.include_all_projects && !workspace.projects.iter().any(|key| key == &project_key)
+    {
+        workspace.projects.push(project_key.clone());
+    }
+    if workspace.root_dir.is_none() {
+        workspace.root_dir = path.parent().map(Path::to_path_buf);
+    }
+
+    workspace
+        .project_instances
+        .retain(|instance| instance.project != project_key);
+    workspace
+        .project_instances
+        .push(ProjectWorkspaceProjectInstanceConfig {
+            project: project_key,
+            path,
+            managed,
+        });
+    workspace = workspace.normalized();
+    let path = paths
+        .project_workspaces
+        .join(format!("{}.toml", workspace.key));
+    save_project_workspace_config(&path, &workspace)?;
+    Ok(workspace)
+}
+
+fn apply_project_instance_path(project: &mut ProjectConfig, instance_path: &Path) {
+    let previous_repo_path = project.repo_path.clone();
+    project.repo_path = Some(instance_path.to_path_buf());
+
+    if let Some(command) = &mut project.dev {
+        rebase_project_command_paths(command, previous_repo_path.as_deref(), instance_path);
+    }
+    if let Some(command) = &mut project.build {
+        rebase_project_command_paths(command, previous_repo_path.as_deref(), instance_path);
+    }
+}
+
+fn rebase_project_command_paths(
+    command: &mut ProjectCommandConfig,
+    previous_repo_path: Option<&Path>,
+    instance_path: &Path,
+) {
+    if let Some(previous_repo_path) = previous_repo_path {
+        if let Some(cwd) = command.cwd.as_mut() {
+            *cwd = rebase_path_for_project_instance(cwd, previous_repo_path, instance_path);
+        }
+        if let Some(output_dir) = command.output_dir.as_mut() {
+            *output_dir =
+                rebase_path_for_project_instance(output_dir, previous_repo_path, instance_path);
+        }
+    }
+}
+
+fn rebase_path_for_project_instance(
+    path: &Path,
+    previous_repo_path: &Path,
+    instance_path: &Path,
+) -> PathBuf {
+    if path.is_absolute() {
+        if let Ok(relative) = path.strip_prefix(previous_repo_path) {
+            return instance_path.join(relative);
+        }
+    }
+    path.to_path_buf()
+}
+
 fn normalize_text(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
 }
 
+fn normalize_project_workspace_type(value: &str) -> String {
+    let value = value.trim().to_lowercase();
+    let value = value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '-' || character == '_' {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if value.is_empty() {
+        DEFAULT_PROJECT_WORKSPACE_TYPE.to_string()
+    } else {
+        value
+    }
+}
+
 fn normalize_optional_text(value: Option<String>) -> Option<String> {
     value.and_then(|value| normalize_text(&value))
+}
+
+fn normalize_optional_path(value: Option<PathBuf>) -> Option<PathBuf> {
+    value.and_then(|path| {
+        let value = path.to_string_lossy().trim().to_string();
+        (!value.is_empty()).then(|| PathBuf::from(value))
+    })
+}
+
+fn normalize_metadata(values: BTreeMap<String, String>) -> BTreeMap<String, String> {
+    values
+        .into_iter()
+        .filter_map(|(key, value)| {
+            let key = normalize_text(&key)?;
+            let value = normalize_text(&value)?;
+            Some((key, value))
+        })
+        .collect()
+}
+
+fn normalize_project_instances(
+    values: Vec<ProjectWorkspaceProjectInstanceConfig>,
+) -> Vec<ProjectWorkspaceProjectInstanceConfig> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for value in values {
+        let Some(project) = normalize_text(&value.project) else {
+            continue;
+        };
+        let Some(path) = normalize_optional_path(Some(value.path)) else {
+            continue;
+        };
+        if seen.insert(project.clone()) {
+            normalized.push(ProjectWorkspaceProjectInstanceConfig {
+                project,
+                path,
+                managed: value.managed,
+            });
+        }
+    }
+    normalized
+}
+
+fn normalize_workspace_resource_categories(
+    values: Vec<ProjectWorkspaceResourceCategoryConfig>,
+) -> Vec<ProjectWorkspaceResourceCategoryConfig> {
+    let mut categories = Vec::new();
+    for value in values {
+        let Some(title) = normalize_text(&value.title) else {
+            continue;
+        };
+        let entries = normalize_workspace_resource_entries(value.entries);
+        if entries.is_empty() {
+            continue;
+        }
+        categories.push(ProjectWorkspaceResourceCategoryConfig {
+            title,
+            short_label: normalize_optional_text(value.short_label),
+            entries,
+        });
+    }
+    categories
+}
+
+fn normalize_workspace_resource_entries(
+    values: Vec<ProjectWorkspaceResourceEntryConfig>,
+) -> Vec<ProjectWorkspaceResourceEntryConfig> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for value in values {
+        let Some(name) = normalize_text(&value.name) else {
+            continue;
+        };
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        normalized.push(ProjectWorkspaceResourceEntryConfig {
+            name,
+            kind: normalize_optional_text(value.kind),
+            url: normalize_text(&value.url).unwrap_or_default(),
+            browser: normalize_optional_text(value.browser),
+            browser_profile: normalize_optional_text(value.browser_profile),
+            runtime_profile: normalize_optional_text(value.runtime_profile),
+            bundle_id: normalize_optional_text(value.bundle_id),
+            app_name: normalize_optional_text(value.app_name),
+            script: normalize_optional_text(value.script),
+            path: normalize_optional_text(value.path),
+            cwd: normalize_optional_text(value.cwd),
+            note: normalize_optional_text(value.note),
+        });
+    }
+    normalized
 }
 
 fn normalize_unique_strings(values: Vec<String>) -> Vec<String> {

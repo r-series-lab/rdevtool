@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   getTrayPinnedActions,
   setTrayPinnedActions,
-  TRAY_PINNED_LIMIT,
+  TRAY_PINNED_STORAGE_LIMIT,
   type TrayPinnedAction,
 } from "../lib/trayPins";
 
@@ -55,7 +55,7 @@ export function useTrayPinnedActions(kind?: string) {
         : [
             { ...action, updatedAtMs: Date.now() },
             ...actions.filter((item) => item.dedupeKey !== action.dedupeKey),
-          ].slice(0, TRAY_PINNED_LIMIT);
+          ].slice(0, TRAY_PINNED_STORAGE_LIMIT);
       return persistActions(next);
     },
     [actions, persistActions],

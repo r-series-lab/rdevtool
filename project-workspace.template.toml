@@ -1,6 +1,7 @@
 key = "system"
 name = "系统工作区"
 description = "显示全部项目和入口，作为全局管理视图。"
+workspace_type = "system"
 include_all_projects = true
 include_all_navigation = true
 
@@ -9,6 +10,7 @@ include_all_navigation = true
 # key = "marketing-rework"
 # name = "营销改造"
 # description = "只显示当前需求相关项目和入口。"
+# workspace_type = "business"
 # include_all_projects = false
 # include_all_navigation = false
 # projects = ["imop-admin", "marketing-admin"]
@@ -20,6 +22,7 @@ include_all_navigation = true
 # key = "r-series"
 # name = "R系列"
 # description = "R 系列工具开发工作区，只显示当前工具家族相关项目和少量通用入口。"
+# workspace_type = "dev"
 # include_all_projects = false
 # include_all_navigation = false
 # projects = ["rdevtool", "rterm", "rimage", "rqrcode"]

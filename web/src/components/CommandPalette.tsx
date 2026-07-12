@@ -12,6 +12,7 @@ import {
   TerminalIcon,
   WebsiteIcon,
 } from "./AppIcons";
+import { AppEmptyState } from "./AppEmptyState";
 
 type NavItem = {
   key: PageKey;
@@ -430,7 +431,12 @@ export function CommandPalette({
 
         <div className="command-result-list" role="listbox" aria-label="命令结果">
           {results.length === 0 ? (
-            <div className="command-empty">没有匹配的命令</div>
+            <AppEmptyState
+              compact
+              className="command-empty"
+              title="没有匹配命令"
+              description="换个关键词试试。"
+            />
           ) : (
             results.map((command, index) => (
               <button

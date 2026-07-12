@@ -1,45 +1,53 @@
 use project_runtime::{
-    ProjectRuntimeLogKind, ProjectRuntimeLogResponse, ProjectRuntimeSnapshot, ProjectRuntimeState,
+    ProjectRuntimeLogKind, ProjectRuntimeLogResponse, ProjectRuntimePreflightResponse,
+    ProjectRuntimeSnapshot, ProjectRuntimeState,
 };
+use rdevtool_core::agent::{AgentContext, context_for_workspace};
 use rdevtool_core::build as core_build;
 use rdevtool_core::config::{
-    AppConfig, BranchRules, BuildActionKind, BuildTargetAdapter, CreateProjectWorkspaceRequest,
-    DeployParamConfig, DeployParamKind, DeployTargetConfig, Jobs, ProjectAuthHelperConfig,
-    ProjectAuthHelperItemConfig, ProjectCommandConfig, ProjectConfig, ProjectDebugLocalFileConfig,
-    ProjectDebugProfileConfig, ProjectFocusConfig, ProjectLocalProxyConfig,
-    ProjectLocalProxyRouteConfig, ProjectNetworkProxyConfig, ProjectWorkspaceConfig,
-    RuntimeProfileConfig, SYSTEM_PROJECT_WORKSPACE_KEY, active_project_workspace_key,
-    apply_project_workspace_filter, create_project_workspace, default_config_dir,
-    default_project_workspaces_dir, default_projects_path, default_workspace_path,
-    ensure_default_configs, load_active_project_workspace, load_config,
-    load_project_workspace_by_key, load_project_workspaces, load_workspace_config, save_config,
-    save_project_workspace_config, save_workspace_config,
+    AppConfig, BranchRules, BuildActionKind, BuildTargetAdapter, ConfigPaths,
+    CreateProjectWorkspaceRequest, DeployParamConfig, DeployParamKind, DeployTargetConfig, Jobs,
+    ProjectAuthHelperConfig, ProjectAuthHelperItemConfig, ProjectCommandConfig, ProjectConfig,
+    ProjectDebugLocalFileConfig, ProjectDebugProfileConfig, ProjectFocusConfig,
+    ProjectLocalProxyConfig, ProjectLocalProxyRouteConfig, ProjectNetworkProxyConfig,
+    ProjectReadyConfig, ProjectWorkspaceConfig, RuntimeProfileConfig, SYSTEM_PROJECT_WORKSPACE_KEY,
+    active_project_workspace_key, apply_project_workspace_context, create_project_workspace,
+    default_config_dir, default_project_workspace_root_dir, default_project_workspaces_dir,
+    default_projects_path, default_workspace_path, ensure_default_configs,
+    load_active_project_workspace, load_config, load_project_workspace_by_key,
+    load_project_workspaces, load_workspace_config, save_config, save_project_workspace_config,
+    save_workspace_config, set_project_workspace_instance,
 };
 use rdevtool_core::core::{
     BranchCheckoutRequest, BranchCommitOverview, BranchCreateRequest, BranchPushRequest,
     BranchPushStatus, BranchSwitchRequest, BranchSyncRequest, BranchTaskResponse,
-    BranchWorktreeSummary,
-    BuildStatusResponse, BuildTriggerResponse, DeployPlan, DeployRequest, DeployTargetMeta,
-    ProjectDetail, ProjectSummary, StatusRequest, available_branch_options, branch_commit_overview,
-    branch_hint, branch_push_status, build_plan, checkout_branch_to_directory, deploy_target_meta,
-    execute_branch_create, execute_branch_push, execute_branch_switch, execute_branch_sync,
-    execute_merge, project_detail, project_summaries, project_worktrees, refresh_deploy_status,
-    trigger_deploy,
+    BranchWorktreeSummary, BuildStatusResponse, BuildTriggerResponse, DeployPlan, DeployRequest,
+    DeployTargetMeta, ProjectDetail, ProjectSummary, StatusRequest, available_branch_options,
+    branch_commit_overview, branch_hint, branch_push_status, build_plan,
+    checkout_branch_to_directory, deploy_target_meta, execute_branch_create, execute_branch_push,
+    execute_branch_switch, execute_branch_sync, execute_merge, project_detail, project_summaries,
+    project_worktrees, refresh_deploy_status, trigger_deploy,
 };
 use rdevtool_core::core::{MergeRequest, MergeResponse};
+use rdevtool_core::git;
 use rdevtool_core::navigation::{
     NavigationData, NavigationEditorData, NavigationEntry, NavigationOpenResult,
     load_navigation_data_for_workspace, load_navigation_editor_data, navigation_file_path,
     open_navigation_entry_with_runtime_profiles, save_navigation_editor_data,
 };
 use rdevtool_core::proxy::{
-    ProxyDashboard, ProxyProfile, ProxyProfilePack, ProxyRule, ProxyRuntimeState,
-    default_proxy_path, delete_proxy_profile as core_delete_proxy_profile,
-    delete_proxy_rule as core_delete_proxy_rule, ensure_proxy_config,
+    ProxyDashboard, ProxyProfile, ProxyProfilePack, ProxyRequestDiagnosis, ProxyRule,
+    ProxyRuntimeState, default_proxy_path, delete_proxy_profile as core_delete_proxy_profile,
+    delete_proxy_rule as core_delete_proxy_rule,
+    diagnose_proxy_request as core_diagnose_proxy_request, ensure_proxy_config,
     export_proxy_profile_pack as core_export_proxy_profile_pack,
     import_proxy_profile_pack as core_import_proxy_profile_pack, load_proxy_config,
     save_proxy_config, upsert_proxy_profile, upsert_proxy_rule, validate_proxy_profile,
     validate_proxy_rule,
+};
+use rdevtool_core::runtime as core_runtime;
+use rdevtool_core::runtime_link::{
+    BindProxyRuntimeRequest, BindProxyRuntimeResult, bind_proxy_runtime_profile,
 };
 use rdevtool_core::storage::{
     BuildHistoryEntry, DeployHistoryEntry, MergeHistoryEntry, SaveBuildHistoryRequest,
@@ -56,6 +64,9 @@ use rdevtool_core::web_actions::{
     run_web_action_navigation_script as core_run_web_action_navigation_script,
     run_web_action_script as core_run_web_action_script,
 };
+use rdevtool_core::workspace_init::{
+    InitDemandWorkspaceRequest, InitDemandWorkspaceResult, init_demand_workspace,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -68,7 +79,7 @@ use std::sync::{
 };
 use std::time::SystemTime;
 use tauri::{
-    AppHandle, Manager, Runtime, WindowEvent,
+    AppHandle, Manager, RunEvent, Runtime, WindowEvent,
     image::Image,
     menu::{IconMenuItem, IsMenuItem, Menu, MenuItem, NativeIcon, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -124,9 +135,14 @@ struct ProjectWorkspaceSummary {
     description: Option<String>,
     active: bool,
     system: bool,
+    workspace_type: String,
+    workspace_type_label: String,
     project_count: usize,
+    resource_count: usize,
     include_all_projects: bool,
     include_all_navigation: bool,
+    root_dir: Option<String>,
+    workspace_kind: String,
     project_scope_label: String,
     navigation_scope_label: String,
 }
@@ -147,6 +163,12 @@ struct ProjectWorkspaceEditorDraft {
     name: String,
     description: Option<String>,
     system: bool,
+    #[serde(default = "default_project_workspace_type_value")]
+    workspace_type: String,
+    #[serde(default)]
+    workspace_type_label: String,
+    #[serde(default)]
+    root_dir: Option<String>,
     include_all_projects: bool,
     include_all_navigation: bool,
     projects: Vec<String>,
@@ -154,6 +176,17 @@ struct ProjectWorkspaceEditorDraft {
     navigation_entries: Vec<String>,
     #[serde(default)]
     proxy_profiles: Vec<String>,
+    #[serde(default)]
+    project_instances: Vec<ProjectWorkspaceProjectInstanceDraft>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectWorkspaceProjectInstanceDraft {
+    project: String,
+    path: String,
+    #[serde(default)]
+    managed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +195,7 @@ struct ProjectWorkspaceEditorProject {
     key: String,
     name: String,
     category: String,
+    repo_path: Option<String>,
     selected: bool,
 }
 
@@ -202,14 +236,56 @@ struct CreateProjectWorkspacePayload {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    workspace_type: Option<String>,
+    #[serde(default)]
+    root_dir: Option<String>,
+    #[serde(default)]
+    independent_dir: bool,
     #[serde(default = "default_true")]
     copy_current: bool,
+    #[serde(default)]
+    copy_from_workspace_key: Option<String>,
+    #[serde(default = "default_true")]
+    activate: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InitDemandWorkspacePayload {
+    name: String,
+    #[serde(default)]
+    key: Option<String>,
+    #[serde(default)]
+    demand_id: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    workspace_type: Option<String>,
+    requirement_dir: String,
+    repo_path: String,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+    #[serde(default)]
+    root_dir: Option<String>,
+    #[serde(default)]
+    requirement_category: Option<String>,
+    #[serde(default)]
+    requirement_short_label: Option<String>,
+    #[serde(default)]
+    requirement_entry_name: Option<String>,
     #[serde(default = "default_true")]
     activate: bool,
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_project_workspace_type_value() -> String {
+    "custom".to_string()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -253,6 +329,32 @@ struct ProjectFocusEditor {
     url: Option<String>,
     bundle_id: Option<String>,
     auto_on_start: bool,
+    #[serde(default = "default_focus_editor_auto_open_mode")]
+    auto_open_mode: String,
+    #[serde(default)]
+    after_ready_actions_text: String,
+    #[serde(default = "default_focus_editor_ready_enabled")]
+    ready_enabled: bool,
+    #[serde(default = "default_focus_editor_ready_timeout_ms")]
+    ready_timeout_ms: u64,
+    #[serde(default)]
+    ready_url_patterns_text: String,
+    #[serde(default)]
+    ready_success_markers_text: String,
+    #[serde(default)]
+    ready_failure_markers_text: String,
+}
+
+fn default_focus_editor_auto_open_mode() -> String {
+    ProjectFocusConfig::default().auto_open_mode
+}
+
+fn default_focus_editor_ready_enabled() -> bool {
+    ProjectReadyConfig::default().enabled
+}
+
+fn default_focus_editor_ready_timeout_ms() -> u64 {
+    ProjectReadyConfig::default().timeout_ms
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -496,7 +598,7 @@ struct SaveProjectDeployTargetsRequest {
     deploy_targets: Vec<DeployTargetEditor>,
 }
 
-const DEFAULT_PAGE_KEYS: [&str; 4] = ["projects", "merge", "build", "proxy"];
+const DEFAULT_PAGE_KEYS: [&str; 5] = ["overview", "projects", "merge", "build", "proxy"];
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "main-tray";
 const TRAY_SHOW_ID: &str = "tray_show_main";
@@ -510,7 +612,8 @@ const TRAY_PINNED_STORAGE_KEY: &str = "pinned-actions";
 const BRANCH_WORKFLOW_STORAGE_NAMESPACE: &str = "branch-workflow";
 const BRANCH_WORKFLOW_HISTORY_KEY: &str = "history";
 const TRAY_RECENT_LIMIT: usize = 6;
-const TRAY_PINNED_LIMIT: usize = 5;
+const TRAY_PINNED_STORAGE_LIMIT: usize = 60;
+const TRAY_PINNED_MENU_LIMIT: usize = 5;
 
 fn should_use_tray() -> bool {
     !cfg!(debug_assertions)
@@ -535,6 +638,136 @@ struct TrayReplayAction {
 struct TrayBranchReplayPayload {
     command: String,
     request: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspacePinnedActionsOverview {
+    key: String,
+    name: String,
+    description: Option<String>,
+    system: bool,
+    root_dir: Option<String>,
+    workspace_kind: String,
+    workspace_type: String,
+    workspace_type_label: String,
+    project_count: usize,
+    entry_count: usize,
+    action_count: usize,
+    proxy_profile_count: usize,
+    resources: Vec<WorkspaceResourceShortcutItem>,
+    project_directories: Vec<WorkspaceProjectDirectoryItem>,
+    proxy_profiles: Vec<WorkspaceProxyProfileItem>,
+    actions: Vec<WorkspacePinnedActionItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceProxyProfileItem {
+    id: String,
+    name: String,
+    listen_host: String,
+    listen_port: u16,
+    listen_url: String,
+    workspace_key: Option<String>,
+    workspace_label: String,
+    rule_count: usize,
+    running: bool,
+    started_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspacePinnedActionItem {
+    action: TrayReplayAction,
+    kind_label: String,
+    label: String,
+    detail: Option<String>,
+    project_key: Option<String>,
+    confirm_required: bool,
+    updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceResourceShortcutItem {
+    key: String,
+    category: String,
+    label: String,
+    kind: String,
+    kind_label: String,
+    value: Option<String>,
+    open_kind: Option<String>,
+    openable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceProjectDirectoryItem {
+    project_key: String,
+    project_name: String,
+    mode: String,
+    mode_label: String,
+    path: Option<String>,
+    managed: bool,
+    status_key: String,
+    status_label: String,
+    running: bool,
+    can_start: bool,
+    can_stop: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceAiContextResponse {
+    workspace_key: String,
+    workspace_name: String,
+    markdown: String,
+    json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceAiContextOptions {
+    #[serde(default = "default_true")]
+    include_projects: bool,
+    #[serde(default = "default_true")]
+    include_entries: bool,
+    #[serde(default = "default_true")]
+    include_directories: bool,
+    #[serde(default = "default_true")]
+    include_actions: bool,
+    #[serde(default = "default_true")]
+    include_build_history: bool,
+    #[serde(default = "default_true")]
+    include_merge_history: bool,
+    #[serde(default = "default_item_limit")]
+    item_limit: usize,
+    #[serde(default = "default_history_limit")]
+    history_limit: usize,
+}
+
+impl Default for WorkspaceAiContextOptions {
+    fn default() -> Self {
+        Self {
+            include_projects: true,
+            include_entries: true,
+            include_directories: true,
+            include_actions: true,
+            include_build_history: true,
+            include_merge_history: true,
+            item_limit: default_item_limit(),
+            history_limit: default_history_limit(),
+        }
+    }
+}
+
+fn default_item_limit() -> usize {
+    12
+}
+
+fn default_history_limit() -> usize {
+    8
 }
 
 impl AppConfigState {
@@ -585,7 +818,7 @@ fn normalize_page_key(value: Option<String>) -> Option<String> {
     match value.as_str() {
         "navigation" => Some("projects".to_string()),
         "deploy" => Some("build".to_string()),
-        "build" | "merge" | "projects" | "proxy" => Some(value),
+        "overview" | "build" | "merge" | "projects" | "proxy" => Some(value),
         _ => None,
     }
 }
@@ -674,6 +907,9 @@ fn project_workspace_summary(
 ) -> ProjectWorkspaceSummary {
     let system = workspace.is_system();
     let project_count = workspace.project_count_for(config);
+    let resource_count = workspace_resource_count(&workspace);
+    let workspace_type = workspace.workspace_type.clone();
+    let workspace_type_label = workspace_type_label(&workspace);
     let project_scope_label = if workspace.include_all_projects {
         "全部项目".to_string()
     } else {
@@ -684,11 +920,15 @@ fn project_workspace_summary(
     } else {
         let category_count = workspace.navigation_categories.len();
         let entry_count = workspace.navigation_entries.len();
-        match (category_count, entry_count) {
-            (0, 0) => "未配置入口".to_string(),
-            (0, count) => format!("{count} 个入口"),
-            (count, 0) => format!("{count} 个分类"),
-            (category_count, entry_count) => format!("{category_count} 类 / {entry_count} 项"),
+        match (category_count, entry_count, resource_count) {
+            (0, 0, 0) => "未配置入口".to_string(),
+            (0, 0, count) => format!("{count} 个动态入口"),
+            (0, count, 0) => format!("{count} 个入口"),
+            (count, 0, 0) => format!("{count} 个分类"),
+            (category_count, entry_count, 0) => format!("{category_count} 类 / {entry_count} 项"),
+            (category_count, entry_count, resource_count) => {
+                format!("{category_count} 类 / {entry_count} 项 · {resource_count} 动态")
+            }
         }
     };
 
@@ -699,24 +939,64 @@ fn project_workspace_summary(
         name: if system {
             "全局".to_string()
         } else {
-            workspace.name
+            workspace.name.clone()
         },
         description: workspace.description,
+        workspace_type,
+        workspace_type_label,
         project_count,
+        resource_count,
         include_all_projects: workspace.include_all_projects,
         include_all_navigation: workspace.include_all_navigation,
+        root_dir: workspace
+            .root_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        workspace_kind: if system {
+            "global".to_string()
+        } else if workspace.root_dir.is_some() {
+            "directory".to_string()
+        } else {
+            "scope".to_string()
+        },
         project_scope_label,
         navigation_scope_label,
     }
 }
 
+fn workspace_resource_count(workspace: &ProjectWorkspaceConfig) -> usize {
+    workspace
+        .resource_categories
+        .iter()
+        .map(|category| category.entries.len())
+        .sum()
+}
+
+fn load_project_workspace_for_editor(
+    paths: &ConfigPaths,
+    workspace_key: Option<String>,
+) -> Result<ProjectWorkspaceConfig, String> {
+    if let Some(workspace_key) = workspace_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+    {
+        return load_project_workspace_by_key(&paths.project_workspaces, workspace_key)
+            .map_err(|error| error.to_string());
+    }
+    load_active_project_workspace(paths).map_err(|error| error.to_string())
+}
+
 fn project_workspace_editor_state(
     config: &AppConfig,
+    workspace_key: Option<String>,
 ) -> Result<ProjectWorkspaceEditorState, String> {
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-    let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
+    let workspace = load_project_workspace_for_editor(&paths, workspace_key)?;
     let system = workspace.is_system();
     let workspace_key = workspace.key.clone();
+    let workspace_type = workspace.workspace_type.clone();
+    let workspace_type_label = workspace_type_label(&workspace);
     let project_keys = workspace.projects.iter().cloned().collect::<BTreeSet<_>>();
     let navigation_category_keys = workspace
         .navigation_categories
@@ -750,6 +1030,10 @@ fn project_workspace_editor_state(
             key: project.key.clone(),
             name: project.name.clone(),
             category: project.category.clone(),
+            repo_path: project
+                .repo_path
+                .as_ref()
+                .map(|path| path.display().to_string()),
             selected: include_all_projects || project_keys.contains(&project.key),
         })
         .collect::<Vec<_>>();
@@ -833,6 +1117,12 @@ fn project_workspace_editor_state(
             name: workspace.name,
             description: workspace.description,
             system,
+            workspace_type,
+            workspace_type_label,
+            root_dir: workspace
+                .root_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
             include_all_projects,
             include_all_navigation,
             projects: workspace.projects,
@@ -846,6 +1136,15 @@ fn project_workspace_editor_state(
             } else {
                 selected_proxy_profiles
             },
+            project_instances: workspace
+                .project_instances
+                .into_iter()
+                .map(|instance| ProjectWorkspaceProjectInstanceDraft {
+                    project: instance.project,
+                    path: instance.path.display().to_string(),
+                    managed: instance.managed,
+                })
+                .collect(),
         },
         projects,
         navigation_categories,
@@ -853,18 +1152,31 @@ fn project_workspace_editor_state(
     })
 }
 
+fn apply_active_workspace_context(config: &AppConfig) -> Result<AppConfig, String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
+    Ok(apply_project_workspace_context(config, &workspace))
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    let left = left.canonicalize().unwrap_or_else(|_| left.to_path_buf());
+    let right = right.canonicalize().unwrap_or_else(|_| right.to_path_buf());
+    left == right
+}
+
 fn save_project_workspace_editor_state(
     config: &AppConfig,
     draft: ProjectWorkspaceEditorDraft,
 ) -> Result<ProjectWorkspaceEditorState, String> {
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-    let active_workspace =
-        load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
-    if active_workspace.is_system() {
-        return Err("全局工作区显示全部项目、入口和代理，不需要编辑范围".to_string());
+    let draft_key = draft.key.trim().to_string();
+    if draft_key.is_empty() {
+        return Err("工作区 key 不能为空".to_string());
     }
-    if draft.key != active_workspace.key {
-        return Err("只能编辑当前激活的工作区".to_string());
+    let current_workspace = load_project_workspace_by_key(&paths.project_workspaces, &draft_key)
+        .map_err(|error| error.to_string())?;
+    if current_workspace.is_system() {
+        return Err("全局工作区显示全部项目、入口和代理，不需要编辑范围".to_string());
     }
     let name = draft.name.trim();
     if name.is_empty() {
@@ -872,11 +1184,17 @@ fn save_project_workspace_editor_state(
     }
 
     let mut workspace = ProjectWorkspaceConfig {
-        key: active_workspace.key,
+        key: current_workspace.key.clone(),
         name: name.to_string(),
         description: draft.description.and_then(|value| {
             let value = value.trim().to_string();
             (!value.is_empty()).then_some(value)
+        }),
+        workspace_type: draft.workspace_type,
+        metadata: current_workspace.metadata,
+        root_dir: draft.root_dir.and_then(|value| {
+            let value = value.trim().to_string();
+            (!value.is_empty()).then_some(PathBuf::from(value))
         }),
         include_all_projects: draft.include_all_projects,
         include_all_navigation: draft.include_all_navigation,
@@ -895,6 +1213,25 @@ fn save_project_workspace_editor_state(
         } else {
             draft.navigation_entries
         },
+        project_instances: draft
+            .project_instances
+            .into_iter()
+            .filter_map(|instance| {
+                let project = instance.project.trim().to_string();
+                let path = instance.path.trim().to_string();
+                if project.is_empty() || path.is_empty() {
+                    return None;
+                }
+                Some(
+                    rdevtool_core::config::ProjectWorkspaceProjectInstanceConfig {
+                        project,
+                        path: PathBuf::from(path),
+                        managed: instance.managed,
+                    },
+                )
+            })
+            .collect(),
+        resource_categories: current_workspace.resource_categories,
     }
     .normalized();
 
@@ -923,7 +1260,7 @@ fn save_project_workspace_editor_state(
     }
     save_proxy_config(&proxy_path, &proxy_config).map_err(|error| error.to_string())?;
 
-    project_workspace_editor_state(config)
+    project_workspace_editor_state(config, Some(workspace.key.clone()))
 }
 
 fn active_workspace_project_filter() -> Result<Option<BTreeSet<String>>, String> {
@@ -1020,6 +1357,29 @@ fn scope_proxy_pack_for_workspace(
     pack
 }
 
+fn filter_proxy_config_for_workspace(
+    mut config: rdevtool_core::proxy::ProxyConfig,
+    workspace: &ProjectWorkspaceConfig,
+) -> rdevtool_core::proxy::ProxyConfig {
+    if workspace.is_system() {
+        return config;
+    }
+
+    let profile_ids = config
+        .profiles
+        .iter()
+        .filter(|profile| profile.workspace_key.as_deref() == Some(workspace.key.as_str()))
+        .map(|profile| profile.id.clone())
+        .collect::<BTreeSet<_>>();
+    config
+        .profiles
+        .retain(|profile| profile_ids.contains(&profile.id));
+    config
+        .rules
+        .retain(|rule| profile_ids.contains(&rule.profile_id));
+    config
+}
+
 fn filter_proxy_dashboard_by_workspace(
     mut dashboard: ProxyDashboard,
     workspace: &ProjectWorkspaceConfig,
@@ -1060,6 +1420,25 @@ fn proxy_dashboard_for_active_workspace(
     let workspace = active_proxy_workspace()?;
     let dashboard = runtime.dashboard(path).map_err(|error| error.to_string())?;
     Ok(filter_proxy_dashboard_by_workspace(dashboard, &workspace))
+}
+
+fn select_proxy_profile_for_request_diagnosis(
+    config: &rdevtool_core::proxy::ProxyConfig,
+    profile: Option<String>,
+) -> Result<ProxyProfile, String> {
+    if let Some(profile) = optional_editor_string(profile) {
+        return config
+            .profiles
+            .iter()
+            .find(|item| item.id == profile || item.name == profile)
+            .cloned()
+            .ok_or_else(|| format!("代理配置在当前工作区不可见: {}", profile));
+    }
+    match config.profiles.as_slice() {
+        [profile] => Ok(profile.clone()),
+        [] => Err("当前工作区没有可用代理配置".to_string()),
+        _ => Err("当前工作区有多个代理配置，请指定 profile".to_string()),
+    }
 }
 
 #[tauri::command]
@@ -1167,16 +1546,42 @@ async fn create_project_workspace_config(
     tauri::async_runtime::spawn_blocking(move || {
         let paths = ensure_default_configs().map_err(|error| error.to_string())?;
         let copy_from = if payload.copy_current {
-            Some(load_active_project_workspace(&paths).map_err(|error| error.to_string())?)
+            if let Some(copy_from_key) = payload
+                .copy_from_workspace_key
+                .as_deref()
+                .map(str::trim)
+                .filter(|key| !key.is_empty())
+            {
+                Some(
+                    load_project_workspace_by_key(&paths.project_workspaces, copy_from_key)
+                        .map_err(|error| error.to_string())?,
+                )
+            } else {
+                Some(load_active_project_workspace(&paths).map_err(|error| error.to_string())?)
+            }
         } else {
             None
         };
+        let root_dir = payload
+            .root_dir
+            .as_ref()
+            .and_then(|value| {
+                let value = value.trim().to_string();
+                (!value.is_empty()).then_some(PathBuf::from(value))
+            })
+            .or_else(|| {
+                payload
+                    .independent_dir
+                    .then(|| default_project_workspace_root_dir(&payload.key))
+            });
         create_project_workspace(
             &paths,
             CreateProjectWorkspaceRequest {
                 key: payload.key,
                 name: payload.name,
                 description: payload.description,
+                workspace_type: payload.workspace_type,
+                root_dir,
                 copy_from,
                 activate: payload.activate,
             },
@@ -1191,13 +1596,49 @@ async fn create_project_workspace_config(
 }
 
 #[tauri::command]
+async fn init_demand_workspace_config(
+    state: tauri::State<'_, AppState>,
+    payload: InitDemandWorkspacePayload,
+) -> Result<InitDemandWorkspaceResult, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let config = config_state.load()?;
+        init_demand_workspace(
+            &paths,
+            &config,
+            InitDemandWorkspaceRequest {
+                key: payload.key,
+                demand_id: payload.demand_id,
+                name: payload.name,
+                description: payload.description,
+                workspace_type: payload.workspace_type,
+                requirement_dir: PathBuf::from(payload.requirement_dir),
+                repo_path: PathBuf::from(payload.repo_path),
+                project: payload.project,
+                branch: payload.branch,
+                root_dir: payload.root_dir.map(PathBuf::from),
+                requirement_category: payload.requirement_category,
+                requirement_short_label: payload.requirement_short_label,
+                requirement_entry_name: payload.requirement_entry_name,
+                activate: payload.activate,
+            },
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn get_project_workspace_editor(
     state: tauri::State<'_, AppState>,
+    workspace_key: Option<String>,
 ) -> Result<ProjectWorkspaceEditorState, String> {
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
-        project_workspace_editor_state(&config)
+        project_workspace_editor_state(&config, workspace_key)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1223,6 +1664,34 @@ async fn get_proxy_dashboard(state: tauri::State<'_, AppState>) -> Result<ProxyD
     tauri::async_runtime::spawn_blocking(move || {
         let path = ensure_proxy_config().map_err(|error| error.to_string())?;
         proxy_dashboard_for_active_workspace(&runtime, &path)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn diagnose_proxy_request(
+    profile: Option<String>,
+    method: String,
+    url: String,
+    headers: Option<BTreeMap<String, String>>,
+) -> Result<ProxyRequestDiagnosis, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        let workspace = active_proxy_workspace()?;
+        let config = filter_proxy_config_for_workspace(
+            load_proxy_config(&path).map_err(|error| error.to_string())?,
+            &workspace,
+        );
+        let selected_profile = select_proxy_profile_for_request_diagnosis(&config, profile)?;
+        core_diagnose_proxy_request(
+            &config,
+            &selected_profile.id,
+            &method,
+            &url,
+            &headers.unwrap_or_default(),
+        )
+        .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1412,6 +1881,27 @@ async fn import_proxy_profile_pack(
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+async fn bind_proxy_runtime_profile_config(
+    state: tauri::State<'_, AppState>,
+    request: BindProxyRuntimeRequest,
+) -> Result<BindProxyRuntimeResult, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let mut config = config_state.load()?;
+        let proxy_path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+        let result = bind_proxy_runtime_profile(&mut config, &proxy_config, request)
+            .map_err(|error| error.to_string())?;
+        save_config(&paths.projects, &config).map_err(|error| error.to_string())?;
+        config_state.invalidate()?;
+        Ok(result)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn optional_editor_string(value: Option<String>) -> Option<String> {
     value.and_then(|item| {
         let trimmed = item.trim().to_string();
@@ -1425,6 +1915,29 @@ fn optional_editor_string(value: Option<String>) -> Option<String> {
 
 fn optional_editor_path(value: Option<String>) -> Option<PathBuf> {
     optional_editor_string(value).map(PathBuf::from)
+}
+
+fn normalize_focus_auto_open_mode(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "started" | "start" | "immediate" => "started".to_string(),
+        "manual" | "off" | "none" => "manual".to_string(),
+        _ => "ready".to_string(),
+    }
+}
+
+fn normalize_multiline_config_list(value: &str, fallback: Vec<String>) -> Vec<String> {
+    let items = value
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect::<Vec<_>>();
+    if items.is_empty() { fallback } else { items }
 }
 
 fn command_to_editor(command: &Option<ProjectCommandConfig>) -> ProjectCommandEditor {
@@ -2152,6 +2665,13 @@ fn project_to_editor(project: &rdevtool_core::config::ProjectConfig) -> ProjectC
             url: project.focus.url.clone(),
             bundle_id: project.focus.bundle_id.clone(),
             auto_on_start: project.focus.auto_on_start,
+            auto_open_mode: project.focus.auto_open_mode.clone(),
+            after_ready_actions_text: project.focus.after_ready_actions.join("\n"),
+            ready_enabled: project.focus.ready.enabled,
+            ready_timeout_ms: project.focus.ready.timeout_ms,
+            ready_url_patterns_text: project.focus.ready.url_patterns.join("\n"),
+            ready_success_markers_text: project.focus.ready.success_markers.join("\n"),
+            ready_failure_markers_text: project.focus.ready.failure_markers.join("\n"),
         },
         branch_rules: BranchRulesEditor {
             source_keywords: project.branch_rules.source_keywords.clone(),
@@ -2327,6 +2847,27 @@ async fn save_project_config_basics(
             url: optional_editor_string(request.focus.url),
             bundle_id: optional_editor_string(request.focus.bundle_id),
             auto_on_start: request.focus.auto_on_start,
+            auto_open_mode: normalize_focus_auto_open_mode(&request.focus.auto_open_mode),
+            after_ready_actions: normalize_multiline_config_list(
+                &request.focus.after_ready_actions_text,
+                Vec::new(),
+            ),
+            ready: ProjectReadyConfig {
+                enabled: request.focus.ready_enabled,
+                timeout_ms: request.focus.ready_timeout_ms.clamp(1_000, 600_000),
+                url_patterns: normalize_multiline_config_list(
+                    &request.focus.ready_url_patterns_text,
+                    ProjectReadyConfig::default().url_patterns,
+                ),
+                success_markers: normalize_multiline_config_list(
+                    &request.focus.ready_success_markers_text,
+                    ProjectReadyConfig::default().success_markers,
+                ),
+                failure_markers: normalize_multiline_config_list(
+                    &request.focus.ready_failure_markers_text,
+                    ProjectReadyConfig::default().failure_markers,
+                ),
+            },
         };
         project.branch_rules = BranchRules {
             source_keywords: normalize_keyword_list(request.branch_rules.source_keywords),
@@ -2534,9 +3075,7 @@ async fn list_projects(state: tauri::State<'_, AppState>) -> Result<Vec<ProjectS
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
-        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-        let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
-        let config = apply_project_workspace_filter(&config, &workspace);
+        let config = apply_active_workspace_context(&config)?;
         Ok(project_summaries(&config))
     })
     .await
@@ -2551,6 +3090,7 @@ async fn get_project_detail(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         project_detail(&config, &project).map_err(|error| error.to_string())
     })
     .await
@@ -2565,6 +3105,7 @@ async fn get_project_branches(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         available_branch_options(&config, &project).map_err(|error| error.to_string())
     })
     .await
@@ -2579,6 +3120,7 @@ async fn get_default_branch(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         branch_hint(&config, &project).map_err(|error| error.to_string())
     })
     .await
@@ -2595,6 +3137,7 @@ async fn get_branch_commit_overview(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         branch_commit_overview(&config, &project, &source_branch, &target_branch)
             .map_err(|error| error.to_string())
     })
@@ -2611,6 +3154,7 @@ async fn get_deploy_target_meta(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         deploy_target_meta(&config, &project, target.as_deref()).map_err(|error| error.to_string())
     })
     .await
@@ -2634,6 +3178,7 @@ async fn build_deploy_plan(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         build_plan(&config, &request).map_err(|error| error.to_string())
     })
     .await
@@ -2657,6 +3202,7 @@ async fn trigger_build(
     let runtime = state.project_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         trigger_build_for_desktop(&runtime, &config, request)
     })
     .await
@@ -2672,6 +3218,7 @@ async fn refresh_build_status(
     let runtime = state.project_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         if let Some(project) = request.project.as_deref().filter(|value| !value.is_empty()) {
             return refresh_runtime_build_status(&runtime, &config, project);
         }
@@ -2825,6 +3372,7 @@ async fn execute_branch_merge(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         execute_merge(&config, &request).map_err(|error| error.to_string())
     })
     .await
@@ -2839,6 +3387,7 @@ async fn execute_branch_sync_task(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         execute_branch_sync(&config, &request).map_err(|error| error.to_string())
     })
     .await
@@ -2853,6 +3402,7 @@ async fn execute_branch_create_task(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         execute_branch_create(&config, &request).map_err(|error| error.to_string())
     })
     .await
@@ -2866,8 +3416,185 @@ async fn checkout_branch_to_directory_task(
 ) -> Result<BranchTaskResponse, String> {
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
         let config = config_state.load()?;
-        checkout_branch_to_directory(&config, &request).map_err(|error| error.to_string())
+        let config = apply_project_workspace_context(&config, &workspace);
+        let result =
+            checkout_branch_to_directory(&config, &request).map_err(|error| error.to_string())?;
+        if !workspace.is_system() && result.success {
+            if let Some(output_path) = result
+                .items
+                .iter()
+                .find(|item| item.success)
+                .and_then(|item| item.output_path.as_deref())
+                .filter(|value| !value.trim().is_empty())
+            {
+                set_project_workspace_instance(
+                    &paths,
+                    &workspace.key,
+                    &request.project,
+                    PathBuf::from(output_path),
+                    true,
+                )
+                .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(result)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn create_project_workspace_project_copy(
+    state: tauri::State<'_, AppState>,
+    workspace_key: Option<String>,
+    project: String,
+) -> Result<ProjectWorkspaceEditorState, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let workspace = load_project_workspace_for_editor(&paths, workspace_key)?;
+        if workspace.is_system() {
+            return Err("全局工作区不能创建项目副本".to_string());
+        }
+        let root_dir = workspace
+            .root_dir
+            .clone()
+            .ok_or_else(|| "当前工作区未配置工作区目录".to_string())?;
+        let project_key = project.trim().to_string();
+        if project_key.is_empty() {
+            return Err("项目不能为空".to_string());
+        }
+        if workspace.project_instance_path(&project_key).is_some() {
+            return Err("当前项目已经绑定了工作区目录".to_string());
+        }
+
+        let config = config_state.load()?;
+        let project_config = config
+            .find_project(&project_key)
+            .map_err(|error| error.to_string())?;
+        let repo_path = project_config
+            .repo_path
+            .as_ref()
+            .ok_or_else(|| "项目未配置默认目录，无法创建工作区副本".to_string())?;
+        let branch = git::current_branch(repo_path)
+            .map_err(|error| format!("无法读取项目当前分支: {error}"))?;
+        if branch.trim().is_empty() {
+            return Err("项目当前分支为空，无法创建工作区副本".to_string());
+        }
+
+        let destination = root_dir.join("projects").join(&project_key);
+        let request = BranchCheckoutRequest {
+            project: project_key.clone(),
+            source_branch: branch,
+            destination_dir: destination.display().to_string(),
+        };
+        let result =
+            checkout_branch_to_directory(&config, &request).map_err(|error| error.to_string())?;
+        if !result.success {
+            let detail = result
+                .items
+                .iter()
+                .find_map(|item| {
+                    (!item.success).then(|| {
+                        let detail = item.detail.trim();
+                        if detail.is_empty() {
+                            item.summary.clone()
+                        } else {
+                            detail.to_string()
+                        }
+                    })
+                })
+                .unwrap_or_else(|| "创建工作区副本失败".to_string());
+            return Err(detail);
+        }
+        set_project_workspace_instance(&paths, &workspace.key, &project_key, destination, true)
+            .map_err(|error| error.to_string())?;
+        let config = config_state.load()?;
+        project_workspace_editor_state(&config, Some(workspace.key))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn bind_project_workspace_project_directory(
+    state: tauri::State<'_, AppState>,
+    workspace_key: Option<String>,
+    project: String,
+    path: String,
+) -> Result<ProjectWorkspaceEditorState, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let workspace = load_project_workspace_for_editor(&paths, workspace_key)?;
+        if workspace.is_system() {
+            return Err("全局工作区不能绑定项目目录".to_string());
+        }
+        let project_key = project.trim().to_string();
+        if project_key.is_empty() {
+            return Err("项目不能为空".to_string());
+        }
+        let path = PathBuf::from(path.trim());
+        if path.as_os_str().is_empty() {
+            return Err("目录不能为空".to_string());
+        }
+        let path = if path.is_absolute() {
+            path
+        } else if let Some(root_dir) = workspace.root_dir.as_ref() {
+            root_dir.join(path)
+        } else {
+            return Err("相对目录需要先配置工作区目录".to_string());
+        };
+        if !path.exists() {
+            return Err(format!("目录不存在: {}", path.display()));
+        }
+        if !path.is_dir() {
+            return Err(format!("目标不是目录: {}", path.display()));
+        }
+        let config = config_state.load()?;
+        config
+            .find_project(&project_key)
+            .map_err(|error| error.to_string())?;
+        set_project_workspace_instance(&paths, &workspace.key, &project_key, path, false)
+            .map_err(|error| error.to_string())?;
+        let config = config_state.load()?;
+        project_workspace_editor_state(&config, Some(workspace.key))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn unbind_project_workspace_project_directory(
+    state: tauri::State<'_, AppState>,
+    workspace_key: Option<String>,
+    project: String,
+) -> Result<ProjectWorkspaceEditorState, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let mut workspace = load_project_workspace_for_editor(&paths, workspace_key)?;
+        if workspace.is_system() {
+            return Err("全局工作区不能解绑项目目录".to_string());
+        }
+        let project_key = project.trim().to_string();
+        if project_key.is_empty() {
+            return Err("项目不能为空".to_string());
+        }
+        workspace
+            .project_instances
+            .retain(|instance| instance.project != project_key);
+        let workspace_key = workspace.key.clone();
+        let path = paths
+            .project_workspaces
+            .join(format!("{}.toml", workspace.key));
+        save_project_workspace_config(&path, &workspace.normalized())
+            .map_err(|error| error.to_string())?;
+        let config = config_state.load()?;
+        project_workspace_editor_state(&config, Some(workspace_key))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2881,6 +3608,7 @@ async fn execute_branch_switch_task(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         execute_branch_switch(&config, &request).map_err(|error| error.to_string())
     })
     .await
@@ -2894,8 +3622,27 @@ async fn list_project_worktrees(
 ) -> Result<Vec<BranchWorktreeSummary>, String> {
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
         let config = config_state.load()?;
-        project_worktrees(&config, &project).map_err(|error| error.to_string())
+        let config = apply_project_workspace_context(&config, &workspace);
+        let mut items = project_worktrees(&config, &project).map_err(|error| error.to_string())?;
+        if let Some(instance) = workspace
+            .project_instances
+            .iter()
+            .find(|instance| instance.project == project)
+        {
+            for item in &mut items {
+                if same_path(Path::new(&item.repo_path), &instance.path) {
+                    item.is_workspace_instance = true;
+                    item.managed = instance.managed;
+                    if item.label == "默认目录" {
+                        item.label = "工作区副本".to_string();
+                    }
+                }
+            }
+        }
+        Ok(items)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2910,6 +3657,7 @@ async fn get_project_push_status(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         branch_push_status(&config, &project, repo_path.as_deref())
             .map_err(|error| error.to_string())
     })
@@ -2925,6 +3673,7 @@ async fn execute_branch_push_task(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         execute_branch_push(&config, &request).map_err(|error| error.to_string())
     })
     .await
@@ -3197,6 +3946,67 @@ async fn get_tray_pinned_actions(
 }
 
 #[tauri::command]
+async fn get_workspace_pinned_actions_overview(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<WorkspacePinnedActionsOverview>, String> {
+    let storage = state.storage.clone();
+    let config_state = state.config_state.clone();
+    let proxy_runtime = state.proxy_runtime.clone();
+    let project_runtime = state.project_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        workspace_pinned_actions_overview(&config, &storage, &proxy_runtime, &project_runtime)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_workspace_ai_context(
+    state: tauri::State<'_, AppState>,
+    workspace_key: String,
+    options: Option<WorkspaceAiContextOptions>,
+) -> Result<WorkspaceAiContextResponse, String> {
+    let storage = state.storage.clone();
+    let config_state = state.config_state.clone();
+    let proxy_runtime = state.proxy_runtime.clone();
+    let project_runtime = state.project_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        workspace_ai_context_response(
+            &config,
+            &storage,
+            &proxy_runtime,
+            &project_runtime,
+            workspace_key,
+            options,
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn execute_tray_pinned_action(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    action: TrayReplayAction,
+) -> Result<(), String> {
+    let replay_guard = state.tray_replay_running.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if replay_guard.swap(true, Ordering::AcqRel) {
+            return Err("已有快捷动作正在执行".to_string());
+        }
+
+        let result = execute_tray_replay_action(&app, &action);
+        replay_guard.store(false, Ordering::Release);
+        result
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn set_tray_pinned_actions(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
@@ -3218,11 +4028,9 @@ async fn list_build_history(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<BuildHistoryEntry>, String> {
     let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        filter_build_history_by_active_workspace(&storage)
-    })
-    .await
-    .map_err(|error| error.to_string())?
+    tauri::async_runtime::spawn_blocking(move || filter_build_history_by_active_workspace(&storage))
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -3312,9 +4120,7 @@ async fn list_project_runtimes(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
-        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-        let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
-        let config = apply_project_workspace_filter(&config, &workspace);
+        let config = apply_active_workspace_context(&config)?;
         runtime.list(&config)
     })
     .await
@@ -3330,7 +4136,52 @@ async fn list_selected_project_runtimes(
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
         runtime.list_selected(&config, &projects)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn preflight_project_runtime(
+    state: tauri::State<'_, AppState>,
+    project: String,
+    debug_profile: Option<String>,
+) -> Result<ProjectRuntimePreflightResponse, String> {
+    let runtime = state.project_runtime.clone();
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
+        runtime.preflight(
+            &config,
+            &project,
+            optional_editor_string(debug_profile).as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn inspect_project_runtime(
+    state: tauri::State<'_, AppState>,
+    project: String,
+    debug_profile: Option<String>,
+) -> Result<core_runtime::ProjectRuntimeInspectResponse, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
+        let proxy_config =
+            load_proxy_config(&default_proxy_path()).map_err(|error| error.to_string())?;
+        core_runtime::inspect_project_runtime(
+            &config,
+            &proxy_config,
+            &project,
+            optional_editor_string(debug_profile).as_deref(),
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -3357,6 +4208,7 @@ async fn start_project_runtime(
             &proxy_runtime,
             runtime_profile_key.as_deref(),
         )?;
+        let config = apply_active_workspace_context(&config)?;
         let explicit_env_overrides = env_overrides.is_some();
         let env_overrides = normalize_runtime_env_overrides(env_overrides);
         let mut updated = runtime.start(
@@ -3432,7 +4284,14 @@ fn should_auto_focus_project(
         && snapshot.can_focus_runtime
         && config
             .find_project(project_key)
-            .map(|project| project.focus.auto_on_start)
+            .map(|project| {
+                project.focus.auto_on_start
+                    && project
+                        .focus
+                        .auto_open_mode
+                        .trim()
+                        .eq_ignore_ascii_case("started")
+            })
             .unwrap_or(false)
 }
 
@@ -3634,6 +4493,22 @@ async fn read_project_runtime_log(
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+async fn clear_project_runtime_log(
+    state: tauri::State<'_, AppState>,
+    project: String,
+    kind: ProjectRuntimeLogKind,
+) -> Result<ProjectRuntimeLogResponse, String> {
+    let runtime = state.project_runtime.clone();
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        runtime.clear_log(&config, &project, kind)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn open_path(path: PathBuf) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = {
@@ -3793,7 +4668,7 @@ fn tray_pinned_actions(storage: &Storage) -> Vec<TrayReplayAction> {
         .unwrap_or_default()
         .into_iter()
         .filter(valid_tray_action)
-        .take(TRAY_PINNED_LIMIT)
+        .take(TRAY_PINNED_STORAGE_LIMIT)
         .collect()
 }
 
@@ -3857,7 +4732,10 @@ fn build_history_matches_pinned_action(
 
 fn branch_history_items(storage: &Storage) -> Vec<serde_json::Value> {
     storage
-        .get_json(BRANCH_WORKFLOW_STORAGE_NAMESPACE, BRANCH_WORKFLOW_HISTORY_KEY)
+        .get_json(
+            BRANCH_WORKFLOW_STORAGE_NAMESPACE,
+            BRANCH_WORKFLOW_HISTORY_KEY,
+        )
         .ok()
         .flatten()
         .and_then(|value| value.as_array().cloned())
@@ -3905,8 +4783,7 @@ fn branch_history_matches_pinned_action(
                 .get("replay")
                 .and_then(|value| value.as_object())
                 .is_some_and(|replay| {
-                    replay.get("command") == Some(command)
-                        && replay.get("request") == Some(request)
+                    replay.get("command") == Some(command) && replay.get("request") == Some(request)
                 })
     })
 }
@@ -3920,7 +4797,10 @@ fn tray_pinned_actions_for_menu(storage: &Storage) -> Vec<TrayReplayAction> {
     let project_filter = match active_workspace_project_filter() {
         Ok(value) => value,
         Err(error) => {
-            eprintln!("failed to filter tray pinned actions by workspace: {}", error);
+            eprintln!(
+                "failed to filter tray pinned actions by workspace: {}",
+                error
+            );
             None
         }
     };
@@ -3940,18 +4820,938 @@ fn tray_pinned_actions_for_menu(storage: &Storage) -> Vec<TrayReplayAction> {
                 "build.replay" | "deploy.replay" => {
                     build_history_matches_pinned_action(action, &build_history)
                 }
-                "branch.replay" => {
-                    branch_history_matches_pinned_action(
-                        action,
-                        &branch_history,
-                        project_filter.as_ref(),
-                    )
-                }
+                "branch.replay" => branch_history_matches_pinned_action(
+                    action,
+                    &branch_history,
+                    project_filter.as_ref(),
+                ),
                 _ => true,
             }
         })
-        .take(TRAY_PINNED_LIMIT)
+        .take(TRAY_PINNED_MENU_LIMIT)
         .collect()
+}
+
+fn tray_action_kind_label(kind: &str) -> String {
+    match kind {
+        "build.replay" | "deploy.replay" => "构建".to_string(),
+        "branch.replay" => "分支".to_string(),
+        "finder.shortcut.open" => "入口".to_string(),
+        "project.runtime.start" => "启动".to_string(),
+        "project.runtime.focus" => "聚焦".to_string(),
+        "project.build.run" => "构建".to_string(),
+        "project.build.openOutput" | "project.openDirectory" => "打开".to_string(),
+        _ => "动作".to_string(),
+    }
+}
+
+fn tray_action_confirm_required(kind: &str) -> bool {
+    matches!(
+        kind,
+        "build.replay"
+            | "deploy.replay"
+            | "branch.replay"
+            | "project.runtime.start"
+            | "project.build.run"
+    )
+}
+
+fn branch_action_project_keys(action: &TrayReplayAction) -> BTreeSet<String> {
+    let Some(serde_json::Value::Object(payload)) = action.payload.as_ref() else {
+        return BTreeSet::new();
+    };
+    let Some(serde_json::Value::Object(request)) = payload.get("request") else {
+        return BTreeSet::new();
+    };
+
+    let mut keys = BTreeSet::new();
+    if let Some(project) = request
+        .get("project")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        keys.insert(project.to_string());
+    }
+    if let Some(projects) = request.get("projects").and_then(|value| value.as_array()) {
+        for project in projects {
+            if let Some(project) = project
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                keys.insert(project.to_string());
+            }
+        }
+    }
+    keys
+}
+
+fn tray_action_project_keys(action: &TrayReplayAction) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+    if let Some(project_key) = action
+        .project_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        keys.insert(project_key.to_string());
+    }
+
+    if let Some(serde_json::Value::Object(payload)) = action.payload.as_ref() {
+        if let Some(project_key) = payload
+            .get("project")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            keys.insert(project_key.to_string());
+        }
+    }
+
+    if action.kind == "branch.replay" {
+        keys.extend(branch_action_project_keys(action));
+    }
+
+    keys
+}
+
+fn same_navigation_entry(left: &NavigationEntry, right: &NavigationEntry) -> bool {
+    left.kind == right.kind && left.name == right.name && left.target_label == right.target_label
+}
+
+fn workspace_allows_navigation_action(
+    workspace: &ProjectWorkspaceConfig,
+    action: &TrayReplayAction,
+) -> bool {
+    let Some(entry) = action.entry.as_ref() else {
+        return false;
+    };
+    if workspace.include_all_navigation {
+        return true;
+    }
+
+    load_navigation_data_for_workspace(workspace)
+        .ok()
+        .is_some_and(|data| {
+            data.categories.into_iter().any(|category| {
+                category
+                    .entries
+                    .into_iter()
+                    .any(|candidate| same_navigation_entry(&candidate, entry))
+            })
+        })
+}
+
+fn workspace_entry_count(workspace: &ProjectWorkspaceConfig) -> usize {
+    load_navigation_data_for_workspace(workspace)
+        .ok()
+        .map(|data| {
+            data.categories
+                .into_iter()
+                .map(|category| category.entries.len())
+                .sum()
+        })
+        .unwrap_or_default()
+}
+
+fn workspace_display_name(workspace: &ProjectWorkspaceConfig) -> String {
+    if workspace.is_system() {
+        "全局".to_string()
+    } else {
+        workspace.name.clone()
+    }
+}
+
+fn workspace_kind_label(workspace: &ProjectWorkspaceConfig) -> String {
+    if workspace.is_system() {
+        "global".to_string()
+    } else if workspace.root_dir.is_some() {
+        "directory".to_string()
+    } else {
+        "scope".to_string()
+    }
+}
+
+fn workspace_type_label(workspace: &ProjectWorkspaceConfig) -> String {
+    match workspace.workspace_type.as_str() {
+        "system" => "全局".to_string(),
+        "business" => "业务".to_string(),
+        "dev" => "研发".to_string(),
+        "tool" => "工具".to_string(),
+        "personal" => "个人".to_string(),
+        "other" => "其他".to_string(),
+        "custom" | "" => "未分类".to_string(),
+        value => value.to_string(),
+    }
+}
+
+fn workspace_resource_kind_label(kind: &str) -> String {
+    match kind {
+        "url" => "网站",
+        "directory" => "目录",
+        "app" => "应用",
+        "script" => "脚本",
+        _ => "入口",
+    }
+    .to_string()
+}
+
+fn navigation_entry_shortcut_kind(entry: &NavigationEntry) -> String {
+    match entry.kind.trim().to_ascii_lowercase().as_str() {
+        "dir" | "folder" => "directory".to_string(),
+        "" => "url".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn navigation_entry_shortcut_open_target(
+    entry: &NavigationEntry,
+) -> (Option<String>, Option<String>) {
+    match navigation_entry_shortcut_kind(entry).as_str() {
+        "url" => {
+            let value = entry
+                .url
+                .as_deref()
+                .unwrap_or(entry.target_label.as_str())
+                .trim();
+            if value.is_empty() {
+                (None, None)
+            } else {
+                (Some("url".to_string()), Some(value.to_string()))
+            }
+        }
+        "directory" => {
+            let value = entry
+                .path
+                .as_deref()
+                .unwrap_or(entry.target_label.as_str())
+                .trim();
+            if value.is_empty() {
+                (None, None)
+            } else {
+                (Some("localPath".to_string()), Some(value.to_string()))
+            }
+        }
+        _ => (None, None),
+    }
+}
+
+fn workspace_resource_shortcuts(
+    workspace: &ProjectWorkspaceConfig,
+) -> Vec<WorkspaceResourceShortcutItem> {
+    let workspace_key = workspace.key.clone();
+    load_navigation_data_for_workspace(workspace)
+        .ok()
+        .map(|data| {
+            data.categories
+                .into_iter()
+                .flat_map(|category| {
+                    let category_title = category.title;
+                    let workspace_key = workspace_key.clone();
+                    category
+                        .entries
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(index, entry)| {
+                            let kind = navigation_entry_shortcut_kind(&entry);
+                            let (open_kind, value) = navigation_entry_shortcut_open_target(&entry);
+                            let label = entry.name.trim();
+                            let label = if label.is_empty() {
+                                entry.target_label.trim()
+                            } else {
+                                label
+                            }
+                            .to_string();
+                            let openable = open_kind.is_some() && value.is_some();
+                            WorkspaceResourceShortcutItem {
+                                key: format!("{}:{}:{}", workspace_key, category_title, index),
+                                category: category_title.clone(),
+                                label,
+                                kind_label: workspace_resource_kind_label(&kind),
+                                kind,
+                                value,
+                                open_kind,
+                                openable,
+                            }
+                        })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn workspace_project_directory_items(
+    config: &AppConfig,
+    workspace: &ProjectWorkspaceConfig,
+    runtime_statuses: &BTreeMap<String, ProjectRuntimeSnapshot>,
+) -> Vec<WorkspaceProjectDirectoryItem> {
+    let project_keys = if workspace.include_all_projects {
+        config
+            .projects
+            .iter()
+            .map(|project| project.key.clone())
+            .collect::<Vec<_>>()
+    } else {
+        workspace.projects.clone()
+    };
+
+    project_keys
+        .into_iter()
+        .filter_map(|project_key| {
+            let project = config
+                .projects
+                .iter()
+                .find(|item| item.key == project_key)?;
+            let instance = workspace
+                .project_instances
+                .iter()
+                .find(|item| item.project == project.key);
+            let (mode, mode_label, path, managed) = if let Some(instance) = instance {
+                (
+                    if instance.managed { "managed" } else { "bound" },
+                    if instance.managed {
+                        "工作区副本"
+                    } else {
+                        "绑定目录"
+                    },
+                    Some(instance.path.display().to_string()),
+                    instance.managed,
+                )
+            } else {
+                (
+                    "global",
+                    "全局目录",
+                    project
+                        .repo_path
+                        .as_ref()
+                        .map(|path| path.display().to_string()),
+                    false,
+                )
+            };
+            let runtime_status = runtime_statuses.get(&project.key);
+
+            Some(WorkspaceProjectDirectoryItem {
+                project_key: project.key.clone(),
+                project_name: project.name.clone(),
+                mode: mode.to_string(),
+                mode_label: mode_label.to_string(),
+                path,
+                managed,
+                status_key: runtime_status
+                    .map(|snapshot| snapshot.status_key.clone())
+                    .unwrap_or_else(|| "unknown".to_string()),
+                status_label: runtime_status
+                    .map(|snapshot| snapshot.status_label.clone())
+                    .unwrap_or_else(|| "未知".to_string()),
+                running: runtime_status
+                    .map(|snapshot| snapshot.status_key == "running")
+                    .unwrap_or(false),
+                can_start: runtime_status
+                    .map(|snapshot| snapshot.can_start)
+                    .unwrap_or(false),
+                can_stop: runtime_status
+                    .map(|snapshot| snapshot.can_stop)
+                    .unwrap_or(false),
+            })
+        })
+        .collect()
+}
+
+fn workspace_matches_action(
+    workspace: &ProjectWorkspaceConfig,
+    action: &TrayReplayAction,
+    project_keys: &BTreeSet<String>,
+) -> bool {
+    if !project_keys.is_empty()
+        && project_keys
+            .iter()
+            .any(|project_key| workspace.allows_project(project_key))
+    {
+        return true;
+    }
+    workspace_allows_navigation_action(workspace, action)
+}
+
+fn tray_action_available(
+    action: &TrayReplayAction,
+    build_history: &[BuildHistoryEntry],
+    branch_history: &[serde_json::Value],
+) -> bool {
+    match action.kind.as_str() {
+        "build.replay" | "deploy.replay" => {
+            build_history_matches_pinned_action(action, build_history)
+        }
+        "branch.replay" => branch_history_matches_pinned_action(action, branch_history, None),
+        _ => true,
+    }
+}
+
+fn workspace_pinned_action_item(action: TrayReplayAction) -> WorkspacePinnedActionItem {
+    let project_key = tray_action_project_keys(&action).into_iter().next();
+    WorkspacePinnedActionItem {
+        kind_label: tray_action_kind_label(&action.kind),
+        label: action.label.clone(),
+        detail: action.detail.clone(),
+        project_key,
+        confirm_required: tray_action_confirm_required(&action.kind),
+        updated_at_ms: action.updated_at_ms,
+        action,
+    }
+}
+
+fn proxy_rule_counts_by_profile(dashboard: &ProxyDashboard) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for rule in &dashboard.config.rules {
+        *counts.entry(rule.profile_id.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn proxy_status_by_profile(
+    dashboard: &ProxyDashboard,
+) -> BTreeMap<String, (bool, String, Option<String>)> {
+    dashboard
+        .statuses
+        .iter()
+        .map(|status| {
+            (
+                status.profile_id.clone(),
+                (
+                    status.running,
+                    status.listen_url.clone(),
+                    status.started_at.clone(),
+                ),
+            )
+        })
+        .collect()
+}
+
+fn workspace_proxy_profile_items(
+    dashboard: &ProxyDashboard,
+    workspace: &ProjectWorkspaceConfig,
+    workspace_names: &BTreeMap<String, String>,
+    rule_counts: &BTreeMap<String, usize>,
+    statuses: &BTreeMap<String, (bool, String, Option<String>)>,
+) -> Vec<WorkspaceProxyProfileItem> {
+    dashboard
+        .config
+        .profiles
+        .iter()
+        .filter(|profile| {
+            workspace.is_system()
+                || profile.workspace_key.as_deref() == Some(workspace.key.as_str())
+        })
+        .map(|profile| {
+            let (running, listen_url, started_at) = statuses
+                .get(&profile.id)
+                .cloned()
+                .unwrap_or_else(|| (false, profile.listen_url(), None));
+            let workspace_label = profile
+                .workspace_key
+                .as_ref()
+                .and_then(|key| workspace_names.get(key))
+                .cloned()
+                .unwrap_or_else(|| {
+                    profile
+                        .workspace_key
+                        .clone()
+                        .unwrap_or_else(|| "未归属".to_string())
+                });
+            WorkspaceProxyProfileItem {
+                id: profile.id.clone(),
+                name: profile.name.clone(),
+                listen_host: profile.listen_host.clone(),
+                listen_port: profile.listen_port,
+                listen_url,
+                workspace_key: profile.workspace_key.clone(),
+                workspace_label,
+                rule_count: *rule_counts.get(&profile.id).unwrap_or(&0),
+                running,
+                started_at,
+            }
+        })
+        .collect()
+}
+
+fn workspace_pinned_actions_overview(
+    config: &AppConfig,
+    storage: &Storage,
+    proxy_runtime: &ProxyRuntimeState,
+    project_runtime: &ProjectRuntimeState,
+) -> Result<Vec<WorkspacePinnedActionsOverview>, String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspaces =
+        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
+    let actions = tray_pinned_actions(storage);
+    let proxy_path = ensure_proxy_config().map_err(|error| error.to_string())?;
+    let proxy_dashboard = proxy_runtime
+        .dashboard(&proxy_path)
+        .map_err(|error| error.to_string())?;
+    let proxy_rule_counts = proxy_rule_counts_by_profile(&proxy_dashboard);
+    let proxy_statuses = proxy_status_by_profile(&proxy_dashboard);
+    let project_runtime_statuses = project_runtime
+        .list(config)?
+        .into_iter()
+        .map(|snapshot| (snapshot.key.clone(), snapshot))
+        .collect::<BTreeMap<_, _>>();
+    let workspace_names = workspaces
+        .iter()
+        .map(|workspace| (workspace.key.clone(), workspace_display_name(workspace)))
+        .collect::<BTreeMap<_, _>>();
+
+    let build_history = storage.list_all_deploy_history()?;
+    let branch_history = branch_history_items(storage);
+    let mut grouped = workspaces
+        .iter()
+        .map(|workspace| (workspace.key.clone(), Vec::<TrayReplayAction>::new()))
+        .collect::<BTreeMap<_, _>>();
+
+    for action in actions {
+        if !tray_action_available(&action, &build_history, &branch_history) {
+            continue;
+        }
+
+        let project_keys = tray_action_project_keys(&action);
+        let matched_workspace_keys = workspaces
+            .iter()
+            .filter(|workspace| !workspace.is_system())
+            .filter(|workspace| workspace_matches_action(workspace, &action, &project_keys))
+            .map(|workspace| workspace.key.clone())
+            .collect::<Vec<_>>();
+        let target_key = if matched_workspace_keys.len() == 1 {
+            matched_workspace_keys[0].clone()
+        } else {
+            SYSTEM_PROJECT_WORKSPACE_KEY.to_string()
+        };
+
+        grouped.entry(target_key).or_default().push(action);
+    }
+
+    let overview = workspaces
+        .into_iter()
+        .map(|workspace| {
+            let actions = grouped.remove(&workspace.key).unwrap_or_default();
+            let project_count = workspace.project_count_for(config);
+            let entry_count = workspace_entry_count(&workspace);
+            let resources = workspace_resource_shortcuts(&workspace);
+            let project_directories =
+                workspace_project_directory_items(config, &workspace, &project_runtime_statuses);
+            let proxy_profiles = workspace_proxy_profile_items(
+                &proxy_dashboard,
+                &workspace,
+                &workspace_names,
+                &proxy_rule_counts,
+                &proxy_statuses,
+            );
+            let items = actions
+                .into_iter()
+                .map(workspace_pinned_action_item)
+                .collect::<Vec<_>>();
+            WorkspacePinnedActionsOverview {
+                key: workspace.key.clone(),
+                name: workspace_display_name(&workspace),
+                description: workspace.description.clone(),
+                system: workspace.is_system(),
+                root_dir: workspace
+                    .root_dir
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                workspace_kind: workspace_kind_label(&workspace),
+                workspace_type: workspace.workspace_type.clone(),
+                workspace_type_label: workspace_type_label(&workspace),
+                project_count,
+                entry_count,
+                action_count: items.len(),
+                proxy_profile_count: proxy_profiles.len(),
+                resources,
+                project_directories,
+                proxy_profiles,
+                actions: items,
+            }
+        })
+        .collect();
+
+    Ok(overview)
+}
+
+fn workspace_ai_context_response(
+    config: &AppConfig,
+    storage: &Storage,
+    proxy_runtime: &ProxyRuntimeState,
+    project_runtime: &ProjectRuntimeState,
+    workspace_key: String,
+    options: Option<WorkspaceAiContextOptions>,
+) -> Result<WorkspaceAiContextResponse, String> {
+    let options = normalize_workspace_ai_context_options(options);
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspace_key = workspace_key.trim();
+    let workspace_key = if workspace_key.is_empty() {
+        SYSTEM_PROJECT_WORKSPACE_KEY
+    } else {
+        workspace_key
+    };
+    let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)
+        .map_err(|error| error.to_string())?;
+    let overview =
+        workspace_pinned_actions_overview(config, storage, proxy_runtime, project_runtime)?
+            .into_iter()
+            .find(|item| item.key == workspace.key)
+            .ok_or_else(|| format!("工作区不存在: {}", workspace.key))?;
+    let context_limit = options.item_limit.max(options.history_limit);
+    let context =
+        context_for_workspace(config, storage, Some(&workspace), None, None, context_limit)
+            .map_err(|error| error.to_string())?;
+    let markdown = workspace_ai_context_markdown(&context, &overview, &options);
+    let workspace_name = overview.name.clone();
+    let workspace_key = overview.key.clone();
+    let (json_context, json_overview) =
+        filtered_workspace_ai_context_payload(context.clone(), overview.clone(), &options);
+    let json = json!({
+        "options": options,
+        "context": json_context,
+        "overview": json_overview,
+    });
+
+    Ok(WorkspaceAiContextResponse {
+        workspace_key,
+        workspace_name,
+        markdown,
+        json,
+    })
+}
+
+fn normalize_workspace_ai_context_options(
+    options: Option<WorkspaceAiContextOptions>,
+) -> WorkspaceAiContextOptions {
+    let mut options = options.unwrap_or_default();
+    options.item_limit = normalize_ai_context_limit(options.item_limit, default_item_limit());
+    options.history_limit =
+        normalize_ai_context_limit(options.history_limit, default_history_limit());
+    options
+}
+
+fn normalize_ai_context_limit(value: usize, fallback: usize) -> usize {
+    if value == 0 { fallback } else { value.min(20) }
+}
+
+fn truncate_to<T>(values: &mut Vec<T>, limit: usize) {
+    if values.len() > limit {
+        values.truncate(limit);
+    }
+}
+
+fn filtered_workspace_ai_context_payload(
+    mut context: AgentContext,
+    mut overview: WorkspacePinnedActionsOverview,
+    options: &WorkspaceAiContextOptions,
+) -> (AgentContext, WorkspacePinnedActionsOverview) {
+    if options.include_projects {
+        truncate_to(&mut context.projects, options.item_limit);
+    } else {
+        context.projects.clear();
+    }
+
+    if options.include_entries {
+        truncate_to(&mut overview.resources, options.item_limit);
+        truncate_to(&mut context.navigation, options.item_limit);
+    } else {
+        overview.resources.clear();
+        context.navigation.clear();
+    }
+
+    if options.include_directories {
+        truncate_to(&mut overview.project_directories, options.item_limit);
+    } else {
+        overview.project_directories.clear();
+    }
+    truncate_to(&mut overview.proxy_profiles, options.item_limit);
+
+    if options.include_actions {
+        truncate_to(&mut overview.actions, options.item_limit);
+    } else {
+        overview.actions.clear();
+    }
+
+    if options.include_build_history {
+        truncate_to(&mut context.build_history, options.history_limit);
+        truncate_to(&mut context.deploy_history, options.history_limit);
+    } else {
+        context.build_history.clear();
+        context.deploy_history.clear();
+    }
+
+    if options.include_merge_history {
+        truncate_to(&mut context.merge_history, options.history_limit);
+    } else {
+        context.merge_history.clear();
+    }
+    context
+        .replay_actions
+        .retain(|action| match action.kind.as_str() {
+            "build" => options.include_build_history,
+            "merge" => options.include_merge_history,
+            _ => options.include_actions,
+        });
+    truncate_to(&mut context.replay_actions, options.history_limit);
+
+    truncate_to(&mut context.notes, options.item_limit);
+    (context, overview)
+}
+
+fn workspace_ai_context_markdown(
+    context: &AgentContext,
+    overview: &WorkspacePinnedActionsOverview,
+    options: &WorkspaceAiContextOptions,
+) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("# rDevTool 工作区上下文：{}", overview.name));
+    lines.push(String::new());
+    lines.push("## 工作区".to_string());
+    lines.push(format!("- Key: `{}`", overview.key));
+    lines.push(format!("- 类型: {}", overview.workspace_kind));
+    if let Some(description) = overview
+        .description
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("- 说明: {}", description));
+    }
+    if let Some(root_dir) = overview
+        .root_dir
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(format!("- 工作区目录: `{}`", root_dir));
+    }
+    lines.push(format!("- 项目数: {}", overview.project_count));
+    lines.push(format!("- 入口数: {}", overview.entry_count));
+    lines.push(format!("- 代理服务数: {}", overview.proxy_profile_count));
+    lines.push(format!("- 动作数: {}", overview.action_count));
+    lines.push(format!(
+        "- 包含范围: {}",
+        workspace_ai_context_scope_labels(options).join(" / ")
+    ));
+    lines.push("- 安全约定: 这份上下文不包含 token、密码或私密环境变量值。".to_string());
+
+    if options.include_projects {
+        lines.push(String::new());
+        lines.push("## 项目".to_string());
+        if context.projects.is_empty() {
+            lines.push("- 暂无项目".to_string());
+        } else {
+            for project in context.projects.iter().take(options.item_limit) {
+                let path = overview
+                    .project_directories
+                    .iter()
+                    .find(|directory| directory.project_key == project.key)
+                    .and_then(|directory| directory.path.as_deref())
+                    .or(project.repo_path.as_deref())
+                    .unwrap_or("未配置目录");
+                let mut meta = Vec::new();
+                if project.supports_branch {
+                    meta.push("Git工作流");
+                }
+                if project.supports_deploy {
+                    meta.push("构建/部署");
+                }
+                let meta = if meta.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · {}", meta.join(" / "))
+                };
+                lines.push(format!(
+                    "- {} (`{}`) · {}{} · `{}`",
+                    project.name, project.key, project.category, meta, path
+                ));
+            }
+            if context.projects.len() > options.item_limit {
+                lines.push(format!(
+                    "- ……另有 {} 个项目",
+                    context.projects.len() - options.item_limit
+                ));
+            }
+        }
+    }
+
+    if options.include_entries {
+        lines.push(String::new());
+        lines.push("## 入口".to_string());
+        if overview.resources.is_empty() {
+            lines.push("- 暂无工作区入口".to_string());
+        } else {
+            for resource in overview.resources.iter().take(options.item_limit) {
+                let value = resource.value.as_deref().unwrap_or("未配置目标");
+                lines.push(format!(
+                    "- {} · {} · `{}`",
+                    resource.label, resource.kind_label, value
+                ));
+            }
+            if overview.resources.len() > options.item_limit {
+                lines.push(format!(
+                    "- ……另有 {} 个入口",
+                    overview.resources.len() - options.item_limit
+                ));
+            }
+        }
+    }
+
+    if options.include_directories {
+        lines.push(String::new());
+        lines.push("## 项目目录".to_string());
+        if overview.project_directories.is_empty() {
+            lines.push("- 暂无项目目录映射".to_string());
+        } else {
+            for directory in overview.project_directories.iter().take(options.item_limit) {
+                let path = directory.path.as_deref().unwrap_or("未配置目录");
+                lines.push(format!(
+                    "- {} (`{}`) · {} · `{}`",
+                    directory.project_name, directory.project_key, directory.mode_label, path
+                ));
+            }
+            if overview.project_directories.len() > options.item_limit {
+                lines.push(format!(
+                    "- ……另有 {} 个项目目录",
+                    overview.project_directories.len() - options.item_limit
+                ));
+            }
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("## 代理服务".to_string());
+    if overview.proxy_profiles.is_empty() {
+        lines.push("- 暂无代理服务".to_string());
+    } else {
+        for profile in overview.proxy_profiles.iter().take(options.item_limit) {
+            let state = if profile.running {
+                "运行中"
+            } else {
+                "未启动"
+            };
+            lines.push(format!(
+                "- {} (`{}`) · {} · {} 条规则 · {}",
+                profile.name, profile.id, profile.listen_url, profile.rule_count, state
+            ));
+        }
+        if overview.proxy_profiles.len() > options.item_limit {
+            lines.push(format!(
+                "- ……另有 {} 个代理服务",
+                overview.proxy_profiles.len() - options.item_limit
+            ));
+        }
+    }
+
+    if options.include_actions {
+        lines.push(String::new());
+        lines.push("## 最近动作".to_string());
+        if overview.actions.is_empty() {
+            lines.push("- 暂无标记动作".to_string());
+        } else {
+            for action in overview.actions.iter().take(options.item_limit) {
+                let detail = action.detail.as_deref().unwrap_or("");
+                let project = action
+                    .project_key
+                    .as_deref()
+                    .map(|value| format!(" · `{}`", value))
+                    .unwrap_or_default();
+                if detail.is_empty() {
+                    lines.push(format!(
+                        "- {} · {}{}",
+                        action.kind_label, action.label, project
+                    ));
+                } else {
+                    lines.push(format!(
+                        "- {} · {}{} · {}",
+                        action.kind_label, action.label, project, detail
+                    ));
+                }
+            }
+        }
+    }
+
+    if options.include_build_history {
+        lines.push(String::new());
+        lines.push("## 最近构建/部署".to_string());
+        if context.build_history.is_empty() {
+            lines.push("- 暂无构建/部署记录".to_string());
+        } else {
+            for item in context.build_history.iter().take(options.history_limit) {
+                lines.push(format!(
+                    "- {} · {} · {} · {} · {}",
+                    item.project_name, item.mode, item.env, item.branch, item.state_label
+                ));
+            }
+        }
+    }
+
+    if options.include_merge_history {
+        lines.push(String::new());
+        lines.push("## 最近分支/合并".to_string());
+        if context.merge_history.is_empty() {
+            lines.push("- 暂无合并记录".to_string());
+        } else {
+            for item in context.merge_history.iter().take(options.history_limit) {
+                let status = if item.success { "成功" } else { "失败" };
+                lines.push(format!(
+                    "- {} · {} → {} · {} · {}",
+                    item.project_name, item.source_branch, item.target_branch, status, item.summary
+                ));
+            }
+        }
+    }
+
+    if options.include_build_history || options.include_merge_history {
+        lines.push(String::new());
+        lines.push("## 可回放动作".to_string());
+        if context.replay_actions.is_empty() {
+            lines.push("- 暂无可回放动作".to_string());
+        } else {
+            for action in context.replay_actions.iter().take(options.history_limit) {
+                lines.push(format!(
+                    "- `{}` · {} · 风险: {}",
+                    action.id, action.label, action.risk_level
+                ));
+                lines.push(format!("  - 预览: `{}`", action.preview_command.display));
+                lines.push(format!("  - 执行: `{}`", action.run_command.display));
+            }
+        }
+    }
+
+    lines.push(String::new());
+    lines.push("## 给 AI 的使用提示".to_string());
+    lines.push("- 优先围绕上述工作区、项目目录、入口、代理服务和最近动作回答。".to_string());
+    lines
+        .push("- 合并、部署、推送等高风险动作必须先执行预览命令，再经用户确认后执行。".to_string());
+    lines.push("- 需要执行命令或改代码前，先确认目标项目和目录。".to_string());
+    lines.push("- 不要假设未出现在上下文中的密钥、账号或环境变量值。".to_string());
+    lines.join("\n")
+}
+
+fn workspace_ai_context_scope_labels(options: &WorkspaceAiContextOptions) -> Vec<&'static str> {
+    let mut labels = Vec::new();
+    if options.include_projects {
+        labels.push("项目");
+    }
+    if options.include_entries {
+        labels.push("入口");
+    }
+    if options.include_directories {
+        labels.push("项目目录");
+    }
+    if options.include_actions {
+        labels.push("最近动作");
+    }
+    if options.include_build_history {
+        labels.push("构建/部署");
+    }
+    if options.include_merge_history {
+        labels.push("分支/合并");
+    }
+    if labels.is_empty() {
+        labels.push("基础信息");
+    }
+    labels
 }
 
 fn normalize_tray_pinned_actions(mut actions: Vec<TrayReplayAction>) -> Vec<TrayReplayAction> {
@@ -3970,7 +5770,7 @@ fn normalize_tray_pinned_actions(mut actions: Vec<TrayReplayAction>) -> Vec<Tray
             continue;
         }
         normalized.push(action);
-        if normalized.len() >= TRAY_PINNED_LIMIT {
+        if normalized.len() >= TRAY_PINNED_STORAGE_LIMIT {
             break;
         }
     }
@@ -4085,7 +5885,7 @@ fn create_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     } else {
         pinned_actions
             .iter()
-            .take(TRAY_PINNED_LIMIT)
+            .take(TRAY_PINNED_MENU_LIMIT)
             .enumerate()
             .map(|(index, action)| {
                 let (_, icon) = tray_action_menu_meta(action);
@@ -4585,9 +6385,11 @@ pub fn run() {
             get_project_workspaces,
             set_active_project_workspace,
             create_project_workspace_config,
+            init_demand_workspace_config,
             get_project_workspace_editor,
             save_project_workspace_editor,
             get_proxy_dashboard,
+            diagnose_proxy_request,
             save_proxy_profile,
             delete_proxy_profile,
             save_proxy_rule,
@@ -4597,6 +6399,7 @@ pub fn run() {
             clear_proxy_events,
             export_proxy_profile_pack,
             import_proxy_profile_pack,
+            bind_proxy_runtime_profile_config,
             get_project_config_editor,
             save_default_branch_rules,
             save_runtime_profiles,
@@ -4620,6 +6423,9 @@ pub fn run() {
             execute_branch_sync_task,
             execute_branch_create_task,
             checkout_branch_to_directory_task,
+            create_project_workspace_project_copy,
+            bind_project_workspace_project_directory,
+            unbind_project_workspace_project_directory,
             execute_branch_switch_task,
             list_project_worktrees,
             get_project_push_status,
@@ -4643,6 +6449,9 @@ pub fn run() {
             storage_set_json,
             storage_delete_json,
             get_tray_pinned_actions,
+            get_workspace_pinned_actions_overview,
+            get_workspace_ai_context,
+            execute_tray_pinned_action,
             set_tray_pinned_actions,
             list_build_history,
             save_build_history,
@@ -4655,6 +6464,8 @@ pub fn run() {
             clear_merge_history,
             list_project_runtimes,
             list_selected_project_runtimes,
+            preflight_project_runtime,
+            inspect_project_runtime,
             start_project_runtime,
             stop_project_runtime,
             run_project_build,
@@ -4662,8 +6473,16 @@ pub fn run() {
             open_project_build_output,
             open_project_directory,
             focus_project_runtime,
-            read_project_runtime_log
+            read_project_runtime_log,
+            clear_project_runtime_log
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.project_runtime.shutdown_all();
+                }
+            }
+        });
 }

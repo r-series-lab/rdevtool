@@ -283,6 +283,9 @@ function matchesActivity(item: ActivityEntry, match: ActivityMatch) {
   if (match.status && item.status !== match.status) {
     return false;
   }
+  if (match.executionKey && item.executionKey !== match.executionKey) {
+    return false;
+  }
   if (match.projectKey && item.projectKey !== match.projectKey) {
     return false;
   }
@@ -348,6 +351,13 @@ function shouldApplyActivityPatch(item: ActivityEntry, patch: ActivityPatch) {
     return true;
   }
   return false;
+}
+
+function acknowledgedRunningSummary(item: ActivityEntry) {
+  const originalSummary = item.summary.trim();
+  return originalSummary
+    ? `已结束关注 · 原状态：${originalSummary}`
+    : "已结束关注";
 }
 
 export function useActivityCenter({
@@ -493,6 +503,7 @@ export function useActivityCenter({
             setError(String(reason));
           }
         });
+        void syncStoredBuildStatuses(normalized);
       })
       .catch((reason) => {
         if (!cancelled) {
@@ -503,7 +514,7 @@ export function useActivityCenter({
     return () => {
       cancelled = true;
     };
-  }, [setError]);
+  }, [setError, syncStoredBuildStatuses]);
 
   const recordActivity = useCallback((draft: ActivityDraft) => {
     const entry = createActivityEntry(draft);
@@ -556,14 +567,27 @@ export function useActivityCenter({
     }
     const now = new Date().toISOString();
     persist(
-      itemsRef.current.map((item) =>
-        targetIds.has(item.id) && item.status === "failed"
-          ? {
-              ...item,
-              acknowledgedAt: item.acknowledgedAt || now,
-            }
-          : item,
-      ),
+      itemsRef.current.map((item) => {
+        if (!targetIds.has(item.id)) {
+          return item;
+        }
+        if (item.status === "failed") {
+          return {
+            ...item,
+            acknowledgedAt: item.acknowledgedAt || now,
+          };
+        }
+        if (item.status === "running") {
+          return {
+            ...item,
+            status: "info" as ActivityStatus,
+            summary: acknowledgedRunningSummary(item),
+            acknowledgedAt: item.acknowledgedAt || now,
+            updatedAt: now,
+          };
+        }
+        return item;
+      }),
     );
   }, [persist]);
 

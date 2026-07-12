@@ -7,10 +7,12 @@ use rdevtool_core::agent::{AgentCapabilities, AgentContext, capabilities, contex
 use rdevtool_core::config::{
     AppConfig, BranchRules, BuildActionKind, BuildTargetAdapter, CreateProjectWorkspaceRequest,
     DeployParamConfig, DeployParamKind, DeployTargetConfig, JobConfig, Jobs, ProjectConfig,
-    ProjectFocusConfig, ProjectWorkspaceConfig, SYSTEM_PROJECT_WORKSPACE_KEY,
-    active_project_workspace_key, apply_project_workspace_filter, create_project_workspace,
-    default_config_dir, default_project_workspaces_dir, default_projects_path,
-    default_workspace_path, ensure_default_configs, load_active_project_workspace, load_config,
+    ProjectFocusConfig, ProjectWorkspaceConfig, ProjectWorkspaceProjectInstanceConfig,
+    ProjectWorkspaceResourceCategoryConfig, ProjectWorkspaceResourceEntryConfig,
+    SYSTEM_PROJECT_WORKSPACE_KEY, active_project_workspace_key, apply_project_workspace_context,
+    create_project_workspace, default_config_dir, default_project_workspace_root_dir,
+    default_project_workspaces_dir, default_projects_path, default_workspace_path,
+    ensure_default_configs, load_active_project_workspace, load_config,
     load_project_workspace_by_key, load_project_workspaces, load_workspace_config,
     resolve_config_path, save_config, save_project_workspace_config, save_workspace_config,
 };
@@ -26,18 +28,40 @@ use rdevtool_core::navigation::{
     find_navigation_entry_for_workspace, list_navigation_entries_for_workspace,
     load_navigation_editor_data, navigation_file_path, open_navigation_entry,
     save_navigation_editor_data, search_navigation_entries_for_workspace,
+    validate_workspace_resource_entry,
 };
 use rdevtool_core::proxy::{
-    ProxyConfig, ProxyOutboundMode, ProxyProfile, ProxyProfilePack, ProxyRule, ProxyRuleAction,
-    default_proxy_path, delete_proxy_profile as core_delete_proxy_profile,
-    delete_proxy_rule as core_delete_proxy_rule, ensure_proxy_config, export_proxy_profile_pack,
+    ProxyConfig, ProxyOutboundMode, ProxyProfile, ProxyProfilePack, ProxyRequestDiagnosis,
+    ProxyRule, ProxyRuleAction, default_proxy_path,
+    delete_proxy_profile as core_delete_proxy_profile, delete_proxy_rule as core_delete_proxy_rule,
+    diagnose_proxy_request, ensure_proxy_config, export_proxy_profile_pack,
     import_proxy_profile_pack, load_proxy_config, save_proxy_config, upsert_proxy_profile,
     upsert_proxy_rule, validate_proxy_profile, validate_proxy_rule,
 };
+use rdevtool_core::replay::{
+    ReplayAction, build_replay_action, merge_replay_action, replay_kind_and_history_key,
+};
+use rdevtool_core::runtime::{
+    ProjectRuntimeFocusResponse, ProjectRuntimeInspectResponse, ProjectRuntimeLogKind,
+    ProjectRuntimeLogResponse, ProjectRuntimePreflightResponse, ProjectRuntimeStartResponse,
+    RuntimeProfileSummary, RuntimeProfilesResponse, clear_project_runtime_log,
+    focus_project_runtime, inspect_project_runtime, project_runtime_preflight,
+    read_project_runtime_log, runtime_profile_show, runtime_profiles,
+    start_project_runtime_detached,
+};
+use rdevtool_core::runtime_link::{BindProxyRuntimeRequest, bind_proxy_runtime_profile};
 use rdevtool_core::storage::{
     self, DeployHistoryEntry, MergeHistoryEntry, SaveNoteRequest, Storage,
 };
-use rdevtool_core::web_actions::default_web_actions_path;
+use rdevtool_core::web_actions::{
+    WebActionListResponse, WebActionRunRequest, WebActionRunResult, WebActionScriptRunRequest,
+    WebActionTarget, default_web_actions_path, list_web_action_targets, list_web_actions,
+    open_web_action_target, run_web_action, run_web_action_script,
+};
+use rdevtool_core::workspace_init::{
+    InitDemandWorkspaceBranch, InitDemandWorkspaceProject, InitDemandWorkspaceRequest,
+    InitDemandWorkspaceRequirementEntry, InitDemandWorkspaceResult, init_demand_workspace,
+};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -214,6 +238,14 @@ enum Commands {
         #[command(subcommand)]
         command: ProxyCommands,
     },
+    Runtime {
+        #[command(subcommand)]
+        command: RuntimeCommands,
+    },
+    WebActions {
+        #[command(subcommand)]
+        command: WebActionCommands,
+    },
     Notes {
         #[command(subcommand)]
         command: NoteCommands,
@@ -256,7 +288,41 @@ enum WorkspaceCommands {
         #[arg(long)]
         description: Option<String>,
         #[arg(long)]
+        root_dir: Option<PathBuf>,
+        #[arg(long)]
+        independent_dir: bool,
+        #[arg(long)]
         empty: bool,
+        #[arg(long)]
+        no_switch: bool,
+    },
+    InitDemand {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        key: Option<String>,
+        #[arg(long)]
+        demand_id: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        workspace_type: Option<String>,
+        #[arg(long)]
+        requirement_dir: PathBuf,
+        #[arg(long)]
+        repo_path: PathBuf,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+        #[arg(long)]
+        root_dir: Option<PathBuf>,
+        #[arg(long, default_value = "需求资料")]
+        requirement_category: String,
+        #[arg(long, default_value = "需求")]
+        requirement_short_label: String,
+        #[arg(long, default_value = "需求目录")]
+        requirement_entry_name: String,
         #[arg(long)]
         no_switch: bool,
     },
@@ -289,6 +355,14 @@ enum WorkspaceCommands {
         proxy_profiles: Vec<String>,
         #[arg(long)]
         clear_proxy_profiles: bool,
+        #[arg(long)]
+        root_dir: Option<PathBuf>,
+        #[arg(long)]
+        clear_root_dir: bool,
+        #[arg(long = "project-instance")]
+        project_instances: Vec<String>,
+        #[arg(long)]
+        clear_project_instances: bool,
     },
 }
 
@@ -774,6 +848,12 @@ enum HistoryCommands {
         #[arg(long, default_value_t = 12)]
         limit: usize,
     },
+    ReplayPlan {
+        id: String,
+    },
+    ReplayRun {
+        id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -825,6 +905,8 @@ enum NavigationCommands {
         note: Option<String>,
         #[arg(long)]
         short_label: Option<String>,
+        #[arg(long)]
+        workspace: Option<String>,
     },
     Update {
         #[arg(long)]
@@ -855,12 +937,16 @@ enum NavigationCommands {
         runtime_profile: Option<String>,
         #[arg(long)]
         note: Option<String>,
+        #[arg(long)]
+        workspace: Option<String>,
     },
     Delete {
         #[arg(long)]
         category: String,
         #[arg(long)]
         name: String,
+        #[arg(long)]
+        workspace: Option<String>,
     },
 }
 
@@ -1025,6 +1111,139 @@ enum ProxyCommands {
     RuleDelete {
         rule: String,
     },
+    Diagnose {
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long, default_value = "GET")]
+        method: String,
+        #[arg(long)]
+        url: String,
+        #[arg(long = "header")]
+        headers: Vec<String>,
+    },
+    BindRuntime {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        runtime_profile: Option<String>,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        debug_profile: Option<String>,
+        #[arg(long)]
+        create_debug_profile: bool,
+        #[arg(long)]
+        debug_profile_label: Option<String>,
+        #[arg(long)]
+        network_proxy: bool,
+        #[arg(long)]
+        node_hook: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RuntimeCommands {
+    Profiles,
+    ProfileShow {
+        key: String,
+    },
+    Inspect {
+        #[arg(long)]
+        project: String,
+        #[arg(long = "debug-profile")]
+        debug_profile: Option<String>,
+    },
+    Preflight {
+        #[arg(long)]
+        project: String,
+        #[arg(long = "debug-profile")]
+        debug_profile: Option<String>,
+    },
+    Start {
+        #[arg(long)]
+        project: String,
+        #[arg(long = "debug-profile")]
+        debug_profile: Option<String>,
+        #[arg(long = "env")]
+        env: Vec<String>,
+    },
+    Focus {
+        #[arg(long)]
+        project: String,
+        #[arg(long = "debug-profile")]
+        debug_profile: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+    },
+    Log {
+        #[arg(long)]
+        project: String,
+        #[arg(long, value_enum, default_value = "dev")]
+        kind: RuntimeLogKindArg,
+        #[arg(long, default_value_t = 160)]
+        max_lines: usize,
+        #[arg(long)]
+        clear: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RuntimeLogKindArg {
+    Dev,
+    Build,
+}
+
+impl From<RuntimeLogKindArg> for ProjectRuntimeLogKind {
+    fn from(value: RuntimeLogKindArg) -> Self {
+        match value {
+            RuntimeLogKindArg::Dev => ProjectRuntimeLogKind::Dev,
+            RuntimeLogKindArg::Build => ProjectRuntimeLogKind::Build,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum WebActionCommands {
+    Path,
+    List {
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+    },
+    Targets,
+    Open {
+        #[arg(long)]
+        url: String,
+    },
+    Run {
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long = "param")]
+        params: Vec<String>,
+        #[arg(long = "context")]
+        context_params: Vec<String>,
+    },
+    Script {
+        #[arg(long)]
+        target: String,
+        #[arg(long)]
+        script: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        stdin: bool,
+        #[arg(long = "param")]
+        params: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1124,23 +1343,23 @@ fn run_cli(cli: Cli) -> Result<()> {
             tui::run(&config)
         }
         Commands::Show { project } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             show_project(&config, &project, json)
         }
         Commands::Branch { project } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             show_branch(&config, &project, json)
         }
         Commands::Branches { project } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             show_branches(&config, &project, json)
         }
         Commands::Envs { project, target } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             show_envs(&config, &project, target, json)
         }
         Commands::Options { project, target } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             show_options(&config, &project, target, json)
         }
         Commands::Plan {
@@ -1150,7 +1369,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             branch,
             extra_params,
         } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             plan_deploy(&config, project, target, env, branch, extra_params, json)
         }
         Commands::Trigger {
@@ -1160,26 +1379,26 @@ fn run_cli(cli: Cli) -> Result<()> {
             branch,
             extra_params,
         } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             trigger_deploy(&config, project, target, env, branch, extra_params, json)
         }
         Commands::Status {
             queue_url,
             build_url,
         } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             show_status(&config, queue_url, build_url, json)
         }
         Commands::Deploy { command } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_deploy(&config, command, json)
         }
         Commands::Build { command } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_build(&config, command, json)
         }
         Commands::Git { command } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_git(&config, command, json)
         }
         Commands::MigrateConfig { input, output } => {
@@ -1192,7 +1411,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             source,
             target,
         } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             show_merge_overview(&config, &project, &source, &target, json)
         }
         Commands::Merge {
@@ -1200,7 +1419,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             source,
             target,
         } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_merge(&config, project, source, target, json)
         }
         Commands::SyncBranches {
@@ -1208,7 +1427,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             source_branch,
             target_branches,
         } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_branch_sync(&config, project, source_branch, target_branches, json)
         }
         Commands::CreateBranch {
@@ -1216,7 +1435,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             source_branch,
             target_branch,
         } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_branch_create(&config, projects, source_branch, target_branch, json)
         }
         Commands::CheckoutBranch {
@@ -1224,28 +1443,36 @@ fn run_cli(cli: Cli) -> Result<()> {
             source_branch,
             destination,
         } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_branch_checkout(&config, project, source_branch, destination, json)
         }
         Commands::SwitchBranch {
             project,
             target_branch,
         } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_branch_switch(&config, project, target_branch, json)
         }
         Commands::PushStatus { project } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_push_status(&config, project, json)
         }
         Commands::PushBranch { project, message } => {
-            let (config, _) = load_cli_config(config_override)?;
+            let (config, _) = load_cli_effective_config(config_override)?;
             run_push_branch(&config, project, message, json)
         }
         Commands::Navigation { command } => run_navigation(command, json),
         Commands::Proxy { command } => run_proxy(command, config_override, json),
+        Commands::Runtime { command } => {
+            let (config, _) = load_cli_effective_config(config_override)?;
+            run_runtime(&config, command, json)
+        }
+        Commands::WebActions { command } => run_web_actions(command, json),
         Commands::Notes { command } => run_notes(command, json),
-        Commands::History { command } => run_history(command, json),
+        Commands::History { command } => {
+            let (config, _) = load_cli_effective_config(config_override)?;
+            run_history(&config, command, json)
+        }
         Commands::Agent { command } => {
             let context_input = match &command {
                 AgentCommands::Capabilities => None,
@@ -1343,6 +1570,17 @@ struct WorkspaceScopeCliInfo {
     proxy_profiles: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InitDemandWorkspaceCliInfo {
+    workspace: ProjectWorkspaceCliInfo,
+    project: InitDemandWorkspaceProject,
+    requirement_entry: InitDemandWorkspaceRequirementEntry,
+    branch: InitDemandWorkspaceBranch,
+    metadata: BTreeMap<String, String>,
+    warnings: Vec<String>,
+}
+
 struct WorkspaceScopeUpdate {
     name: Option<String>,
     description: Option<String>,
@@ -1356,6 +1594,10 @@ struct WorkspaceScopeUpdate {
     navigation_entries: Vec<String>,
     proxy_profiles: Vec<String>,
     clear_proxy_profiles: bool,
+    root_dir: Option<PathBuf>,
+    clear_root_dir: bool,
+    project_instances: Vec<String>,
+    clear_project_instances: bool,
 }
 
 struct ProxyRuleCliPatch {
@@ -1399,12 +1641,44 @@ struct ProjectWorkspaceCliInfo {
     description: Option<String>,
     active: bool,
     system: bool,
+    workspace_kind: String,
+    workspace_type: String,
+    metadata: BTreeMap<String, String>,
+    root_dir: Option<String>,
     project_count: usize,
+    resource_count: usize,
     include_all_projects: bool,
     include_all_navigation: bool,
     projects: Vec<String>,
     navigation_categories: Vec<String>,
     navigation_entries: Vec<String>,
+    project_instances: Vec<ProjectWorkspaceProjectInstanceCliInfo>,
+    resource_categories: Vec<ProjectWorkspaceResourceCategoryCliInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectWorkspaceProjectInstanceCliInfo {
+    project: String,
+    path: String,
+    managed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectWorkspaceResourceCategoryCliInfo {
+    title: String,
+    short_label: Option<String>,
+    entries: Vec<ProjectWorkspaceResourceEntryCliInfo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectWorkspaceResourceEntryCliInfo {
+    name: String,
+    kind: Option<String>,
+    target: String,
+    note: Option<String>,
 }
 
 fn load_cli_config(config_override: Option<&Path>) -> Result<(AppConfig, PathBuf)> {
@@ -1420,7 +1694,7 @@ fn load_cli_effective_config(config_override: Option<&Path>) -> Result<(AppConfi
     let (config, path) = load_cli_config(config_override)?;
     let paths = ensure_default_configs()?;
     let workspace = load_active_project_workspace(&paths)?;
-    Ok((apply_project_workspace_filter(&config, &workspace), path))
+    Ok((apply_project_workspace_context(&config, &workspace), path))
 }
 
 fn load_cli_context(
@@ -2147,6 +2421,8 @@ fn run_workspace(
             key,
             name,
             description,
+            root_dir,
+            independent_dir,
             empty,
             no_switch,
         } => {
@@ -2157,12 +2433,19 @@ fn run_workspace(
             } else {
                 Some(load_active_project_workspace(&paths)?)
             };
+            let root_dir = match (root_dir, independent_dir) {
+                (Some(root_dir), _) => Some(normalize_cli_path_buf(root_dir)?),
+                (None, true) => Some(default_project_workspace_root_dir(&key)),
+                (None, false) => None,
+            };
             let workspace = create_project_workspace(
                 &paths,
                 CreateProjectWorkspaceRequest {
                     name: name.unwrap_or_else(|| key.clone()),
                     key,
                     description,
+                    workspace_type: None,
+                    root_dir,
                     copy_from,
                     activate: !no_switch,
                 },
@@ -2174,6 +2457,74 @@ fn run_workspace(
                 return print_json_command("workspace.create", &info);
             }
             print_project_workspace(&info);
+            Ok(())
+        }
+        WorkspaceCommands::InitDemand {
+            name,
+            key,
+            demand_id,
+            description,
+            workspace_type,
+            requirement_dir,
+            repo_path,
+            project,
+            branch,
+            root_dir,
+            requirement_category,
+            requirement_short_label,
+            requirement_entry_name,
+            no_switch,
+        } => {
+            let (config, _) = load_cli_config(config_override)?;
+            let paths = ensure_default_configs()?;
+            let result = init_demand_workspace(
+                &paths,
+                &config,
+                InitDemandWorkspaceRequest {
+                    key,
+                    demand_id,
+                    name,
+                    description,
+                    workspace_type,
+                    requirement_dir,
+                    repo_path,
+                    project,
+                    branch,
+                    root_dir,
+                    requirement_category: Some(requirement_category),
+                    requirement_short_label: Some(requirement_short_label),
+                    requirement_entry_name: Some(requirement_entry_name),
+                    activate: !no_switch,
+                },
+            )?;
+            let active_key =
+                active_project_workspace_key(&load_workspace_config(&paths.workspace)?);
+            let info = init_demand_workspace_cli_info(result, &config, &active_key);
+            if json_mode {
+                return print_json_command("workspace.init-demand", &info);
+            }
+            print_project_workspace(&info.workspace);
+            println!(
+                "project       : {} ({})",
+                info.project.name, info.project.key
+            );
+            println!("requirement   : {}", info.requirement_entry.path);
+            if let Some(expected) = &info.branch.expected {
+                let marker = if info.branch.matches == Some(true) {
+                    "matched"
+                } else {
+                    "mismatch"
+                };
+                println!(
+                    "branch        : {} -> {} ({})",
+                    info.branch.current.as_deref().unwrap_or("-"),
+                    expected,
+                    marker
+                );
+            }
+            for warning in &info.warnings {
+                println!("warning       : {}", warning);
+            }
             Ok(())
         }
         WorkspaceCommands::Use { workspace } => {
@@ -2211,6 +2562,10 @@ fn run_workspace(
             navigation_entries,
             proxy_profiles,
             clear_proxy_profiles,
+            root_dir,
+            clear_root_dir,
+            project_instances,
+            clear_project_instances,
         } => run_workspace_scope(
             config_override,
             workspace,
@@ -2227,6 +2582,10 @@ fn run_workspace(
                 navigation_entries,
                 proxy_profiles,
                 clear_proxy_profiles,
+                root_dir,
+                clear_root_dir,
+                project_instances,
+                clear_project_instances,
             },
             json_mode,
         ),
@@ -2238,10 +2597,31 @@ fn project_workspace_cli_info(
     config: &AppConfig,
     active_key: &str,
 ) -> ProjectWorkspaceCliInfo {
+    let workspace_kind = if workspace.is_system() {
+        "global"
+    } else if workspace.root_dir.is_some() {
+        "directory"
+    } else {
+        "scope"
+    }
+    .to_string();
+    let resource_count = workspace
+        .resource_categories
+        .iter()
+        .map(|category| category.entries.len())
+        .sum();
     ProjectWorkspaceCliInfo {
         active: workspace.key == active_key,
         system: workspace.is_system(),
+        workspace_kind,
+        workspace_type: workspace.workspace_type.clone(),
+        metadata: workspace.metadata.clone(),
+        root_dir: workspace
+            .root_dir
+            .as_ref()
+            .map(|path| path.display().to_string()),
         project_count: workspace.project_count_for(config),
+        resource_count,
         key: workspace.key,
         name: workspace.name,
         description: workspace.description,
@@ -2250,6 +2630,48 @@ fn project_workspace_cli_info(
         projects: workspace.projects,
         navigation_categories: workspace.navigation_categories,
         navigation_entries: workspace.navigation_entries,
+        project_instances: workspace
+            .project_instances
+            .into_iter()
+            .map(|instance| ProjectWorkspaceProjectInstanceCliInfo {
+                project: instance.project,
+                path: instance.path.display().to_string(),
+                managed: instance.managed,
+            })
+            .collect(),
+        resource_categories: workspace
+            .resource_categories
+            .into_iter()
+            .map(|category| ProjectWorkspaceResourceCategoryCliInfo {
+                title: category.title,
+                short_label: category.short_label,
+                entries: category
+                    .entries
+                    .into_iter()
+                    .map(|entry| ProjectWorkspaceResourceEntryCliInfo {
+                        target: workspace_resource_entry_target(&entry),
+                        name: entry.name,
+                        kind: entry.kind,
+                        note: entry.note,
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+fn init_demand_workspace_cli_info(
+    result: InitDemandWorkspaceResult,
+    config: &AppConfig,
+    active_key: &str,
+) -> InitDemandWorkspaceCliInfo {
+    InitDemandWorkspaceCliInfo {
+        workspace: project_workspace_cli_info(result.workspace, config, active_key),
+        project: result.project,
+        requirement_entry: result.requirement_entry,
+        branch: result.branch,
+        metadata: result.metadata,
+        warnings: result.warnings,
     }
 }
 
@@ -2258,6 +2680,17 @@ fn print_project_workspace(value: &ProjectWorkspaceCliInfo) {
     println!("key           : {}", value.key);
     println!("active        : {}", value.active);
     println!("system        : {}", value.system);
+    println!("kind          : {}", value.workspace_kind);
+    println!("type          : {}", value.workspace_type);
+    if !value.metadata.is_empty() {
+        println!("metadata      :");
+        for (key, metadata_value) in &value.metadata {
+            println!("  - {} = {}", key, metadata_value);
+        }
+    }
+    if let Some(root_dir) = &value.root_dir {
+        println!("root dir      : {}", root_dir);
+    }
     println!(
         "projects      : {}",
         if value.include_all_projects {
@@ -2267,6 +2700,7 @@ fn print_project_workspace(value: &ProjectWorkspaceCliInfo) {
         }
     );
     println!("project count : {}", value.project_count);
+    println!("resource count: {}", value.resource_count);
     println!(
         "navigation    : {}",
         if value.include_all_navigation {
@@ -2282,9 +2716,46 @@ fn print_project_workspace(value: &ProjectWorkspaceCliInfo) {
             .join(" | ")
         }
     );
+    if !value.project_instances.is_empty() {
+        println!("instances     :");
+        for instance in &value.project_instances {
+            let marker = if instance.managed { "managed" } else { "bound" };
+            println!("  - {} -> {} ({})", instance.project, instance.path, marker);
+        }
+    }
+    if !value.resource_categories.is_empty() {
+        println!("resources     :");
+        for category in &value.resource_categories {
+            for entry in &category.entries {
+                let kind = entry.kind.as_deref().unwrap_or("url");
+                println!(
+                    "  - {}/{} [{}] {}",
+                    category.title, entry.name, kind, entry.target
+                );
+            }
+        }
+    }
     if let Some(description) = &value.description {
         println!("description   : {}", description);
     }
+}
+
+fn workspace_resource_entry_target(entry: &ProjectWorkspaceResourceEntryConfig) -> String {
+    entry
+        .url
+        .trim()
+        .to_string()
+        .is_empty()
+        .then(|| {
+            entry
+                .path
+                .clone()
+                .or_else(|| entry.script.clone())
+                .or_else(|| entry.bundle_id.clone())
+                .or_else(|| entry.app_name.clone())
+                .unwrap_or_default()
+        })
+        .unwrap_or_else(|| entry.url.clone())
 }
 
 fn run_workspace_scope(
@@ -2305,6 +2776,13 @@ fn run_workspace_scope(
     }
 
     let should_save_workspace = update.has_workspace_changes();
+
+    if update.clear_root_dir && update.root_dir.is_some() {
+        anyhow::bail!("choose only one of --root-dir or --clear-root-dir");
+    }
+    if update.clear_project_instances && !update.project_instances.is_empty() {
+        anyhow::bail!("choose only one of --project-instance or --clear-project-instances");
+    }
 
     if let Some(name) = update.name {
         workspace.name = require_non_empty_cli_value("workspace name", &name)?;
@@ -2351,6 +2829,37 @@ fn run_workspace_scope(
         workspace.include_all_navigation = false;
         workspace.navigation_categories = categories;
         workspace.navigation_entries = entries;
+    }
+
+    if update.clear_root_dir {
+        workspace.root_dir = None;
+    } else if let Some(root_dir) = update.root_dir {
+        workspace.root_dir = Some(normalize_cli_path_buf(root_dir)?);
+    }
+
+    if update.clear_project_instances {
+        workspace.project_instances.clear();
+    } else if !update.project_instances.is_empty() {
+        let instances = parse_workspace_project_instances(update.project_instances)?;
+        let instance_projects = instances
+            .iter()
+            .map(|instance| instance.project.clone())
+            .collect::<Vec<_>>();
+        validate_workspace_projects(&config, &instance_projects)?;
+        for instance in instances {
+            if !workspace.include_all_projects
+                && !workspace
+                    .projects
+                    .iter()
+                    .any(|project| project == &instance.project)
+            {
+                workspace.projects.push(instance.project.clone());
+            }
+            workspace
+                .project_instances
+                .retain(|current| current.project != instance.project);
+            workspace.project_instances.push(instance);
+        }
     }
 
     workspace = workspace.normalized();
@@ -2400,6 +2909,10 @@ impl WorkspaceScopeUpdate {
             || self.clear_navigation
             || !self.navigation_categories.is_empty()
             || !self.navigation_entries.is_empty()
+            || self.root_dir.is_some()
+            || self.clear_root_dir
+            || !self.project_instances.is_empty()
+            || self.clear_project_instances
     }
 }
 
@@ -2507,6 +3020,29 @@ fn normalize_cli_strings(values: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn parse_workspace_project_instances(
+    values: Vec<String>,
+) -> Result<Vec<ProjectWorkspaceProjectInstanceConfig>> {
+    let mut instances = Vec::new();
+    for value in values {
+        let value = value.trim();
+        if value.is_empty() {
+            continue;
+        }
+        let (project, path) = value
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("project instance must use project=/path format"))?;
+        let project = require_non_empty_cli_value("project instance project", project)?;
+        let path = require_non_empty_cli_value("project instance path", path)?;
+        instances.push(ProjectWorkspaceProjectInstanceConfig {
+            project,
+            path: normalize_cli_path_buf(PathBuf::from(path))?,
+            managed: true,
+        });
+    }
+    Ok(instances)
+}
+
 fn validate_workspace_projects(config: &AppConfig, projects: &[String]) -> Result<()> {
     let known = config
         .projects
@@ -2591,7 +3127,8 @@ fn normalize_cli_page(value: Option<String>) -> Option<String> {
     let trimmed = value.trim();
     match trimmed {
         "navigation" => Some("projects".to_string()),
-        "projects" | "merge" | "deploy" => Some(trimmed.to_string()),
+        "deploy" => Some("build".to_string()),
+        "overview" | "projects" | "merge" | "build" | "proxy" => Some(trimmed.to_string()),
         _ => None,
     }
 }
@@ -4669,8 +5206,9 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
             runtime_profile,
             note,
             short_label,
+            workspace,
         } => {
-            let data = add_navigation_entry(NavigationEntryCliInput {
+            let input = NavigationEntryCliInput {
                 category,
                 name,
                 kind: Some(kind),
@@ -4686,15 +5224,28 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
                 runtime_profile,
                 note,
                 short_label,
-            })?;
-            if json_mode {
-                print_json_command("navigation.add", &data)
+            };
+            if let Some(workspace) = workspace {
+                let workspace = add_workspace_navigation_entry(&workspace, input)?;
+                if json_mode {
+                    print_json_command("navigation.add", &workspace)
+                } else {
+                    print_navigation_entries(&list_navigation_entries_for_workspace(
+                        &workspace, 24,
+                    )?);
+                    Ok(())
+                }
             } else {
-                print_navigation_entries(&list_navigation_entries_for_workspace(
-                    &load_active_project_workspace(&ensure_default_configs()?)?,
-                    24,
-                )?);
-                Ok(())
+                let data = add_navigation_entry(input)?;
+                if json_mode {
+                    print_json_command("navigation.add", &data)
+                } else {
+                    print_navigation_entries(&list_navigation_entries_for_workspace(
+                        &load_active_project_workspace(&ensure_default_configs()?)?,
+                        24,
+                    )?);
+                    Ok(())
+                }
             }
         }
         NavigationCommands::Update {
@@ -4712,8 +5263,9 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
             browser_profile,
             runtime_profile,
             note,
+            workspace,
         } => {
-            let data = update_navigation_entry(NavigationEntryCliInput {
+            let input = NavigationEntryCliInput {
                 category,
                 name,
                 kind,
@@ -4729,21 +5281,46 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
                 runtime_profile,
                 note,
                 short_label: None,
-            })?;
-            if json_mode {
-                print_json_command("navigation.update", &data)
+            };
+            if let Some(workspace) = workspace {
+                let workspace = update_workspace_navigation_entry(&workspace, input)?;
+                if json_mode {
+                    print_json_command("navigation.update", &workspace)
+                } else {
+                    println!("updated workspace navigation entry");
+                    Ok(())
+                }
             } else {
-                println!("updated navigation entry");
-                Ok(())
+                let data = update_navigation_entry(input)?;
+                if json_mode {
+                    print_json_command("navigation.update", &data)
+                } else {
+                    println!("updated navigation entry");
+                    Ok(())
+                }
             }
         }
-        NavigationCommands::Delete { category, name } => {
-            let data = delete_navigation_entry(&category, &name)?;
-            if json_mode {
-                print_json_command("navigation.delete", &data)
+        NavigationCommands::Delete {
+            category,
+            name,
+            workspace,
+        } => {
+            if let Some(workspace) = workspace {
+                let workspace = delete_workspace_navigation_entry(&workspace, &category, &name)?;
+                if json_mode {
+                    print_json_command("navigation.delete", &workspace)
+                } else {
+                    println!("deleted workspace navigation entry: {category}/{name}");
+                    Ok(())
+                }
             } else {
-                println!("deleted navigation entry: {category}/{name}");
-                Ok(())
+                let data = delete_navigation_entry(&category, &name)?;
+                if json_mode {
+                    print_json_command("navigation.delete", &data)
+                } else {
+                    println!("deleted navigation entry: {category}/{name}");
+                    Ok(())
+                }
             }
         }
     }
@@ -4860,6 +5437,192 @@ fn delete_navigation_entry(
         anyhow::bail!("navigation entry not found: {category_title}/{entry_name}");
     }
     save_navigation_editor_data(data)
+}
+
+fn add_workspace_navigation_entry(
+    workspace_key: &str,
+    mut input: NavigationEntryCliInput,
+) -> Result<ProjectWorkspaceConfig> {
+    let paths = ensure_default_configs()?;
+    let mut workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    ensure_workspace_can_own_resources(&workspace)?;
+    let category_title = require_non_empty_cli_value("navigation category", &input.category)?;
+    let short_label = input.short_label.take().and_then(optional_cli_text);
+    let entry = workspace_resource_entry_from_editor(
+        navigation_editor_entry_from_cli(input, None)?,
+        workspace.root_dir.as_deref(),
+    )?;
+    let category = workspace_resource_category_mut(&mut workspace, &category_title, short_label);
+    if category.entries.iter().any(|item| item.name == entry.name) {
+        anyhow::bail!(
+            "workspace navigation entry already exists: {}/{}",
+            category_title,
+            entry.name
+        );
+    }
+    category.entries.push(entry);
+    save_project_workspace(&paths.project_workspaces, workspace)
+}
+
+fn update_workspace_navigation_entry(
+    workspace_key: &str,
+    input: NavigationEntryCliInput,
+) -> Result<ProjectWorkspaceConfig> {
+    let paths = ensure_default_configs()?;
+    let mut workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    ensure_workspace_can_own_resources(&workspace)?;
+    let category_title = require_non_empty_cli_value("navigation category", &input.category)?;
+    let entry_name = require_non_empty_cli_value("navigation entry", &input.name)?;
+    let root_dir = workspace.root_dir.clone();
+    let category = workspace
+        .resource_categories
+        .iter_mut()
+        .find(|category| category.title == category_title)
+        .ok_or_else(|| {
+            anyhow::anyhow!("workspace navigation category not found: {category_title}")
+        })?;
+    let index = category
+        .entries
+        .iter()
+        .position(|entry| entry.name == entry_name)
+        .ok_or_else(|| {
+            anyhow::anyhow!("workspace navigation entry not found: {category_title}/{entry_name}")
+        })?;
+    let current = navigation_editor_entry_from_workspace_resource(&category.entries[index]);
+    let next = workspace_resource_entry_from_editor(
+        navigation_editor_entry_from_cli(input, Some(current))?,
+        root_dir.as_deref(),
+    )?;
+    if next.name != entry_name
+        && category
+            .entries
+            .iter()
+            .enumerate()
+            .any(|(item_index, item)| item_index != index && item.name == next.name)
+    {
+        anyhow::bail!(
+            "workspace navigation entry already exists: {}/{}",
+            category_title,
+            next.name
+        );
+    }
+    category.entries[index] = next;
+    save_project_workspace(&paths.project_workspaces, workspace)
+}
+
+fn delete_workspace_navigation_entry(
+    workspace_key: &str,
+    category_title: &str,
+    entry_name: &str,
+) -> Result<ProjectWorkspaceConfig> {
+    let paths = ensure_default_configs()?;
+    let mut workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    ensure_workspace_can_own_resources(&workspace)?;
+    let category_title = require_non_empty_cli_value("navigation category", category_title)?;
+    let entry_name = require_non_empty_cli_value("navigation entry", entry_name)?;
+    let category = workspace
+        .resource_categories
+        .iter_mut()
+        .find(|category| category.title == category_title)
+        .ok_or_else(|| {
+            anyhow::anyhow!("workspace navigation category not found: {category_title}")
+        })?;
+    let original_len = category.entries.len();
+    category.entries.retain(|entry| entry.name != entry_name);
+    if category.entries.len() == original_len {
+        anyhow::bail!("workspace navigation entry not found: {category_title}/{entry_name}");
+    }
+    workspace
+        .resource_categories
+        .retain(|category| !category.entries.is_empty());
+    save_project_workspace(&paths.project_workspaces, workspace)
+}
+
+fn workspace_resource_category_mut<'a>(
+    workspace: &'a mut ProjectWorkspaceConfig,
+    category_title: &str,
+    short_label: Option<String>,
+) -> &'a mut ProjectWorkspaceResourceCategoryConfig {
+    if let Some(index) = workspace
+        .resource_categories
+        .iter()
+        .position(|category| category.title == category_title)
+    {
+        if let Some(short_label) = short_label {
+            workspace.resource_categories[index].short_label = Some(short_label);
+        }
+        return &mut workspace.resource_categories[index];
+    }
+
+    workspace
+        .resource_categories
+        .push(ProjectWorkspaceResourceCategoryConfig {
+            title: category_title.to_string(),
+            short_label: Some(short_label.unwrap_or_else(|| category_title.to_string())),
+            entries: Vec::new(),
+        });
+    workspace
+        .resource_categories
+        .last_mut()
+        .expect("workspace resource category was just pushed")
+}
+
+fn workspace_resource_entry_from_editor(
+    entry: NavigationEditorEntry,
+    root_dir: Option<&Path>,
+) -> Result<ProjectWorkspaceResourceEntryConfig> {
+    let entry = ProjectWorkspaceResourceEntryConfig {
+        name: entry.name,
+        kind: Some(entry.kind),
+        url: entry.url.unwrap_or_default(),
+        browser: entry.browser,
+        browser_profile: entry.browser_profile,
+        runtime_profile: entry.runtime_profile,
+        bundle_id: entry.bundle_id,
+        app_name: entry.app_name,
+        script: entry.script,
+        path: entry.path,
+        cwd: entry.cwd,
+        note: entry.note,
+    };
+    validate_workspace_resource_entry(&entry, root_dir)?;
+    Ok(entry)
+}
+
+fn navigation_editor_entry_from_workspace_resource(
+    entry: &ProjectWorkspaceResourceEntryConfig,
+) -> NavigationEditorEntry {
+    NavigationEditorEntry {
+        name: entry.name.clone(),
+        kind: entry.kind.clone().unwrap_or_else(|| "url".to_string()),
+        url: optional_cli_text(entry.url.clone()),
+        browser: entry.browser.clone(),
+        browser_profile: entry.browser_profile.clone(),
+        runtime_profile: entry.runtime_profile.clone(),
+        bundle_id: entry.bundle_id.clone(),
+        app_name: entry.app_name.clone(),
+        script: entry.script.clone(),
+        path: entry.path.clone(),
+        cwd: entry.cwd.clone(),
+        note: entry.note.clone(),
+    }
+}
+
+fn ensure_workspace_can_own_resources(workspace: &ProjectWorkspaceConfig) -> Result<()> {
+    if workspace.is_system() {
+        anyhow::bail!("system workspace cannot own dynamic navigation entries");
+    }
+    Ok(())
+}
+
+fn save_project_workspace(
+    dir: &Path,
+    workspace: ProjectWorkspaceConfig,
+) -> Result<ProjectWorkspaceConfig> {
+    let workspace = workspace.normalized();
+    let path = dir.join(format!("{}.toml", workspace.key));
+    save_project_workspace_config(&path, &workspace)?;
+    Ok(workspace)
 }
 
 fn navigation_editor_entry_from_cli(
@@ -5296,7 +6059,515 @@ fn run_proxy(
                 Ok(())
             }
         }
+        ProxyCommands::Diagnose {
+            profile,
+            method,
+            url,
+            headers,
+        } => {
+            let info = load_proxy_cli_info(config_override)?;
+            let selected_profile = select_proxy_profile_for_diagnosis(&info, profile.as_deref())?;
+            let header_map = parse_key_value_map(&headers)?;
+            let diagnosis = diagnose_proxy_request(
+                &ProxyConfig {
+                    profiles: info.profiles.clone(),
+                    rules: info.rules.clone(),
+                },
+                &selected_profile.id,
+                &method,
+                &url,
+                &header_map,
+            )?;
+            if json_mode {
+                print_json_command("proxy.diagnose", &diagnosis)
+            } else {
+                print_proxy_diagnosis(&diagnosis);
+                Ok(())
+            }
+        }
+        ProxyCommands::BindRuntime {
+            profile,
+            runtime_profile,
+            label,
+            project,
+            debug_profile,
+            create_debug_profile,
+            debug_profile_label,
+            network_proxy,
+            node_hook,
+        } => {
+            let (mut config, config_path) = load_cli_config(config_override)?;
+            let proxy_path = ensure_proxy_config()?;
+            let proxy_config = load_proxy_config(&proxy_path)?;
+            let result = bind_proxy_runtime_profile(
+                &mut config,
+                &proxy_config,
+                BindProxyRuntimeRequest {
+                    proxy_profile: profile,
+                    runtime_profile_key: runtime_profile,
+                    runtime_profile_label: label,
+                    project,
+                    debug_profile,
+                    create_debug_profile,
+                    debug_profile_label,
+                    enable_network_proxy: network_proxy,
+                    node_hook,
+                },
+            )?;
+            save_config(&config_path, &config)?;
+            if json_mode {
+                print_json_command("proxy.bind-runtime", &result)
+            } else {
+                println!(
+                    "runtime      : {} ({})",
+                    result.runtime_profile.label, result.runtime_profile.key
+                );
+                println!("proxy        : {}", result.runtime_profile.proxy_url);
+                if let Some(debug_profile) = &result.project_debug_profile {
+                    println!(
+                        "project      : {} ({})",
+                        debug_profile.project_name, debug_profile.project_key
+                    );
+                    println!(
+                        "debug profile: {} ({})",
+                        debug_profile.debug_profile_label, debug_profile.debug_profile_key
+                    );
+                }
+                Ok(())
+            }
+        }
     }
+}
+
+fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) -> Result<()> {
+    match command {
+        RuntimeCommands::Profiles => {
+            let info = runtime_profiles(config);
+            if json_mode {
+                print_json_command("runtime.profiles", &info)
+            } else {
+                print_runtime_profiles(&info);
+                Ok(())
+            }
+        }
+        RuntimeCommands::ProfileShow { key } => {
+            let profile =
+                runtime_profile_show(config, &key).map_err(|error| anyhow::anyhow!(error))?;
+            if json_mode {
+                print_json_command("runtime.profile-show", &profile)
+            } else {
+                print_runtime_profile(&profile);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Inspect {
+            project,
+            debug_profile,
+        } => {
+            let proxy_config = load_proxy_config(&default_proxy_path())?;
+            let response =
+                inspect_project_runtime(config, &proxy_config, &project, debug_profile.as_deref())
+                    .map_err(|error| anyhow::anyhow!(error))?;
+            if json_mode {
+                print_json_command("runtime.inspect", &response)
+            } else {
+                print_runtime_inspect(&response);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Preflight {
+            project,
+            debug_profile,
+        } => {
+            let response = project_runtime_preflight(config, &project, debug_profile.as_deref())
+                .map_err(|error| anyhow::anyhow!(error))?;
+            if json_mode {
+                print_json_command("runtime.preflight", &response)
+            } else {
+                print_runtime_preflight(&response);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Start {
+            project,
+            debug_profile,
+            env,
+        } => {
+            let env_overrides = parse_key_value_map(&env)?;
+            let response = start_project_runtime_detached(
+                config,
+                &project,
+                debug_profile.as_deref(),
+                &env_overrides,
+            )
+            .map_err(|error| anyhow::anyhow!(error))?;
+            if json_mode {
+                print_json_command("runtime.start", &response)
+            } else {
+                print_runtime_start(&response);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Focus {
+            project,
+            debug_profile,
+            url,
+        } => {
+            let response =
+                focus_project_runtime(config, &project, debug_profile.as_deref(), url.as_deref())
+                    .map_err(|error| anyhow::anyhow!(error))?;
+            if json_mode {
+                print_json_command("runtime.focus", &response)
+            } else {
+                print_runtime_focus(&response);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Log {
+            project,
+            kind,
+            max_lines,
+            clear,
+        } => {
+            let kind = ProjectRuntimeLogKind::from(kind);
+            let response = if clear {
+                clear_project_runtime_log(config, &project, kind)
+            } else {
+                read_project_runtime_log(config, &project, kind, max_lines)
+            }
+            .map_err(|error| anyhow::anyhow!(error))?;
+            if json_mode {
+                print_json_command("runtime.log", &response)
+            } else {
+                print_runtime_log(&response);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn print_runtime_profiles(info: &RuntimeProfilesResponse) {
+    if info.profiles.is_empty() {
+        println!("no runtime profiles configured");
+        return;
+    }
+    for profile in &info.profiles {
+        let mut parts = vec![profile.key.clone(), profile.label.clone()];
+        if !profile.proxy_url.trim().is_empty() {
+            parts.push(format!("browser proxy {}", profile.proxy_url));
+        }
+        if profile.network_proxy.enabled {
+            parts.push(format!("network proxy {}", profile.network_proxy.proxy_url));
+        }
+        if profile.web_actions_enabled {
+            parts.push(format!("cdp {}", profile.web_actions_port));
+        }
+        println!("{}", parts.join(" | "));
+    }
+}
+
+fn print_runtime_profile(profile: &RuntimeProfileSummary) {
+    println!("{} ({})", profile.label, profile.key);
+    if let Some(browser) = profile.browser.as_ref() {
+        println!("browser: {}", browser);
+    }
+    if let Some(profile_name) = profile.browser_profile.as_ref() {
+        println!("browser profile: {}", profile_name);
+    }
+    if !profile.proxy_url.trim().is_empty() {
+        println!("browser proxy: {}", profile.proxy_url);
+    }
+    if profile.network_proxy.enabled {
+        println!("network proxy: {}", profile.network_proxy.proxy_url);
+    }
+    println!(
+        "web actions: {}",
+        if profile.web_actions_enabled {
+            format!("enabled on {}", profile.web_actions_port)
+        } else {
+            "disabled".to_string()
+        }
+    );
+}
+
+fn print_runtime_preflight(response: &ProjectRuntimePreflightResponse) {
+    println!(
+        "{} ({}) - {}: {}",
+        response.project_name, response.project_key, response.status_label, response.summary
+    );
+    if let Some(profile) = response.debug_profile_key.as_ref() {
+        println!("debug profile: {}", profile);
+    }
+    if let Some(profile) = response.runtime_profile_key.as_ref() {
+        println!("runtime profile: {}", profile);
+    }
+    for check in &response.checks {
+        println!(
+            "[{}] {} / {}: {}",
+            check.status_label, check.category, check.title, check.detail
+        );
+        if let Some(action) = check.action.as_ref() {
+            println!("  action: {}", action);
+        }
+    }
+}
+
+fn print_runtime_inspect(response: &ProjectRuntimeInspectResponse) {
+    println!(
+        "{} ({}) - {}: {}",
+        response.project_name, response.project_key, response.status_label, response.summary
+    );
+    if let Some(path) = response.repo_path.as_ref() {
+        println!("project path: {}", path);
+    }
+    if let Some(profile) = response.debug_profile_key.as_ref() {
+        println!("debug profile: {}", profile);
+    }
+    if let Some(profile) = response.runtime_profile_key.as_ref() {
+        println!("runtime profile: {}", profile);
+    }
+    if !response.local_files.is_empty() {
+        println!("local files:");
+        for file in &response.local_files {
+            println!(
+                "  [{}] {} ({}) - {}",
+                file.status_label, file.path, file.mode, file.detail
+            );
+        }
+    }
+    if !response.proxies.is_empty() {
+        println!("proxies:");
+        for proxy in &response.proxies {
+            let url = proxy.url.as_deref().unwrap_or("-");
+            println!(
+                "  [{}] {} {} - {}",
+                proxy.status_label, proxy.label, url, proxy.detail
+            );
+        }
+    }
+    if !response.env_preview.is_empty() {
+        println!("env preview:");
+        for item in &response.env_preview {
+            println!("  {}={} ({})", item.key, item.value, item.source);
+        }
+    }
+    if !response.handoff.risks.is_empty() {
+        println!("risks:");
+        for risk in &response.handoff.risks {
+            println!("  {}", risk);
+        }
+    }
+}
+
+fn print_runtime_start(response: &ProjectRuntimeStartResponse) {
+    println!(
+        "{} ({}) - {}: {}",
+        response.project_name, response.project_key, response.status_label, response.detail
+    );
+    println!("command: {}", response.command);
+    println!("cwd: {}", response.cwd);
+    if let Some(pid) = response.pid {
+        println!("pid: {}", pid);
+    }
+    if let Some(code) = response.exit_code {
+        println!("exit code: {}", code);
+    }
+    println!("log: {}", response.log_path);
+}
+
+fn print_runtime_focus(response: &ProjectRuntimeFocusResponse) {
+    println!(
+        "{} ({}) - {}",
+        response.project_name, response.project_key, response.detail
+    );
+    if let Some(url) = response.url.as_ref() {
+        println!("url: {}", url);
+    }
+    if let Some(bundle_id) = response.bundle_id.as_ref() {
+        println!("bundle: {}", bundle_id);
+    }
+}
+
+fn print_runtime_log(response: &ProjectRuntimeLogResponse) {
+    println!("log: {}", response.path);
+    println!(
+        "ready: {} - {}",
+        response.ready_summary.status_label,
+        response
+            .ready_summary
+            .detail
+            .as_deref()
+            .unwrap_or("no detail")
+    );
+    if let Some(run_id) = response.session_summary.run_id.as_ref() {
+        println!("session: {}", run_id);
+    }
+    if response.truncated {
+        println!("... truncated ...");
+    }
+    for line in &response.lines {
+        println!("{}", line);
+    }
+}
+
+fn run_web_actions(command: WebActionCommands, json_mode: bool) -> Result<()> {
+    match command {
+        WebActionCommands::Path => {
+            let path = default_web_actions_path();
+            if json_mode {
+                print_json_command(
+                    "web-actions.path",
+                    &json!({ "path": path.display().to_string() }),
+                )
+            } else {
+                println!("{}", path.display());
+                Ok(())
+            }
+        }
+        WebActionCommands::List { scope, url } => {
+            let response = list_web_actions(scope.as_deref(), url.as_deref())?;
+            if json_mode {
+                print_json_command("web-actions.list", &response)
+            } else {
+                print_web_action_list(&response);
+                Ok(())
+            }
+        }
+        WebActionCommands::Targets => {
+            let targets = list_web_action_targets()?;
+            if json_mode {
+                print_json_command("web-actions.targets", &targets)
+            } else {
+                print_web_action_targets(&targets);
+                Ok(())
+            }
+        }
+        WebActionCommands::Open { url } => {
+            let target = open_web_action_target(&url)?;
+            if json_mode {
+                print_json_command("web-actions.open", &target)
+            } else {
+                print_web_action_targets(&[target]);
+                Ok(())
+            }
+        }
+        WebActionCommands::Run {
+            action,
+            target,
+            scope,
+            url,
+            params,
+            context_params,
+        } => {
+            let result = run_web_action(WebActionRunRequest {
+                action_key: action,
+                target_id: target,
+                scope,
+                url,
+                params: parse_key_value_map(&params)?,
+                context_params: parse_key_value_map(&context_params)?,
+            })?;
+            if json_mode {
+                print_json_command("web-actions.run", &result)
+            } else {
+                print_web_action_result(&result);
+                Ok(())
+            }
+        }
+        WebActionCommands::Script {
+            target,
+            script,
+            file,
+            stdin,
+            params,
+        } => {
+            let result = run_web_action_script(WebActionScriptRunRequest {
+                target_id: target,
+                script: resolve_web_action_script_content(script, file, stdin)?,
+                params: parse_key_value_map(&params)?,
+            })?;
+            if json_mode {
+                print_json_command("web-actions.script", &result)
+            } else {
+                print_web_action_result(&result);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn print_web_action_list(response: &WebActionListResponse) {
+    println!("config: {}", response.config_path);
+    for action in &response.actions {
+        let kind = format!("{:?}", action.kind).to_ascii_lowercase();
+        let matches = if action.match_patterns.is_empty() {
+            "-".to_string()
+        } else {
+            action.match_patterns.join(", ")
+        };
+        println!(
+            "{:<24} {:<8} {} ({})",
+            action.key, kind, action.name, matches
+        );
+    }
+}
+
+fn print_web_action_targets(targets: &[WebActionTarget]) {
+    for target in targets {
+        println!("{:<40} {} -> {}", target.id, target.title, target.url);
+    }
+}
+
+fn print_web_action_result(result: &WebActionRunResult) {
+    println!("action : {}", result.action_key);
+    println!("target : {}", result.target_id);
+    println!("title  : {}", result.title);
+    println!("url    : {}", result.url);
+    println!("success: {}", result.success);
+    if let Some(error) = &result.error {
+        println!("error  : {error}");
+    } else if !result.result_text.trim().is_empty() {
+        println!("{}", result.result_text);
+    }
+}
+
+fn resolve_web_action_script_content(
+    script: Option<String>,
+    file: Option<PathBuf>,
+    stdin: bool,
+) -> Result<String> {
+    let mut modes = 0usize;
+    if script.is_some() {
+        modes += 1;
+    }
+    if file.is_some() {
+        modes += 1;
+    }
+    if stdin {
+        modes += 1;
+    }
+    if modes > 1 {
+        anyhow::bail!("choose only one of --script, --file, or --stdin");
+    }
+    if let Some(script) = script {
+        return Ok(script);
+    }
+    if let Some(file) = file {
+        return fs::read_to_string(&file).map_err(|error| {
+            anyhow::anyhow!(
+                "failed to read web action script {}: {error}",
+                file.display()
+            )
+        });
+    }
+    if stdin {
+        let mut buffer = String::new();
+        io::stdin().read_to_string(&mut buffer).map_err(|error| {
+            anyhow::anyhow!("failed to read web action script from stdin: {error}")
+        })?;
+        return Ok(buffer);
+    }
+    anyhow::bail!("temporary script is required; use --script, --file, or --stdin")
 }
 
 fn load_proxy_cli_info(config_override: Option<&Path>) -> Result<ProxyCliInfo> {
@@ -5347,6 +6618,20 @@ fn find_proxy_profile_in_info(info: &ProxyCliInfo, profile: &str) -> Result<Prox
         .find(|item| item.id == profile || item.name == profile)
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("proxy profile not visible in active workspace: {profile}"))
+}
+
+fn select_proxy_profile_for_diagnosis(
+    info: &ProxyCliInfo,
+    profile: Option<&str>,
+) -> Result<ProxyProfile> {
+    if let Some(profile) = profile.map(str::trim).filter(|value| !value.is_empty()) {
+        return find_proxy_profile_in_info(info, profile);
+    }
+    match info.profiles.as_slice() {
+        [profile] => Ok(profile.clone()),
+        [] => anyhow::bail!("no proxy profile visible in active workspace"),
+        _ => anyhow::bail!("multiple proxy profiles visible; pass --profile"),
+    }
 }
 
 fn find_proxy_rule(config: &ProxyConfig, rule: &str) -> Result<ProxyRule> {
@@ -5662,6 +6947,46 @@ fn print_proxy_rules(rules: &[ProxyRule]) {
     }
 }
 
+fn print_proxy_diagnosis(diagnosis: &ProxyRequestDiagnosis) {
+    println!("{} - {}", diagnosis.status_label, diagnosis.summary);
+    println!(
+        "profile: {} ({}) {} listening={}",
+        diagnosis.profile.name,
+        diagnosis.profile.id,
+        diagnosis.profile.listen_url,
+        diagnosis.profile.listening
+    );
+    println!(
+        "request: {} {}",
+        diagnosis.request.method, diagnosis.request.path
+    );
+    if let Some(rule) = diagnosis.matched_rule.as_ref() {
+        println!(
+            "matched: {} ({}) action={} priority={}",
+            rule.name, rule.id, rule.action, rule.priority
+        );
+    }
+    if !diagnosis.warnings.is_empty() {
+        println!("warnings:");
+        for warning in &diagnosis.warnings {
+            println!("  {}: {}", warning.key, warning.detail);
+            if let Some(action) = warning.action.as_ref() {
+                println!("    action: {}", action);
+            }
+        }
+    }
+    println!("rules:");
+    for decision in &diagnosis.decisions {
+        println!(
+            "  {} [{}] priority={} matched={}",
+            decision.rule_name, decision.action, decision.priority, decision.matched
+        );
+        for reason in decision.reasons.iter().filter(|reason| !reason.matched) {
+            println!("    - {}: {}", reason.key, reason.detail);
+        }
+    }
+}
+
 fn proxy_rule_action_label(action: &ProxyRuleAction) -> &'static str {
     match action {
         ProxyRuleAction::Forward { .. } => "forward",
@@ -5743,7 +7068,76 @@ fn list_merge_history_for_workspace(
     }
 }
 
-fn run_history(command: HistoryCommands, json_mode: bool) -> Result<()> {
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryReplayPreview {
+    action: ReplayAction,
+    preview: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryReplayRun {
+    action: ReplayAction,
+    result: serde_json::Value,
+}
+
+fn find_history_replay_action(storage: &Storage, id: &str) -> Result<ReplayAction> {
+    let (kind, history_key) = replay_kind_and_history_key(id).ok_or_else(|| {
+        anyhow::anyhow!("replay id must look like build:<historyKey> or merge:<historyKey>")
+    })?;
+    match kind {
+        "build" | "deploy" => list_deploy_history_for_workspace(storage, None, 20)?
+            .into_iter()
+            .find(|entry| entry.history_key == history_key)
+            .and_then(|entry| build_replay_action(&entry))
+            .ok_or_else(|| anyhow::anyhow!("build replay action not found: {id}")),
+        "merge" => list_merge_history_for_workspace(storage, None, 20)?
+            .into_iter()
+            .find(|entry| entry.history_key == history_key)
+            .and_then(|entry| merge_replay_action(&entry))
+            .ok_or_else(|| anyhow::anyhow!("merge replay action not found: {id}")),
+        other => anyhow::bail!("unsupported replay kind: {other}"),
+    }
+}
+
+fn preview_history_replay(config: &AppConfig, action: &ReplayAction) -> Result<serde_json::Value> {
+    match action.kind.as_str() {
+        "build" => {
+            let request: DeployRequest = serde_json::from_value(action.request.clone())?;
+            serde_json::to_value(core::build_plan(config, &request)?).map_err(anyhow::Error::from)
+        }
+        "merge" => {
+            let request: MergeRequest = serde_json::from_value(action.request.clone())?;
+            serde_json::to_value(core::branch_commit_overview(
+                config,
+                &request.project,
+                &request.source_branch,
+                &request.target_branch,
+            )?)
+            .map_err(anyhow::Error::from)
+        }
+        other => anyhow::bail!("unsupported replay kind: {other}"),
+    }
+}
+
+fn run_history_replay(config: &AppConfig, action: &ReplayAction) -> Result<serde_json::Value> {
+    match action.kind.as_str() {
+        "build" => {
+            let request: DeployRequest = serde_json::from_value(action.request.clone())?;
+            serde_json::to_value(core::trigger_deploy(config, &request)?)
+                .map_err(anyhow::Error::from)
+        }
+        "merge" => {
+            let request: MergeRequest = serde_json::from_value(action.request.clone())?;
+            serde_json::to_value(core::execute_merge(config, &request)?)
+                .map_err(anyhow::Error::from)
+        }
+        other => anyhow::bail!("unsupported replay kind: {other}"),
+    }
+}
+
+fn run_history(config: &AppConfig, command: HistoryCommands, json_mode: bool) -> Result<()> {
     let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
     match command {
         HistoryCommands::Build { project, limit } => {
@@ -5778,6 +7172,28 @@ fn run_history(command: HistoryCommands, json_mode: bool) -> Result<()> {
                 Ok(())
             }
         }
+        HistoryCommands::ReplayPlan { id } => {
+            let action = find_history_replay_action(&storage, &id)?;
+            let preview = preview_history_replay(config, &action)?;
+            let value = HistoryReplayPreview { action, preview };
+            if json_mode {
+                print_json_command("history.replay-plan", &value)
+            } else {
+                print_history_replay_preview(&value);
+                Ok(())
+            }
+        }
+        HistoryCommands::ReplayRun { id } => {
+            let action = find_history_replay_action(&storage, &id)?;
+            let result = run_history_replay(config, &action)?;
+            let value = HistoryReplayRun { action, result };
+            if json_mode {
+                print_json_command("history.replay-run", &value)
+            } else {
+                print_history_replay_run(&value);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -5788,6 +7204,21 @@ fn print_build_history_items(items: Vec<DeployHistoryEntry>) {
             item.project_key, item.mode, item.state_label, item.updated_at
         );
     }
+}
+
+fn print_history_replay_preview(value: &HistoryReplayPreview) {
+    println!("action       : {}", value.action.label);
+    println!("id           : {}", value.action.id);
+    println!("risk         : {}", value.action.risk_level);
+    println!("preview cmd  : {}", value.action.preview_command.display);
+    println!("run cmd      : {}", value.action.run_command.display);
+}
+
+fn print_history_replay_run(value: &HistoryReplayRun) {
+    println!("action       : {}", value.action.label);
+    println!("id           : {}", value.action.id);
+    println!("risk         : {}", value.action.risk_level);
+    println!("result       : done");
 }
 
 fn run_agent(
@@ -5952,6 +7383,7 @@ fn print_agent_context(value: &AgentContext) {
     println!("notes        : {}", value.notes.len());
     println!("build hist   : {}", value.build_history.len());
     println!("merge hist   : {}", value.merge_history.len());
+    println!("replayable   : {}", value.replay_actions.len());
     println!("navigation   : {}", value.navigation.len());
     if let Some(project) = &value.project {
         println!("project      : {}", project.detail.name);

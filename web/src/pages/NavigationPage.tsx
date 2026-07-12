@@ -17,6 +17,7 @@ import {
   OpenExternalIcon,
   TerminalIcon,
 } from "../components/AppIcons";
+import { AppEmptyState } from "../components/AppEmptyState";
 import { shouldHandlePrimaryEnter } from "../lib/keyboard";
 
 type NavigationEntry = {
@@ -818,26 +819,21 @@ export function NavigationPage({
                       ))}
                     </Stack>
                   ) : (
-                    <Box
-                      sx={{
-                        p: 1.25,
-                        borderRadius: "14px",
-                        border: "1px dashed",
-                        borderColor: shellTone.sectionBorder,
-                        bgcolor: shellTone.emptyBg,
-                      }}
-                    >
-                      <Typography variant="body2" sx={{ color: shellTone.emptyText }}>
-                        当前筛选下暂无快捷入口，试试切到“全部”或清空搜索。
-                      </Typography>
-                    </Box>
+                    <AppEmptyState
+                      compact
+                      title="没有匹配入口"
+                      description="切到全部或清空搜索再试。"
+                    />
                   )}
                 </Box>
               </>
             ) : (
-              <Typography variant="body2" color="text.secondary" sx={{ mt: 0.3 }}>
-                还没有加载到快捷入口配置，检查 `navigation.toml` 是否可读。
-              </Typography>
+              <AppEmptyState
+                compact
+                title="暂无快捷入口"
+                description="检查 navigation.toml 是否可读。"
+                sx={{ mt: 0.3 }}
+              />
             )}
           </Stack>
         </CardContent>

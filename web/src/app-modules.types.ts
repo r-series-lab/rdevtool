@@ -9,9 +9,12 @@ import type {
   BranchPushAction,
   BranchPushStatus,
   BranchTaskHistoryEntry,
-  BranchTaskResponse,
   BranchWorkflowMode,
   BranchWorktreeSummary,
+  CreateProjectWorkspacePayload,
+  InitDemandWorkspacePayload,
+  InitDemandWorkspaceResult,
+  ProjectWorkspaceSummary,
 } from "./app-types";
 import type {
   ProjectSelectionEntry,
@@ -22,12 +25,14 @@ import type { WorkflowSignalsState } from "./hooks/useWorkflowSignals";
 import type { WorkflowProjectReplay } from "./lib/workflowSignals";
 import type { BuildPageProps } from "./pages/BuildPage";
 import type { MergePageProps } from "./pages/MergePage";
+import type { OverviewPageProps } from "./pages/OverviewPage";
 import type { ProxyPageProps } from "./pages/ProxyPage";
 import type { ProjectsPageProps } from "./pages/ProjectsPage";
 
 export type PageComponent = LazyExoticComponent<ComponentType<any>>;
 
 export type AppPagePropsMap = {
+  overview: OverviewPageProps;
   build: BuildPageProps;
   merge: MergePageProps;
   proxy: ProxyPageProps;
@@ -35,14 +40,23 @@ export type AppPagePropsMap = {
 };
 
 export type AppShellContext = {
-  enabledPages: Array<"projects" | "merge" | "build" | "proxy">;
+  enabledPages: Array<"overview" | "projects" | "merge" | "build" | "proxy">;
   projects: ProjectSummary[];
   buildProjects: ProjectSummary[];
   branchProjects: ProjectSummary[];
   selectedProject: string;
   selectedProjectInfo: ProjectSummary | null;
+  projectWorkspaces: ProjectWorkspaceSummary[];
+  activeProjectWorkspaceKey: string;
   setSelectedProject: (projectKey: string) => void;
-  setPage: (page: "projects" | "merge" | "build" | "proxy") => void;
+  setPage: (page: "overview" | "projects" | "merge" | "build" | "proxy") => void;
+  onProjectWorkspaceChange: (workspaceKey: string) => Promise<void> | void;
+  onCreateProjectWorkspace: (payload: CreateProjectWorkspacePayload) => Promise<void> | void;
+  onInitDemandWorkspace: (
+    payload: InitDemandWorkspacePayload,
+  ) => Promise<InitDemandWorkspaceResult> | InitDemandWorkspaceResult;
+  onProjectConfigSaved: () => Promise<void> | void;
+  onOpenProjectWorkspacesDir: () => void;
 };
 
 export type BuildModuleContext = {
@@ -62,7 +76,7 @@ export type BuildModuleContext = {
   plan: BuildPageProps["plan"];
   buildResult: BuildPageProps["buildResult"];
   buildResultUpdatedAtMs: BuildPageProps["buildResultUpdatedAtMs"];
-  buildAutoRefreshTimedOut: boolean;
+  currentBuildHistoryKey: BuildPageProps["currentBuildHistoryKey"];
   visibleBuildHistory: BuildPageProps["buildHistory"];
   handleTriggerBuild: () => Promise<void>;
   handleTriggerBuildRequest: (
@@ -131,7 +145,8 @@ export type MergeModuleContext = {
   worktreesError: string;
   selectedWorktreePath: string;
   setSelectedWorktreePath: (value: string) => void;
-  branchTaskResult: BranchTaskResponse | null;
+  currentBranchTaskHistoryId: string;
+  currentBranchTaskRunningLabel: string;
   visibleBranchTaskHistory: BranchTaskHistoryEntry[];
   loadBranchTaskHistory: () => Promise<void>;
   loadProjectWorktrees: (
@@ -157,9 +172,6 @@ export type ProjectsModuleContext = {
   finderTypeOptions: ProjectsPageProps["finderTypeOptions"];
   finderType: ProjectsPageProps["finderType"];
   finderTypeCounts: ProjectsPageProps["finderTypeCounts"];
-  finderQuickFilterOptions: ProjectsPageProps["finderQuickFilterOptions"];
-  finderQuickFilter: ProjectsPageProps["finderQuickFilter"];
-  finderQuickFilterCounts: ProjectsPageProps["finderQuickFilterCounts"];
   finderCategories: ProjectsPageProps["finderCategories"];
   finderCategory: ProjectsPageProps["finderCategory"];
   finderCategoryCounts: ProjectsPageProps["finderCategoryCounts"];
@@ -174,7 +186,6 @@ export type ProjectsModuleContext = {
   recentShortcutKeys: ProjectsPageProps["recentShortcutKeys"];
   selectedDebugProfileKeys: ProjectsPageProps["selectedDebugProfileKeys"];
   setFinderType: ProjectsPageProps["onFinderTypeChange"];
-  setFinderQuickFilter: ProjectsPageProps["onFinderQuickFilterChange"];
   setFinderCategory: ProjectsPageProps["onFinderCategoryChange"];
   setFinderQuery: ProjectsPageProps["onFinderQueryChange"];
   toggleProjectFavorite: ProjectsPageProps["onToggleProjectFavorite"];
@@ -224,6 +235,8 @@ export type ProxyModuleContext = {
   clearProxyEvents: ProxyPageProps["onClearEvents"];
   exportProxyProfilePack: ProxyPageProps["onExportProfilePack"];
   importProxyProfilePack: ProxyPageProps["onImportProfilePack"];
+  bindProxyRuntimeProfile: ProxyPageProps["onBindProxyRuntimeProfile"];
+  diagnoseProxyRequest: ProxyPageProps["onDiagnoseRequest"];
 };
 
 export type BuildModulePropsContext = {

@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, Shutdown, TcpListener, TcpStream};
+use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc, Mutex,
@@ -170,31 +170,39 @@ fn default_outbound_mode() -> ProxyOutboundMode {
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum ProxyRuleAction {
     Forward {
-        #[serde(default)]
+        #[serde(default, rename = "targetBaseUrl", alias = "target_base_url")]
         target_base_url: String,
-        #[serde(default)]
+        #[serde(default, rename = "rewritePrefix", alias = "rewrite_prefix")]
         rewrite_prefix: String,
-        #[serde(default)]
+        #[serde(default, rename = "requestHeaders", alias = "request_headers")]
         request_headers: BTreeMap<String, String>,
-        #[serde(default)]
+        #[serde(default, rename = "responseHeaders", alias = "response_headers")]
         response_headers: BTreeMap<String, String>,
-        #[serde(default = "default_outbound_mode")]
+        #[serde(
+            default = "default_outbound_mode",
+            rename = "outboundMode",
+            alias = "outbound_mode"
+        )]
         outbound_mode: ProxyOutboundMode,
-        #[serde(default)]
+        #[serde(default, rename = "outboundProxy", alias = "outbound_proxy")]
         outbound_proxy: String,
-        #[serde(default)]
+        #[serde(default, rename = "delayMs", alias = "delay_ms")]
         delay_ms: u64,
     },
     Mock {
         #[serde(default = "default_mock_status")]
         status: u16,
-        #[serde(default = "default_content_type")]
+        #[serde(
+            default = "default_content_type",
+            rename = "contentType",
+            alias = "content_type"
+        )]
         content_type: String,
         #[serde(default)]
         body: String,
         #[serde(default)]
         headers: BTreeMap<String, String>,
-        #[serde(default)]
+        #[serde(default, rename = "delayMs", alias = "delay_ms")]
         delay_ms: u64,
     },
     Block {
@@ -202,7 +210,7 @@ pub enum ProxyRuleAction {
         status: u16,
         #[serde(default)]
         body: String,
-        #[serde(default)]
+        #[serde(default, rename = "delayMs", alias = "delay_ms")]
         delay_ms: u64,
     },
 }
@@ -281,6 +289,75 @@ pub struct ProxyDashboard {
     pub config: ProxyConfig,
     pub statuses: Vec<ProxyProfileRuntimeStatus>,
     pub events: Vec<ProxyEvent>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRequestDiagnosis {
+    pub profile: ProxyRequestDiagnosisProfile,
+    pub request: ProxyRequestDiagnosisRequest,
+    pub status_key: String,
+    pub status_label: String,
+    pub summary: String,
+    pub matched_rule: Option<ProxyRuleDiagnosisSummary>,
+    pub decisions: Vec<ProxyRuleDiagnosisDecision>,
+    pub warnings: Vec<ProxyRequestDiagnosisWarning>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRequestDiagnosisProfile {
+    pub id: String,
+    pub name: String,
+    pub listen_url: String,
+    pub listening: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRequestDiagnosisRequest {
+    pub method: String,
+    pub url: String,
+    pub path: String,
+    pub header_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRuleDiagnosisSummary {
+    pub id: String,
+    pub name: String,
+    pub priority: i32,
+    pub action: String,
+    pub path_prefix: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRuleDiagnosisDecision {
+    pub rule_id: String,
+    pub rule_name: String,
+    pub enabled: bool,
+    pub priority: i32,
+    pub action: String,
+    pub matched: bool,
+    pub reasons: Vec<ProxyRuleDiagnosisReason>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRuleDiagnosisReason {
+    pub key: String,
+    pub matched: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyRequestDiagnosisWarning {
+    pub key: String,
+    pub detail: String,
+    pub action: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -462,6 +539,99 @@ pub fn import_proxy_profile_pack(path: &Path, pack: ProxyProfilePack) -> Result<
 
     save_proxy_config(path, &config)?;
     load_proxy_config(path)
+}
+
+pub fn diagnose_proxy_request(
+    config: &ProxyConfig,
+    profile: &str,
+    method: &str,
+    raw_url: &str,
+    headers: &BTreeMap<String, String>,
+) -> Result<ProxyRequestDiagnosis> {
+    let mut config = config.clone();
+    normalize_proxy_config(&mut config);
+    let profile = config
+        .profiles
+        .iter()
+        .find(|item| item.id == profile || item.name == profile)
+        .cloned()
+        .ok_or_else(|| anyhow!("proxy profile not found: {}", profile))?;
+    let method = method.trim().to_ascii_uppercase();
+    if method.is_empty() {
+        bail!("request method is required");
+    }
+    let target_url = diagnosis_target_url(&profile, raw_url)?;
+    let request_headers = headers
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect::<Vec<_>>();
+    let profile_rules = config
+        .rules
+        .iter()
+        .filter(|rule| rule.profile_id == profile.id)
+        .cloned()
+        .collect::<Vec<_>>();
+    let decisions = profile_rules
+        .iter()
+        .map(|rule| diagnose_rule_match(rule, &method, &target_url, &request_headers))
+        .collect::<Vec<_>>();
+    let matched_index = decisions
+        .iter()
+        .position(|decision| decision.enabled && decision.matched);
+    let matched_rule = matched_index.and_then(|index| profile_rules.get(index));
+    let listening = proxy_profile_port_listening(&profile);
+    let warnings = proxy_diagnosis_warnings(
+        &profile,
+        listening,
+        matched_index,
+        &profile_rules,
+        &decisions,
+    );
+    let status_key = if matched_rule.is_some() && listening {
+        "matched"
+    } else if matched_rule.is_some() {
+        "matchedNotListening"
+    } else {
+        "notMatched"
+    };
+    let status_label = match status_key {
+        "matched" => "已命中",
+        "matchedNotListening" => "规则命中但端口未监听",
+        _ => "未命中",
+    }
+    .to_string();
+    let summary = match matched_rule {
+        Some(rule) if listening => format!("请求会命中规则 {}", rule.name),
+        Some(rule) => format!("请求会命中规则 {}，但代理端口当前未监听", rule.name),
+        None => "没有启用规则会处理这个请求".to_string(),
+    };
+    let path = target_url.path().to_string()
+        + target_url
+            .query()
+            .map(|query| format!("?{query}"))
+            .as_deref()
+            .unwrap_or("");
+
+    Ok(ProxyRequestDiagnosis {
+        profile: ProxyRequestDiagnosisProfile {
+            id: profile.id.clone(),
+            name: profile.name.clone(),
+            listen_url: profile.listen_url(),
+            listening,
+        },
+        request: ProxyRequestDiagnosisRequest {
+            method,
+            url: target_url.to_string(),
+            path,
+            header_count: headers.len(),
+        },
+        status_key: status_key.to_string(),
+        status_label,
+        summary,
+        matched_rule: matched_rule.map(proxy_rule_diagnosis_summary),
+        decisions,
+        warnings,
+    })
 }
 
 fn imported_profile_name(config: &ProxyConfig, base_name: &str) -> String {
@@ -1507,6 +1677,198 @@ fn rule_matches(
         }
     }
     true
+}
+
+fn diagnosis_target_url(profile: &ProxyProfile, raw_url: &str) -> Result<Url> {
+    let raw_url = raw_url.trim();
+    if raw_url.is_empty() {
+        bail!("request URL or path is required");
+    }
+    if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+        return Url::parse(raw_url).with_context(|| format!("invalid request URL: {raw_url}"));
+    }
+    let path = if raw_url.starts_with('/') {
+        raw_url.to_string()
+    } else {
+        format!("/{raw_url}")
+    };
+    let base = if profile.upstream_base_url.trim().is_empty() {
+        "http://rdevtool.local"
+    } else {
+        profile.upstream_base_url.trim()
+    };
+    Url::parse(base)
+        .with_context(|| format!("invalid profile upstream URL: {base}"))?
+        .join(&path)
+        .with_context(|| format!("invalid request path: {raw_url}"))
+}
+
+fn diagnose_rule_match(
+    rule: &ProxyRule,
+    method: &str,
+    url: &Url,
+    headers: &[(String, String)],
+) -> ProxyRuleDiagnosisDecision {
+    let mut reasons = Vec::new();
+    if !rule.enabled {
+        reasons.push(ProxyRuleDiagnosisReason {
+            key: "enabled".to_string(),
+            matched: false,
+            detail: "规则已停用".to_string(),
+        });
+    }
+    reasons.push(match_rule_reason(
+        "method",
+        rule.method.is_empty() || rule.method == method,
+        if rule.method.is_empty() {
+            "未限制 method".to_string()
+        } else {
+            format!("需要 {}，当前 {}", rule.method, method)
+        },
+    ));
+    reasons.push(match_rule_reason(
+        "urlContains",
+        rule.url_contains.is_empty() || url.as_str().contains(&rule.url_contains),
+        if rule.url_contains.is_empty() {
+            "未限制 URL 包含内容".to_string()
+        } else {
+            format!("需要 URL 包含 {}", rule.url_contains)
+        },
+    ));
+    reasons.push(match_rule_reason(
+        "pathPrefix",
+        rule.path_prefix.is_empty() || url.path().starts_with(&rule.path_prefix),
+        if rule.path_prefix.is_empty() {
+            "未限制 pathPrefix".to_string()
+        } else {
+            format!("需要路径以 {} 开头，当前 {}", rule.path_prefix, url.path())
+        },
+    ));
+    if !rule.header_name.is_empty() {
+        let value = header_value(headers, &rule.header_name);
+        let matched = value.as_ref().is_some_and(|value| {
+            rule.header_contains.is_empty() || value.contains(&rule.header_contains)
+        });
+        reasons.push(match_rule_reason(
+            "header",
+            matched,
+            match value {
+                Some(value) if rule.header_contains.is_empty() => {
+                    format!("找到请求头 {}={}", rule.header_name, value)
+                }
+                Some(value) => format!(
+                    "请求头 {} 需要包含 {}，当前 {}",
+                    rule.header_name, rule.header_contains, value
+                ),
+                None => format!("缺少请求头 {}", rule.header_name),
+            },
+        ));
+    } else {
+        reasons.push(match_rule_reason(
+            "header",
+            true,
+            "未限制请求头".to_string(),
+        ));
+    }
+    let matched = rule.enabled && reasons.iter().all(|reason| reason.matched);
+    ProxyRuleDiagnosisDecision {
+        rule_id: rule.id.clone(),
+        rule_name: rule.name.clone(),
+        enabled: rule.enabled,
+        priority: rule.priority,
+        action: rule.action.label().to_string(),
+        matched,
+        reasons,
+    }
+}
+
+fn match_rule_reason(key: &str, matched: bool, detail: String) -> ProxyRuleDiagnosisReason {
+    ProxyRuleDiagnosisReason {
+        key: key.to_string(),
+        matched,
+        detail,
+    }
+}
+
+fn proxy_rule_diagnosis_summary(rule: &ProxyRule) -> ProxyRuleDiagnosisSummary {
+    ProxyRuleDiagnosisSummary {
+        id: rule.id.clone(),
+        name: rule.name.clone(),
+        priority: rule.priority,
+        action: rule.action.label().to_string(),
+        path_prefix: rule.path_prefix.clone(),
+    }
+}
+
+fn proxy_diagnosis_warnings(
+    profile: &ProxyProfile,
+    listening: bool,
+    matched_index: Option<usize>,
+    rules: &[ProxyRule],
+    decisions: &[ProxyRuleDiagnosisDecision],
+) -> Vec<ProxyRequestDiagnosisWarning> {
+    let mut warnings = Vec::new();
+    if !listening {
+        warnings.push(ProxyRequestDiagnosisWarning {
+            key: "profileNotListening".to_string(),
+            detail: format!("{} 当前没有监听", profile.listen_url()),
+            action: Some("先启动该代理 profile，再验证请求是否进入代理。".to_string()),
+        });
+    }
+    if rules.iter().all(|rule| !rule.enabled) {
+        warnings.push(ProxyRequestDiagnosisWarning {
+            key: "noEnabledRules".to_string(),
+            detail: "该 profile 没有启用中的规则".to_string(),
+            action: Some("启用至少一条规则，或创建新的转发/Mock/阻断规则。".to_string()),
+        });
+    }
+    if matched_index.is_none() && rules.iter().any(|rule| rule.enabled) {
+        warnings.push(ProxyRequestDiagnosisWarning {
+            key: "noRuleMatched".to_string(),
+            detail: "请求进入该 profile 后会走默认转发，不会命中规则动作".to_string(),
+            action: Some("检查 pathPrefix、method、urlContains 和 header 条件。".to_string()),
+        });
+    }
+    if let Some(index) = matched_index {
+        if let Some(selected) = rules.get(index) {
+            let selected_prefix_len = selected.path_prefix.len();
+            let shadowed = rules
+                .iter()
+                .enumerate()
+                .skip(index + 1)
+                .filter(|(_, rule)| rule.enabled && rule.path_prefix.len() > selected_prefix_len)
+                .filter_map(|(rule_index, rule)| {
+                    decisions
+                        .get(rule_index)
+                        .filter(|decision| decision.matched)
+                        .map(|_| rule.name.clone())
+                })
+                .collect::<Vec<_>>();
+            if !shadowed.is_empty() {
+                warnings.push(ProxyRequestDiagnosisWarning {
+                    key: "specificRuleShadowed".to_string(),
+                    detail: format!(
+                        "更具体的规则也能命中，但排序在 {} 之后：{}",
+                        selected.name,
+                        shadowed.join(", ")
+                    ),
+                    action: Some("把更具体的 pathPrefix 规则设置为更小的 priority。".to_string()),
+                });
+            }
+        }
+    }
+    warnings
+}
+
+fn proxy_profile_port_listening(profile: &ProxyProfile) -> bool {
+    let address = format!("{}:{}", profile.listen_host, profile.listen_port);
+    address
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addresses| addresses.next())
+        .is_some_and(|address| {
+            TcpStream::connect_timeout(&address, Duration::from_millis(180)).is_ok()
+        })
 }
 
 struct ForwardResponse {

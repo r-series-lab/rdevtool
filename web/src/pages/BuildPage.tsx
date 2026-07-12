@@ -14,7 +14,6 @@ import {
   InputAdornment,
   InputLabel,
   MenuItem,
-  Pagination,
   Select,
   Skeleton,
   Stack,
@@ -22,7 +21,14 @@ import {
   Typography,
 } from "@mui/material";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
+import {
+  useEffect,
+  useMemo,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+  type UIEvent,
+} from "react";
 import type { SelectChangeEvent } from "@mui/material/Select";
 import type {
   BranchOption,
@@ -30,6 +36,7 @@ import type {
   ProjectRuntimeLogResponse,
 } from "../app-types";
 import { HistoryCard } from "../components/AppCards";
+import { AppEmptyState } from "../components/AppEmptyState";
 import {
   WorkflowLinkButton,
   WorkflowLinkSummaryButton,
@@ -42,9 +49,7 @@ import { WorkflowRulesConfigDialog } from "../components/WorkflowRulesConfigDial
 import { InlineWarningNotice } from "../components/InlineWarningNotice";
 import {
   ClearIcon,
-  CheckIcon,
   CollapseIcon,
-  CopyIcon,
   ExpandIcon,
   FolderIcon,
   OpenExternalIcon,
@@ -91,9 +96,7 @@ type BuildActionCopy = {
   config: string;
 };
 
-const HISTORY_PAGE_SIZE = 5;
-const BUILD_STATUS_STALE_MS = 45_000;
-const BUILD_STATUS_CLOCK_INTERVAL_MS = 15_000;
+const HISTORY_SCROLL_PAGE_SIZE = 8;
 const BUILD_HISTORY_PARAM_PREVIEW_LIMIT = 5;
 const BUILD_ENV_PARAM_KEYS = new Set(["ENV_PROFILE", "projectEnv", "env"]);
 const BUILD_BRANCH_PARAM_KEYS = new Set(["BRANCH", "branch", "Branch"]);
@@ -108,7 +111,7 @@ function buildActionCopy(actionKind?: string | null): BuildActionCopy {
     case "build":
       return { noun: "构建", start: "开始构建", config: "构建配置" };
     case "package":
-      return { noun: "打包", start: "开始打包", config: "打包配置" };
+      return { noun: "产物构建", start: "开始产物构建", config: "产物构建配置" };
     case "release":
       return { noun: "发布", start: "开始发布", config: "发布配置" };
     case "deploy":
@@ -353,197 +356,6 @@ function buildParamInvalidMessage(
   return "";
 }
 
-type BuildStatusFreshnessProps = {
-  updatedAtMs: number;
-  nowMs: number;
-  active: boolean;
-  timedOut: boolean;
-  canRefresh: boolean;
-  onRefresh: () => void;
-};
-
-function BuildStatusFreshness({
-  updatedAtMs,
-  nowMs,
-  active,
-  timedOut,
-  canRefresh,
-  onRefresh,
-}: BuildStatusFreshnessProps) {
-  const stale = Boolean(
-    timedOut || (active && updatedAtMs && nowMs - updatedAtMs > BUILD_STATUS_STALE_MS),
-  );
-  if (!stale) {
-    return null;
-  }
-
-  return (
-    <Stack direction="row" spacing={0.5} alignItems="baseline" flexWrap="wrap" rowGap={0.2}>
-      <Typography
-        variant="caption"
-        color="text.secondary"
-        sx={{ fontSize: "0.7rem", lineHeight: 1.4 }}
-      >
-        {timedOut ? "自动刷新已暂停" : "状态可能已过期"}
-      </Typography>
-      <Button
-        size="small"
-        variant="text"
-        disabled={!canRefresh}
-        onClick={onRefresh}
-        sx={{
-          minWidth: 0,
-          minHeight: 20,
-          px: 0.25,
-          py: 0,
-          fontSize: "0.7rem",
-          fontWeight: 760,
-          lineHeight: 1.2,
-        }}
-      >
-        刷新
-      </Button>
-    </Stack>
-  );
-}
-
-type BuildResultRowProps = {
-  label: string;
-  value?: string | number | null;
-  copyKey?: string;
-  copied?: boolean;
-  onCopy?: (field: string, value?: string | number | null) => void;
-};
-
-function BuildResultRow({
-  label,
-  value,
-  copyKey,
-  copied = false,
-  onCopy,
-}: BuildResultRowProps) {
-  const textValue = value === null || value === undefined || value === "" ? "-" : String(value);
-  const canCopy = Boolean(copyKey && textValue !== "-" && onCopy);
-
-  return (
-    <Box
-      sx={{
-        display: "grid",
-        gridTemplateColumns: { xs: "76px minmax(0,1fr)", sm: "92px minmax(0,1fr)" },
-        alignItems: "start",
-        gap: 1,
-        minWidth: 0,
-        py: 0.65,
-        borderTop: "1px solid",
-        borderColor: "divider",
-        "&:first-of-type": { borderTop: "none" },
-      }}
-    >
-      <Typography variant="caption" color="text.secondary" noWrap sx={{ fontWeight: 800 }}>
-        {label}
-      </Typography>
-      <Stack direction="row" alignItems="flex-start" spacing={0.55} minWidth={0}>
-        <Typography
-          variant="body2"
-          sx={{
-            flex: 1,
-            minWidth: 0,
-            overflowWrap: "anywhere",
-            wordBreak: "break-word",
-            fontWeight: label === "状态" ? 700 : 500,
-          }}
-        >
-          {textValue}
-        </Typography>
-        {canCopy && copyKey ? (
-          <IconButton
-            size="small"
-            onClick={() => onCopy?.(copyKey, textValue)}
-            title={copied ? "已复制" : "复制"}
-            aria-label={copied ? `已复制${label}` : `复制${label}`}
-            sx={{ mt: -0.45, flexShrink: 0 }}
-          >
-            {copied ? <CheckIcon fontSize="small" /> : <CopyIcon fontSize="small" />}
-          </IconButton>
-        ) : null}
-      </Stack>
-    </Box>
-  );
-}
-
-type BuildResultLinkRowProps = {
-  label: string;
-  value?: string | null;
-  copyKey: string;
-  copied: boolean;
-  onCopy: (field: string, value?: string | number | null) => void;
-  onOpen: (url: string) => void;
-};
-
-function BuildResultLinkRow({
-  label,
-  value,
-  copyKey,
-  copied,
-  onCopy,
-  onOpen,
-}: BuildResultLinkRowProps) {
-  const url = value?.trim() ?? "";
-
-  return (
-    <Box
-      sx={{
-        display: "grid",
-        gridTemplateColumns: { xs: "76px minmax(0,1fr)", sm: "92px minmax(0,1fr)" },
-        alignItems: "center",
-        gap: 1,
-        minWidth: 0,
-        py: 0.55,
-        borderTop: "1px solid",
-        borderColor: "divider",
-        "&:first-of-type": { borderTop: "none" },
-      }}
-    >
-      <Typography variant="caption" color="text.secondary" noWrap sx={{ fontWeight: 800 }}>
-        {label}
-      </Typography>
-      {url ? (
-        <Stack direction="row" alignItems="center" spacing={0.45} minWidth={0}>
-          <Typography
-            variant="body2"
-            noWrap
-            sx={{ flex: 1, minWidth: 0, fontWeight: 760, color: "text.primary" }}
-          >
-            可打开
-          </Typography>
-          <IconButton
-            size="small"
-            onClick={() => onOpen(url)}
-            title={`打开${label}`}
-            aria-label={`打开${label}`}
-            sx={{ flexShrink: 0 }}
-          >
-            <OpenExternalIcon fontSize="small" />
-          </IconButton>
-          <IconButton
-            size="small"
-            onClick={() => onCopy(copyKey, url)}
-            title={copied ? "已复制" : "复制"}
-            aria-label={copied ? `已复制${label}` : `复制${label}`}
-            sx={{ flexShrink: 0 }}
-          >
-            {copied ? <CheckIcon fontSize="small" /> : <CopyIcon fontSize="small" />}
-          </IconButton>
-        </Stack>
-      ) : (
-        <Typography variant="body2" sx={{ fontWeight: 760 }}>
-          -
-        </Typography>
-      )}
-    </Box>
-  );
-}
-
 type BuildHistoryParamEntry = {
   key: string;
   label: string;
@@ -635,6 +447,22 @@ function buildHistoryParamMetaLabels(
   return extraCount > 0 ? [...labels, `+${extraCount}`] : labels;
 }
 
+function buildHistoryEntriesReferToSameRun(
+  left: BuildHistoryEntry,
+  right: BuildHistoryEntry,
+) {
+  if (left.historyKey && left.historyKey === right.historyKey) {
+    return true;
+  }
+  if (left.queueUrl && right.queueUrl && left.queueUrl === right.queueUrl) {
+    return true;
+  }
+  if (left.buildUrl && right.buildUrl && left.buildUrl === right.buildUrl) {
+    return true;
+  }
+  return false;
+}
+
 export type BuildPageProps = {
   projects: ProjectOption[];
   selectedProject: string;
@@ -657,7 +485,7 @@ export type BuildPageProps = {
   plan: BuildPlan | null;
   buildResult: BuildResult | null;
   buildResultUpdatedAtMs: number;
-  buildAutoRefreshTimedOut: boolean;
+  currentBuildHistoryKey: string;
   onRefreshBuild: () => void;
   onOpenBuildRecord: () => void;
   onOpenBuildUrl: (url: string) => void;
@@ -702,7 +530,7 @@ export function BuildPage({
   plan,
   buildResult,
   buildResultUpdatedAtMs,
-  buildAutoRefreshTimedOut,
+  currentBuildHistoryKey,
   onRefreshBuild,
   onOpenBuildRecord,
   onOpenBuildUrl,
@@ -721,14 +549,13 @@ export function BuildPage({
   onClearBuildHistory,
   formatRelativeTime,
 }: BuildPageProps) {
-  const [resultExpanded, setResultExpanded] = useState(true);
   const [historyExpanded, setHistoryExpanded] = useState(true);
-  const [historyPage, setHistoryPage] = useState(1);
+  const [historyVisibleCount, setHistoryVisibleCount] = useState(
+    HISTORY_SCROLL_PAGE_SIZE,
+  );
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [workflowListOpen, setWorkflowListOpen] = useState(false);
   const [workflowEntry, setWorkflowEntry] = useState<BuildHistoryEntry | null>(null);
-  const [nowMs, setNowMs] = useState(Date.now());
-  const [copiedResultField, setCopiedResultField] = useState("");
   const [runtimeLogOpen, setRuntimeLogOpen] = useState(false);
   const [runtimeLogLoading, setRuntimeLogLoading] = useState(false);
   const [runtimeLogError, setRuntimeLogError] = useState("");
@@ -745,26 +572,114 @@ export function BuildPage({
     removePinned,
     replacePinnedActions,
   } = useTrayPinnedActions("build.replay");
+  const currentBuildHistoryEntry = useMemo(() => {
+    if (!buildResult) {
+      return null;
+    }
+    const resultKey =
+      currentBuildHistoryKey || buildResult.queueUrl || buildResult.buildUrl || "";
+    const matchedEntry = buildHistory.find((item) => {
+      if (resultKey && item.historyKey === resultKey) {
+        return true;
+      }
+      if (buildResult.queueUrl && item.queueUrl === buildResult.queueUrl) {
+        return true;
+      }
+      if (buildResult.buildUrl && item.buildUrl === buildResult.buildUrl) {
+        return true;
+      }
+      return false;
+    });
+    const projectOption = projects.find((item) => item.key === selectedProject);
+    const planParams = plan?.params ?? matchedEntry?.params ?? paramValues;
+    const updatedAt = new Date(buildResultUpdatedAtMs || Date.now()).toISOString();
+    return {
+      historyKey:
+        matchedEntry?.historyKey ||
+        resultKey ||
+        `${plan?.projectKey || selectedProject}:${plan?.jobKind || target || "default"}:${updatedAt}`,
+      projectKey: matchedEntry?.projectKey || plan?.projectKey || selectedProject,
+      projectName:
+        matchedEntry?.projectName ||
+        plan?.projectName ||
+        projectOption?.name ||
+        selectedProject,
+      mode: matchedEntry?.mode || plan?.jobKind || target || "",
+      env:
+        matchedEntry?.env ||
+        planParams.ENV_PROFILE ||
+        planParams.projectEnv ||
+        planParams.env ||
+        "",
+      branch:
+        matchedEntry?.branch ||
+        planParams.BRANCH ||
+        planParams.branch ||
+        planParams.Branch ||
+        "",
+      stateKey: buildResult.stateKey,
+      stateLabel: buildResult.stateLabel,
+      detail: buildResult.detail,
+      queueUrl: buildResult.queueUrl ?? matchedEntry?.queueUrl ?? null,
+      buildUrl: buildResult.buildUrl ?? matchedEntry?.buildUrl ?? null,
+      params: planParams,
+      createdAt: matchedEntry?.createdAt || updatedAt,
+      updatedAt,
+    } satisfies BuildHistoryEntry;
+  }, [
+    buildHistory,
+    buildResult,
+    buildResultUpdatedAtMs,
+    currentBuildHistoryKey,
+    paramValues,
+    plan,
+    projects,
+    selectedProject,
+    target,
+  ]);
+  const displayBuildHistory = useMemo(() => {
+    if (!currentBuildHistoryEntry) {
+      return buildHistory;
+    }
+    return [
+      currentBuildHistoryEntry,
+      ...buildHistory.filter(
+        (item) => !buildHistoryEntriesReferToSameRun(item, currentBuildHistoryEntry),
+      ),
+    ];
+  }, [buildHistory, currentBuildHistoryEntry]);
+  const latestTaskAnchorEntry = useMemo(() => {
+    if (currentBuildHistoryEntry) {
+      return currentBuildHistoryEntry;
+    }
+    if (currentBuildHistoryKey) {
+      return (
+        buildHistory.find((item) => item.historyKey === currentBuildHistoryKey) ??
+        null
+      );
+    }
+    return buildHistory[0] ?? null;
+  }, [buildHistory, currentBuildHistoryEntry, currentBuildHistoryKey]);
   const buildHistoryByPinnedKey = useMemo(() => {
     const next = new Map<string, BuildHistoryEntry>();
-    for (const item of buildHistory) {
+    for (const item of displayBuildHistory) {
       const key = buildTrayDedupeKeyFromHistory(item);
       if (!next.has(key)) {
         next.set(key, item);
       }
     }
     return next;
-  }, [buildHistory]);
+  }, [displayBuildHistory]);
   const buildLegacyHistoryByPinnedKey = useMemo(() => {
     const next = new Map<string, BuildHistoryEntry>();
-    for (const item of buildHistory) {
+    for (const item of displayBuildHistory) {
       const key = buildLegacyTrayDedupeKeyFromHistory(item);
       if (!next.has(key)) {
         next.set(key, item);
       }
     }
     return next;
-  }, [buildHistory]);
+  }, [displayBuildHistory]);
   const buildSpecificLegacyPinnedKeys = useMemo(() => {
     const next = new Set<string>();
     for (const action of pinnedBuildActions) {
@@ -865,11 +780,11 @@ export function BuildPage({
   const groupedBuildHistory = useMemo(
     () =>
       groupConsecutiveBy(
-        buildHistory,
+        displayBuildHistory,
         buildHistorySignature,
         (item) => item.historyKey,
       ),
-    [buildHistory],
+    [displayBuildHistory],
   );
   function pinnedOrderForBuildGroup(group: (typeof groupedBuildHistory)[number]) {
     let order: number | undefined;
@@ -939,30 +854,49 @@ export function BuildPage({
     const legacyKey = buildLegacyTrayDedupeKeyFromHistory(group.latest);
     return pinnedActionByKey.get(legacyKey) ?? null;
   }
-  const historyPageCount = Math.max(
-    1,
-    Math.ceil(unpinnedBuildHistoryGroups.length / HISTORY_PAGE_SIZE),
-  );
-  const pagedBuildHistoryGroups = useMemo(
+  const visibleUnpinnedBuildHistoryGroups = useMemo(
     () =>
       unpinnedBuildHistoryGroups.slice(
-        (historyPage - 1) * HISTORY_PAGE_SIZE,
-        historyPage * HISTORY_PAGE_SIZE,
+        0,
+        historyVisibleCount,
       ),
-    [historyPage, unpinnedBuildHistoryGroups],
+    [historyVisibleCount, unpinnedBuildHistoryGroups],
   );
   const visibleBuildHistoryGroups = useMemo(
-    () => [...pinnedBuildHistoryGroups, ...pagedBuildHistoryGroups],
-    [pagedBuildHistoryGroups, pinnedBuildHistoryGroups],
+    () => [...pinnedBuildHistoryGroups, ...visibleUnpinnedBuildHistoryGroups],
+    [pinnedBuildHistoryGroups, visibleUnpinnedBuildHistoryGroups],
   );
+  const hasMoreBuildHistoryGroups =
+    historyVisibleCount < unpinnedBuildHistoryGroups.length;
+  const currentBuildHistoryGroupId = useMemo(() => {
+    if (!latestTaskAnchorEntry) {
+      return "";
+    }
+    return (
+      sortedBuildHistoryGroups.find((group) =>
+        group.items.some((item) =>
+          buildHistoryEntriesReferToSameRun(item, latestTaskAnchorEntry),
+        ),
+      )?.id ?? ""
+    );
+  }, [latestTaskAnchorEntry, sortedBuildHistoryGroups]);
+  const hasDisplayBuildHistory = displayBuildHistory.length > 0;
   const workflowReceiveGroups = useMemo(
     () => groupWorkflowReceiveRules(workflowReceiveRules),
     [workflowReceiveRules],
   );
 
   useEffect(() => {
-    setHistoryPage((current) => Math.min(current, historyPageCount));
-  }, [historyPageCount]);
+    setHistoryVisibleCount((current) => {
+      if (current <= HISTORY_SCROLL_PAGE_SIZE) {
+        return HISTORY_SCROLL_PAGE_SIZE;
+      }
+      return Math.min(
+        current,
+        Math.max(HISTORY_SCROLL_PAGE_SIZE, unpinnedBuildHistoryGroups.length),
+      );
+    });
+  }, [unpinnedBuildHistoryGroups.length]);
 
   useEffect(() => {
     setExpandedHistoryGroups((current) => {
@@ -973,15 +907,18 @@ export function BuildPage({
   }, [sortedBuildHistoryGroups]);
 
   useEffect(() => {
-    if (!buildResultUpdatedAtMs) {
+    if (!currentBuildHistoryGroupId) {
       return;
     }
-    setNowMs(Date.now());
-    const timer = window.setInterval(() => {
-      setNowMs(Date.now());
-    }, BUILD_STATUS_CLOCK_INTERVAL_MS);
-    return () => window.clearInterval(timer);
-  }, [buildResultUpdatedAtMs]);
+    setExpandedHistoryGroups((current) => {
+      if (current.has(currentBuildHistoryGroupId)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.add(currentBuildHistoryGroupId);
+      return next;
+    });
+  }, [currentBuildHistoryGroupId]);
 
   function handlePrimaryEnter(event: KeyboardEvent<HTMLElement>) {
     if (!shouldHandlePrimaryEnter(event) || contextBlocked) {
@@ -1003,6 +940,25 @@ export function BuildPage({
     });
   }
 
+  function loadMoreBuildHistoryGroups() {
+    setHistoryVisibleCount((current) =>
+      Math.min(
+        current + HISTORY_SCROLL_PAGE_SIZE,
+        unpinnedBuildHistoryGroups.length,
+      ),
+    );
+  }
+
+  function handleBuildHistoryScroll(event: UIEvent<HTMLDivElement>) {
+    if (!hasMoreBuildHistoryGroups) {
+      return;
+    }
+    const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
+    if (scrollHeight - scrollTop - clientHeight <= 84) {
+      loadMoreBuildHistoryGroups();
+    }
+  }
+
   function openWorkflowReceiveDialog(entry: BuildHistoryEntry) {
     setWorkflowEntry(entry);
     setWorkflowOpen(true);
@@ -1010,7 +966,7 @@ export function BuildPage({
 
   function handleTogglePinned(action: TrayPinnedAction) {
     togglePinned(action)
-      .then(() => setHistoryPage(1))
+      .then(() => setHistoryVisibleCount(HISTORY_SCROLL_PAGE_SIZE))
       .catch((error) => {
         console.error("failed to update tray pinned action", error);
       });
@@ -1018,29 +974,10 @@ export function BuildPage({
 
   function handleRemovePinned(dedupeKey: string) {
     removePinned(dedupeKey)
-      .then(() => setHistoryPage(1))
+      .then(() => setHistoryVisibleCount(HISTORY_SCROLL_PAGE_SIZE))
       .catch((error) => {
         console.error("failed to remove tray pinned action", error);
       });
-  }
-
-  async function copyResultValue(
-    field: string,
-    value?: string | number | null,
-  ) {
-    const text = value === null || value === undefined || value === "" ? "" : String(value);
-    if (!text || !navigator.clipboard) {
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(text);
-      setCopiedResultField(field);
-      window.setTimeout(() => {
-        setCopiedResultField((current) => (current === field ? "" : current));
-      }, 1200);
-    } catch {
-      setCopiedResultField("");
-    }
   }
 
   async function openLocalBuildLog() {
@@ -1420,104 +1357,6 @@ export function BuildPage({
           </Stack>
       </Box>
 
-      {buildResult ? (
-      <Box className="workflow-panel workflow-result-panel">
-          <Stack
-            direction="row"
-            justifyContent="space-between"
-            alignItems="center"
-            spacing={0.8}
-            flexWrap="wrap"
-            rowGap={0.45}
-            minWidth={0}
-            mb={resultExpanded ? 0.8 : 0}
-          >
-            <Typography variant="h6" sx={{ flexShrink: 0, fontWeight: 700 }}>
-              结果
-            </Typography>
-            <Stack direction="row" spacing={0.55} alignItems="center" flexWrap="wrap" rowGap={0.4} justifyContent="flex-end">
-              <IconButton onClick={onRefreshBuild} disabled={!canRefreshBuild} size="small" title={`刷新${actionCopy.noun}状态`}>
-                <RefreshIcon fontSize="small" />
-              </IconButton>
-              {isLocalBuildPlan ? (
-                <>
-                  <IconButton
-                    onClick={openLocalBuildLog}
-                    disabled={!localBuildProjectKey || runtimeLogLoading}
-                    size="small"
-                    title="查看构建日志"
-                  >
-                    <TerminalIcon fontSize="small" />
-                  </IconButton>
-                  <IconButton
-                    onClick={stopLocalBuild}
-                    disabled={!buildResultActive || localBuildAction === "stop"}
-                    size="small"
-                    title="停止本地构建"
-                  >
-                    <StopIcon fontSize="small" />
-                  </IconButton>
-                  <IconButton
-                    onClick={openLocalBuildOutput}
-                    disabled={!localBuildProjectKey || localBuildAction === "output"}
-                    size="small"
-                    title="打开产物目录"
-                  >
-                    <FolderIcon fontSize="small" />
-                  </IconButton>
-                </>
-              ) : null}
-              <IconButton onClick={onOpenBuildRecord} disabled={!buildResult?.queueUrl && !buildResult?.buildUrl} size="small" title="打开构建记录页">
-                <OpenExternalIcon fontSize="small" />
-              </IconButton>
-              <BuildStatusFreshness
-                updatedAtMs={buildResultUpdatedAtMs}
-                nowMs={nowMs}
-                active={buildResultActive}
-                timedOut={buildAutoRefreshTimedOut}
-                canRefresh={canRefreshBuild}
-                onRefresh={onRefreshBuild}
-              />
-              <IconButton size="small" onClick={() => setResultExpanded((current) => !current)} title={resultExpanded ? `收起${actionCopy.noun}结果` : `展开${actionCopy.noun}结果`}>
-                {resultExpanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
-              </IconButton>
-            </Stack>
-          </Stack>
-          <Collapse in={resultExpanded} timeout="auto" unmountOnExit>
-              <Stack spacing={0.1} minWidth={0}>
-                <BuildResultRow label="状态" value={buildResult.stateLabel} />
-                <BuildResultRow
-                  label={plan?.adapter === "jenkins" ? "HTTP" : "退出码"}
-                  value={buildResult.status}
-                />
-                <BuildResultLinkRow
-                  label="队列"
-                  value={buildResult.queueUrl}
-                  copyKey="queueUrl"
-                  copied={copiedResultField === "queueUrl"}
-                  onCopy={copyResultValue}
-                  onOpen={onOpenBuildUrl}
-                />
-                <BuildResultLinkRow
-                  label="构建"
-                  value={buildResult.buildUrl}
-                  copyKey="buildUrl"
-                  copied={copiedResultField === "buildUrl"}
-                  onCopy={copyResultValue}
-                  onOpen={onOpenBuildUrl}
-                />
-                <BuildResultRow
-                  label="说明"
-                  value={buildResult.detail}
-                  copyKey="detail"
-                  copied={copiedResultField === "detail"}
-                  onCopy={copyResultValue}
-                />
-              </Stack>
-          </Collapse>
-      </Box>
-      ) : null}
-
       <Box className="workflow-panel workflow-history-panel">
           <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.8} flexWrap="wrap" rowGap={0.45} minWidth={0} mb={historyExpanded ? 0.8 : 0}>
             <Typography variant="h6" sx={{ flexShrink: 0, fontWeight: 700 }}>
@@ -1540,14 +1379,36 @@ export function BuildPage({
             </Stack>
           </Stack>
           <Collapse in={historyExpanded} timeout="auto" unmountOnExit>
-            {buildHistory.length > 0 ? (
+            {hasDisplayBuildHistory ? (
               <Stack className="workflow-history-content" spacing={0.65} minWidth={0}>
-                <Box className="module-list-scroll">
+                <Box
+                  className="module-list-scroll"
+                  onScroll={handleBuildHistoryScroll}
+                >
                   <Stack spacing={0.65} minWidth={0}>
                     {visibleBuildHistoryGroups.map((group) => {
                       const item = group.latest;
                       const isGrouped = group.items.length > 1;
                       const groupExpanded = expandedHistoryGroups.has(group.id);
+                      const isTaskAnchorGroup =
+                        latestTaskAnchorEntry !== null &&
+                        group.items.some((historyItem) =>
+                          buildHistoryEntriesReferToSameRun(
+                            historyItem,
+                            latestTaskAnchorEntry,
+                          ),
+                        );
+                      const isLiveCurrentTask =
+                        currentBuildHistoryEntry !== null &&
+                        group.items.some((historyItem) =>
+                          buildHistoryEntriesReferToSameRun(
+                            historyItem,
+                            currentBuildHistoryEntry,
+                          ),
+                        );
+                      const taskBadgeActive =
+                        isTaskAnchorGroup &&
+                        isActiveBuildState(latestTaskAnchorEntry?.stateKey);
                       const workflowSignalIds = workflowSignalIdsForBuildReplay(item);
                       const historyTargetMeta = targetMetaByKey.get(item.mode);
                       const historyActionCopy = buildActionCopy(historyTargetMeta?.actionKind);
@@ -1579,6 +1440,62 @@ export function BuildPage({
                               rowGap={0.4}
                               justifyContent="flex-end"
                             >
+                              {isTaskAnchorGroup ? (
+                                <Chip
+                                  size="small"
+                                  label={taskBadgeActive ? "正在执行" : "最新任务"}
+                                  color={taskBadgeActive ? "warning" : "primary"}
+                                  variant="filled"
+                                />
+                              ) : null}
+                              {isLiveCurrentTask ? (
+                                <>
+                                  <IconButton
+                                    onClick={onRefreshBuild}
+                                    disabled={!canRefreshBuild}
+                                    size="small"
+                                    title={`刷新${actionCopy.noun}状态`}
+                                  >
+                                    <RefreshIcon fontSize="small" />
+                                  </IconButton>
+                                  {isLocalBuildPlan ? (
+                                    <>
+                                      <IconButton
+                                        onClick={openLocalBuildLog}
+                                        disabled={!localBuildProjectKey || runtimeLogLoading}
+                                        size="small"
+                                        title="查看构建日志"
+                                      >
+                                        <TerminalIcon fontSize="small" />
+                                      </IconButton>
+                                      <IconButton
+                                        onClick={stopLocalBuild}
+                                        disabled={!buildResultActive || localBuildAction === "stop"}
+                                        size="small"
+                                        title="停止本地构建"
+                                      >
+                                        <StopIcon fontSize="small" />
+                                      </IconButton>
+                                      <IconButton
+                                        onClick={openLocalBuildOutput}
+                                        disabled={!localBuildProjectKey || localBuildAction === "output"}
+                                        size="small"
+                                        title="打开产物目录"
+                                      >
+                                        <FolderIcon fontSize="small" />
+                                      </IconButton>
+                                    </>
+                                  ) : null}
+                                  <IconButton
+                                    onClick={onOpenBuildRecord}
+                                    disabled={!buildResult?.queueUrl && !buildResult?.buildUrl}
+                                    size="small"
+                                    title="打开构建记录页"
+                                  >
+                                    <OpenExternalIcon fontSize="small" />
+                                  </IconButton>
+                                </>
+                              ) : null}
                               <IconButton
                                 size="small"
                                 onClick={() => onReplayBuildHistory(item)}
@@ -1592,12 +1509,12 @@ export function BuildPage({
                                 active={workflowSignalIds.length > 0}
                                 onClick={() => openWorkflowReceiveDialog(item)}
                               />
-                              {item.buildUrl ? (
+                              {!isLiveCurrentTask && (item.buildUrl || item.queueUrl) ? (
                                 <IconButton
                                   size="small"
-                                  onClick={() => onOpenBuildUrl(item.buildUrl!)}
-                                  aria-label="打开构建"
-                                  title="打开构建"
+                                  onClick={() => onOpenBuildUrl((item.buildUrl || item.queueUrl)!)}
+                                  aria-label="打开记录"
+                                  title="打开记录"
                                 >
                                   <OpenExternalIcon fontSize="small" />
                                 </IconButton>
@@ -1695,33 +1612,37 @@ export function BuildPage({
                         </HistoryCard>
                       );
                     })}
+                    <Box
+                      className={
+                        hasMoreBuildHistoryGroups
+                          ? "workflow-history-footer"
+                          : "workflow-history-footer workflow-history-footer--done"
+                      }
+                    >
+                      {hasMoreBuildHistoryGroups ? (
+                        <Button
+                          size="small"
+                          variant="text"
+                          onClick={loadMoreBuildHistoryGroups}
+                          className="workflow-history-footer-action"
+                        >
+                          下滑加载更多
+                        </Button>
+                      ) : (
+                        <Typography variant="caption" className="workflow-history-footer-text">
+                          没有更多了
+                        </Typography>
+                      )}
+                    </Box>
                   </Stack>
                 </Box>
-                {historyPageCount > 1 ? (
-                  <Stack direction="row" justifyContent="flex-end" sx={{ pt: 0.25 }}>
-                    <Pagination
-                      size="small"
-                      page={historyPage}
-                      count={historyPageCount}
-                      siblingCount={0}
-                      boundaryCount={1}
-                      onChange={(_, nextPage) => setHistoryPage(nextPage)}
-                      sx={{
-                        "& .MuiPaginationItem-root": {
-                          minWidth: 26,
-                          height: 26,
-                          borderRadius: "9px",
-                          fontWeight: 800,
-                        },
-                      }}
-                    />
-                  </Stack>
-                ) : null}
               </Stack>
             ) : (
-              <Typography variant="body2" color="text.secondary">
-                暂无{actionCopy.noun}记录。
-              </Typography>
+              <AppEmptyState
+                compact
+                title={`暂无${actionCopy.noun}记录`}
+                description="执行任务后会保留最近结果。"
+              />
             )}
           </Collapse>
       </Box>

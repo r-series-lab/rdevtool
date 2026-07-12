@@ -20,9 +20,9 @@ import type {
   BranchPushAction,
   BranchPushStatus,
   BranchTaskHistoryEntry,
-  BranchTaskResponse,
   BranchWorkflowMode,
   BranchWorktreeSummary,
+  ProjectWorkspaceSummary,
 } from "../app-types";
 import {
   BranchModeTabs,
@@ -30,7 +30,6 @@ import {
 } from "../components/branch/BranchModeTabs";
 import { BranchHistoryPanel } from "../components/branch/BranchHistoryPanel";
 import { BranchPushStatusCard } from "../components/branch/BranchPushStatusCard";
-import { BranchTaskResultPanel } from "../components/branch/BranchTaskResultPanel";
 import { LocalWorkspaceStatusCard } from "../components/branch/LocalWorkspaceStatusCard";
 import {
   WorkflowLinksDialog,
@@ -61,6 +60,7 @@ type LocalBranchOperation = "switch" | "clone";
 
 export type MergePageProps = {
   projects: ProjectOption[];
+  activeWorkspace: ProjectWorkspaceSummary | null;
   selectedProject: string;
   onProjectChange: (projectKey: string) => void;
   mode: BranchWorkflowMode;
@@ -82,6 +82,7 @@ export type MergePageProps = {
   onCheckoutSourceChange: (value: string) => void;
   onClearCheckoutSource: () => void;
   checkoutDestinationDir: string;
+  onCheckoutDestinationChange: (value: string) => void;
   onClearCheckoutDestination: () => void;
   onChooseCheckoutDirectory: () => void;
   switchTarget: string;
@@ -109,7 +110,8 @@ export type MergePageProps = {
   sourceBranchOptions: string[];
   targetBranchOptions: string[];
   busy: string;
-  branchTaskResult: BranchTaskResponse | null;
+  currentBranchTaskHistoryId: string;
+  currentBranchTaskRunningLabel: string;
   branchTaskHistory: BranchTaskHistoryEntry[];
   onExecuteSync: () => void;
   onExecuteCreate: () => void;
@@ -310,6 +312,12 @@ function worktreeBranchLabel(item: BranchWorktreeSummary) {
   return item.currentBranch || "HEAD";
 }
 
+function joinWorkspacePath(rootDir: string, projectKey: string) {
+  const normalizedRoot = rootDir.trim().replace(/[\\/]+$/, "");
+  const normalizedProject = projectKey.trim();
+  return normalizedRoot && normalizedProject ? `${normalizedRoot}/${normalizedProject}` : "";
+}
+
 function WorktreeSelector({
   items,
   value,
@@ -334,7 +342,7 @@ function WorktreeSelector({
     error ||
     selected?.detail ||
     selected?.repoPath ||
-    (loading ? "正在读取本地工作副本" : "选择本地目录或 worktree 后再操作");
+    (loading ? "正在读取项目实例" : "选择项目实例或本地目录后再操作");
 
   return (
     <Stack spacing={0.45}>
@@ -347,16 +355,16 @@ function WorktreeSelector({
         }}
       >
         <FormControl fullWidth disabled={disabled}>
-          <InputLabel>工作副本</InputLabel>
+          <InputLabel>项目实例</InputLabel>
           <Select
             value={value}
-            label="工作副本"
+            label="项目实例"
             displayEmpty
             onChange={(event: SelectChangeEvent<string>) => onChange(event.target.value)}
             renderValue={(selectedValue) => {
               const item = items.find((entry) => entry.repoPath === selectedValue);
               if (!item) {
-                return loading ? "正在读取工作副本" : "选择工作副本";
+                return loading ? "正在读取项目实例" : "选择项目实例";
               }
               return `${item.label} · ${worktreeBranchLabel(item)}`;
             }}
@@ -368,6 +376,10 @@ function WorktreeSelector({
                     <Typography variant="body2" fontWeight={820} noWrap>
                       {item.label}
                     </Typography>
+                    {item.isWorkspaceInstance ? (
+                      <Chip size="small" label="工作区" color="primary" variant="outlined" />
+                    ) : null}
+                    {item.managed ? <Chip size="small" label="托管" variant="outlined" /> : null}
                     {item.isDefault ? <Chip size="small" label="默认" variant="outlined" /> : null}
                     {item.isGitWorktree ? <Chip size="small" label="worktree" variant="outlined" /> : null}
                     <Chip
@@ -393,8 +405,8 @@ function WorktreeSelector({
         <IconButton
           onClick={onRefresh}
           disabled={disabled || loading}
-          aria-label="刷新工作副本"
-          title="刷新工作副本"
+          aria-label="刷新项目实例"
+          title="刷新项目实例"
           sx={{ alignSelf: "center" }}
         >
           <RefreshIcon fontSize="small" />
@@ -563,6 +575,7 @@ function BranchInput({
 
 export function MergePage({
   projects,
+  activeWorkspace,
   selectedProject,
   onProjectChange,
   mode,
@@ -584,6 +597,7 @@ export function MergePage({
   onCheckoutSourceChange,
   onClearCheckoutSource,
   checkoutDestinationDir,
+  onCheckoutDestinationChange,
   onClearCheckoutDestination,
   onChooseCheckoutDirectory,
   switchTarget,
@@ -611,7 +625,8 @@ export function MergePage({
   sourceBranchOptions,
   targetBranchOptions,
   busy,
-  branchTaskResult,
+  currentBranchTaskHistoryId,
+  currentBranchTaskRunningLabel,
   branchTaskHistory,
   onExecuteSync,
   onExecuteCreate,
@@ -637,7 +652,6 @@ export function MergePage({
   onOpenTaskOutput,
   formatRelativeTime,
 }: MergePageProps) {
-  const [resultExpanded, setResultExpanded] = useState(true);
   const [historyExpanded, setHistoryExpanded] = useState(true);
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [workflowListOpen, setWorkflowListOpen] = useState(false);
@@ -680,6 +694,13 @@ export function MergePage({
     Boolean(selectedProject) &&
     Boolean(checkoutSource.trim()) &&
     Boolean(checkoutDestinationDir.trim());
+  const workspaceInstancePath = useMemo(
+    () =>
+      activeWorkspace?.rootDir
+        ? joinWorkspacePath(activeWorkspace.rootDir, selectedProject)
+        : "",
+    [activeWorkspace?.rootDir, selectedProject],
+  );
   const normalizedSwitchTarget = switchTarget.trim();
   const switchSameAsCurrent = Boolean(
     pushStatus &&
@@ -713,9 +734,9 @@ export function MergePage({
             : pushStatusStale
               ? "本地状态可能已过期，建议刷新后再操作"
               : pushStatus.repoPath
-        : hasSelectedWorktree
-          ? "读取本地仓库状态后可切换分支"
-          : "先选择本地工作副本");
+          : hasSelectedWorktree
+            ? "读取本地仓库状态后可切换分支"
+          : "先选择项目实例");
   const workflowBroadcastGroups = useMemo(
     () => groupWorkflowBroadcastRules(workflowBroadcastRules),
     [workflowBroadcastRules],
@@ -745,6 +766,24 @@ export function MergePage({
     setPushFilesExpanded(false);
     setSwitchFilesExpanded(false);
   }, [mode, selectedProject]);
+
+  useEffect(() => {
+    if (
+      mode !== "switch" ||
+      localOperation !== "clone" ||
+      !workspaceInstancePath ||
+      checkoutDestinationDir.trim()
+    ) {
+      return;
+    }
+    onCheckoutDestinationChange(workspaceInstancePath);
+  }, [
+    checkoutDestinationDir,
+    localOperation,
+    mode,
+    onCheckoutDestinationChange,
+    workspaceInstancePath,
+  ]);
 
   useEffect(() => {
     if (!pushStatusUpdatedAtMs) {
@@ -1039,7 +1078,7 @@ export function MergePage({
                 >
                   {[
                     { key: "switch", label: "切换分支" },
-                    { key: "clone", label: "克隆新副本" },
+                    { key: "clone", label: "创建副本" },
                   ].map((item) => (
                     <Button
                       key={item.key}
@@ -1154,9 +1193,9 @@ export function MergePage({
                     <TextField
                       label="目标目录"
                       value={checkoutDestinationDir}
-                      placeholder="选择一个目录"
+                      placeholder={workspaceInstancePath || "选择一个目录"}
+                      onChange={(event) => onCheckoutDestinationChange(event.target.value)}
                       InputProps={{
-                        readOnly: true,
                         endAdornment: (
                           <InputAdornment position="end">
                             <Stack direction="row" spacing={0.2}>
@@ -1192,7 +1231,7 @@ export function MergePage({
                       disabled={actionDisabled}
                       sx={{ minHeight: 34, borderRadius: "11px" }}
                     >
-                      克隆到目标目录
+                      创建工作区副本
                     </Button>
                   </>
                 ) : null}
@@ -1309,18 +1348,11 @@ export function MergePage({
         </Stack>
       </Box>
 
-      {branchTaskResult ? (
-        <BranchTaskResultPanel
-          expanded={resultExpanded}
-          result={branchTaskResult}
-          onToggleExpanded={() => setResultExpanded((current) => !current)}
-          onOpenTaskOutput={onOpenTaskOutput}
-        />
-      ) : null}
-
       <BranchHistoryPanel
         expanded={historyExpanded}
         history={branchTaskHistory}
+        currentHistoryId={currentBranchTaskHistoryId}
+        currentTaskLabel={currentBranchTaskRunningLabel}
         busy={busy}
         workflowGroupCount={workflowGroups.length}
         workflowSignalIdsForBranchReplay={(entry) => [
@@ -1333,6 +1365,7 @@ export function MergePage({
         onClearHistory={onClearBranchTaskHistory}
         onReplayHistory={onReplayBranchTaskHistory}
         onConfigureWorkflow={openWorkflowDialog}
+        onOpenTaskOutput={onOpenTaskOutput}
         formatRelativeTime={formatRelativeTime}
       />
 

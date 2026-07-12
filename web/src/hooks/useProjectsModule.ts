@@ -30,7 +30,6 @@ type UseProjectsModuleOptions = {
 };
 
 type FinderType = "项目" | "网站" | "目录" | "工具";
-type FinderQuickFilter = "全部" | "最近";
 
 type NavigationEntry = {
   name: string;
@@ -67,7 +66,6 @@ export type FinderShortcutItem = {
 };
 
 const FINDER_TYPE_OPTIONS = ["项目", "网站", "目录", "工具"] as const;
-const FINDER_QUICK_FILTER_OPTIONS = ["全部", "最近"] as const;
 const FINDER_STORAGE_NAMESPACE = "projects";
 const FINDER_PREFERENCES_STORAGE_KEY = "finder-preferences";
 const FINDER_DATA_CACHE_TTL_MS = 15_000;
@@ -83,7 +81,6 @@ type FinderPreferences = {
   debugProfileKeysByProject: Record<string, string>;
   lastFinderType?: FinderType;
   lastFinderCategory?: string;
-  lastFinderQuickFilter?: FinderQuickFilter;
 };
 
 type LoadFinderDataOptions = {
@@ -107,14 +104,6 @@ const EMPTY_FINDER_PREFERENCES: FinderPreferences = {
 function normalizeFinderType(value: unknown): FinderType | undefined {
   return FINDER_TYPE_OPTIONS.includes(value as FinderType)
     ? (value as FinderType)
-    : undefined;
-}
-
-function normalizeFinderQuickFilter(
-  value: unknown,
-): FinderQuickFilter | undefined {
-  return FINDER_QUICK_FILTER_OPTIONS.includes(value as FinderQuickFilter)
-    ? (value as FinderQuickFilter)
     : undefined;
 }
 
@@ -290,9 +279,6 @@ function normalizeFinderPreferences(value: unknown): FinderPreferences {
       record.lastFinderCategory.trim()
         ? record.lastFinderCategory.trim()
         : undefined,
-    lastFinderQuickFilter: normalizeFinderQuickFilter(
-      record.lastFinderQuickFilter,
-    ),
   };
 }
 
@@ -434,10 +420,6 @@ export type ProjectsModuleState = {
   finderType: FinderType;
   finderTypeCounts: Record<FinderType, number>;
   setFinderType: (value: FinderType) => void;
-  finderQuickFilterOptions: readonly FinderQuickFilter[];
-  finderQuickFilter: FinderQuickFilter;
-  finderQuickFilterCounts: Record<FinderQuickFilter, number>;
-  setFinderQuickFilter: (value: FinderQuickFilter) => void;
   finderCategories: string[];
   finderCategory: string;
   finderCategoryCounts: Record<string, number>;
@@ -488,8 +470,6 @@ export function useProjectsModule({
   syncActivities,
 }: UseProjectsModuleOptions): ProjectsModuleState {
   const [finderType, setFinderType] = useState<FinderType>("项目");
-  const [finderQuickFilter, setFinderQuickFilter] =
-    useState<FinderQuickFilter>("全部");
   const [finderCategory, setFinderCategory] = useState("全部");
   const [finderQuery, setFinderQuery] = useState("");
   const [runtimeEntries, setRuntimeEntries] = useState<ProjectRuntimeEntry[]>([]);
@@ -520,17 +500,9 @@ export function useProjectsModule({
     () => new Set(preferences.favoriteProjectKeys),
     [preferences.favoriteProjectKeys],
   );
-  const recentProjectKeySet = useMemo(
-    () => new Set(preferences.recentProjectKeys),
-    [preferences.recentProjectKeys],
-  );
   const favoriteShortcutKeySet = useMemo(
     () => new Set(preferences.favoriteShortcutKeys),
     [preferences.favoriteShortcutKeys],
-  );
-  const recentShortcutKeySet = useMemo(
-    () => new Set(preferences.recentShortcutKeys),
-    [preferences.recentShortcutKeys],
   );
 
   const shortcutEntries = useMemo(() => {
@@ -593,40 +565,6 @@ export function useProjectsModule({
     return counts;
   }, [shortcutEntries]);
 
-  const shortcutEntriesInCategory = useMemo(
-    () =>
-      shortcutEntries.filter(
-        (item) =>
-          finderCategory === "全部" ||
-          !finderCategory ||
-          item.categoryTitle === finderCategory,
-      ),
-    [finderCategory, shortcutEntries],
-  );
-
-  const finderQuickFilterCounts = useMemo(() => {
-    if (finderType === "项目") {
-      return {
-        全部: runtimeItems.length,
-        最近: runtimeItems.filter((item) => recentProjectKeySet.has(item.key))
-          .length,
-      };
-    }
-
-    return {
-      全部: shortcutEntriesInCategory.length,
-      最近: shortcutEntriesInCategory.filter((item) =>
-        recentShortcutKeySet.has(buildFinderShortcutKey(item)),
-      ).length,
-    };
-  }, [
-    finderType,
-    recentProjectKeySet,
-    recentShortcutKeySet,
-    runtimeItems,
-    shortcutEntriesInCategory,
-  ]);
-
   useEffect(() => {
     if (finderType === "项目") {
       if (finderCategory !== "全部") {
@@ -647,22 +585,10 @@ export function useProjectsModule({
     }
   }, [finderCategories, finderCategory, finderType]);
 
-  useEffect(() => {
-    if (finderQuickFilter !== "全部" && finderQuickFilterCounts[finderQuickFilter] === 0) {
-      setFinderQuickFilter("全部");
-    }
-  }, [finderQuickFilter, finderQuickFilterCounts]);
-
   const filteredRuntimeEntries = useMemo(() => {
     const keyword = finderQuery.trim().toLowerCase();
-    const recentOrder = new Map(
-      preferences.recentProjectKeys.map((key, index) => [key, index] as const),
-    );
     const filtered = runtimeItems.filter((item) => {
       if (finderType !== "项目") {
-        return false;
-      }
-      if (finderQuickFilter === "最近" && !recentProjectKeySet.has(item.key)) {
         return false;
       }
       if (!keyword) {
@@ -675,36 +601,23 @@ export function useProjectsModule({
         compareMarkedFirst(
           favoriteProjectKeySet.has(a.key),
           favoriteProjectKeySet.has(b.key),
-        ) ||
-        (finderQuickFilter === "最近"
-          ? (recentOrder.get(a.key) ?? Number.MAX_SAFE_INTEGER) -
-            (recentOrder.get(b.key) ?? Number.MAX_SAFE_INTEGER)
-          : 0),
+        ),
     );
   }, [
     favoriteProjectKeySet,
     finderQuery,
-    finderQuickFilter,
     finderType,
-    preferences.recentProjectKeys,
-    recentProjectKeySet,
     runtimeItems,
   ]);
 
   const filteredShortcutEntries = useMemo(() => {
     const keyword = finderQuery.trim().toLowerCase();
-    const recentOrder = new Map(
-      preferences.recentShortcutKeys.map((key, index) => [key, index] as const),
-    );
     const filtered = shortcutEntries.filter((item) => {
       const shortcutKey = buildFinderShortcutKey(item);
       if (finderType === "项目") {
         return false;
       }
       if (finderCategory !== "全部" && finderCategory && item.categoryTitle !== finderCategory) {
-        return false;
-      }
-      if (finderQuickFilter === "最近" && !recentShortcutKeySet.has(shortcutKey)) {
         return false;
       }
       if (!keyword) {
@@ -720,11 +633,7 @@ export function useProjectsModule({
           compareMarkedFirst(
             favoriteShortcutKeySet.has(aKey),
             favoriteShortcutKeySet.has(bKey),
-          ) ||
-          (finderQuickFilter === "最近"
-            ? (recentOrder.get(aKey) ?? Number.MAX_SAFE_INTEGER) -
-              (recentOrder.get(bKey) ?? Number.MAX_SAFE_INTEGER)
-            : 0)
+          )
         );
       },
     );
@@ -732,10 +641,7 @@ export function useProjectsModule({
     favoriteShortcutKeySet,
     finderCategory,
     finderQuery,
-    finderQuickFilter,
     finderType,
-    preferences.recentShortcutKeys,
-    recentShortcutKeySet,
     shortcutEntries,
   ]);
 
@@ -1053,9 +959,6 @@ export function useProjectsModule({
         if (nextPreferences.lastFinderCategory) {
           setFinderCategory(nextPreferences.lastFinderCategory);
         }
-        if (nextPreferences.lastFinderQuickFilter) {
-          setFinderQuickFilter(nextPreferences.lastFinderQuickFilter);
-        }
         setPreferences(nextPreferences);
         setPreferencesHydrated(true);
       })
@@ -1081,12 +984,10 @@ export function useProjectsModule({
       ...current,
       lastFinderType: finderType,
       lastFinderCategory: finderCategory,
-      lastFinderQuickFilter: finderQuickFilter,
     }));
   }, [
     enabled,
     finderCategory,
-    finderQuickFilter,
     finderType,
     preferencesHydrated,
   ]);
@@ -1435,7 +1336,7 @@ export function useProjectsModule({
       return;
     }
 
-    setBusy("正在执行打包任务");
+    setBusy("正在执行构建任务");
     setError("");
     const activityId =
       recordActivity?.({
@@ -1505,7 +1406,7 @@ export function useProjectsModule({
       return;
     }
 
-    setBusy("正在中止打包任务");
+    setBusy("正在中止构建任务");
     setError("");
     const runningBuildActivityId = activeBuildActivityIdsRef.current[projectKey] || "";
     const activityId =
@@ -1816,10 +1717,6 @@ export function useProjectsModule({
     finderType,
     finderTypeCounts,
     setFinderType,
-    finderQuickFilterOptions: FINDER_QUICK_FILTER_OPTIONS,
-    finderQuickFilter,
-    finderQuickFilterCounts,
-    setFinderQuickFilter,
     finderCategories,
     finderCategory,
     finderCategoryCounts,

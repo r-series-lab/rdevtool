@@ -24,6 +24,7 @@ import {
 } from "@mui/material";
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 import { ClearIcon, PanelSideIcon, TrashIcon } from "./AppIcons";
+import { AppEmptyState } from "./AppEmptyState";
 
 type WorkflowRulesConfigDialogProps = {
   open: boolean;
@@ -333,20 +334,7 @@ function SignalManagerPanel({
               </Box>
             ))
           ) : (
-            <Box
-              sx={{
-                minHeight: 90,
-                display: "grid",
-                placeItems: "center",
-                border: "1px dashed var(--line)",
-                borderRadius: "14px",
-                color: "var(--muted)",
-              }}
-            >
-              <Typography variant="body2" color="text.secondary" sx={{ fontWeight: 750 }}>
-                暂无可管理 Signal
-              </Typography>
-            </Box>
+            <AppEmptyState compact title="暂无 Signal" description="配置联动后会显示可管理项。" />
           )}
         </Stack>
       </Box>

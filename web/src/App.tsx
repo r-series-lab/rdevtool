@@ -29,7 +29,11 @@ import { usePageScrollReset } from "./hooks/usePageScrollReset";
 import { useProjectsModule } from "./hooks/useProjectsModule";
 import { useProxyModule } from "./hooks/useProxyModule";
 import { useWorkflowSignals } from "./hooks/useWorkflowSignals";
-import type { CreateProjectWorkspacePayload } from "./app-types";
+import type {
+  CreateProjectWorkspacePayload,
+  InitDemandWorkspacePayload,
+  InitDemandWorkspaceResult,
+} from "./app-types";
 import type { ActivityEntry } from "./lib/activityCenter";
 import { createAppTheme } from "./theme";
 
@@ -201,6 +205,11 @@ function App() {
       ...appShell,
       buildProjects,
       branchProjects,
+      onProjectWorkspaceChange: changeProjectWorkspace,
+      onCreateProjectWorkspace: createProjectWorkspace,
+      onInitDemandWorkspace: initDemandWorkspace,
+      onProjectConfigSaved: reloadProjectsAfterConfigSave,
+      onOpenProjectWorkspacesDir: openProjectWorkspacesDir,
     },
     branchContext,
     mergeSelection,
@@ -423,6 +432,25 @@ function App() {
       if (projectsAvailable) {
         await projectsModule.loadFinderData({ force: true });
       }
+    } catch (reason) {
+      setError(String(reason));
+      throw reason;
+    }
+  }
+
+  async function initDemandWorkspace(
+    payload: InitDemandWorkspacePayload,
+  ): Promise<InitDemandWorkspaceResult> {
+    try {
+      setError("");
+      const result = await invoke<InitDemandWorkspaceResult>("init_demand_workspace_config", {
+        payload,
+      });
+      await appShell.loadProjectWorkspaces();
+      if (projectsAvailable) {
+        await projectsModule.loadFinderData({ force: true });
+      }
+      return result;
     } catch (reason) {
       setError(String(reason));
       throw reason;

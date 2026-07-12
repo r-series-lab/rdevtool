@@ -12,14 +12,17 @@ import {
   Checkbox,
   Chip,
   FormControlLabel,
+  IconButton,
   MenuItem,
   Stack,
   TextField,
+  Tooltip,
   Typography,
 } from "@mui/material";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { ALL_PAGE_KEYS, NAV_ITEM_MAP, type PageKey } from "../app-shell";
+import { useWorkspaceTypeOptions } from "../hooks/useWorkspaceTypeOptions";
 import type {
   CreateProjectWorkspacePayload,
   DeployParamConfigKind,
@@ -46,6 +49,12 @@ import type {
 } from "../app-types";
 import type { AppStyleMode } from "../theme";
 import {
+  DEFAULT_NEW_WORKSPACE_TYPE,
+  normalizeWorkspaceType,
+  workspaceTypeLabel,
+  workspaceTypeOptionsWithValues,
+} from "../lib/workspaceTypes";
+import {
   CheckIcon,
   ClearIcon,
   CopyIcon,
@@ -54,6 +63,9 @@ import {
   RefreshIcon,
   TrashIcon,
 } from "./AppIcons";
+import { AppEmptyState } from "./AppEmptyState";
+import { AppToast } from "./AppToast";
+import { WorkspaceTypeSelect } from "./WorkspaceTypeSelect";
 
 export type SettingsSection =
   | "general"
@@ -74,7 +86,6 @@ type SettingsPanelProps = {
   onCreateProjectWorkspace: (payload: CreateProjectWorkspacePayload) => Promise<void> | void;
   projectWorkspaces: ProjectWorkspaceSummary[];
   activeProjectWorkspaceKey: string;
-  onProjectWorkspaceChange: (workspaceKey: string) => Promise<void> | void;
   initialSection?: SettingsSection;
   activePage: PageKey;
   enabledPages: PageKey[];
@@ -97,9 +108,9 @@ const SECTION_ITEMS: Array<{ key: SettingsSection; label: string }> = [
   { key: "general", label: "全局" },
   { key: "workspace", label: "工作区" },
   { key: "projects", label: "项目" },
-  { key: "branch", label: "分支" },
-  { key: "build", label: "构建" },
-  { key: "finder", label: "访达" },
+  { key: "branch", label: "Git工作流" },
+  { key: "build", label: "构建任务" },
+  { key: "finder", label: "资源入口" },
 ];
 
 const DEPLOY_PARAM_KIND_OPTIONS: Array<{ value: DeployParamConfigKind; label: string }> = [
@@ -123,7 +134,7 @@ const BUILD_ACTION_KIND_OPTIONS: Array<{
 }> = [
   { value: "deploy", label: "部署" },
   { value: "build", label: "构建" },
-  { value: "package", label: "打包" },
+  { value: "package", label: "产物构建" },
   { value: "release", label: "发布" },
 ];
 
@@ -153,7 +164,7 @@ const BUILD_ADAPTER_DETAILS: Record<DeployTargetConfigSummary["adapter"], BuildA
   r_series_package: {
     title: "R 系列打包",
     meta: "Package",
-    commandLabel: "打包命令覆盖",
+    commandLabel: "构建命令覆盖",
     commandPlaceholder: "留空继承项目构建命令",
     emptyJobText: "继承项目构建命令",
   },
@@ -380,6 +391,21 @@ function normalizeWorkspaceKey(value: string) {
     .replace(/^-+|-+$/g, "");
 }
 
+async function copyPlainText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+  const textarea = document.createElement("textarea");
+  textarea.value = value;
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
+}
+
 function toggleStringValue(values: string[], value: string, checked: boolean) {
   const next = new Set(values);
   if (checked) {
@@ -515,7 +541,6 @@ export function SettingsPanel({
   onCreateProjectWorkspace,
   projectWorkspaces,
   activeProjectWorkspaceKey,
-  onProjectWorkspaceChange,
   initialSection,
   activePage,
   enabledPages,
@@ -545,20 +570,49 @@ export function SettingsPanel({
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [newWorkspaceKey, setNewWorkspaceKey] = useState("");
   const [newWorkspaceDescription, setNewWorkspaceDescription] = useState("");
+  const [newWorkspaceType, setNewWorkspaceType] = useState(DEFAULT_NEW_WORKSPACE_TYPE);
+  const [newWorkspaceIndependentDir, setNewWorkspaceIndependentDir] = useState(false);
+  const [newWorkspaceRootDir, setNewWorkspaceRootDir] = useState("");
   const [copyCurrentWorkspace, setCopyCurrentWorkspace] = useState(true);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [workspaceEditor, setWorkspaceEditor] = useState<ProjectWorkspaceEditorState | null>(null);
   const [workspaceDraft, setWorkspaceDraft] = useState<ProjectWorkspaceEditorDraft | null>(null);
+  const [workspaceEditorKey, setWorkspaceEditorKey] = useState(
+    activeProjectWorkspaceKey || "system",
+  );
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceSaving, setWorkspaceSaving] = useState(false);
+  const [workspaceDirectoryBusy, setWorkspaceDirectoryBusy] = useState("");
   const [loading, setLoading] = useState(false);
   const [navigationLoading, setNavigationLoading] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [status, setStatus] = useState("");
-  const [error, setError] = useState("");
+  const [status, setStatusValue] = useState("");
+  const [error, setErrorValue] = useState("");
+  const [toastNonce, setToastNonce] = useState(0);
   const [confirmState, setConfirmState] = useState<SettingsConfirmState | null>(null);
   const [keywordDrafts, setKeywordDrafts] = useState<Record<string, string>>({});
   const [deployParamOptionsDrafts, setDeployParamOptionsDrafts] = useState<Record<string, string>>({});
+  const {
+    options: workspaceTypeOptions,
+    addWorkspaceType,
+    removeWorkspaceType,
+  } = useWorkspaceTypeOptions();
+
+  function bumpToast(value: string) {
+    if (value.trim()) {
+      setToastNonce((current) => current + 1);
+    }
+  }
+
+  function setStatus(value: string) {
+    setStatusValue(value);
+    bumpToast(value);
+  }
+
+  function setError(value: string) {
+    setErrorValue(value);
+    bumpToast(value);
+  }
 
   const selectedProject = useMemo(
     () => editorState?.projects.find((project) => project.key === selectedKey) ?? null,
@@ -580,6 +634,30 @@ export function SettingsPanel({
     workspaceEditor &&
       workspaceDraft &&
       JSON.stringify(workspaceDraft) !== JSON.stringify(workspaceEditor.workspace),
+  );
+  const workspaceTypeUsageCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const workspace of projectWorkspaces) {
+      const key = normalizeWorkspaceType(workspace.workspaceType);
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+    return counts;
+  }, [projectWorkspaces]);
+  const workspaceTypeSelectOptions = useMemo(
+    () =>
+      workspaceTypeOptionsWithValues(workspaceTypeOptions, [
+        { value: newWorkspaceType },
+        {
+          value: workspaceDraft?.workspaceType,
+          label: workspaceDraft?.workspaceTypeLabel,
+        },
+      ]),
+    [
+      newWorkspaceType,
+      workspaceDraft?.workspaceType,
+      workspaceDraft?.workspaceTypeLabel,
+      workspaceTypeOptions,
+    ],
   );
   const hasUnsavedChanges =
     dirtyKeys.size > 0 ||
@@ -632,13 +710,16 @@ export function SettingsPanel({
     }
   }
 
-  async function loadProjectWorkspaceEditor() {
+  async function loadProjectWorkspaceEditor(workspaceKey = workspaceEditorKey) {
     setWorkspaceLoading(true);
     setError("");
     try {
-      const nextState = await invoke<ProjectWorkspaceEditorState>("get_project_workspace_editor");
+      const nextState = await invoke<ProjectWorkspaceEditorState>("get_project_workspace_editor", {
+        workspaceKey,
+      });
       setWorkspaceEditor(nextState);
       setWorkspaceDraft(nextState.workspace);
+      setWorkspaceEditorKey(nextState.workspace.key);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -660,12 +741,118 @@ export function SettingsPanel({
       );
       setWorkspaceEditor(nextState);
       setWorkspaceDraft(nextState.workspace);
+      setWorkspaceEditorKey(nextState.workspace.key);
       await onProjectConfigSaved();
       setStatus(`已更新工作区 ${nextState.workspace.name}`);
     } catch (reason) {
       setError(String(reason));
     } finally {
       setWorkspaceSaving(false);
+    }
+  }
+
+  function applyProjectWorkspaceEditorState(nextState: ProjectWorkspaceEditorState) {
+    setWorkspaceEditor(nextState);
+    setWorkspaceDraft(nextState.workspace);
+    setWorkspaceEditorKey(nextState.workspace.key);
+  }
+
+  async function createWorkspaceProjectCopy(projectKey: string) {
+    if (!workspaceDraft || workspaceDraft.system) {
+      return;
+    }
+    setWorkspaceDirectoryBusy(projectKey);
+    setError("");
+    setStatus("");
+    try {
+      const nextState = await invoke<ProjectWorkspaceEditorState>(
+        "create_project_workspace_project_copy",
+        { workspaceKey: workspaceDraft.key, project: projectKey },
+      );
+      applyProjectWorkspaceEditorState(nextState);
+      await onProjectConfigSaved();
+      setStatus("已创建工作区副本");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorkspaceDirectoryBusy("");
+    }
+  }
+
+  async function bindWorkspaceProjectDirectory(projectKey: string) {
+    if (!workspaceDraft || workspaceDraft.system) {
+      return;
+    }
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: workspaceDraft.rootDir ?? undefined,
+    });
+    if (typeof selected !== "string" || !selected.trim()) {
+      return;
+    }
+    setWorkspaceDirectoryBusy(projectKey);
+    setError("");
+    setStatus("");
+    try {
+      const nextState = await invoke<ProjectWorkspaceEditorState>(
+        "bind_project_workspace_project_directory",
+        { workspaceKey: workspaceDraft.key, project: projectKey, path: selected },
+      );
+      applyProjectWorkspaceEditorState(nextState);
+      await onProjectConfigSaved();
+      setStatus("已绑定已有目录");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorkspaceDirectoryBusy("");
+    }
+  }
+
+  async function unbindWorkspaceProjectDirectory(projectKey: string) {
+    if (!workspaceDraft || workspaceDraft.system) {
+      return;
+    }
+    setWorkspaceDirectoryBusy(projectKey);
+    setError("");
+    setStatus("");
+    try {
+      const nextState = await invoke<ProjectWorkspaceEditorState>(
+        "unbind_project_workspace_project_directory",
+        { workspaceKey: workspaceDraft.key, project: projectKey },
+      );
+      applyProjectWorkspaceEditorState(nextState);
+      await onProjectConfigSaved();
+      setStatus("已恢复使用全局目录");
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorkspaceDirectoryBusy("");
+    }
+  }
+
+  async function openWorkspaceProjectDirectory(path: string) {
+    if (!path.trim() || path === "未配置项目目录") {
+      return;
+    }
+    setError("");
+    try {
+      await invoke("open_local_path", { path });
+      setStatus("已打开项目目录");
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function copyWorkspaceProjectDirectory(path: string) {
+    if (!path.trim() || path === "未配置项目目录") {
+      return;
+    }
+    try {
+      await copyPlainText(path);
+      setStatus("已复制项目目录路径");
+    } catch (reason) {
+      setError(String(reason));
     }
   }
 
@@ -689,15 +876,22 @@ export function SettingsPanel({
         key,
         name,
         description: description || null,
+        workspaceType: newWorkspaceType,
+        rootDir: newWorkspaceIndependentDir ? newWorkspaceRootDir.trim() || null : null,
+        independentDir: newWorkspaceIndependentDir,
         copyCurrent: copyCurrentWorkspace,
-        activate: true,
+        copyFromWorkspaceKey: workspaceDraft?.key ?? workspaceEditorKey,
+        activate: false,
       });
       setNewWorkspaceName("");
       setNewWorkspaceKey("");
       setNewWorkspaceDescription("");
+      setNewWorkspaceType(DEFAULT_NEW_WORKSPACE_TYPE);
+      setNewWorkspaceIndependentDir(false);
+      setNewWorkspaceRootDir("");
       setCopyCurrentWorkspace(true);
-      await loadProjectWorkspaceEditor();
-      setStatus(`已创建并切换到 ${name}`);
+      await loadProjectWorkspaceEditor(key);
+      setStatus(`已创建工作区 ${name}`);
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -705,17 +899,67 @@ export function SettingsPanel({
     }
   }
 
+  async function handleCreateWorkspaceType(label: string) {
+    try {
+      const option = await addWorkspaceType(label);
+      setStatus(`已新增类型 ${option.label}`);
+      return option;
+    } catch (reason) {
+      setError(String(reason));
+      throw reason;
+    }
+  }
+
+  async function handleRemoveWorkspaceType(
+    optionKey: string,
+    label: string,
+    updateDraft?: (patch: Partial<ProjectWorkspaceEditorDraft>) => void,
+  ) {
+    const usedCount = workspaceTypeUsageCounts.get(optionKey) ?? 0;
+    if (usedCount > 0) {
+      setError(`已有 ${usedCount} 个工作区使用 ${label}`);
+      return;
+    }
+    try {
+      await removeWorkspaceType(optionKey);
+      if (newWorkspaceType === optionKey) {
+        setNewWorkspaceType(DEFAULT_NEW_WORKSPACE_TYPE);
+      }
+      if (workspaceDraft?.workspaceType === optionKey) {
+        const fallbackTypePatch = {
+          workspaceType: DEFAULT_NEW_WORKSPACE_TYPE,
+          workspaceTypeLabel: workspaceTypeLabel(
+            DEFAULT_NEW_WORKSPACE_TYPE,
+            null,
+            workspaceTypeOptions,
+          ),
+        };
+        if (updateDraft) {
+          updateDraft(fallbackTypePatch);
+        } else {
+          setWorkspaceDraft((current) =>
+            current?.workspaceType === optionKey ? { ...current, ...fallbackTypePatch } : current,
+          );
+        }
+      }
+      setStatus(`已删除类型 ${label}`);
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
   function switchProjectWorkspace(workspaceKey: string) {
-    if (!workspaceKey || workspaceKey === activeProjectWorkspaceKey) {
+    const currentKey = workspaceDraft?.key ?? workspaceEditorKey;
+    if (!workspaceKey || workspaceKey === currentKey) {
       return;
     }
     const workspaceName =
       projectWorkspaces.find((workspace) => workspace.key === workspaceKey)?.name ?? workspaceKey;
     if (workspaceDirty) {
       setConfirmState({
-        title: "切换工作区？",
-        message: `当前工作区范围有未保存修改，切换到「${workspaceName}」会丢弃这些修改。`,
-        confirmLabel: "切换",
+        title: "切换配置对象？",
+        message: `当前配置有未保存修改，查看「${workspaceName}」会丢弃这些修改。`,
+        confirmLabel: "查看",
         onConfirm: () => switchProjectWorkspaceConfirmed(workspaceKey),
       });
       return;
@@ -724,14 +968,10 @@ export function SettingsPanel({
   }
 
   async function switchProjectWorkspaceConfirmed(workspaceKey: string) {
-    const workspaceName =
-      projectWorkspaces.find((workspace) => workspace.key === workspaceKey)?.name ?? workspaceKey;
     setError("");
     setStatus("");
     try {
-      await onProjectWorkspaceChange(workspaceKey);
-      await loadProjectWorkspaceEditor();
-      setStatus(`已切换到 ${workspaceName}`);
+      await loadProjectWorkspaceEditor(workspaceKey);
     } catch (reason) {
       setError(String(reason));
     }
@@ -742,6 +982,12 @@ export function SettingsPanel({
     void loadNavigationEditor();
     void loadProjectWorkspaceEditor();
   }, []);
+
+  useEffect(() => {
+    if (initialSection) {
+      setActiveSection(initialSection);
+    }
+  }, [initialSection]);
 
   useEffect(() => {
     document.documentElement.classList.add("settings-scroll-lock");
@@ -1850,6 +2096,14 @@ export function SettingsPanel({
     const selectedProxyProfiles = workspaceDraft.system
       ? proxyTotal
       : workspaceDraft.proxyProfiles.length;
+    const instanceByProject = new Map(
+      workspaceDraft.projectInstances.map((instance) => [instance.project, instance]),
+    );
+    const scopedProjects = workspaceEditor.projects.filter(
+      (project) =>
+        workspaceDraft.includeAllProjects || workspaceDraft.projects.includes(project.key),
+    );
+    const directoryBusy = Boolean(workspaceDirectoryBusy);
     const updateDraft = (patch: Partial<ProjectWorkspaceEditorDraft>) => {
       setWorkspaceDraft((current) => (current ? { ...current, ...patch } : current));
     };
@@ -1883,6 +2137,17 @@ export function SettingsPanel({
                 <Chip
                   className="settings-workspace-stat"
                   size="small"
+                  label={workspaceTypeLabel(
+                    workspaceDraft.workspaceType,
+                    workspaceDraft.workspaceTypeLabel,
+                    workspaceTypeOptions,
+                  )}
+                />
+              ) : null}
+              {!workspaceDraft.system ? (
+                <Chip
+                  className="settings-workspace-stat"
+                  size="small"
                   label={`${selectedNavigation}/${navigationTotal} 入口`}
                 />
               ) : null}
@@ -1891,6 +2156,13 @@ export function SettingsPanel({
                   className="settings-workspace-stat"
                   size="small"
                   label={`${selectedProxyProfiles}/${proxyTotal} 代理`}
+                />
+              ) : null}
+              {!workspaceDraft.system && workspaceDraft.projectInstances.length > 0 ? (
+                <Chip
+                  className="settings-workspace-stat"
+                  size="small"
+                  label={`${workspaceDraft.projectInstances.length} 实例`}
                 />
               ) : null}
               <Button
@@ -1918,6 +2190,22 @@ export function SettingsPanel({
                   onChange={(event) => updateDraft({ name: event.target.value })}
                   disabled={workspaceSaving}
                 />
+                <WorkspaceTypeSelect
+                  value={workspaceDraft.workspaceType}
+                  options={workspaceTypeSelectOptions}
+                  usageCounts={workspaceTypeUsageCounts}
+                  disabled={workspaceSaving}
+                  onChange={(key, nextLabel) =>
+                    updateDraft({
+                      workspaceType: key,
+                      workspaceTypeLabel: nextLabel,
+                    })
+                  }
+                  onCreate={handleCreateWorkspaceType}
+                  onDelete={(key, nextLabel) =>
+                    handleRemoveWorkspaceType(key, nextLabel, updateDraft)
+                  }
+                />
                 <TextField
                   size="small"
                   label="备注"
@@ -1925,6 +2213,117 @@ export function SettingsPanel({
                   onChange={(event) => updateDraft({ description: event.target.value })}
                   disabled={workspaceSaving}
                 />
+                <TextField
+                  size="small"
+                  label="工作区目录"
+                  value={workspaceDraft.rootDir ?? ""}
+                  placeholder="留空为轻量范围工作区"
+                  onChange={(event) => updateDraft({ rootDir: event.target.value })}
+                  disabled={workspaceSaving}
+                />
+              </div>
+              <div className="settings-workspace-project-dir-list">
+                <div className="settings-workspace-project-dir-head">
+                  <Typography variant="caption">项目目录</Typography>
+                  <Typography className="settings-workspace-scope-hint" variant="caption">
+                    全局目录 / 工作区副本 / 绑定目录
+                  </Typography>
+                </div>
+                {scopedProjects.length > 0 ? (
+                  scopedProjects.map((project) => {
+                    const instance = instanceByProject.get(project.key);
+                    const modeLabel = instance
+                      ? instance.managed
+                        ? "工作区副本"
+                        : "绑定目录"
+                      : "使用全局目录";
+                    const path = instance?.path || project.repoPath || "未配置项目目录";
+                    const busy = workspaceDirectoryBusy === project.key;
+                    const canUsePath = path !== "未配置项目目录";
+                    return (
+                      <div key={project.key} className="settings-workspace-project-dir-row">
+                        <div className="settings-workspace-project-dir-main">
+                          <Stack direction="row" spacing={0.6} alignItems="center" flexWrap="wrap">
+                            <Typography variant="subtitle2">
+                              {project.name || project.key}
+                            </Typography>
+                            <Chip size="small" label={modeLabel} variant="outlined" />
+                            {instance?.managed ? (
+                              <Chip size="small" label="托管" variant="outlined" />
+                            ) : null}
+                          </Stack>
+                          <Typography className="settings-workspace-project-dir-path" variant="caption">
+                            {path}
+                          </Typography>
+                        </div>
+                        <div className="settings-workspace-project-dir-actions">
+                          <Tooltip title="打开目录">
+                            <span>
+                              <IconButton
+                                size="small"
+                                onClick={() => void openWorkspaceProjectDirectory(path)}
+                                disabled={!canUsePath || workspaceSaving}
+                                aria-label="打开项目目录"
+                              >
+                                <OpenExternalIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                          <Tooltip title="复制路径">
+                            <span>
+                              <IconButton
+                                size="small"
+                                onClick={() => void copyWorkspaceProjectDirectory(path)}
+                                disabled={!canUsePath || workspaceSaving}
+                                aria-label="复制项目目录路径"
+                              >
+                                <CopyIcon fontSize="small" />
+                              </IconButton>
+                            </span>
+                          </Tooltip>
+                          {instance ? (
+                            <Button
+                              size="small"
+                              variant="text"
+                              onClick={() => void unbindWorkspaceProjectDirectory(project.key)}
+                              disabled={workspaceSaving || directoryBusy}
+                            >
+                              {busy ? "处理中" : "解绑"}
+                            </Button>
+                          ) : (
+                            <>
+                              <Button
+                                size="small"
+                                variant="outlined"
+                                onClick={() => void createWorkspaceProjectCopy(project.key)}
+                                disabled={
+                                  workspaceSaving ||
+                                  directoryBusy ||
+                                  !workspaceDraft.rootDir ||
+                                  !project.repoPath
+                                }
+                              >
+                                {busy ? "创建中" : "创建副本"}
+                              </Button>
+                              <Button
+                                size="small"
+                                variant="text"
+                                onClick={() => void bindWorkspaceProjectDirectory(project.key)}
+                                disabled={workspaceSaving || directoryBusy}
+                              >
+                                绑定目录
+                              </Button>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })
+                ) : (
+                  <Typography className="settings-workspace-system-note" variant="caption">
+                    先在项目范围里选择项目，再配置项目目录策略。
+                  </Typography>
+                )}
               </div>
               <div className="settings-workspace-scope-grid">
                 <section className="settings-workspace-scope-pane">
@@ -2158,114 +2557,128 @@ export function SettingsPanel({
               目录
             </Button>
           </header>
-          <div className="settings-list settings-workspace-list module-list-scroll">
-            {projectWorkspaces.length > 0 ? (
-              <div className="settings-list-row settings-workspace-switch-row">
-                <span className="settings-list-icon">
-                  <FolderIcon fontSize="small" />
-                </span>
-                <div className="settings-workspace-switch">
-                  <div className="settings-overview-copy">
-                    <Typography component="span" variant="subtitle2">切换工作区</Typography>
-                    <Typography component="span" variant="caption">
-                      选择当前需求上下文
-                    </Typography>
-                  </div>
-                  <div className="settings-workspace-choice" role="listbox" aria-label="切换工作区">
-                    {projectWorkspaces.map((workspace) => {
-                      const selected = workspace.key === activeProjectWorkspaceKey;
-                      return (
-                        <button
-                          key={workspace.key}
-                          type="button"
-                          className={`settings-workspace-choice-item${
-                            selected ? " is-active" : ""
-                          }`}
-                          role="option"
-                          aria-selected={selected}
-                          onClick={() => switchProjectWorkspace(workspace.key)}
-                        >
-                          <span className="settings-workspace-choice-copy">
-                            <span className="settings-workspace-choice-name">
-                              {workspace.name}
-                            </span>
-                            <span className="settings-workspace-choice-meta-row">
-                              <span>{workspace.projectScopeLabel}</span>
-                              <span>{workspace.navigationScopeLabel}</span>
-                            </span>
-                          </span>
-                          {selected ? (
-                            <CheckIcon
-                              className="settings-workspace-choice-check"
-                              fontSize="small"
-                            />
-                          ) : null}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            ) : null}
-            <div className="settings-list-row settings-workspace-create-row">
-              <span className="settings-list-icon">
-                <CopyIcon fontSize="small" />
-              </span>
-              <div className="settings-workspace-create">
-                <div className="settings-workspace-create-head">
-                  <div className="settings-overview-copy">
-                    <Typography component="span" variant="subtitle2">新建工作区</Typography>
-                    <Typography component="span" variant="caption">生成 TOML 并切换</Typography>
-                  </div>
-                  <Button
-                    variant="contained"
+          <div className="settings-workspace-layout">
+            <div className="settings-workspace-selector-panel">
+              {projectWorkspaces.length > 0 ? (
+                <>
+                  <span className="settings-list-icon">
+                    <FolderIcon fontSize="small" />
+                  </span>
+                  <TextField
+                    className="settings-workspace-select"
+                    select
+                    fullWidth
                     size="small"
-                    startIcon={<CheckIcon fontSize="small" />}
-                    onClick={() => void handleCreateWorkspace()}
-                    disabled={creatingWorkspace || !newWorkspaceName.trim()}
+                    value={workspaceDraft?.key ?? workspaceEditorKey}
+                    onChange={(event) => switchProjectWorkspace(event.target.value)}
+                    inputProps={{ "aria-label": "当前工作区" }}
                   >
-                    创建
-                  </Button>
-                </div>
-                <div className="settings-workspace-create-fields">
-                  <TextField
-                    size="small"
-                    label="名称"
-                    value={newWorkspaceName}
-                    onChange={(event) => setNewWorkspaceName(event.target.value)}
-                    disabled={creatingWorkspace}
-                  />
-                  <TextField
-                    size="small"
-                    label="key"
-                    value={newWorkspaceKey}
-                    placeholder={normalizeWorkspaceKey(newWorkspaceName) || "marketing-rework"}
-                    onChange={(event) => setNewWorkspaceKey(event.target.value)}
-                    disabled={creatingWorkspace}
-                  />
-                  <TextField
-                    size="small"
-                    label="备注"
-                    value={newWorkspaceDescription}
-                    onChange={(event) => setNewWorkspaceDescription(event.target.value)}
-                    disabled={creatingWorkspace}
-                  />
-                  <FormControlLabel
-                    className="settings-workspace-copy"
-                    control={
-                      <Checkbox
+                    {projectWorkspaces.map((workspace) => (
+                      <MenuItem key={workspace.key} value={workspace.key}>
+                        {workspace.name}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                </>
+              ) : (
+                <AppEmptyState compact title="暂无工作区" description="先创建一个需求上下文。" />
+              )}
+            </div>
+
+            <div className="settings-workspace-detail">
+              <div className="settings-list settings-workspace-list module-list-scroll">
+                <div className="settings-list-row settings-workspace-create-row">
+                  <span className="settings-list-icon">
+                    <CopyIcon fontSize="small" />
+                  </span>
+                  <div className="settings-workspace-create">
+                    <div className="settings-workspace-create-head">
+                      <div className="settings-overview-copy">
+                        <Typography component="span" variant="subtitle2">新建工作区</Typography>
+                        <Typography component="span" variant="caption">生成 TOML 并切换</Typography>
+                      </div>
+                      <Button
+                        variant="contained"
                         size="small"
-                        checked={copyCurrentWorkspace}
-                        onChange={(event) => setCopyCurrentWorkspace(event.target.checked)}
+                        startIcon={<CheckIcon fontSize="small" />}
+                        onClick={() => void handleCreateWorkspace()}
+                        disabled={creatingWorkspace || !newWorkspaceName.trim()}
+                      >
+                        创建
+                      </Button>
+                    </div>
+                    <div className="settings-workspace-create-fields">
+                      <TextField
+                        size="small"
+                        label="名称"
+                        value={newWorkspaceName}
+                        onChange={(event) => setNewWorkspaceName(event.target.value)}
                         disabled={creatingWorkspace}
                       />
-                    }
-                    label="复制当前范围"
-                  />
+                      <TextField
+                        size="small"
+                        label="key"
+                        value={newWorkspaceKey}
+                        placeholder={normalizeWorkspaceKey(newWorkspaceName) || "marketing-rework"}
+                        onChange={(event) => setNewWorkspaceKey(event.target.value)}
+                        disabled={creatingWorkspace}
+                      />
+                      <WorkspaceTypeSelect
+                        value={newWorkspaceType}
+                        options={workspaceTypeSelectOptions}
+                        usageCounts={workspaceTypeUsageCounts}
+                        disabled={creatingWorkspace}
+                        onChange={(key) => setNewWorkspaceType(key)}
+                        onCreate={handleCreateWorkspaceType}
+                        onDelete={handleRemoveWorkspaceType}
+                      />
+                      <TextField
+                        size="small"
+                        label="备注"
+                        value={newWorkspaceDescription}
+                        onChange={(event) => setNewWorkspaceDescription(event.target.value)}
+                        disabled={creatingWorkspace}
+                      />
+                      <FormControlLabel
+                        className="settings-workspace-copy"
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={newWorkspaceIndependentDir}
+                            onChange={(event) => setNewWorkspaceIndependentDir(event.target.checked)}
+                            disabled={creatingWorkspace}
+                          />
+                        }
+                        label="独立目录"
+                      />
+                      {newWorkspaceIndependentDir ? (
+                        <TextField
+                          size="small"
+                          label="工作区目录"
+                          value={newWorkspaceRootDir}
+                          placeholder="默认：~/Documents/rdevtool-workspaces/<key>"
+                          onChange={(event) => setNewWorkspaceRootDir(event.target.value)}
+                          disabled={creatingWorkspace}
+                        />
+                      ) : null}
+                      <FormControlLabel
+                        className="settings-workspace-copy"
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={copyCurrentWorkspace}
+                            onChange={(event) => setCopyCurrentWorkspace(event.target.checked)}
+                            disabled={creatingWorkspace}
+                          />
+                        }
+                        label="复制当前范围"
+                      />
+                    </div>
+                  </div>
                 </div>
+                {renderWorkspaceScopeEditor()}
               </div>
             </div>
-            {renderWorkspaceScopeEditor()}
           </div>
         </section>
       </Stack>
@@ -3432,7 +3845,7 @@ export function SettingsPanel({
     if (!selectedProject) {
       return (
         <Stack spacing={1.3}>
-          <Alert severity="warning">暂无项目配置</Alert>
+          <AppEmptyState compact title="暂无项目配置" description="新增项目后可配置分支、运行和构建。" />
           {renderNewProjectBlock()}
         </Stack>
       );
@@ -3533,6 +3946,133 @@ export function SettingsPanel({
               }
               label="启动成功后自动唤起"
               sx={{ alignSelf: "center" }}
+            />
+            <TextField
+              size="small"
+              select
+              label="自动打开"
+              value={selectedProject.focus.autoOpenMode ?? "ready"}
+              onChange={(event) =>
+                updateSelectedProject((project) => ({
+                  ...project,
+                  focus: {
+                    ...project.focus,
+                    autoOpenMode: event.target.value,
+                  },
+                }))
+              }
+            >
+              <MenuItem value="ready">识别成功后打开</MenuItem>
+              <MenuItem value="started">进程启动后打开</MenuItem>
+              <MenuItem value="manual">手动打开</MenuItem>
+            </TextField>
+            <TextField
+              size="small"
+              label="识别超时 ms"
+              type="number"
+              value={selectedProject.focus.readyTimeoutMs ?? 180000}
+              onChange={(event) =>
+                updateSelectedProject((project) => ({
+                  ...project,
+                  focus: {
+                    ...project.focus,
+                    readyTimeoutMs: Number(event.target.value) || 180000,
+                  },
+                }))
+              }
+            />
+            <FormControlLabel
+              control={
+                <Checkbox
+                  checked={selectedProject.focus.readyEnabled ?? true}
+                  onChange={(event) =>
+                    updateSelectedProject((project) => ({
+                      ...project,
+                      focus: {
+                        ...project.focus,
+                        readyEnabled: event.target.checked,
+                      },
+                    }))
+                  }
+                />
+              }
+              label="启用启动识别"
+              sx={{ alignSelf: "center" }}
+            />
+            <TextField
+              size="small"
+              className="settings-form-grid-wide"
+              label="启动后动作"
+              helperText="一行一个网页动作 key，在项目 ready 后按顺序执行"
+              value={selectedProject.focus.afterReadyActionsText ?? ""}
+              onChange={(event) =>
+                updateSelectedProject((project) => ({
+                  ...project,
+                  focus: {
+                    ...project.focus,
+                    afterReadyActionsText: event.target.value,
+                  },
+                }))
+              }
+              multiline
+              minRows={2}
+            />
+            <TextField
+              size="small"
+              className="settings-form-grid-wide"
+              label="URL 提取模板"
+              value={
+                selectedProject.focus.readyUrlPatternsText ??
+                "- Local: {url}\nLocal: {url}\n- Network: {url}\nNetwork: {url}\nready - {url}"
+              }
+              onChange={(event) =>
+                updateSelectedProject((project) => ({
+                  ...project,
+                  focus: {
+                    ...project.focus,
+                    readyUrlPatternsText: event.target.value,
+                  },
+                }))
+              }
+              multiline
+              minRows={2}
+            />
+            <TextField
+              size="small"
+              className="settings-form-grid-wide"
+              label="成功标记（可选）"
+              value={selectedProject.focus.readySuccessMarkersText ?? ""}
+              onChange={(event) =>
+                updateSelectedProject((project) => ({
+                  ...project,
+                  focus: {
+                    ...project.focus,
+                    readySuccessMarkersText: event.target.value,
+                  },
+                }))
+              }
+              multiline
+              minRows={2}
+            />
+            <TextField
+              size="small"
+              className="settings-form-grid-wide"
+              label="失败标记"
+              value={
+                selectedProject.focus.readyFailureMarkersText ??
+                "Failed to compile\nCompilation failed\nEADDRINUSE"
+              }
+              onChange={(event) =>
+                updateSelectedProject((project) => ({
+                  ...project,
+                  focus: {
+                    ...project.focus,
+                    readyFailureMarkersText: event.target.value,
+                  },
+                }))
+              }
+              multiline
+              minRows={2}
             />
           </div>,
         )}
@@ -3821,7 +4361,7 @@ export function SettingsPanel({
     if (!navigationEditor) {
       return (
         <Stack spacing={1.3}>
-          <Alert severity="warning">暂无访达配置</Alert>
+          <AppEmptyState compact title="暂无访达配置" description="读取配置后可维护快捷入口。" />
           <div className="settings-action-grid">
             <Button
               variant="outlined"
@@ -4136,7 +4676,7 @@ export function SettingsPanel({
               保存默认
             </Button>
           </div>
-          <Alert severity="warning">暂无项目配置</Alert>
+          <AppEmptyState compact title="暂无项目配置" description="新增项目后可配置分支规则。" />
           {renderNewProjectBlock()}
         </Stack>
       );
@@ -4404,7 +4944,7 @@ export function SettingsPanel({
       return <Alert severity="info">正在读取构建配置</Alert>;
     }
     if (!selectedProject) {
-      return <Alert severity="warning">暂无项目配置</Alert>;
+      return <AppEmptyState compact title="暂无项目配置" description="新增项目后可配置构建任务。" />;
     }
     const deployTargetCount = selectedProject.deployTargets.length;
     const activeDeployTargetIndex =
@@ -4750,16 +5290,12 @@ export function SettingsPanel({
           </div>
 
           <div className="settings-section-content">
-            {error ? (
-              <Alert severity="error" sx={{ py: 0 }}>
-                {error}
-              </Alert>
-            ) : null}
-            {status ? (
-              <Alert severity="success" sx={{ py: 0 }}>
-                {status}
-              </Alert>
-            ) : null}
+            <AppToast
+              message={error || status}
+              severity={error ? "error" : "success"}
+              autoHideDuration={error ? 5200 : 2800}
+              nonce={toastNonce}
+            />
             {activeSection === "general" ? renderGeneralSection() : null}
             {activeSection === "workspace" ? renderWorkspaceSection() : null}
             {activeSection === "projects" ? renderProjectsSection() : null}

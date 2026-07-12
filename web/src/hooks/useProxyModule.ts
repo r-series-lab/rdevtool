@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  BindProxyRuntimeRequest,
+  BindProxyRuntimeResult,
   ProxyDashboard,
   ProxyProfile,
+  ProxyRequestDiagnosis,
+  ProxyRequestDiagnosisInput,
   ProxyRule,
 } from "../app-types";
 
@@ -158,6 +162,34 @@ export function useProxyModule({ enabled: _enabled, setError }: UseProxyModuleOp
     [runDashboardTask],
   );
 
+  const bindProxyRuntimeProfile = useCallback(
+    (request: BindProxyRuntimeRequest) =>
+      runDashboardTask("正在接入运行配置", async () => {
+        await invoke<BindProxyRuntimeResult>("bind_proxy_runtime_profile_config", { request });
+        return invoke<ProxyDashboard>("get_proxy_dashboard");
+      }),
+    [runDashboardTask],
+  );
+
+  const diagnoseProxyRequest = useCallback(
+    async (request: ProxyRequestDiagnosisInput) => {
+      setBusy("正在诊断代理请求");
+      setLocalError("");
+      setError("");
+      try {
+        return await invoke<ProxyRequestDiagnosis>("diagnose_proxy_request", request);
+      } catch (reason) {
+        const text = String(reason);
+        setLocalError(text);
+        setError(text);
+        throw reason;
+      } finally {
+        setBusy("");
+      }
+    },
+    [setError],
+  );
+
   return {
     dashboard,
     selectedProfileId,
@@ -175,5 +207,7 @@ export function useProxyModule({ enabled: _enabled, setError }: UseProxyModuleOp
     clearProxyEvents,
     exportProxyProfilePack,
     importProxyProfilePack,
+    bindProxyRuntimeProfile,
+    diagnoseProxyRequest,
   };
 }

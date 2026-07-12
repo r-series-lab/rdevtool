@@ -3,6 +3,7 @@ import { APP_MODULES, type AppModuleKey } from "./app-modules";
 export type PageKey = AppModuleKey;
 
 export const ALL_PAGE_KEYS: PageKey[] = [
+  "overview",
   "projects",
   "merge",
   "build",

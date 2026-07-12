@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement, type ReactNode } from "react";
 import {
   Box,
   Button,
@@ -12,6 +12,8 @@ import {
   IconButton,
   Pagination,
   Stack,
+  Tab,
+  Tabs,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -24,13 +26,16 @@ import {
   type ActivityStatus,
 } from "../lib/activityCenter";
 import {
+  AppWindowIcon,
   CheckIcon,
+  ClockIcon,
   ClearIcon,
   LocateIcon,
   OpenExternalIcon,
   RefreshIcon,
   TrashIcon,
 } from "./AppIcons";
+import { AppEmptyState } from "./AppEmptyState";
 import type { Theme } from "@mui/material/styles";
 
 type ActivityFilter =
@@ -44,6 +49,7 @@ type ActivityQueueGroup = {
   label: string;
   latest: ActivityEntry;
   failedItems: ActivityEntry[];
+  runningItems: ActivityEntry[];
   resourceItem: ActivityEntry | null;
   targetItem: ActivityEntry | null;
   failedCount: number;
@@ -58,6 +64,7 @@ type ActivityChainGroup = {
   latest: ActivityEntry;
   status: ActivityStatus;
   failedItems: ActivityEntry[];
+  runningItems: ActivityEntry[];
   resourceItem: ActivityEntry | null;
   targetItem: ActivityEntry | null;
 };
@@ -65,9 +72,11 @@ type ActivityChainGroup = {
 type ActivityExecutionGroup = {
   id: string;
   items: ActivityEntry[];
+  title: string;
   latest: ActivityEntry;
   status: ActivityStatus;
   failedItems: ActivityEntry[];
+  runningItems: ActivityEntry[];
   resourceItem: ActivityEntry | null;
   targetItem: ActivityEntry | null;
   executionCount: number;
@@ -97,10 +106,10 @@ const ACTIVITY_EXECUTION_PREVIEW_LIMIT = 3;
 
 const KIND_LABELS: Record<ActivityKind, string> = {
   runtime: "运行",
-  build: "构建",
-  branch: "分支",
-  deploy: "构建",
-  shortcut: "访达",
+  build: "构建任务",
+  branch: "Git工作流",
+  deploy: "构建任务",
+  shortcut: "资源入口",
 };
 
 const STATUS_LABELS: Record<ActivityStatus, string> = {
@@ -137,16 +146,18 @@ const activityHeaderIconSx = (theme: Theme) => {
     width: 28,
     height: 28,
     borderRadius: "8px",
-    border: dark ? "1px solid rgba(226,232,240,0.065)" : "1px solid rgba(52,76,96,0.08)",
-    bgcolor: dark ? "rgba(255,255,255,0.018)" : "rgba(255,255,255,0.28)",
-    color: "var(--muted)",
-    boxShadow: dark
-      ? "inset 0 1px 0 rgba(255,255,255,0.018)"
-      : "inset 0 1px 0 rgba(255,255,255,0.3)",
+    border: "1px solid transparent",
+    bgcolor: "transparent",
+    color: "color-mix(in srgb, var(--muted) 78%, var(--text))",
+    flexShrink: 0,
+    boxShadow: "none",
     "&:hover": {
-      color: "var(--accent)",
-      bgcolor: dark ? "rgba(255,255,255,0.045)" : "rgba(255,255,255,0.42)",
-      borderColor: "var(--accent-border)",
+      color: "var(--text)",
+      bgcolor: dark ? "rgba(255,255,255,0.052)" : "rgba(255,255,255,0.5)",
+      borderColor: dark ? "rgba(143,184,234,0.08)" : "rgba(84,111,140,0.12)",
+    },
+    "&.Mui-disabled": {
+      opacity: 0.34,
     },
   };
 };
@@ -325,22 +336,23 @@ function ActivityTitleCluster({
             height: 7,
             borderRadius: "50%",
             bgcolor: item.acknowledgedAt ? "var(--muted)" : statusColor(item.status),
-            boxShadow: item.status === "running" ? "0 0 0 3px var(--accent-soft)" : "none",
+            boxShadow: item.status === "running" ? "0 0 0 3px var(--activity-running-soft)" : "none",
             flex: "0 0 auto",
           }}
         />
         <Typography
           variant="body2"
-          fontWeight={790}
+          fontWeight={760}
           noWrap
           title={item.title}
           sx={{
             minWidth: 0,
             flex: "1 1 auto",
-            color: "var(--text)",
+            color: "color-mix(in srgb, var(--text) 88%, var(--muted))",
             fontSize: "0.83rem",
             lineHeight: 1.3,
             letterSpacing: 0,
+            fontWeight: 760,
           }}
         >
           {item.title}
@@ -369,9 +381,9 @@ function ActivityTitleCluster({
           <Typography
             className="activity-card-meta"
             variant="caption"
-            color="text.secondary"
             noWrap
             title={meta}
+            sx={{ color: "color-mix(in srgb, var(--muted) 88%, var(--text))" }}
           >
             {meta}
           </Typography>
@@ -469,6 +481,63 @@ function activityStepLabel(item: ActivityEntry) {
   return item.stepLabel || item.title;
 }
 
+function buildExecutionTargetFromGroupId(id: string) {
+  if (!id.startsWith("build:")) {
+    return "";
+  }
+  return id.split(":")[2]?.trim().toLowerCase() ?? "";
+}
+
+function buildExecutionTitleFromItems(id: string, items: ActivityEntry[]) {
+  if (!items.every((item) => isBuildActivityKind(item.kind))) {
+    return "";
+  }
+
+  const text = items
+    .flatMap((item) => [item.title, item.stepLabel ?? ""])
+    .join(" ");
+  if (text.includes("产物构建") || text.includes("打包")) {
+    return "产物构建";
+  }
+  if (text.includes("发布")) {
+    return "发布";
+  }
+  if (text.includes("部署")) {
+    return "部署";
+  }
+
+  const target = buildExecutionTargetFromGroupId(id);
+  if (target === "package") {
+    return "产物构建";
+  }
+  if (target === "release") {
+    return "发布";
+  }
+  return "构建";
+}
+
+function executionGroupTitle(id: string, items: ActivityEntry[]) {
+  return (
+    buildExecutionTitleFromItems(id, items) ||
+    [...items].sort(compareActivityCreated)[0]?.title ||
+    items[0]?.title ||
+    "活动记录"
+  );
+}
+
+function executionItemTitle(item: ActivityEntry, groupTitle: string) {
+  if (!isBuildActivityKind(item.kind) || !groupTitle || groupTitle === "构建") {
+    return item.title;
+  }
+  if (item.title.startsWith("重播")) {
+    return `重播${groupTitle}`;
+  }
+  if (item.title.startsWith("触发")) {
+    return `触发${groupTitle}`;
+  }
+  return item.title;
+}
+
 function aggregateChainStatus(items: ActivityEntry[]): ActivityStatus {
   if (items.some(isFailureActivity)) {
     return "failed";
@@ -489,13 +558,16 @@ function buildActivityExecutionGroup(
   const items = [...groupItems].sort(compareActivityUpdatedDesc);
   const prioritized = [...groupItems].sort(compareActivityPriority);
   const failedItems = groupItems.filter(isFailureActivity);
+  const runningItems = groupItems.filter(isVisibleRunningActivity);
   const latest = items[0];
   return {
     id,
     items,
+    title: executionGroupTitle(id, groupItems),
     latest,
     status: aggregateChainStatus(groupItems),
     failedItems,
+    runningItems,
     resourceItem:
       prioritized.find((item) => isUnhandledFailure(item) && item.resource) ??
       prioritized.find((item) => item.resource) ??
@@ -550,6 +622,7 @@ function buildActivityDisplayUnits(items: ActivityEntry[]): ActivityDisplayUnit[
       ordered.find((item) => item.id === latest.parentId) ??
       ordered[0];
     const failedItems = chainItems.filter(isFailureActivity);
+    const runningItems = chainItems.filter(isVisibleRunningActivity);
     units.push({
       type: "chain",
       group: {
@@ -559,6 +632,7 @@ function buildActivityDisplayUnits(items: ActivityEntry[]): ActivityDisplayUnit[
         latest,
         status: aggregateChainStatus(chainItems),
         failedItems,
+        runningItems,
         resourceItem: prioritized.find((item) => item.resource) ?? null,
         targetItem:
           failedItems.find((item) => item.target) ??
@@ -624,9 +698,12 @@ function ActivityChainTrail({ items }: { items: ActivityEntry[] }) {
               overflow: "hidden",
               textOverflow: "ellipsis",
               whiteSpace: "nowrap",
-              color: item.status === "failed" ? "var(--activity-danger)" : "var(--text)",
+              color:
+                item.status === "failed"
+                  ? "var(--activity-danger)"
+                  : "color-mix(in srgb, var(--text) 82%, var(--muted))",
               fontSize: "0.66rem",
-              fontWeight: item.status === "running" ? 820 : 740,
+              fontWeight: item.status === "running" ? 760 : 720,
               lineHeight: 1.2,
             }}
           >
@@ -650,7 +727,7 @@ export function ActivityCenter({
   onAcknowledgeEntry,
   onAcknowledgeEntries,
 }: ActivityCenterProps) {
-  const [filter, setFilter] = useState<ActivityFilter>("attention");
+  const [filter, setFilter] = useState<ActivityFilter>("all");
   const [listPage, setListPage] = useState(1);
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [manualRefreshing, setManualRefreshing] = useState(false);
@@ -742,12 +819,12 @@ export function ActivityCenter({
       successItems.length,
     ],
   );
-  const filterOptions = useMemo<Array<{ key: ActivityFilter; label: string; count: number }>>(
+  const filterOptions = useMemo<Array<{ key: ActivityFilter; label: string; count: number; icon: ReactElement }>>(
     () => [
-      { key: "all", label: "全部", count: counts.all },
-      { key: "attention", label: "待处理", count: counts.attention },
-      { key: "success", label: "成功", count: counts.success },
-      { key: "failed", label: "失败", count: counts.failed },
+      { key: "all", label: "全部", count: counts.all, icon: <AppWindowIcon fontSize="small" /> },
+      { key: "attention", label: "待办", count: counts.attention, icon: <ClockIcon fontSize="small" /> },
+      { key: "success", label: "成功", count: counts.success, icon: <CheckIcon fontSize="small" /> },
+      { key: "failed", label: "失败", count: counts.failed, icon: <ClearIcon fontSize="small" /> },
     ],
     [counts.all, counts.attention, counts.failed, counts.success],
   );
@@ -768,12 +845,14 @@ export function ActivityCenter({
       .map(([id, groupItems]): ActivityQueueGroup => {
         const sorted = [...groupItems].sort(compareActivityPriority);
         const groupFailedItems = groupItems.filter(isUnhandledFailure);
+        const groupRunningItems = groupItems.filter(isVisibleRunningActivity);
         const latest = sorted[0];
         return {
           id,
           label: queueGroupLabel(latest),
           latest,
           failedItems: groupFailedItems,
+          runningItems: groupRunningItems,
           resourceItem:
             sorted.find((item) => isUnhandledFailure(item) && item.resource) ??
             sorted.find((item) => item.resource) ??
@@ -797,16 +876,15 @@ export function ActivityCenter({
         return right.latest.updatedAt.localeCompare(left.latest.updatedAt);
       });
   }, [attentionItems]);
-  const attentionSummary = useMemo(
-    () =>
-      [
-        counts.running ? `${counts.running} 个进行中` : "",
-        counts.failed ? `${counts.failed} 个失败` : "",
-      ]
-        .filter(Boolean)
-        .join(" · ") || "没有待处理活动",
-    [counts.failed, counts.running],
-  );
+  const attentionSummary = useMemo(() => {
+    const summary = [
+      counts.running ? `${counts.running} 个进行中` : "",
+      counts.failed ? `${counts.failed} 个失败` : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    return summary ? `共 ${summary}` : "没有待处理活动";
+  }, [counts.failed, counts.running]);
   const visibleItems = useMemo(() => {
     if (filter === "attention") {
       return attentionItems;
@@ -883,96 +961,124 @@ export function ActivityCenter({
           overflow: "hidden",
         }}
       >
-        <Stack
-          className="activity-center-header"
-          direction="row"
-          justifyContent="space-between"
-          alignItems="center"
-          spacing={1.15}
-        >
-          <Box className="activity-header-copy" minWidth={0}>
-            <Typography
-              variant="subtitle1"
-              sx={{
-                fontSize: "0.98rem",
-                fontWeight: 820,
-                lineHeight: 1.12,
-                textWrap: "balance",
-              }}
-            >
-              活动
-            </Typography>
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ display: "block", mt: 0.16, fontSize: "0.68rem", lineHeight: 1.25 }}
-            >
-              {attentionSummary}
-            </Typography>
-          </Box>
+        <Box className="activity-control-panel">
           <Stack
-            className="activity-header-actions"
+            className="activity-center-header"
             direction="row"
-            spacing={0.3}
-            sx={{ pt: variant === "panel" ? 0.1 : 0 }}
+            justifyContent="space-between"
+            alignItems="center"
+            spacing={1.15}
           >
-            <Tooltip title="处理全部失败">
-              <span>
-                <IconButton
-                  size="small"
-                  onClick={handleAcknowledgeAllFailed}
-                  disabled={unhandledFailedItems.length === 0}
-                  aria-label="处理全部失败"
-                  sx={activityHeaderIconSx}
-                >
-                  <CheckIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-            <Tooltip title="刷新活动状态">
-              <span>
-                <IconButton
-                  size="small"
-                  onClick={() => void runRefresh({ force: true })}
-                  disabled={!hasManualRefreshableBuildActivity || manualRefreshing}
-                  aria-label="刷新活动状态"
-                  sx={activityHeaderIconSx}
-                >
-                  <RefreshIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-            <Tooltip title="清空活动">
-              <span>
-                <IconButton
-                  size="small"
-                  onClick={() => setClearConfirmOpen(true)}
-                  disabled={items.length === 0}
-                  aria-label="清空活动"
-                  sx={activityHeaderIconSx}
-                >
-                  <TrashIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-            <Tooltip title="关闭">
-              <IconButton
-                size="small"
-                onClick={onClose}
-                aria-label="关闭活动中心"
-                sx={activityHeaderIconSx}
+            <Box className="activity-header-copy" minWidth={0}>
+              <Typography
+                variant="subtitle1"
+                sx={{
+                  fontSize: "0.98rem",
+                  fontWeight: 800,
+                  lineHeight: 1.12,
+                  textWrap: "balance",
+                }}
               >
-                <ClearIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
+                活动
+              </Typography>
+              <Typography
+                variant="caption"
+                color="text.secondary"
+                sx={{ display: "block", mt: 0.08, fontSize: "0.66rem", lineHeight: 1.22 }}
+              >
+                {attentionSummary}
+              </Typography>
+            </Box>
+            <Stack
+              className="activity-header-actions"
+              direction="row"
+              spacing={0}
+              sx={{ pt: variant === "panel" ? 0.1 : 0 }}
+            >
+              <Tooltip title="处理全部失败">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={handleAcknowledgeAllFailed}
+                    disabled={unhandledFailedItems.length === 0}
+                    aria-label="处理全部失败"
+                    sx={activityHeaderIconSx}
+                  >
+                    <CheckIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Tooltip title="刷新活动状态">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={() => void runRefresh({ force: true })}
+                    disabled={!hasManualRefreshableBuildActivity || manualRefreshing}
+                    aria-label="刷新活动状态"
+                    sx={activityHeaderIconSx}
+                  >
+                    <RefreshIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Tooltip title="清空活动">
+                <span>
+                  <IconButton
+                    size="small"
+                    onClick={() => setClearConfirmOpen(true)}
+                    disabled={items.length === 0}
+                    aria-label="清空活动"
+                    sx={activityHeaderIconSx}
+                  >
+                    <TrashIcon fontSize="small" />
+                  </IconButton>
+                </span>
+              </Tooltip>
+              <Tooltip title="关闭">
+                <IconButton
+                  size="small"
+                  onClick={onClose}
+                  aria-label="关闭活动中心"
+                  sx={activityHeaderIconSx}
+                >
+                  <ClearIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            </Stack>
           </Stack>
-        </Stack>
+
+          <Tabs
+            className="runtime-panel-tabs activity-filter-strip"
+            value={filter}
+            onChange={(_, value) => setFilter(value as ActivityFilter)}
+            variant="fullWidth"
+            aria-label="活动筛选"
+          >
+            {filterOptions.map((item) => (
+              <Tab
+                key={item.key}
+                value={item.key}
+                icon={item.icon}
+                iconPosition="start"
+                label={(
+                  <Box component="span" className="activity-filter-label">
+                    <Box component="span">{item.label}</Box>
+                    <Box component="span" className="activity-filter-count">
+                      {item.count}
+                    </Box>
+                  </Box>
+                )}
+                aria-label={`${item.label} ${item.count}`}
+              />
+            ))}
+          </Tabs>
+        </Box>
 
         {queueGroups.length > 0 ? (
           <Box
             className="activity-queue-section"
             sx={{
-              mt: 1.05,
+              mt: 0.75,
               p: 0.9,
             }}
           >
@@ -1059,9 +1165,9 @@ export function ActivityCenter({
                           <Typography
                             variant="body2"
                             sx={{
-                              color: "var(--text)",
+                              color: "color-mix(in srgb, var(--text) 88%, var(--muted))",
                               fontSize: "0.83rem",
-                              fontWeight: 790,
+                              fontWeight: 760,
                               lineHeight: 1.32,
                               overflowWrap: "anywhere",
                             }}
@@ -1101,7 +1207,7 @@ export function ActivityCenter({
                             ) : null}
                           </Stack>
                         </Stack>
-                        {group.resourceItem || group.targetItem || group.failedItems.length > 0 ? (
+                        {group.resourceItem || group.targetItem || group.failedItems.length > 0 || group.runningItems.length > 0 ? (
                           <Stack className="activity-card-actions" direction="row" spacing={0.42} flexShrink={0}>
                             {group.resourceItem ? (
                               <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
@@ -1127,12 +1233,12 @@ export function ActivityCenter({
                                 </IconButton>
                               </Tooltip>
                             ) : null}
-                            {group.failedItems.length > 0 ? (
-                              <Tooltip title="标记已处理">
+                            {group.failedItems.length > 0 || group.runningItems.length > 0 ? (
+                              <Tooltip title={group.failedItems.length > 0 ? "标记已处理" : "结束关注"}>
                                 <IconButton
                                   size="small"
-                                  onClick={() => onAcknowledgeEntries(group.failedItems)}
-                                  aria-label="标记已处理"
+                                  onClick={() => onAcknowledgeEntries([...group.failedItems, ...group.runningItems])}
+                                  aria-label={group.failedItems.length > 0 ? "标记已处理" : "结束关注"}
                                   sx={activityActionIconSx}
                                 >
                                   <CheckIcon fontSize="small" />
@@ -1144,10 +1250,10 @@ export function ActivityCenter({
                       </Stack>
                       <Typography
                         variant="caption"
-                        color="text.secondary"
                         sx={{
                           display: "-webkit-box",
                           mt: 0.42,
+                          color: "color-mix(in srgb, var(--muted) 88%, var(--text))",
                           overflow: "hidden",
                           overflowWrap: "anywhere",
                           WebkitBoxOrient: "vertical",
@@ -1191,64 +1297,6 @@ export function ActivityCenter({
           </Box>
         ) : null}
 
-        <Box
-          className="activity-filter-strip"
-          sx={{
-            mt: queueGroups.length > 0 ? 0.88 : 1.05,
-            mb: 0.82,
-            p: 0.38,
-            display: "grid",
-            gridTemplateColumns: "repeat(4, minmax(0, 1fr))",
-            gap: 0.4,
-          }}
-        >
-          {filterOptions.map((item) => (
-            <Chip
-              key={item.key}
-              size="small"
-              label={(
-                <Box component="span" className="activity-filter-label">
-                  <Box component="span">{item.label}</Box>
-                  <Box component="span" className="activity-filter-count">
-                    {item.count}
-                  </Box>
-                </Box>
-              )}
-              variant={filter === item.key ? "filled" : "outlined"}
-              color={filter === item.key ? "primary" : "default"}
-              onClick={() => setFilter(item.key as ActivityFilter)}
-              sx={(theme) => {
-                const dark = theme.palette.mode === "dark";
-                const active = filter === item.key;
-                return {
-                  height: 25,
-                  borderRadius: "7px",
-                  borderColor: active
-                    ? "var(--accent-border)"
-                    : "transparent",
-                  bgcolor: active
-                    ? dark
-                      ? "rgba(143,184,234,0.18)"
-                      : "rgba(92,112,133,0.72)"
-                    : "transparent",
-                  color: active
-                    ? dark
-                      ? "var(--accent-hover)"
-                      : "#ffffff"
-                    : undefined,
-                  backdropFilter: "blur(18px) saturate(1.16)",
-                  WebkitBackdropFilter: "blur(18px) saturate(1.16)",
-                  "& .MuiChip-label": {
-                    px: 0.72,
-                    fontSize: "0.64rem",
-                    fontWeight: 760,
-                  },
-                };
-              }}
-            />
-          ))}
-        </Box>
-
         <Divider className="activity-list-divider" sx={{ borderColor: "var(--line-soft)", opacity: 0.78 }} />
 
         <Stack
@@ -1268,24 +1316,27 @@ export function ActivityCenter({
             bgcolor: "transparent",
             scrollbarWidth: "thin",
             scrollbarColor:
-              "color-mix(in srgb, var(--muted) 34%, transparent) color-mix(in srgb, var(--muted) 8%, transparent)",
+              "color-mix(in srgb, var(--muted) 34%, transparent) transparent",
             transition: "scrollbar-color 140ms ease",
             "&:hover": {
               scrollbarColor:
-                "color-mix(in srgb, var(--muted) 48%, transparent) color-mix(in srgb, var(--muted) 8%, transparent)",
+                "color-mix(in srgb, var(--muted) 48%, transparent) transparent",
             },
             "&::-webkit-scrollbar": {
-              width: 6,
-              height: 6,
+              width: "var(--scrollbar-gutter-size)",
+              height: "var(--scrollbar-gutter-size)",
             },
             "&::-webkit-scrollbar-track": {
-              background: "color-mix(in srgb, var(--muted) 8%, transparent)",
+              background: "transparent",
               borderRadius: "999px",
             },
             "&::-webkit-scrollbar-thumb": {
               backgroundColor: "color-mix(in srgb, var(--muted) 34%, transparent)",
               borderRadius: "999px",
-              border: "2px solid transparent",
+              borderColor: "transparent",
+              borderStyle: "solid",
+              borderWidth:
+                "var(--scrollbar-thumb-inset-block) var(--scrollbar-thumb-inset-right) var(--scrollbar-thumb-inset-block) var(--scrollbar-thumb-inset-left)",
               backgroundClip: "padding-box",
             },
             "&:hover::-webkit-scrollbar-thumb": {
@@ -1297,22 +1348,23 @@ export function ActivityCenter({
           }}
         >
           {visibleUnits.length === 0 ? (
-            <Box
-              sx={{
-                border: "1px dashed var(--line)",
-                borderRadius: 2,
-                p: 2,
-                color: "var(--muted)",
-                fontSize: 13,
-              }}
-            >
-              {filter === "attention" ? "当前没有待处理活动。" : "暂无匹配的活动记录。"}
-            </Box>
+            <AppEmptyState
+              title={filter === "attention" ? "暂无待处理" : "没有匹配记录"}
+              description={
+                filter === "attention"
+                  ? "失败、运行中和需要确认的动作会出现在这里。"
+                  : "换个筛选条件看看其他活动。"
+              }
+            />
           ) : (
             paginatedUnits.map((unit) => {
               if (unit.type === "chain") {
                 const { group } = unit;
                 const unhandledGroupFailures = group.failedItems.filter(isUnhandledFailure);
+                const actionableGroupItems = [
+                  ...unhandledGroupFailures,
+                  ...group.runningItems,
+                ];
                 const groupAcknowledgedAt =
                   group.status === "failed" &&
                   group.failedItems.length > 0 &&
@@ -1361,7 +1413,7 @@ export function ActivityCenter({
                               .filter(Boolean)
                               .join(" · ")}
                           />
-                          {group.targetItem || group.resourceItem || unhandledGroupFailures.length > 0 ? (
+                          {group.targetItem || group.resourceItem || actionableGroupItems.length > 0 ? (
                             <Stack className="activity-card-actions" direction="row" spacing={0.4} flexShrink={0}>
                               {group.resourceItem ? (
                                 <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
@@ -1387,12 +1439,12 @@ export function ActivityCenter({
                                   </IconButton>
                                 </Tooltip>
                               ) : null}
-                              {unhandledGroupFailures.length > 0 ? (
-                                <Tooltip title="标记已处理">
+                              {actionableGroupItems.length > 0 ? (
+                                <Tooltip title={unhandledGroupFailures.length > 0 ? "标记已处理" : "结束关注"}>
                                   <IconButton
                                     size="small"
-                                    onClick={() => onAcknowledgeEntries(unhandledGroupFailures)}
-                                    aria-label="标记已处理"
+                                    onClick={() => onAcknowledgeEntries(actionableGroupItems)}
+                                    aria-label={unhandledGroupFailures.length > 0 ? "标记已处理" : "结束关注"}
                                     sx={activityActionIconSx}
                                   >
                                     <CheckIcon fontSize="small" />
@@ -1454,6 +1506,10 @@ export function ActivityCenter({
               if (unit.type === "execution") {
                 const { group } = unit;
                 const unhandledGroupFailures = group.failedItems.filter(isUnhandledFailure);
+                const actionableGroupItems = [
+                  ...unhandledGroupFailures,
+                  ...group.runningItems,
+                ];
                 const groupAcknowledgedAt =
                   group.status === "failed" &&
                   group.failedItems.length > 0 &&
@@ -1462,6 +1518,7 @@ export function ActivityCenter({
                     : null;
                 const headlineItem: ActivityEntry = {
                   ...group.latest,
+                  title: group.title,
                   status: group.status,
                   acknowledgedAt: groupAcknowledgedAt,
                 };
@@ -1508,7 +1565,7 @@ export function ActivityCenter({
                               />
                             )}
                           />
-                          {group.resourceItem || group.targetItem || unhandledGroupFailures.length > 0 ? (
+                          {group.resourceItem || group.targetItem || actionableGroupItems.length > 0 ? (
                             <Stack className="activity-card-actions" direction="row" spacing={0.4} flexShrink={0}>
                               {group.resourceItem ? (
                                 <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
@@ -1534,12 +1591,12 @@ export function ActivityCenter({
                                   </IconButton>
                                 </Tooltip>
                               ) : null}
-                              {unhandledGroupFailures.length > 0 ? (
-                                <Tooltip title="标记已处理">
+                              {actionableGroupItems.length > 0 ? (
+                                <Tooltip title={unhandledGroupFailures.length > 0 ? "标记已处理" : "结束关注"}>
                                   <IconButton
                                     size="small"
-                                    onClick={() => onAcknowledgeEntries(unhandledGroupFailures)}
-                                    aria-label="标记已处理"
+                                    onClick={() => onAcknowledgeEntries(actionableGroupItems)}
+                                    aria-label={unhandledGroupFailures.length > 0 ? "标记已处理" : "结束关注"}
                                     sx={activityActionIconSx}
                                   >
                                     <CheckIcon fontSize="small" />
@@ -1590,6 +1647,7 @@ export function ActivityCenter({
                                 }}
                               >
                                 {[
+                                  executionItemTitle(item, group.title),
                                   activityStatusLabel(item),
                                   formatActivityTime(item.updatedAt),
                                   displayActivitySummary(item) ||
@@ -1645,7 +1703,7 @@ export function ActivityCenter({
                           .filter(Boolean)
                           .join(" · ")}
                       />
-                      {item.target || item.resource || isUnhandledFailure(item) ? (
+                      {item.target || item.resource || isUnhandledFailure(item) || isVisibleRunningActivity(item) ? (
                         <Stack className="activity-card-actions" direction="row" spacing={0.4} flexShrink={0}>
                           {item.resource ? (
                             <Tooltip title={item.resource.label}>
@@ -1671,12 +1729,12 @@ export function ActivityCenter({
                               </IconButton>
                             </Tooltip>
                           ) : null}
-                          {isUnhandledFailure(item) ? (
-                            <Tooltip title="标记已处理">
+                          {isUnhandledFailure(item) || isVisibleRunningActivity(item) ? (
+                            <Tooltip title={isUnhandledFailure(item) ? "标记已处理" : "结束关注"}>
                               <IconButton
                                 size="small"
                                 onClick={() => onAcknowledgeEntry(item)}
-                                aria-label="标记已处理"
+                                aria-label={isUnhandledFailure(item) ? "标记已处理" : "结束关注"}
                                 sx={activityActionIconSx}
                               >
                                 <CheckIcon fontSize="small" />
@@ -1692,13 +1750,13 @@ export function ActivityCenter({
                         sx={{
                           display: "-webkit-box",
                           mt: 0.7,
-                          color: "var(--text)",
+                          color: "color-mix(in srgb, var(--text) 76%, var(--muted))",
                           overflow: "hidden",
                           overflowWrap: "anywhere",
                           WebkitBoxOrient: "vertical",
                           WebkitLineClamp: 2,
-                          fontSize: "0.74rem",
-                          fontWeight: 720,
+                          fontSize: "0.72rem",
+                          fontWeight: 650,
                           lineHeight: 1.5,
                         }}
                       >
@@ -1708,10 +1766,10 @@ export function ActivityCenter({
                     {item.detail ? (
                       <Typography
                         variant="caption"
-                        color="text.secondary"
                         sx={{
                           display: "-webkit-box",
                           mt: 0.58,
+                          color: "color-mix(in srgb, var(--muted) 92%, var(--text))",
                           overflow: "hidden",
                           overflowWrap: "anywhere",
                           WebkitBoxOrient: "vertical",

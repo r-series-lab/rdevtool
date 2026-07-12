@@ -44,9 +44,30 @@ function normalizeHistoryTimestamp(value: string) {
 
 export const APP_MODULES = [
   {
+    key: "overview",
+    label: "工作台",
+    shortLabel: "工作台",
+    component: lazy(() =>
+      import("./pages/OverviewPage").then((module) => ({
+        default: module.OverviewPage,
+      })),
+    ),
+    loadOnStartup: undefined,
+    buildProps: ({ appShell, proxyModule }) => ({
+      projectWorkspaces: appShell.projectWorkspaces,
+      activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
+      onProjectWorkspaceChange: appShell.onProjectWorkspaceChange,
+      onCreateProjectWorkspace: appShell.onCreateProjectWorkspace,
+      onInitDemandWorkspace: appShell.onInitDemandWorkspace,
+      onProjectConfigSaved: appShell.onProjectConfigSaved,
+      onStartProxyProfile: proxyModule.startProxyProfile,
+      onStopProxyProfile: proxyModule.stopProxyProfile,
+    }),
+  },
+  {
     key: "build",
-    label: "项目构建",
-    shortLabel: "构建",
+    label: "构建任务",
+    shortLabel: "构建任务",
     component: lazy(() =>
       import("./pages/BuildPage").then((module) => ({
         default: module.BuildPage,
@@ -86,7 +107,7 @@ export const APP_MODULES = [
       plan: buildModule.plan,
       buildResult: buildModule.buildResult,
       buildResultUpdatedAtMs: buildModule.buildResultUpdatedAtMs,
-      buildAutoRefreshTimedOut: buildModule.buildAutoRefreshTimedOut,
+      currentBuildHistoryKey: buildModule.currentBuildHistoryKey,
       onRefreshBuild: buildModule.handleRefreshBuild,
       onOpenBuildRecord: buildModule.handleOpenBuildRecord,
       onOpenBuildUrl: buildModule.handleOpenBuildUrl,
@@ -128,8 +149,8 @@ export const APP_MODULES = [
   },
   {
     key: "merge",
-    label: "分支",
-    shortLabel: "分支",
+    label: "Git工作流",
+    shortLabel: "Git工作流",
     component: lazy(() =>
       import("./pages/MergePage").then((module) => ({
         default: module.MergePage,
@@ -145,6 +166,10 @@ export const APP_MODULES = [
       busy,
     }) => ({
       projects: appShell.branchProjects.map(({ key, name }) => ({ key, name })),
+      activeWorkspace:
+        appShell.projectWorkspaces.find(
+          (workspace) => workspace.key === appShell.activeProjectWorkspaceKey,
+        ) ?? null,
       selectedProject: appShell.selectedProject,
       onProjectChange: appShell.setSelectedProject,
       mode: mergeModule.mode,
@@ -166,6 +191,7 @@ export const APP_MODULES = [
       onCheckoutSourceChange: mergeModule.setCheckoutSource,
       onClearCheckoutSource: () => mergeModule.setCheckoutSource(""),
       checkoutDestinationDir: mergeModule.checkoutDestinationDir,
+      onCheckoutDestinationChange: mergeModule.setCheckoutDestinationDir,
       onClearCheckoutDestination: () => mergeModule.setCheckoutDestinationDir(""),
       onChooseCheckoutDirectory: mergeModule.handleChooseCheckoutDirectory,
       switchTarget: mergeModule.switchTarget,
@@ -195,7 +221,8 @@ export const APP_MODULES = [
       sourceBranchOptions: mergeSelection.sourceBranchOptions,
       targetBranchOptions: mergeSelection.targetBranchOptions,
       busy,
-      branchTaskResult: mergeModule.branchTaskResult,
+      currentBranchTaskHistoryId: mergeModule.currentBranchTaskHistoryId,
+      currentBranchTaskRunningLabel: mergeModule.currentBranchTaskRunningLabel,
       branchTaskHistory: mergeModule.visibleBranchTaskHistory,
       onExecuteSync: mergeModule.handleExecuteSync,
       onExecuteCreate: mergeModule.handleExecuteCreate,
@@ -266,17 +293,20 @@ export const APP_MODULES = [
   },
   {
     key: "proxy",
-    label: "代理服务",
-    shortLabel: "代理",
+    label: "本地代理",
+    shortLabel: "本地代理",
     component: lazy(() =>
       import("./pages/ProxyPage").then((module) => ({
         default: module.ProxyPage,
       })),
     ),
     loadOnStartup: ({ proxyModule }) => proxyModule.loadProxyDashboard(),
-    buildProps: ({ proxyModule }) => ({
+    buildProps: ({ appShell, proxyModule }) => ({
       dashboard: proxyModule.dashboard,
       selectedProfileId: proxyModule.selectedProfileId,
+      activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
+      projectWorkspaces: appShell.projectWorkspaces,
+      projects: appShell.projects.map((project) => ({ key: project.key, name: project.name })),
       loading: proxyModule.loading,
       busy: proxyModule.busy,
       error: proxyModule.error,
@@ -291,12 +321,14 @@ export const APP_MODULES = [
       onClearEvents: proxyModule.clearProxyEvents,
       onExportProfilePack: proxyModule.exportProxyProfilePack,
       onImportProfilePack: proxyModule.importProxyProfilePack,
+      onBindProxyRuntimeProfile: proxyModule.bindProxyRuntimeProfile,
+      onDiagnoseRequest: proxyModule.diagnoseProxyRequest,
     }),
   },
   {
     key: "projects",
-    label: "访达",
-    shortLabel: "访达",
+    label: "资源入口",
+    shortLabel: "资源入口",
     component: lazy(() =>
       import("./pages/ProjectsPage").then((module) => ({
         default: module.ProjectsPage,
@@ -308,10 +340,6 @@ export const APP_MODULES = [
       finderType: projectsModule.finderType,
       finderTypeCounts: projectsModule.finderTypeCounts,
       onFinderTypeChange: projectsModule.setFinderType,
-      finderQuickFilterOptions: projectsModule.finderQuickFilterOptions,
-      finderQuickFilter: projectsModule.finderQuickFilter,
-      finderQuickFilterCounts: projectsModule.finderQuickFilterCounts,
-      onFinderQuickFilterChange: projectsModule.setFinderQuickFilter,
       finderCategories: projectsModule.finderCategories,
       finderCategory: projectsModule.finderCategory,
       finderCategoryCounts: projectsModule.finderCategoryCounts,
@@ -327,12 +355,6 @@ export const APP_MODULES = [
       favoriteShortcutKeys: projectsModule.favoriteShortcutKeys,
       recentShortcutKeys: projectsModule.recentShortcutKeys,
       selectedDebugProfileKeys: projectsModule.selectedDebugProfileKeys,
-      branchProjectKeys: appShell.enabledPages.includes("merge")
-        ? appShell.branchProjects.map((item) => item.key)
-        : [],
-      buildProjectKeys: appShell.enabledPages.includes("build")
-        ? appShell.buildProjects.map((item) => item.key)
-        : [],
       workflowReceiveRules: workflowSignals.rules.receivers.filter(
         (rule) => rule.replay.target === "project.replay",
       ),
@@ -369,14 +391,6 @@ export const APP_MODULES = [
       onToggleShortcutFavorite: projectsModule.toggleShortcutFavorite,
       onProjectDebugProfileChange: projectsModule.setProjectDebugProfile,
       onMarkShortcutUsed: projectsModule.markShortcutUsed,
-      onOpenProjectBranch: (projectKey) => {
-        appShell.setSelectedProject(projectKey);
-        appShell.setPage("merge");
-      },
-      onOpenProjectBuild: (projectKey) => {
-        appShell.setSelectedProject(projectKey);
-        appShell.setPage("build");
-      },
       onRefresh: () => void projectsModule.loadFinderData({ force: true }),
       onOpenFinderEntry: (entry) =>
         projectsModule.handleOpenFinderEntry(entry),
@@ -388,10 +402,6 @@ export const APP_MODULES = [
         ),
       onStopRuntime: (projectKey) =>
         void projectsModule.handleStopRuntime(projectKey),
-      onRunBuild: (projectKey) =>
-        void projectsModule.handleRunBuild(projectKey),
-      onStopBuild: (projectKey) =>
-        void projectsModule.handleStopBuild(projectKey),
       onOpenBuildOutput: (projectKey) =>
         void projectsModule.handleOpenBuildOutput(projectKey),
       onFocusRuntime: (projectKey, debugProfileKey) =>
@@ -401,6 +411,7 @@ export const APP_MODULES = [
     }),
   },
 ] as const satisfies readonly [
+  AppModuleDefinition<"overview">,
   AppModuleDefinition<"build">,
   AppModuleDefinition<"merge">,
   AppModuleDefinition<"proxy">,
@@ -421,6 +432,7 @@ export function buildPageProps(
   context: BuildModulePropsContext,
 ): AppPagePropsMap {
   return {
+    overview: APP_MODULE_MAP.overview.buildProps(context),
     build: APP_MODULE_MAP.build.buildProps(context),
     merge: APP_MODULE_MAP.merge.buildProps(context),
     proxy: APP_MODULE_MAP.proxy.buildProps(context),

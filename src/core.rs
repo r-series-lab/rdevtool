@@ -294,6 +294,8 @@ pub struct BranchWorktreeSummary {
     pub behind: usize,
     pub is_default: bool,
     pub is_git_worktree: bool,
+    pub is_workspace_instance: bool,
+    pub managed: bool,
     pub status_key: String,
     pub status_label: String,
     pub detail: String,
@@ -1045,11 +1047,14 @@ pub fn checkout_branch_to_directory(
         anyhow::bail!("源分支不能为空");
     }
 
-    let result = git::clone_branch_to_directory(
-        &project.git_url,
-        source_branch,
-        Path::new(request.destination_dir.trim()),
-    );
+    let destination = Path::new(request.destination_dir.trim());
+    let result = if let Some(repo_path) = project.repo_path.as_ref() {
+        git::add_worktree_from_branch(repo_path, source_branch, destination).or_else(|_| {
+            git::clone_branch_to_directory(&project.git_url, source_branch, destination)
+        })
+    } else {
+        git::clone_branch_to_directory(&project.git_url, source_branch, destination)
+    };
     let items = match result {
         Ok(value) => vec![BranchTaskItemResult {
             project_key: project.key.clone(),
@@ -1059,8 +1064,8 @@ pub fn checkout_branch_to_directory(
             output_path: Some(value.output_path.display().to_string()),
             success: true,
             status_key: "checked_out".to_string(),
-            status_label: "已克隆".to_string(),
-            summary: "已克隆到本地目录".to_string(),
+            status_label: "已创建".to_string(),
+            summary: "已创建工作区副本".to_string(),
             detail: value.detail,
             remote: true,
             commit: None,
@@ -1123,6 +1128,8 @@ fn branch_status_for_project_path(
     repo_path: &Path,
     is_default: bool,
     is_git_worktree: bool,
+    is_workspace_instance: bool,
+    managed: bool,
     branch_hint: Option<&str>,
     detached_hint: bool,
 ) -> BranchWorktreeSummary {
@@ -1150,6 +1157,8 @@ fn branch_status_for_project_path(
                 behind: status.behind,
                 is_default,
                 is_git_worktree,
+                is_workspace_instance,
+                managed,
                 status_key: if status.clean { "clean" } else { "dirty" }.to_string(),
                 status_label: if status.clean { "干净" } else { "有改动" }.to_string(),
                 detail: status
@@ -1174,6 +1183,8 @@ fn branch_status_for_project_path(
                 behind: 0,
                 is_default,
                 is_git_worktree,
+                is_workspace_instance,
+                managed,
                 status_key: "unavailable".to_string(),
                 status_label: "不可用".to_string(),
                 detail: error.to_string(),
@@ -1191,10 +1202,18 @@ pub fn project_worktrees(config: &AppConfig, key: &str) -> Result<Vec<BranchWork
         .with_context(|| format!("project {} has no repo_path configured", project.key))?;
     let default_identity = path_identity(default_repo_path);
     let mut seen = BTreeSet::new();
-    let mut paths = Vec::<(PathBuf, bool, bool, Option<String>, bool)>::new();
+    let mut paths = Vec::<(PathBuf, bool, bool, bool, bool, Option<String>, bool)>::new();
 
     seen.insert(default_identity.clone());
-    paths.push((default_repo_path.clone(), true, false, None, false));
+    paths.push((
+        default_repo_path.clone(),
+        true,
+        false,
+        false,
+        false,
+        None,
+        false,
+    ));
 
     if let Ok(worktrees) = git::list_worktrees(default_repo_path) {
         for worktree in worktrees {
@@ -1207,13 +1226,15 @@ pub fn project_worktrees(config: &AppConfig, key: &str) -> Result<Vec<BranchWork
                     worktree.path,
                     identity == default_identity,
                     true,
+                    false,
+                    false,
                     worktree.branch,
                     worktree.detached,
                 ));
             } else if identity == default_identity {
                 paths[0].2 = true;
-                paths[0].3 = worktree.branch;
-                paths[0].4 = worktree.detached;
+                paths[0].5 = worktree.branch;
+                paths[0].6 = worktree.detached;
             }
         }
     }
@@ -1221,12 +1242,22 @@ pub fn project_worktrees(config: &AppConfig, key: &str) -> Result<Vec<BranchWork
     Ok(paths
         .into_iter()
         .map(
-            |(path, is_default, is_git_worktree, branch_hint, detached_hint)| {
+            |(
+                path,
+                is_default,
+                is_git_worktree,
+                is_workspace_instance,
+                managed,
+                branch_hint,
+                detached_hint,
+            )| {
                 branch_status_for_project_path(
                     project,
                     &path,
                     is_default,
                     is_git_worktree,
+                    is_workspace_instance,
+                    managed,
                     branch_hint.as_deref(),
                     detached_hint,
                 )

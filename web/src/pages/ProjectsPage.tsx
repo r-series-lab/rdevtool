@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactElement,
+  type UIEvent,
+} from "react";
 import {
   Box,
   Button,
@@ -13,9 +20,10 @@ import {
   ListItemText,
   Menu,
   MenuItem,
-  Pagination,
   Stack,
   Switch,
+  Tab,
+  Tabs,
   TextField,
   Tooltip,
   Typography,
@@ -33,6 +41,10 @@ import type {
   ProjectRuntimeEntry,
   ProjectRuntimeLogKind,
   ProjectRuntimeLogResponse,
+  ProjectRuntimeLogSessionSummary,
+  ProjectRuntimePreflightCheck,
+  ProjectRuntimePreflightResponse,
+  ProjectRuntimeReadySummary,
   ProxyDashboard,
   ProxyProfile,
   RuntimeProfileDraft,
@@ -54,9 +66,11 @@ import {
   StarIcon,
   StopIcon,
   TerminalIcon,
+  TrashIcon,
   WebsiteIcon,
   WorkflowIcon,
 } from "../components/AppIcons";
+import { AppEmptyState } from "../components/AppEmptyState";
 import { WorkflowLinkSummaryButton } from "../components/WorkflowLinkButton";
 import {
   WorkflowLinksDialog,
@@ -78,10 +92,9 @@ import {
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 
 type FinderType = "项目" | "网站" | "目录" | "工具";
-type FinderQuickFilter = "全部" | "最近";
 type RuntimePanelTab = "overview" | "config" | "logs" | "webActions";
 
-const FINDER_PAGE_SIZE = 10;
+const FINDER_LOAD_BATCH_SIZE = 20;
 
 type RuntimeLogState = {
   projectKey: string;
@@ -89,8 +102,43 @@ type RuntimeLogState = {
   path: string;
   lines: string[];
   truncated: boolean;
+  readySummary: ProjectRuntimeReadySummary;
+  sessionSummary: ProjectRuntimeLogSessionSummary;
   loading: boolean;
   error: string;
+};
+
+type RuntimePreflightState = {
+  projectKey: string;
+  debugProfileKey: string;
+  response: ProjectRuntimePreflightResponse | null;
+  loading: boolean;
+  error: string;
+};
+
+const EMPTY_RUNTIME_READY_SUMMARY: ProjectRuntimeReadySummary = {
+  enabled: false,
+  ready: false,
+  failed: false,
+  statusKey: "disabled",
+  statusLabel: "未启用",
+  detail: null,
+  url: null,
+  localUrl: null,
+  networkUrl: null,
+};
+
+const EMPTY_RUNTIME_SESSION_SUMMARY: ProjectRuntimeLogSessionSummary = {
+  active: false,
+  runId: null,
+  projectKey: null,
+  kind: null,
+  startedAtMs: null,
+  cwd: null,
+  command: null,
+  pid: null,
+  currentLineCount: 0,
+  totalLineCount: 0,
 };
 
 export type ProjectsPageProps = {
@@ -98,10 +146,6 @@ export type ProjectsPageProps = {
   finderType: FinderType;
   finderTypeCounts: Record<FinderType, number>;
   onFinderTypeChange: (value: FinderType) => void;
-  finderQuickFilterOptions: readonly FinderQuickFilter[];
-  finderQuickFilter: FinderQuickFilter;
-  finderQuickFilterCounts: Record<FinderQuickFilter, number>;
-  onFinderQuickFilterChange: (value: FinderQuickFilter) => void;
   finderCategories: string[];
   finderCategory: string;
   finderCategoryCounts: Record<string, number>;
@@ -117,8 +161,6 @@ export type ProjectsPageProps = {
   favoriteShortcutKeys: string[];
   recentShortcutKeys: string[];
   selectedDebugProfileKeys: Record<string, string>;
-  branchProjectKeys: string[];
-  buildProjectKeys: string[];
   workflowReceiveRules: WorkflowReceiveRule[];
   workflowBroadcastRules: WorkflowBroadcastRule[];
   workflowSignalOptions: string[];
@@ -149,8 +191,6 @@ export type ProjectsPageProps = {
   onToggleShortcutFavorite: (item: FinderShortcutItem) => void;
   onProjectDebugProfileChange: (projectKey: string, profileKey: string) => void;
   onMarkShortcutUsed: (item: FinderShortcutItem) => void;
-  onOpenProjectBranch: (projectKey: string) => void;
-  onOpenProjectBuild: (projectKey: string) => void;
   onRefresh: () => void;
   onOpenFinderEntry: (entry: FinderEntry) => Promise<boolean> | boolean;
   onStartRuntime: (
@@ -159,8 +199,6 @@ export type ProjectsPageProps = {
     envOverrides?: Record<string, string>,
   ) => void;
   onStopRuntime: (projectKey: string) => void;
-  onRunBuild: (projectKey: string) => void;
-  onStopBuild: (projectKey: string) => void;
   onOpenBuildOutput: (projectKey: string) => void;
   onFocusRuntime: (projectKey: string, debugProfileKey?: string) => void;
   onOpenProjectDirectory: (projectKey: string) => void;
@@ -168,6 +206,8 @@ export type ProjectsPageProps = {
 
 const SHORTCUT_CONFIRM_MS = 1100;
 const RUNTIME_LOG_MAX_LINES = 120;
+const RUNTIME_LOG_AUTO_REFRESH_ACTIVE_MS = 2000;
+const RUNTIME_LOG_AUTO_REFRESH_READY_MS = 6000;
 const DEFAULT_RUNTIME_PROFILE_VALUE = "__default__";
 const RUNTIME_PROXY_MANUAL_VALUE = "__manual__";
 const PROJECT_WORKFLOW_ACTIONS: ProjectWorkflowAction[] = [
@@ -294,6 +334,102 @@ function findDebugProfile(
   return profiles.find((profile) => profile.key === profileKey) ?? null;
 }
 
+function projectRuntimeWebActionEntry(
+  item: ProjectRuntimeEntry,
+  url: string,
+  runtimeProfile?: string | null,
+): FinderEntry {
+  return {
+    name: item.name,
+    kind: "url",
+    targetLabel: item.category || "项目",
+    url,
+    browser: null,
+    browserProfile: null,
+    runtimeProfile: runtimeProfile?.trim() || null,
+    bundleId: null,
+    appName: null,
+    script: null,
+    path: null,
+    cwd: item.cwd || item.repoPath || null,
+    note: "项目调试页面",
+  };
+}
+
+function insertWebActionContextParam(
+  params: Record<string, string>,
+  key: string,
+  value?: string | number | null,
+) {
+  const normalized = String(value ?? "").trim();
+  if (normalized) {
+    params[key] = normalized;
+  }
+}
+
+function buildProjectWebActionContextParams(
+  item: ProjectRuntimeEntry,
+  url: string,
+  debugProfile: ProjectDebugProfileSummary | null,
+  runtimeProfile: RuntimeProfileDraft | null,
+) {
+  const params: Record<string, string> = {};
+  insertWebActionContextParam(params, "project.key", item.key);
+  insertWebActionContextParam(params, "project.name", item.name);
+  insertWebActionContextParam(params, "project.category", item.category);
+  insertWebActionContextParam(params, "project.repoPath", item.repoPath);
+  insertWebActionContextParam(params, "project.repo_path", item.repoPath);
+  insertWebActionContextParam(params, "project.cwd", item.cwd);
+  insertWebActionContextParam(params, "project.command", item.command);
+  insertWebActionContextParam(params, "project.focusUrl", item.focusUrl);
+  insertWebActionContextParam(params, "project.focus_url", item.focusUrl);
+  insertWebActionContextParam(params, "project.readyUrl", url);
+  insertWebActionContextParam(params, "project.ready_url", url);
+  insertWebActionContextParam(params, "context.url", url);
+
+  if (debugProfile) {
+    insertWebActionContextParam(params, "debugProfile.key", debugProfile.key);
+    insertWebActionContextParam(params, "debug_profile.key", debugProfile.key);
+    insertWebActionContextParam(params, "debugProfile.label", debugProfile.label);
+    insertWebActionContextParam(params, "debug_profile.label", debugProfile.label);
+    insertWebActionContextParam(
+      params,
+      "debugProfile.runtimeProfile",
+      debugProfile.runtimeProfile,
+    );
+    insertWebActionContextParam(
+      params,
+      "debug_profile.runtime_profile",
+      debugProfile.runtimeProfile,
+    );
+    Object.entries(debugProfile.env ?? {}).forEach(([key, value]) => {
+      insertWebActionContextParam(params, `debugProfile.env.${key}`, value);
+      insertWebActionContextParam(params, `debug_profile.env.${key}`, value);
+    });
+  }
+
+  if (runtimeProfile) {
+    insertWebActionContextParam(params, "runtimeProfile.key", runtimeProfile.key);
+    insertWebActionContextParam(params, "runtime_profile.key", runtimeProfile.key);
+    insertWebActionContextParam(params, "runtimeProfile.label", runtimeProfile.label);
+    insertWebActionContextParam(params, "runtime_profile.label", runtimeProfile.label);
+    insertWebActionContextParam(
+      params,
+      "runtimeProfile.webActionsPort",
+      runtimeProfile.webActionsPort,
+    );
+    insertWebActionContextParam(
+      params,
+      "runtime_profile.web_actions_port",
+      runtimeProfile.webActionsPort,
+    );
+    insertWebActionContextParam(params, "runtimeProfile.proxyUrl", runtimeProfile.proxyUrl);
+    insertWebActionContextParam(params, "runtime_profile.proxy_url", runtimeProfile.proxyUrl);
+  }
+
+  return params;
+}
+
 function groupWorkflowRules(
   rules: Array<WorkflowReceiveRule | WorkflowBroadcastRule>,
   ruleKind: "receive" | "broadcast",
@@ -411,6 +547,32 @@ function buildStatusPalette(statusKey: string, mono: boolean) {
   }
 }
 
+function buildPreflightPalette(statusKey: string, mono: boolean) {
+  switch (statusKey) {
+    case "ok":
+      return buildStatusPalette("succeeded", mono);
+    case "warning":
+      return buildStatusPalette("notConfigured", mono);
+    case "error":
+      return buildStatusPalette("failed", mono);
+    default:
+      return buildStatusPalette("idle", mono);
+  }
+}
+
+function preflightPriority(check: ProjectRuntimePreflightCheck) {
+  switch (check.statusKey) {
+    case "error":
+      return 0;
+    case "warning":
+      return 1;
+    case "ok":
+      return 2;
+    default:
+      return 3;
+  }
+}
+
 function buildProjectsTone(mono: boolean) {
   const shared = {
     outerBorder: "var(--line)",
@@ -470,6 +632,12 @@ function buildProjectsTone(mono: boolean) {
       categoryChipBorder: "var(--line-soft)",
       categoryChipHoverBg: "rgba(255,255,255,0.032)",
       categoryChipActiveColor: "#eaf4ff",
+      successPillBg: "rgba(115, 185, 143, 0.12)",
+      successPillColor: "rgba(204, 238, 216, 0.88)",
+      successPillBorder: "rgba(115, 185, 143, 0.22)",
+      dangerPillBg: "rgba(216, 116, 130, 0.12)",
+      dangerPillColor: "rgba(244, 202, 208, 0.9)",
+      dangerPillBorder: "rgba(216, 116, 130, 0.22)",
       emptyBorder: "var(--line-soft)",
       emptyBg: "rgba(255,255,255,0.018)",
       emptyShadow: "inset 0 1px 0 rgba(255,255,255,0.014)",
@@ -525,57 +693,69 @@ function buildProjectsTone(mono: boolean) {
     toolButtonHoverColor: "rgba(35,40,53,0.82)",
     toolButtonHoverBg: "rgba(246,249,252,0.62)",
     toolButtonHoverBorder: "rgba(52,76,96,0.14)",
-    stageBorder: "rgba(52,76,96,0.08)",
-    stageBg: "rgba(246,249,252,0.3)",
-    stageShadow: "inset 0 1px 0 rgba(255,255,255,0.44)",
-    searchWrapBorder: "rgba(52,76,96,0.09)",
-    searchWrapBg: "rgba(246,249,252,0.28)",
+    stageBorder: "rgba(84,111,140,0.18)",
+    stageBg: "rgba(238,245,252,0.78)",
+    stageShadow:
+      "inset 0 1px 0 rgba(255,255,255,0.72), 0 18px 44px rgba(31,55,90,0.075)",
+    stageOverlay:
+      "linear-gradient(180deg, rgba(255,255,255,0.52), rgba(255,255,255,0.08) 36%, rgba(219,232,246,0.08) 100%)",
+    searchWrapBorder: "rgba(84,111,140,0.18)",
+    searchWrapBg: "rgba(250,253,255,0.78)",
     searchWrapShadow:
-      "inset 0 1px 0 rgba(255,255,255,0.44), 0 8px 22px rgba(24,48,62,0.035)",
-    searchInputBg: "rgba(255,255,255,0.68)",
+      "inset 0 1px 0 rgba(255,255,255,0.82), 0 10px 26px rgba(31,55,90,0.055)",
+    searchInputBg: "rgba(255,255,255,0.94)",
     searchInputColor: "var(--text)",
-    searchInputBorder: "rgba(52,76,96,0.08)",
-    searchInputHoverBorder: "rgba(52,76,96,0.13)",
-    searchPlaceholder: "rgba(92,100,112,0.5)",
-    clearButtonColor: "rgba(92,100,112,0.68)",
-    clearButtonBorder: "rgba(52,76,96,0.08)",
-    clearButtonBg: "rgba(246,249,252,0.48)",
-    clearButtonHoverBg: "rgba(246,249,252,0.68)",
-    clearButtonHoverBorder: "rgba(52,76,96,0.14)",
-    categoryChipBg: "rgba(246,249,252,0.34)",
-    categoryChipColor: "rgba(70,80,96,0.7)",
-    categoryChipBorder: "rgba(52,76,96,0.08)",
-    categoryChipHoverBg: "rgba(246,249,252,0.52)",
-    categoryChipActiveColor: "var(--accent)",
-    emptyBorder: "rgba(52,76,96,0.09)",
-    emptyBg: "rgba(246,249,252,0.3)",
-    emptyShadow: "inset 0 1px 0 rgba(255,255,255,0.44)",
+    searchInputBorder: "rgba(84,111,140,0.16)",
+    searchInputHoverBorder: "rgba(66,96,130,0.24)",
+    searchPlaceholder: "rgba(92,104,118,0.52)",
+    clearButtonColor: "rgba(75,87,104,0.64)",
+    clearButtonBorder: "rgba(84,111,140,0.16)",
+    clearButtonBg: "rgba(246,250,254,0.86)",
+    clearButtonHoverBg: "rgba(255,255,255,0.96)",
+    clearButtonHoverBorder: "rgba(66,96,130,0.25)",
+    categoryChipBg: "rgba(255,255,255,0.68)",
+    categoryChipColor: "rgba(70,84,102,0.72)",
+    categoryChipBorder: "rgba(84,111,140,0.15)",
+    categoryChipHoverBg: "rgba(255,255,255,0.92)",
+    categoryChipActiveBg: "rgba(228,238,249,0.94)",
+    categoryChipActiveColor: "rgba(66,88,112,0.95)",
+    categoryChipActiveBorder: "rgba(110,139,172,0.32)",
+    successPillBg: "rgba(222, 246, 230, 0.84)",
+    successPillColor: "rgba(42, 104, 68, 0.86)",
+    successPillBorder: "rgba(88, 158, 112, 0.22)",
+    dangerPillBg: "rgba(252, 232, 235, 0.86)",
+    dangerPillColor: "rgba(150, 58, 72, 0.86)",
+    dangerPillBorder: "rgba(194, 88, 104, 0.22)",
+    emptyBorder: "rgba(84,111,140,0.15)",
+    emptyBg: "rgba(250,253,255,0.72)",
+    emptyShadow: "inset 0 1px 0 rgba(255,255,255,0.7), 0 10px 26px rgba(31,55,90,0.045)",
     emptyText: "var(--muted)",
-    rowBorderStrong: "rgba(52,76,96,0.14)",
-    rowBorder: "rgba(52,76,96,0.09)",
+    rowBorderStrong: "rgba(84,111,140,0.22)",
+    rowBorder: "rgba(84,111,140,0.15)",
     rowBgEven:
-      "linear-gradient(180deg, rgba(255,255,255,0.3), rgba(255,255,255,0.04) 72%), rgba(246,249,252,0.3)",
+      "linear-gradient(180deg, rgba(255,255,255,0.82), rgba(248,252,255,0.84) 72%), rgba(245,250,255,0.88)",
     rowBgOdd:
-      "linear-gradient(180deg, rgba(255,255,255,0.24), rgba(255,255,255,0.035) 72%), rgba(246,249,252,0.25)",
+      "linear-gradient(180deg, rgba(255,255,255,0.76), rgba(246,251,255,0.8) 72%), rgba(243,249,255,0.82)",
     rowShadow:
-      "inset 0 1px 0 rgba(255,255,255,0.48), 0 10px 24px rgba(24,48,62,0.035)",
-    rowHoverBorder: "rgba(92,112,133,0.2)",
+      "inset 0 1px 0 rgba(255,255,255,0.86), 0 12px 28px rgba(31,55,90,0.06)",
+    rowHoverBorder: "rgba(76,111,151,0.28)",
     rowHoverBg:
-      "linear-gradient(180deg, rgba(255,255,255,0.38), rgba(255,255,255,0.05) 72%), rgba(246,249,252,0.42)",
+      "linear-gradient(180deg, rgba(255,255,255,0.94), rgba(248,252,255,0.9) 72%), rgba(247,251,255,0.96)",
     rowHoverShadow:
-      "inset 0 1px 0 rgba(255,255,255,0.58), 0 12px 28px rgba(24,48,62,0.045)",
+      "inset 0 1px 0 rgba(255,255,255,0.96), 0 16px 34px rgba(31,55,90,0.09)",
     rowTitle: "var(--text)",
     rowKey: "rgba(90,98,112,0.6)",
     rowMeta: "rgba(83,92,106,0.72)",
     rowHint: "rgba(92,100,112,0.7)",
-    actionGroupBorder: "rgba(52,76,96,0.09)",
-    actionGroupBg: "rgba(246,249,252,0.38)",
-    actionGroupShadow: "inset 0 1px 0 rgba(255,255,255,0.46)",
+    actionGroupBorder: "rgba(84,111,140,0.16)",
+    actionGroupBg: "rgba(248,252,255,0.78)",
+    actionGroupShadow:
+      "inset 0 1px 0 rgba(255,255,255,0.78), 0 4px 12px rgba(31,55,90,0.045)",
     startButtonDisabledColor: "rgba(120,126,136,0.32)",
-    stopButtonBg: "rgba(246,249,252,0.44)",
+    stopButtonBg: "rgba(248,252,255,0.86)",
     stopButtonColor: "rgba(52,60,74,0.76)",
-    stopButtonBorder: "rgba(52,76,96,0.09)",
-    stopButtonHoverBg: "rgba(246,249,252,0.66)",
+    stopButtonBorder: "rgba(84,111,140,0.16)",
+    stopButtonHoverBg: "rgba(255,255,255,0.98)",
     stopButtonDisabledColor: "rgba(120,126,136,0.24)",
     buildButtonBg: "rgba(246,249,252,0.46)",
     buildButtonColor: "rgba(52,60,74,0.8)",
@@ -625,6 +805,19 @@ function FinderEntryIcon({ kind }: { kind: string }) {
       return <FolderIcon fontSize="inherit" />;
     default:
       return <WebsiteIcon fontSize="inherit" />;
+  }
+}
+
+function finderTypeIcon(type: FinderType): ReactElement {
+  switch (type) {
+    case "网站":
+      return <WebsiteIcon fontSize="small" />;
+    case "目录":
+      return <FolderIcon fontSize="small" />;
+    case "工具":
+      return <TerminalIcon fontSize="small" />;
+    default:
+      return <PackageIcon fontSize="small" />;
   }
 }
 
@@ -836,10 +1029,6 @@ export function ProjectsPage({
   finderType,
   finderTypeCounts,
   onFinderTypeChange,
-  finderQuickFilterOptions,
-  finderQuickFilter,
-  finderQuickFilterCounts,
-  onFinderQuickFilterChange,
   finderCategories,
   finderCategory,
   finderCategoryCounts,
@@ -855,8 +1044,6 @@ export function ProjectsPage({
   favoriteShortcutKeys,
   recentShortcutKeys,
   selectedDebugProfileKeys,
-  branchProjectKeys,
-  buildProjectKeys,
   workflowReceiveRules,
   workflowBroadcastRules,
   workflowSignalOptions,
@@ -874,14 +1061,10 @@ export function ProjectsPage({
   onToggleShortcutFavorite,
   onProjectDebugProfileChange,
   onMarkShortcutUsed,
-  onOpenProjectBranch,
-  onOpenProjectBuild,
   onRefresh,
   onOpenFinderEntry,
   onStartRuntime,
   onStopRuntime,
-  onRunBuild,
-  onStopBuild,
   onOpenBuildOutput,
   onFocusRuntime,
   onOpenProjectDirectory,
@@ -945,10 +1128,25 @@ export function ProjectsPage({
     path: "",
     lines: [],
     truncated: false,
+    readySummary: EMPTY_RUNTIME_READY_SUMMARY,
+    sessionSummary: EMPTY_RUNTIME_SESSION_SUMMARY,
     loading: false,
     error: "",
   });
+  const [runtimePreflight, setRuntimePreflight] =
+    useState<RuntimePreflightState>({
+      projectKey: "",
+      debugProfileKey: "",
+      response: null,
+      loading: false,
+      error: "",
+    });
+  const [runtimePreflightRefreshKey, setRuntimePreflightRefreshKey] = useState(0);
   const [runtimeLogRefreshKey, setRuntimeLogRefreshKey] = useState(0);
+  const [runtimeLogClearing, setRuntimeLogClearing] = useState(false);
+  const [pageVisible, setPageVisible] = useState(
+    () => document.visibilityState === "visible",
+  );
   const [runtimeProfileDrafts, setRuntimeProfileDrafts] = useState<RuntimeProfileDraft[]>([]);
   const [runtimeProxyProfiles, setRuntimeProxyProfiles] = useState<ProxyProfile[]>([]);
   const [runtimeProfileIndex, setRuntimeProfileIndex] = useState(0);
@@ -960,8 +1158,11 @@ export function ProjectsPage({
     useState<RuntimeProfileDialogState | null>(null);
   const runtimeProfilesLoadingRef = useRef(false);
   const [nowMs, setNowMs] = useState(() => Date.now());
-  const [finderPage, setFinderPage] = useState(1);
+  const [finderVisibleCount, setFinderVisibleCount] = useState(
+    FINDER_LOAD_BATCH_SIZE,
+  );
   const finderListRef = useRef<HTMLDivElement | null>(null);
+  const runtimeLogBoxRef = useRef<HTMLDivElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const confirmTimerRef = useRef<number | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
@@ -977,28 +1178,25 @@ export function ProjectsPage({
   const filteredFinderEntryCount = finderIsProjects
     ? filteredRuntimeEntries.length
     : filteredShortcutEntries.length;
-  const finderPageCount = Math.max(
-    1,
-    Math.ceil(filteredFinderEntryCount / FINDER_PAGE_SIZE),
+  const visibleFinderEntryCount = Math.min(
+    finderVisibleCount,
+    filteredFinderEntryCount,
   );
-  const activeFinderPage = Math.min(finderPage, finderPageCount);
-  const finderPageStart = (activeFinderPage - 1) * FINDER_PAGE_SIZE;
-  const pagedRuntimeEntries = filteredRuntimeEntries.slice(
-    finderPageStart,
-    finderPageStart + FINDER_PAGE_SIZE,
+  const visibleRuntimeEntries = filteredRuntimeEntries.slice(
+    0,
+    visibleFinderEntryCount,
   );
-  const pagedShortcutEntries = filteredShortcutEntries.slice(
-    finderPageStart,
-    finderPageStart + FINDER_PAGE_SIZE,
+  const visibleShortcutEntries = filteredShortcutEntries.slice(
+    0,
+    visibleFinderEntryCount,
   );
+  const hasMoreFinderEntries = finderVisibleCount < filteredFinderEntryCount;
   const showFinderCategories =
     !finderIsProjects && finderCategories.length > 1;
   const favoriteProjectKeySet = new Set(favoriteProjectKeys);
   const recentProjectKeySet = new Set(recentProjectKeys);
   const favoriteShortcutKeySet = new Set(favoriteShortcutKeys);
   const recentShortcutKeySet = new Set(recentShortcutKeys);
-  const branchProjectKeySet = new Set(branchProjectKeys);
-  const buildProjectKeySet = new Set(buildProjectKeys);
   const projectMenuEntry =
     runtimeEntries.find((item) => item.key === projectMenuKey) ?? null;
   const shortcutMenuItem =
@@ -1028,6 +1226,11 @@ export function ProjectsPage({
   const runtimeOptionsProfiles = runtimeOptionsEntry?.debugProfiles ?? [];
   const runtimeOptionsSelectedProfile =
     findDebugProfile(runtimeOptionsProfiles, runtimeOptionsProfileKey) ?? null;
+  const runtimeOptionsSavedProfileKey = runtimeOptionsEntry
+    ? projectSelectedProfileKey(runtimeOptionsEntry, selectedDebugProfileKeys)
+    : "";
+  const runtimeOptionsDefaultSaved =
+    runtimeOptionsProfileKey === runtimeOptionsSavedProfileKey;
   const runtimePanelProfile = runtimeProfileDrafts[runtimeProfileIndex] ?? null;
   const runtimeProxyProfileById = useMemo(
     () => new Map(runtimeProxyProfiles.map((profile) => [profile.id, profile])),
@@ -1043,16 +1246,50 @@ export function ProjectsPage({
   const detailsProjectPath =
     detailsProjectEntry?.cwd || detailsProjectEntry?.repoPath || "";
   const detailsWebActionsContext = useMemo<WebActionsDialogContext | null>(() => {
-    const url = detailsProjectEntry?.focusUrl?.trim();
+    const logReadyUrl =
+      runtimeLog.projectKey === detailsProjectEntry?.key && runtimeLog.kind === "dev"
+        ? runtimeLog.readySummary.url?.trim() ||
+          runtimeLog.readySummary.localUrl?.trim() ||
+          ""
+        : "";
+    const url =
+      detailsProjectEntry?.readyUrl?.trim() ||
+      logReadyUrl ||
+      detailsProjectEntry?.focusUrl?.trim();
     if (!detailsProjectEntry || !url) {
       return null;
     }
+    const runtimeProfile = runtimeOptionsSelectedProfile?.runtimeProfile ?? null;
+    const runtimeProfileDraft =
+      runtimeProfileDrafts.find((profile) => profile.key === runtimeProfile) ?? null;
     return {
       title: detailsProjectEntry.name,
       scope: `project:${detailsProjectEntry.key}`,
       url,
+      entry: projectRuntimeWebActionEntry(detailsProjectEntry, url, runtimeProfile),
+      contextParams: buildProjectWebActionContextParams(
+        detailsProjectEntry,
+        url,
+        runtimeOptionsSelectedProfile,
+        runtimeProfileDraft,
+      ),
     };
-  }, [detailsProjectEntry?.focusUrl, detailsProjectEntry?.key, detailsProjectEntry?.name]);
+  }, [
+    detailsProjectEntry?.category,
+    detailsProjectEntry?.cwd,
+    detailsProjectEntry?.focusUrl,
+    detailsProjectEntry?.key,
+    detailsProjectEntry?.name,
+    detailsProjectEntry?.readyUrl,
+    detailsProjectEntry?.repoPath,
+    runtimeLog.kind,
+    runtimeLog.projectKey,
+    runtimeLog.readySummary.localUrl,
+    runtimeLog.readySummary.url,
+    runtimeProfileDrafts,
+    runtimeOptionsSelectedProfile?.runtimeProfile,
+    runtimeOptionsSelectedProfile?.key,
+  ]);
   const shortcutRuntimeProfileKey =
     shortcutRuntimePanelCurrentItem?.entry.runtimeProfile?.trim() ?? "";
   const shortcutRuntimeProfile =
@@ -1073,8 +1310,6 @@ export function ProjectsPage({
       entry: shortcutRuntimePanelCurrentItem.entry,
     };
   }, [shortcutRuntimePanelCurrentItem]);
-  const showQuickFilters =
-    (finderIsProjects ? runtimeEntries.length : shortcutEntries.length) > 0;
   const workflowReceiveGroups = useMemo(
     () => groupWorkflowRules(workflowReceiveRules, "receive"),
     [workflowReceiveRules],
@@ -1089,18 +1324,42 @@ export function ProjectsPage({
   );
 
   useEffect(() => {
-    setFinderPage(1);
-  }, [finderCategory, finderQuery, finderQuickFilter, finderType]);
-
-  useEffect(() => {
-    setFinderPage((current) => Math.min(current, finderPageCount));
-  }, [finderPageCount]);
-
-  useEffect(() => {
+    setFinderVisibleCount(FINDER_LOAD_BATCH_SIZE);
     if (finderListRef.current) {
       finderListRef.current.scrollTop = 0;
     }
-  }, [activeFinderPage, finderCategory, finderQuery, finderQuickFilter, finderType]);
+  }, [finderCategory, finderQuery, finderType]);
+
+  useEffect(() => {
+    setFinderVisibleCount((current) => {
+      if (current <= FINDER_LOAD_BATCH_SIZE) {
+        return FINDER_LOAD_BATCH_SIZE;
+      }
+      return Math.min(
+        current,
+        Math.max(FINDER_LOAD_BATCH_SIZE, filteredFinderEntryCount),
+      );
+    });
+  }, [filteredFinderEntryCount]);
+
+  function loadMoreFinderEntries() {
+    setFinderVisibleCount((current) =>
+      Math.min(
+        current + FINDER_LOAD_BATCH_SIZE,
+        filteredFinderEntryCount,
+      ),
+    );
+  }
+
+  function handleFinderListScroll(event: UIEvent<HTMLDivElement>) {
+    if (!hasMoreFinderEntries) {
+      return;
+    }
+    const { scrollTop, scrollHeight, clientHeight } = event.currentTarget;
+    if (scrollHeight - scrollTop - clientHeight <= 84) {
+      loadMoreFinderEntries();
+    }
+  }
 
   useEffect(() => {
     return () => {
@@ -1126,6 +1385,17 @@ export function ProjectsPage({
   }, [detailsProjectKey]);
 
   useEffect(() => {
+    const handleVisibilityChange = () => {
+      setPageVisible(document.visibilityState === "visible");
+    };
+    handleVisibilityChange();
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, []);
+
+  useEffect(() => {
     if (detailsProjectKey && !detailsProjectEntry) {
       setDetailsProjectKey("");
       setDetailsPanelTab("overview");
@@ -1146,6 +1416,61 @@ export function ProjectsPage({
     setRuntimeOptionsProfileKey(profileKey);
     setRuntimeOptionsEnvText(formatRuntimeEnvText(profile?.env));
   }, [detailsProjectEntry?.key]);
+
+  useEffect(() => {
+    if (!detailsProjectEntry) {
+      setRuntimePreflight({
+        projectKey: "",
+        debugProfileKey: "",
+        response: null,
+        loading: false,
+        error: "",
+      });
+      return;
+    }
+
+    let cancelled = false;
+    const profileKey = runtimeOptionsProfileKey || "";
+    setRuntimePreflight((current) => ({
+      ...current,
+      projectKey: detailsProjectEntry.key,
+      debugProfileKey: profileKey,
+      loading: true,
+      error: "",
+    }));
+    void invoke<ProjectRuntimePreflightResponse>("preflight_project_runtime", {
+      project: detailsProjectEntry.key,
+      debugProfile: profileKey || null,
+    })
+      .then((response) => {
+        if (cancelled) {
+          return;
+        }
+        setRuntimePreflight({
+          projectKey: detailsProjectEntry.key,
+          debugProfileKey: profileKey,
+          response,
+          loading: false,
+          error: "",
+        });
+      })
+      .catch((reason) => {
+        if (cancelled) {
+          return;
+        }
+        setRuntimePreflight({
+          projectKey: detailsProjectEntry.key,
+          debugProfileKey: profileKey,
+          response: null,
+          loading: false,
+          error: String(reason),
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [detailsProjectEntry?.key, runtimeOptionsProfileKey, runtimePreflightRefreshKey]);
 
   useEffect(() => {
     if (detailsPanelTab === "webActions" && !detailsWebActionsContext) {
@@ -1217,6 +1542,8 @@ export function ProjectsPage({
         projectKey: "",
         lines: [],
         path: "",
+        readySummary: EMPTY_RUNTIME_READY_SUMMARY,
+        sessionSummary: EMPTY_RUNTIME_SESSION_SUMMARY,
         error: "",
         loading: false,
       }));
@@ -1246,6 +1573,8 @@ export function ProjectsPage({
           path: response.path,
           lines: response.lines,
           truncated: response.truncated,
+          readySummary: response.readySummary ?? EMPTY_RUNTIME_READY_SUMMARY,
+          sessionSummary: response.sessionSummary ?? EMPTY_RUNTIME_SESSION_SUMMARY,
           loading: false,
           error: "",
         });
@@ -1263,6 +1592,8 @@ export function ProjectsPage({
               : detailsProjectEntry.logPath ?? "",
           lines: [],
           truncated: false,
+          readySummary: EMPTY_RUNTIME_READY_SUMMARY,
+          sessionSummary: EMPTY_RUNTIME_SESSION_SUMMARY,
           loading: false,
           error: String(reason),
         });
@@ -1277,6 +1608,71 @@ export function ProjectsPage({
     detailsProjectEntry?.logPath,
     runtimeLogKind,
     runtimeLogRefreshKey,
+  ]);
+
+  const runtimeLogAutoRefreshMs = useMemo(() => {
+    if (
+      !detailsProjectEntry ||
+      detailsPanelTab !== "logs" ||
+      !pageVisible ||
+      runtimeLog.loading ||
+      runtimeLogClearing
+    ) {
+      return null;
+    }
+    if (runtimeLogKind === "build") {
+      return detailsProjectEntry.buildStatusKey === "running"
+        ? RUNTIME_LOG_AUTO_REFRESH_ACTIVE_MS
+        : null;
+    }
+    if (detailsProjectEntry.statusKey !== "running") {
+      return null;
+    }
+    return runtimeLog.readySummary.ready
+      ? RUNTIME_LOG_AUTO_REFRESH_READY_MS
+      : RUNTIME_LOG_AUTO_REFRESH_ACTIVE_MS;
+  }, [
+    detailsPanelTab,
+    detailsProjectEntry?.buildStatusKey,
+    detailsProjectEntry?.key,
+    detailsProjectEntry?.statusKey,
+    pageVisible,
+    runtimeLog.loading,
+    runtimeLog.readySummary.ready,
+    runtimeLogClearing,
+    runtimeLogKind,
+  ]);
+
+  useEffect(() => {
+    if (runtimeLogAutoRefreshMs == null) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== "visible") {
+        return;
+      }
+      setRuntimeLogRefreshKey((current) => current + 1);
+    }, runtimeLogAutoRefreshMs);
+    return () => window.clearInterval(timer);
+  }, [runtimeLogAutoRefreshMs]);
+
+  useEffect(() => {
+    if (detailsPanelTab !== "logs") {
+      return;
+    }
+    const logBox = runtimeLogBoxRef.current;
+    if (!logBox) {
+      return;
+    }
+    window.requestAnimationFrame(() => {
+      logBox.scrollTop = logBox.scrollHeight;
+    });
+  }, [
+    detailsPanelTab,
+    runtimeLog.kind,
+    runtimeLog.lines,
+    runtimeLog.loading,
+    runtimeLogClearing,
   ]);
 
   useEffect(() => {
@@ -1300,10 +1696,7 @@ export function ProjectsPage({
 
       if (
         event.key === "Escape" &&
-        (detailsProjectKey ||
-          finderQuery ||
-          finderQuickFilter !== "全部" ||
-          finderCategory !== "全部")
+        (detailsProjectKey || finderQuery || finderCategory !== "全部")
       ) {
         event.preventDefault();
         if (detailsProjectKey) {
@@ -1314,34 +1707,10 @@ export function ProjectsPage({
           onFinderQueryChange("");
           return;
         }
-        if (finderQuickFilter !== "全部") {
-          onFinderQuickFilterChange("全部");
-          return;
-        }
         if (finderCategory !== "全部") {
           onFinderCategoryChange("全部");
         }
         return;
-      }
-
-      if (
-        event.altKey &&
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.shiftKey &&
-        !isTextEditingTarget(event.target)
-      ) {
-        const filterIndex = Number(event.key) - 1;
-        const filter = finderQuickFilterOptions[filterIndex];
-        if (!filter) {
-          return;
-        }
-        const count = finderQuickFilterCounts[filter] ?? 0;
-        if (filter !== "全部" && count === 0) {
-          return;
-        }
-        event.preventDefault();
-        onFinderQuickFilterChange(filter);
       }
     }
 
@@ -1351,11 +1720,7 @@ export function ProjectsPage({
     detailsProjectKey,
     finderCategory,
     finderQuery,
-    finderQuickFilter,
-    finderQuickFilterCounts,
-    finderQuickFilterOptions,
     onFinderCategoryChange,
-    onFinderQuickFilterChange,
     onFinderQueryChange,
   ]);
 
@@ -1604,6 +1969,25 @@ export function ProjectsPage({
     setRuntimeOptionsEnvText(formatRuntimeEnvText(profile?.env));
   }
 
+  function showProjectActionFeedback(label: string) {
+    setCopiedProjectAction(label);
+    if (copiedTimerRef.current != null) {
+      window.clearTimeout(copiedTimerRef.current);
+    }
+    copiedTimerRef.current = window.setTimeout(() => {
+      setCopiedProjectAction("");
+      copiedTimerRef.current = null;
+    }, SHORTCUT_CONFIRM_MS);
+  }
+
+  function handleRuntimeOptionsSaveDefault() {
+    if (!runtimeOptionsEntry) {
+      return;
+    }
+    onProjectDebugProfileChange(runtimeOptionsEntry.key, runtimeOptionsProfileKey);
+    showProjectActionFeedback("runtime-default");
+  }
+
   function handleRuntimeOptionsStart() {
     if (!runtimeOptionsEntry || runtimeOptionsParseResult.error) {
       return;
@@ -1622,14 +2006,43 @@ export function ProjectsPage({
       return;
     }
     await copyPlainText(value);
-    setCopiedProjectAction(label);
-    if (copiedTimerRef.current != null) {
-      window.clearTimeout(copiedTimerRef.current);
+    showProjectActionFeedback(label);
+  }
+
+  async function handleClearRuntimeLog() {
+    if (!detailsProjectEntry || runtimeLogClearing) {
+      return;
     }
-    copiedTimerRef.current = window.setTimeout(() => {
-      setCopiedProjectAction("");
-      copiedTimerRef.current = null;
-    }, SHORTCUT_CONFIRM_MS);
+    setRuntimeLogClearing(true);
+    try {
+      const response = await invoke<ProjectRuntimeLogResponse>(
+        "clear_project_runtime_log",
+        {
+          project: detailsProjectEntry.key,
+          kind: runtimeLogKind,
+        },
+      );
+      setRuntimeLog({
+        projectKey: detailsProjectEntry.key,
+        kind: runtimeLogKind,
+        path: response.path,
+        lines: response.lines,
+        truncated: response.truncated,
+        readySummary: response.readySummary ?? EMPTY_RUNTIME_READY_SUMMARY,
+        sessionSummary: response.sessionSummary ?? EMPTY_RUNTIME_SESSION_SUMMARY,
+        loading: false,
+        error: "",
+      });
+      setRuntimeLogRefreshKey((current) => current + 1);
+    } catch (reason) {
+      setRuntimeLog((current) => ({
+        ...current,
+        loading: false,
+        error: String(reason),
+      }));
+    } finally {
+      setRuntimeLogClearing(false);
+    }
   }
 
   async function handleOpenShortcut(item: FinderShortcutItem, shortcutKey: string) {
@@ -1707,24 +2120,35 @@ export function ProjectsPage({
       }}
     >
       <Box
+        className="finder-workbench-surface"
         sx={{
           position: "relative",
           flex: "1 1 auto",
           display: "flex",
           flexDirection: "column",
           minHeight: 0,
-          borderRadius: 0,
+          borderRadius: { xs: "16px", md: "18px" },
           overflow: "hidden",
-          border: 0,
-          bgcolor: "transparent",
+          border: `1px solid ${tone.stageBorder}`,
+          bgcolor: tone.stageBg,
           color: tone.outerColor,
-          boxShadow: "none",
+          boxShadow: tone.stageShadow,
+          p: { xs: 0.55, md: 0.65 },
+          backdropFilter: "blur(22px) saturate(1.12)",
+          WebkitBackdropFilter: "blur(22px) saturate(1.12)",
           "&::before": {
-            display: "none",
+            content: '""',
+            position: "absolute",
+            inset: 0,
+            pointerEvents: "none",
+            borderRadius: "inherit",
+            background: tone.stageOverlay,
+            opacity: 1,
           },
         }}
       >
         <Box
+          className="finder-workbench-inner"
           sx={{
             position: "relative",
             flex: "1 1 auto",
@@ -1739,10 +2163,10 @@ export function ProjectsPage({
             alignItems="center"
             justifyContent="flex-end"
             spacing={0.8}
-            mb={0.72}
+            mb={0.52}
             sx={{
               px: 0.2,
-              pb: 0.58,
+              pb: 0.48,
               borderBottom: `1px solid ${tone.topDivider}`,
             }}
           >
@@ -1859,10 +2283,11 @@ export function ProjectsPage({
               }}
             >
               <Box
+                className="finder-search-shell"
                 sx={{
-                  mb: 0.72,
+                  mb: 0.52,
                   p: 0.32,
-                  borderRadius: "13px",
+                  borderRadius: "14px",
                   border: `1px solid ${tone.searchWrapBorder}`,
                   backgroundColor: tone.searchWrapBg,
                   boxShadow: tone.searchWrapShadow,
@@ -1880,7 +2305,8 @@ export function ProjectsPage({
                     placeholder={finderPlaceholder(finderType)}
                     sx={{
                       "& .MuiOutlinedInput-root": {
-                        borderRadius: "11px",
+                        minHeight: 40,
+                        borderRadius: "12px",
                         backgroundColor: tone.searchInputBg,
                         color: tone.searchInputColor,
                         "& .MuiOutlinedInput-notchedOutline": {
@@ -1894,8 +2320,8 @@ export function ProjectsPage({
                         },
                       },
                       "& .MuiInputBase-input": {
-                        paddingTop: "7.5px",
-                        paddingBottom: "7.5px",
+                        paddingTop: "8.5px",
+                        paddingBottom: "8.5px",
                       },
                       "& .MuiInputBase-input::placeholder": {
                         color: tone.searchPlaceholder,
@@ -1910,9 +2336,9 @@ export function ProjectsPage({
                         disabled={!finderQuery}
                         aria-label="清空项目搜索"
                         sx={{
-                          width: 28,
-                          height: 28,
-                          borderRadius: "9px",
+                          width: 30,
+                          height: 30,
+                          borderRadius: "11px",
                           color: tone.clearButtonColor,
                           border: `1px solid ${tone.clearButtonBorder}`,
                           backgroundColor: tone.clearButtonBg,
@@ -1929,184 +2355,55 @@ export function ProjectsPage({
                 </Stack>
               </Box>
 
-              <Box
+              <Tabs
+                className="finder-type-tabs-shell"
+                value={finderType}
+                onChange={(_, value) => onFinderTypeChange(value as FinderType)}
+                variant="fullWidth"
+                aria-label="入口类型筛选"
                 sx={{
-                  mb: 0.72,
-                  p: 0.32,
-                  borderRadius: "13px",
+                  mb: 0.52,
+                  minHeight: 40,
+                  p: 0.5,
+                  borderRadius: "14px",
                   border: `1px solid ${tone.searchWrapBorder}`,
                   backgroundColor: tone.searchWrapBg,
                   boxShadow: tone.searchWrapShadow,
                   backdropFilter: "blur(12px)",
                 }}
               >
-                <Box
-                  sx={{
-                    display: "grid",
-                    gridTemplateColumns: `repeat(${finderTypeOptions.length}, minmax(0, 1fr))`,
-                    gap: 0.55,
-                  }}
-                >
-                  {finderTypeOptions.map((type) => {
-                    const active = type === finderType;
-                    return (
-                      <Box
-                        key={type}
-                        component="button"
-                        type="button"
-                        onClick={() => onFinderTypeChange(type)}
-                        sx={{
-                          width: "100%",
-                          minWidth: 0,
-                          height: { xs: 34, sm: 30 },
-                          px: { xs: 0.66, sm: 0.78 },
-                          borderRadius: "10px",
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          gap: 0.4,
-                          cursor: "pointer",
-                          appearance: "none",
-                          textAlign: "left",
-                          border: "1px solid",
-                          borderColor: active
-                            ? tone.categoryChipActiveBorder
-                            : tone.categoryChipBorder,
-                          bgcolor: active
-                            ? tone.categoryChipActiveBg
-                            : tone.categoryChipBg,
-                          color: active
-                            ? tone.categoryChipActiveColor
-                            : tone.categoryChipColor,
-                          boxShadow: active
-                            ? mono
-                              ? "0 10px 22px rgba(0,0,0,0.18), inset 0 1px 0 rgba(255,255,255,0.08)"
-                              : "0 10px 20px rgba(115,88,53,0.08)"
-                            : "none",
-                          "&:hover": {
-                            bgcolor: active
-                              ? tone.categoryChipActiveBg
-                              : tone.categoryChipHoverBg,
-                          },
-                        }}
-                      >
-                        <Box
-                          component="span"
-                          sx={{
-                            minWidth: 0,
-                            overflow: "hidden",
-                            textOverflow: "ellipsis",
-                            whiteSpace: "nowrap",
-                            fontSize: { xs: "0.78rem", sm: "0.82rem" },
-                            fontWeight: active ? 700 : 600,
-                            letterSpacing: "0.01em",
-                          }}
-                        >
-                          {type}
-                        </Box>
-                        <Box
-                          component="span"
-                          sx={{
-                            flexShrink: 0,
-                            minWidth: 16,
-                            px: 0.36,
-                            py: 0.04,
-                            borderRadius: "999px",
-                            bgcolor: active
-                              ? mono
-                                ? "rgba(17,19,25,0.12)"
-                                : "rgba(255,255,255,0.32)"
-                              : mono
-                                ? "rgba(255,255,255,0.06)"
-                                : "rgba(60,70,86,0.08)",
-                            fontSize: "0.62rem",
-                            lineHeight: 1.32,
-                            textAlign: "center",
-                            color: "inherit",
-                          }}
-                        >
+                {finderTypeOptions.map((type) => (
+                  <Tab
+                    key={type}
+                    value={type}
+                    icon={finderTypeIcon(type)}
+                    iconPosition="start"
+                    label={(
+                      <Box component="span" className="finder-type-tab-label">
+                        <Box component="span">{type}</Box>
+                        <Box component="span" className="finder-type-tab-count">
                           {finderTypeCounts[type] ?? 0}
                         </Box>
                       </Box>
-                    );
-                  })}
-                </Box>
-              </Box>
-
-              {showQuickFilters ? (
-                <Box
-                  sx={{
-                    mb: 0.72,
-                    display: "flex",
-                    flexWrap: "wrap",
-                    gap: 0.45,
-                  }}
-                >
-                  {finderQuickFilterOptions.map((filter) => {
-                    const active = filter === finderQuickFilter;
-                    const count = finderQuickFilterCounts[filter] ?? 0;
-                    const disabled = filter !== "全部" && count === 0;
-                    return (
-                      <Chip
-                        key={filter}
-                        size="small"
-                        label={`${filter} ${count}`}
-                        onClick={
-                          disabled
-                            ? undefined
-                            : () => onFinderQuickFilterChange(filter)
-                        }
-                        sx={{
-                          height: 22,
-                          opacity: disabled ? 0.48 : 1,
-                          cursor: disabled ? "default" : "pointer",
-                          bgcolor: active
-                            ? tone.categoryChipActiveBg
-                            : tone.categoryChipBg,
-                          color: active
-                            ? tone.categoryChipActiveColor
-                            : tone.categoryChipColor,
-                          border: `1px solid ${
-                            active
-                              ? tone.categoryChipActiveBorder
-                              : tone.categoryChipBorder
-                          }`,
-                          backdropFilter: "blur(10px)",
-                          "&:hover": {
-                            bgcolor: disabled
-                              ? active
-                                ? tone.categoryChipActiveBg
-                                : tone.categoryChipBg
-                              : active
-                                ? tone.categoryChipActiveBg
-                                : tone.categoryChipHoverBg,
-                          },
-                          "& .MuiChip-label": {
-                            px: 0.82,
-                            fontSize: "0.65rem",
-                            fontWeight: active ? 700 : 600,
-                            letterSpacing: "0.02em",
-                          },
-                        }}
-                      />
-                    );
-                  })}
-                </Box>
-              ) : null}
+                    )}
+                    aria-label={`${type} ${finderTypeCounts[type] ?? 0}`}
+                  />
+                ))}
+              </Tabs>
 
               {showFinderCategories ? (
                 <Box
                   sx={{
-                    mb: 0.82,
-                    p: 0.58,
-                    borderRadius: "12px",
+                    mb: 0.55,
+                    p: 0.48,
+                    borderRadius: "11px",
                     border: `1px solid ${tone.searchWrapBorder}`,
                     backgroundColor: tone.searchWrapBg,
                     boxShadow: tone.searchWrapShadow,
                     backdropFilter: "blur(12px)",
                   }}
                 >
-                  <Stack spacing={0.52}>
+                  <Stack spacing={0.42}>
                     <Typography
                       variant="caption"
                       sx={{
@@ -2121,7 +2418,7 @@ export function ProjectsPage({
                       sx={{
                         display: "flex",
                         flexWrap: "wrap",
-                        gap: 0.48,
+                        gap: 0.42,
                       }}
                     >
                       {finderCategories.map((category) => {
@@ -2137,7 +2434,7 @@ export function ProjectsPage({
                             }
                             onClick={() => onFinderCategoryChange(category)}
                             sx={{
-                              height: 22,
+                              height: 20,
                               bgcolor: active
                                 ? tone.categoryChipActiveBg
                                 : tone.categoryChipBg,
@@ -2156,8 +2453,8 @@ export function ProjectsPage({
                                   : tone.categoryChipHoverBg,
                               },
                               "& .MuiChip-label": {
-                                px: 0.82,
-                                fontSize: "0.65rem",
+                                px: 0.7,
+                                fontSize: "0.62rem",
                                 fontWeight: active ? 700 : 600,
                                 letterSpacing: "0.02em",
                               },
@@ -2171,46 +2468,20 @@ export function ProjectsPage({
               ) : null}
 
               {finderIsProjects && runtimeEntries.length === 0 ? (
-                <Box
-                  sx={{
-                    px: 1.2,
-                    py: 0.86,
-                    borderRadius: "12px",
-                    border: `1px solid ${tone.emptyBorder}`,
-                    backgroundColor: tone.emptyBg,
-                    boxShadow: tone.emptyShadow,
-                  }}
-                >
-                  <Typography variant="body2" sx={{ color: tone.emptyText }}>
-                    还没有加载到项目配置，请检查 `projects.toml` 是否可读。
-                  </Typography>
-                </Box>
+                <AppEmptyState compact title="暂无项目" description="检查 projects.toml 是否可读。" />
               ) : null}
 
               {finderIsProjects &&
               runtimeEntries.length > 0 &&
               filteredRuntimeEntries.length === 0 ? (
-                <Box
-                  sx={{
-                    px: 1.2,
-                    py: 0.86,
-                    borderRadius: "12px",
-                    border: `1px solid ${tone.emptyBorder}`,
-                    backgroundColor: tone.emptyBg,
-                    boxShadow: tone.emptyShadow,
-                  }}
-                >
-                  <Typography variant="body2" sx={{ color: tone.emptyText }}>
-                    当前没有匹配项目，试试调整搜索词。
-                  </Typography>
-                </Box>
+                <AppEmptyState compact title="没有匹配项目" description="调整搜索词再试。" />
               ) : null}
 
               {finderIsProjects &&
               runtimeEntries.length > 0 &&
               filteredRuntimeEntries.length > 0 ? (
                 <Stack
-                  spacing={0.6}
+                  spacing={0.4}
                   minWidth={0}
                   minHeight={0}
                   flex="1 1 auto"
@@ -2219,15 +2490,16 @@ export function ProjectsPage({
                   <Box
                     ref={finderListRef}
                     className="module-list-scroll finder-list-scroll"
+                    onScroll={handleFinderListScroll}
                     sx={{
                       display: "grid",
                       alignContent: "start",
-                      gap: 0.56,
+                      gap: 0.32,
                       flex: "1 1 auto",
                       minHeight: 0,
                     }}
                   >
-                    {pagedRuntimeEntries.map((item, index) => {
+                    {visibleRuntimeEntries.map((item, index) => {
                     const runtimeRunning = item.canStop;
                     const runtimeAvailable = item.canStart || item.canStop;
                     const runtimeTooltip = runtimeRunning
@@ -2282,14 +2554,14 @@ export function ProjectsPage({
                             xs: "minmax(0,1fr)",
                             md: "minmax(0, 1fr) max-content",
                           },
-                          columnGap: { xs: 0.9, md: 0.85 },
-                          rowGap: 0.58,
+                          columnGap: { xs: 0.94, md: 0.9 },
+                          rowGap: 0.5,
                           alignItems: "center",
-                          px: 1.05,
-                          py: { xs: 0.9, md: 0.72 },
-                          pr: { xs: 14.2, md: 1.05 },
-                          minHeight: { xs: 58, md: 48 },
-                          borderRadius: "14px",
+                          px: 1,
+                          py: { xs: 0.82, md: 0.7 },
+                          pr: { xs: 13.4, md: 1 },
+                          minHeight: { xs: 60, md: 56 },
+                          borderRadius: "15px",
                           border: "1px solid",
                           borderColor:
                             projectFavorite
@@ -2347,7 +2619,7 @@ export function ProjectsPage({
                         <Stack
                           direction="row"
                           alignItems="center"
-                          spacing={0.9}
+                          spacing={0.72}
                           minWidth={0}
                           sx={{
                             pr: { xs: 0.75, md: 0 },
@@ -2377,8 +2649,8 @@ export function ProjectsPage({
                           >
                             <Box
                               sx={{
-                                width: 9,
-                                height: 9,
+                                width: 8,
+                                height: 8,
                                 borderRadius: "50%",
                                 bgcolor: statusPalette.dot,
                                 boxShadow:
@@ -2392,7 +2664,7 @@ export function ProjectsPage({
                             <Stack
                               direction="row"
                               alignItems="center"
-                              spacing={0.55}
+                              spacing={0.45}
                               minWidth={0}
                             >
                               <Typography
@@ -2400,8 +2672,9 @@ export function ProjectsPage({
                                 noWrap
                                 sx={{
                                   minWidth: 0,
-                                  fontWeight: 760,
-                                  lineHeight: 1.18,
+                                  fontWeight: 740,
+                                  fontSize: "0.86rem",
+                                  lineHeight: 1.24,
                                   color: tone.rowTitle,
                                 }}
                               >
@@ -2444,7 +2717,7 @@ export function ProjectsPage({
                               noWrap
                               sx={{
                                 display: "block",
-                                mt: 0.28,
+                                mt: 0.16,
                                 overflow: "hidden",
                                 textOverflow: "ellipsis",
                                 letterSpacing: 0,
@@ -2458,7 +2731,7 @@ export function ProjectsPage({
 
                         <Stack
                           direction="row"
-                          spacing={0.45}
+                          spacing={0.38}
                           justifyContent={{ xs: "flex-start", md: "flex-end" }}
                           data-project-row-action="true"
                           sx={{
@@ -2468,8 +2741,8 @@ export function ProjectsPage({
                             flexShrink: 0,
                             justifySelf: { md: "end" },
                             alignSelf: "center",
-                            px: 0.45,
-                            py: 0.26,
+                            px: 0.42,
+                            py: 0.24,
                             borderRadius: "999px",
                             border: `1px solid ${tone.actionGroupBorder}`,
                             backgroundColor: tone.actionGroupBg,
@@ -2497,8 +2770,8 @@ export function ProjectsPage({
                                   );
                                 }}
                                 sx={{
-                                  width: 26,
-                                  height: 26,
+                                  width: 28,
+                                  height: 28,
                                   borderRadius: "999px",
                                   bgcolor: runtimeRunning
                                     ? tone.stopButtonBg
@@ -2544,8 +2817,8 @@ export function ProjectsPage({
                                   onOpenProjectDirectory(item.key);
                                 }}
                                 sx={{
-                                  width: 26,
-                                  height: 26,
+                                  width: 28,
+                                  height: 28,
                                   borderRadius: "999px",
                                   bgcolor: tone.stopButtonBg,
                                   color: item.cwd || item.repoPath
@@ -2571,8 +2844,8 @@ export function ProjectsPage({
                                   setProjectMenuKey(item.key);
                                 }}
                                 sx={{
-                                  width: 26,
-                                  height: 26,
+                                  width: 28,
+                                  height: 28,
                                   borderRadius: "999px",
                                   bgcolor: tone.stopButtonBg,
                                   color: tone.stopButtonColor,
@@ -2591,32 +2864,29 @@ export function ProjectsPage({
                       </Box>
                     );
                     })}
-                  </Box>
-                  {finderPageCount > 1 ? (
                     <Stack
-                      direction="row"
-                      justifyContent="flex-end"
-                      sx={{ pt: 0.25 }}
+                      className={
+                        hasMoreFinderEntries
+                          ? "workflow-history-footer"
+                          : "workflow-history-footer workflow-history-footer--done"
+                      }
                     >
-                      <Pagination
-                        aria-label="访达分页"
-                        size="small"
-                        page={activeFinderPage}
-                        count={finderPageCount}
-                        siblingCount={0}
-                        boundaryCount={1}
-                        onChange={(_, nextPage) => setFinderPage(nextPage)}
-                        sx={{
-                          "& .MuiPaginationItem-root": {
-                            minWidth: 26,
-                            height: 26,
-                            borderRadius: "9px",
-                            fontWeight: 800,
-                          },
-                        }}
-                      />
+                      {hasMoreFinderEntries ? (
+                        <Button
+                          size="small"
+                          variant="text"
+                          onClick={loadMoreFinderEntries}
+                          className="workflow-history-footer-action"
+                        >
+                          下滑加载更多
+                        </Button>
+                      ) : (
+                        <Typography variant="caption" className="workflow-history-footer-text">
+                          没有更多了
+                        </Typography>
+                      )}
                     </Stack>
-                  ) : null}
+                  </Box>
                 </Stack>
               ) : null}
 
@@ -2715,86 +2985,6 @@ export function ProjectsPage({
                   </ListItemIcon>
                   <ListItemText
                     primary="配置联动"
-                    primaryTypographyProps={{
-                      fontSize: "0.82rem",
-                      fontWeight: 650,
-                    }}
-                  />
-                </MenuItem>
-                <MenuItem
-                  disabled={
-                    !projectMenuEntry ||
-                    (!projectMenuEntry.canStopBuild && !projectMenuEntry.canBuild)
-                  }
-                  onClick={() => {
-                    if (!projectMenuEntry) {
-                      return;
-                    }
-                    if (projectMenuEntry.canStopBuild) {
-                      onStopBuild(projectMenuEntry.key);
-                    } else {
-                      onRunBuild(projectMenuEntry.key);
-                    }
-                    closeProjectMenu();
-                  }}
-                >
-                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    {projectMenuEntry?.canStopBuild ? (
-                      <StopIcon fontSize="small" />
-                    ) : (
-                      <PackageIcon fontSize="small" />
-                    )}
-                  </ListItemIcon>
-                  <ListItemText
-                    primary={projectMenuEntry?.canStopBuild ? "中止打包" : "执行打包"}
-                    primaryTypographyProps={{
-                      fontSize: "0.82rem",
-                      fontWeight: 650,
-                    }}
-                  />
-                </MenuItem>
-                <MenuItem
-                  disabled={
-                    !projectMenuEntry ||
-                    !branchProjectKeySet.has(projectMenuEntry.key)
-                  }
-                  onClick={() => {
-                    if (!projectMenuEntry) {
-                      return;
-                    }
-                    onOpenProjectBranch(projectMenuEntry.key);
-                    closeProjectMenu();
-                  }}
-                >
-                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    <WorkflowIcon fontSize="small" />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary="打开分支页"
-                    primaryTypographyProps={{
-                      fontSize: "0.82rem",
-                      fontWeight: 650,
-                    }}
-                  />
-                </MenuItem>
-                <MenuItem
-                  disabled={
-                    !projectMenuEntry ||
-                    !buildProjectKeySet.has(projectMenuEntry.key)
-                  }
-                  onClick={() => {
-                    if (!projectMenuEntry) {
-                      return;
-                    }
-                    onOpenProjectBuild(projectMenuEntry.key);
-                    closeProjectMenu();
-                  }}
-                >
-                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    <OpenExternalIcon fontSize="small" />
-                  </ListItemIcon>
-                  <ListItemText
-                    primary="打开构建页"
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -2923,105 +3113,370 @@ export function ProjectsPage({
                 >
                       {detailsPanelTab === "overview" ? (
                         <>
-                          {[
-                            {
-                              title: "运行",
-                              rows: [
-                                ["状态详情", detailsProjectEntry.detail || "无"],
-                                ["PID", detailsProjectEntry.pid?.toString() || "未运行"],
-                                [
-                                  "启动时间",
-                                  formatDateTime(detailsProjectEntry.startedAtMs),
-                                ],
-                                [
-                                  "运行时长",
-                                  formatElapsedTime(
-                                    detailsProjectEntry.startedAtMs,
-                                    nowMs,
-                                  ),
-                                ],
-                                ["工作目录", detailsProjectEntry.cwd || "未配置"],
-                                ["仓库目录", detailsProjectEntry.repoPath || "未配置"],
-                                ["启动命令", detailsProjectEntry.command || "未配置"],
-                                ["日志路径", detailsProjectEntry.logPath || "未生成"],
-                              ],
-                            },
-                            {
-                              title: "构建",
-                              rows: [
-                                [
-                                  "构建状态",
-                                  detailsProjectEntry.buildStatusLabel || "未配置",
-                                ],
-                                ["构建详情", detailsProjectEntry.buildDetail || "无"],
-                                [
-                                  "构建 PID",
-                                  detailsProjectEntry.buildPid?.toString() || "未运行",
-                                ],
-                                [
-                                  "开始时间",
-                                  formatDateTime(detailsProjectEntry.buildStartedAtMs),
-                                ],
-                                [
-                                  "输出目录",
-                                  detailsProjectEntry.buildOutputDir || "未配置",
-                                ],
-                                [
-                                  "构建命令",
-                                  detailsProjectEntry.buildCommand || "未配置",
-                                ],
-                                [
-                                  "日志路径",
-                                  detailsProjectEntry.buildLogPath || "未生成",
-                                ],
-                              ],
-                            },
-                          ].map((section) => (
-                            <Box
-                              key={section.title}
-                              sx={{
-                                border: `1px solid ${tone.searchWrapBorder}`,
-                                borderRadius: "16px",
-                                bgcolor: tone.searchWrapBg,
-                                boxShadow: tone.searchWrapShadow,
-                                p: 0.9,
-                              }}
-                            >
-                              <Typography
-                                variant="caption"
+                          {(() => {
+                            const preflight = runtimePreflight.response;
+                            const summaryPalette = buildPreflightPalette(
+                              preflight?.statusKey ?? "info",
+                              mono,
+                            );
+                            const checks = (preflight?.checks ?? [])
+                              .slice()
+                              .sort(
+                                (left, right) =>
+                                  preflightPriority(left) - preflightPriority(right),
+                              );
+                            const checkStats = {
+                              error: checks.filter((check) => check.statusKey === "error")
+                                .length,
+                              warning: checks.filter(
+                                (check) => check.statusKey === "warning",
+                              ).length,
+                              ok: checks.filter((check) => check.statusKey === "ok").length,
+                            };
+                            return (
+                              <Box
                                 sx={{
-                                  display: "block",
-                                  mb: 0.7,
-                                  color: tone.rowHint,
-                                  fontWeight: 750,
-                                  letterSpacing: "0.07em",
+                                  border: `1px solid ${tone.searchWrapBorder}`,
+                                  borderRadius: "14px",
+                                  bgcolor: tone.searchWrapBg,
+                                  boxShadow: tone.searchWrapShadow,
+                                  overflow: "hidden",
                                 }}
                               >
-                                {section.title}
-                              </Typography>
-                              <Box sx={{ display: "grid", gap: 0.55 }}>
-                                {section.rows.map(([label, value]) => (
+                                <Stack
+                                  direction="row"
+                                  alignItems="center"
+                                  spacing={0.8}
+                                  sx={{
+                                    px: 1,
+                                    py: 0.8,
+                                    borderBottom: `1px solid ${tone.actionGroupBorder}`,
+                                  }}
+                                >
+                                  <Box
+                                    sx={{
+                                      width: 5,
+                                      height: 34,
+                                      borderRadius: "999px",
+                                      bgcolor: summaryPalette.dot,
+                                      opacity: 0.72,
+                                    }}
+                                  />
+                                  <Box sx={{ minWidth: 0, flex: 1 }}>
+                                    <Stack
+                                      direction="row"
+                                      alignItems="center"
+                                      spacing={0.6}
+                                      sx={{ minWidth: 0 }}
+                                    >
+                                      <Typography
+                                        variant="subtitle2"
+                                        noWrap
+                                        sx={{
+                                          color: tone.rowTitle,
+                                          fontWeight: 820,
+                                          letterSpacing: 0,
+                                        }}
+                                      >
+                                        链路预检
+                                      </Typography>
+                                      <Chip
+                                        size="small"
+                                        label={
+                                          runtimePreflight.loading
+                                            ? "检查中"
+                                            : preflight?.statusLabel ||
+                                              (runtimePreflight.error ? "异常" : "未检查")
+                                        }
+                                        sx={{
+                                          height: 22,
+                                          bgcolor: summaryPalette.pillBg,
+                                          color: summaryPalette.pillColor,
+                                          border: `1px solid ${summaryPalette.pillBorder}`,
+                                          "& .MuiChip-label": {
+                                            px: 0.75,
+                                            fontSize: "0.62rem",
+                                            fontWeight: 800,
+                                          },
+                                        }}
+                                      />
+                                      {[
+                                        { label: "异常", value: checkStats.error },
+                                        { label: "关注", value: checkStats.warning },
+                                        { label: "正常", value: checkStats.ok },
+                                      ].map((item) => (
+                                        <Typography
+                                          key={item.label}
+                                          variant="caption"
+                                          sx={{
+                                            color: tone.rowHint,
+                                            fontWeight: 760,
+                                            fontVariantNumeric: "tabular-nums",
+                                          }}
+                                        >
+                                          {item.label} {item.value}
+                                        </Typography>
+                                      ))}
+                                    </Stack>
+                                    <Typography
+                                      variant="caption"
+                                      noWrap
+                                      sx={{
+                                        display: "block",
+                                        color: tone.rowHint,
+                                        mt: 0.12,
+                                      }}
+                                    >
+                                      {runtimePreflight.error ||
+                                        preflight?.summary ||
+                                        "检查启动命令、调试档案、代理和受控浏览器"}
+                                    </Typography>
+                                  </Box>
+                                  <Tooltip title="刷新预检">
+                                    <span>
+                                      <IconButton
+                                        aria-label="刷新链路预检"
+                                        disabled={runtimePreflight.loading}
+                                        onClick={() =>
+                                          setRuntimePreflightRefreshKey(
+                                            (current) => current + 1,
+                                          )
+                                        }
+                                        sx={{
+                                          width: 32,
+                                          height: 32,
+                                          borderRadius: "11px",
+                                          color: tone.toolButtonColor,
+                                          border: `1px solid ${tone.toolButtonBorder}`,
+                                          bgcolor: tone.toolButtonBg,
+                                          "&:hover": {
+                                            color: tone.toolButtonHoverColor,
+                                            bgcolor: tone.toolButtonHoverBg,
+                                            borderColor: tone.toolButtonHoverBorder,
+                                          },
+                                        }}
+                                      >
+                                        <RefreshIcon fontSize="small" />
+                                      </IconButton>
+                                    </span>
+                                  </Tooltip>
+                                </Stack>
+
+                                <Box
+                                  sx={{
+                                    display: "grid",
+                                    gridTemplateColumns: {
+                                      xs: "minmax(0, 1fr)",
+                                      md: "repeat(2, minmax(0, 1fr))",
+                                    },
+                                    gap: 0,
+                                  }}
+                                >
+                                  {checks.slice(0, 8).map((check) => {
+                                    const palette = buildPreflightPalette(
+                                      check.statusKey,
+                                      mono,
+                                    );
+                                    return (
+                                      <Box
+                                        key={check.key}
+                                        sx={{
+                                          minWidth: 0,
+                                          px: 1,
+                                          py: 0.68,
+                                          borderTop: `1px solid ${tone.actionGroupBorder}`,
+                                          borderRight: {
+                                            md: `1px solid ${tone.actionGroupBorder}`,
+                                          },
+                                          "&:nth-of-type(2n)": {
+                                            borderRight: { md: "none" },
+                                          },
+                                        }}
+                                      >
+                                        <Stack
+                                          direction="row"
+                                          alignItems="center"
+                                          spacing={0.5}
+                                          sx={{ minWidth: 0 }}
+                                        >
+                                          <Box
+                                            sx={{
+                                              width: 6,
+                                              height: 6,
+                                              borderRadius: "50%",
+                                              bgcolor: palette.dot,
+                                              flex: "0 0 auto",
+                                              opacity: 0.9,
+                                            }}
+                                          />
+                                          <Typography
+                                            variant="caption"
+                                            noWrap
+                                            sx={{
+                                              color: tone.rowTitle,
+                                              fontWeight: 780,
+                                              minWidth: 0,
+                                              flex: 1,
+                                            }}
+                                          >
+                                            {check.title}
+                                          </Typography>
+                                          <Typography
+                                            variant="caption"
+                                            sx={{
+                                              color: palette.pillColor,
+                                              fontWeight: 760,
+                                              flex: "0 0 auto",
+                                            }}
+                                          >
+                                            {check.statusLabel}
+                                          </Typography>
+                                        </Stack>
+                                        <Typography
+                                          variant="caption"
+                                          sx={{
+                                            display: "block",
+                                            mt: 0.16,
+                                            color: tone.rowMeta,
+                                            overflowWrap: "anywhere",
+                                            lineHeight: 1.45,
+                                          }}
+                                        >
+                                          {check.detail}
+                                        </Typography>
+                                        {check.action ? (
+                                          <Typography
+                                            variant="caption"
+                                            sx={{
+                                              display: "block",
+                                              mt: 0.12,
+                                              color:
+                                                check.statusKey === "ok"
+                                                  ? tone.rowHint
+                                                  : summaryPalette.pillColor,
+                                              overflowWrap: "anywhere",
+                                              lineHeight: 1.35,
+                                            }}
+                                          >
+                                              {check.action}
+                                          </Typography>
+                                        ) : null}
+                                      </Box>
+                                    );
+                                  })}
+                                </Box>
+                              </Box>
+                            );
+                          })()}
+                          <Box
+                            sx={{
+                              display: "grid",
+                              gridTemplateColumns: {
+                                xs: "minmax(0, 1fr)",
+                                lg: "repeat(2, minmax(0, 1fr))",
+                              },
+                              gap: 0.75,
+                            }}
+                          >
+                            {[
+                              {
+                                title: "运行",
+                                rows: [
+                                  ["状态详情", detailsProjectEntry.detail || "无"],
+                                  ["PID", detailsProjectEntry.pid?.toString() || "未运行"],
+                                  [
+                                    "启动时间",
+                                    formatDateTime(detailsProjectEntry.startedAtMs),
+                                  ],
+                                  [
+                                    "运行时长",
+                                    formatElapsedTime(
+                                      detailsProjectEntry.startedAtMs,
+                                      nowMs,
+                                    ),
+                                  ],
+                                  ["工作目录", detailsProjectEntry.cwd || "未配置"],
+                                  ["仓库目录", detailsProjectEntry.repoPath || "未配置"],
+                                  ["启动命令", detailsProjectEntry.command || "未配置"],
+                                  ["日志路径", detailsProjectEntry.logPath || "未生成"],
+                                ],
+                              },
+                              {
+                                title: "构建",
+                                rows: [
+                                  [
+                                    "构建状态",
+                                    detailsProjectEntry.buildStatusLabel || "未配置",
+                                  ],
+                                  ["构建详情", detailsProjectEntry.buildDetail || "无"],
+                                  [
+                                    "构建 PID",
+                                    detailsProjectEntry.buildPid?.toString() || "未运行",
+                                  ],
+                                  [
+                                    "开始时间",
+                                    formatDateTime(detailsProjectEntry.buildStartedAtMs),
+                                  ],
+                                  [
+                                    "输出目录",
+                                    detailsProjectEntry.buildOutputDir || "未配置",
+                                  ],
+                                  [
+                                    "构建命令",
+                                    detailsProjectEntry.buildCommand || "未配置",
+                                  ],
+                                  [
+                                    "日志路径",
+                                    detailsProjectEntry.buildLogPath || "未生成",
+                                  ],
+                                ],
+                              },
+                            ].map((section) => (
+                              <Box
+                                key={section.title}
+                                sx={{
+                                  border: `1px solid ${tone.searchWrapBorder}`,
+                                  borderRadius: "14px",
+                                  bgcolor: tone.searchWrapBg,
+                                  boxShadow: tone.searchWrapShadow,
+                                  overflow: "hidden",
+                                }}
+                              >
+                                <Typography
+                                  variant="caption"
+                                  sx={{
+                                    display: "block",
+                                    px: 1,
+                                    py: 0.72,
+                                    color: tone.rowHint,
+                                    fontWeight: 800,
+                                    letterSpacing: "0.06em",
+                                    borderBottom: `1px solid ${tone.actionGroupBorder}`,
+                                  }}
+                                >
+                                  {section.title}
+                                </Typography>
+                                {section.rows.map(([label, value], index) => (
                                   <Box
                                     key={`${section.title}-${label}`}
                                     sx={{
                                       display: "grid",
-                                      gridTemplateColumns: "74px minmax(0, 1fr)",
+                                      gridTemplateColumns: "72px minmax(0, 1fr)",
                                       gap: 0.8,
                                       alignItems: "start",
-                                      px: 0.75,
-                                      py: 0.65,
-                                      borderRadius: "12px",
-                                      bgcolor: mono
-                                        ? "rgba(255,255,255,0.014)"
-                                        : "rgba(255,255,255,0.48)",
-                                      border: `1px solid ${tone.actionGroupBorder}`,
+                                      px: 1,
+                                      py: 0.58,
+                                      borderTop:
+                                        index === 0
+                                          ? "none"
+                                          : `1px solid ${tone.actionGroupBorder}`,
                                     }}
                                   >
                                     <Typography
                                       variant="caption"
                                       sx={{
                                         color: tone.rowKey,
-                                        fontWeight: 700,
+                                        fontWeight: 720,
                                       }}
                                     >
                                       {label}
@@ -3046,8 +3501,8 @@ export function ProjectsPage({
                                   </Box>
                                 ))}
                               </Box>
-                            </Box>
-                          ))}
+                            ))}
+                          </Box>
                         </>
                       ) : null}
 
@@ -3249,51 +3704,115 @@ export function ProjectsPage({
                           }}
                         >
                           <Stack spacing={1.05}>
-                            <Stack spacing={0.55}>
+                            <Stack
+                              direction="row"
+                              alignItems="center"
+                              justifyContent="space-between"
+                              spacing={0.8}
+                            >
                               <Typography
                                 variant="caption"
                                 sx={{ color: tone.rowMeta, fontWeight: 750 }}
                               >
                                 项目运行配置
                               </Typography>
-                              <TextField
-                                select
+                              <Button
                                 size="small"
-                                value={
-                                  runtimeOptionsProfileKey ||
-                                  DEFAULT_RUNTIME_PROFILE_VALUE
-                                }
-                                onChange={(event) =>
-                                  handleRuntimeOptionsProfileChange(
-                                    event.target.value,
-                                  )
-                                }
-                                fullWidth
-                                inputProps={{ "aria-label": "项目运行配置" }}
+                                color="inherit"
+                                onClick={() => setRuntimeOptionsEnvText("")}
+                                disabled={!runtimeOptionsEnvText.trim()}
                                 sx={{
-                                  "& .MuiSelect-select": {
-                                    minHeight: "unset",
-                                    py: 1,
-                                    fontSize: "0.82rem",
-                                    fontWeight: 750,
+                                  minWidth: 0,
+                                  height: 28,
+                                  px: 1.15,
+                                  borderRadius: "10px",
+                                  color: tone.rowKey,
+                                  border: `1px solid ${tone.toolButtonBorder}`,
+                                  bgcolor: tone.toolButtonBg,
+                                  "&:hover": {
+                                    bgcolor: tone.toolButtonHoverBg,
+                                    borderColor: tone.toolButtonHoverBorder,
+                                  },
+                                  "&.Mui-disabled": {
+                                    color: tone.rowHint,
+                                    borderColor: tone.actionGroupBorder,
                                   },
                                 }}
                               >
-                                <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
-                                  默认启动
-                                </MenuItem>
-                                {runtimeOptionsProfiles.map((profile) => (
-                                  <MenuItem key={profile.key} value={profile.key}>
-                                    {profile.label || profile.key}
-                                    {profile.envCount > 0
-                                      ? ` · ${profile.envCount} env`
-                                      : ""}
-                                    {profile.localFileCount > 0
-                                      ? ` · ${profile.localFileCount} 文件`
-                                      : ""}
+                                清空变量
+                              </Button>
+                            </Stack>
+
+                            <Stack spacing={0.55}>
+                              <Stack
+                                direction={{ xs: "column", sm: "row" }}
+                                spacing={0.65}
+                                alignItems="stretch"
+                              >
+                                <TextField
+                                  select
+                                  size="small"
+                                  value={
+                                    runtimeOptionsProfileKey ||
+                                    DEFAULT_RUNTIME_PROFILE_VALUE
+                                  }
+                                  onChange={(event) =>
+                                    handleRuntimeOptionsProfileChange(
+                                      event.target.value,
+                                    )
+                                  }
+                                  fullWidth
+                                  inputProps={{ "aria-label": "项目运行配置" }}
+                                  sx={{
+                                    flex: "1 1 auto",
+                                    "& .MuiSelect-select": {
+                                      minHeight: "unset",
+                                      py: 1,
+                                      fontSize: "0.82rem",
+                                      fontWeight: 750,
+                                    },
+                                  }}
+                                >
+                                  <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
+                                    默认启动
                                   </MenuItem>
-                                ))}
-                              </TextField>
+                                  {runtimeOptionsProfiles.map((profile) => (
+                                    <MenuItem key={profile.key} value={profile.key}>
+                                      {profile.label || profile.key}
+                                      {profile.envCount > 0
+                                        ? ` · ${profile.envCount} env`
+                                        : ""}
+                                      {profile.localFileCount > 0
+                                        ? ` · ${profile.localFileCount} 文件`
+                                        : ""}
+                                    </MenuItem>
+                                  ))}
+                                </TextField>
+                                <Button
+                                  variant="outlined"
+                                  color="inherit"
+                                  disabled={runtimeOptionsDefaultSaved}
+                                  startIcon={
+                                    runtimeOptionsDefaultSaved ||
+                                    copiedProjectAction === "runtime-default" ? (
+                                      <CheckIcon fontSize="small" />
+                                    ) : undefined
+                                  }
+                                  onClick={handleRuntimeOptionsSaveDefault}
+                                  sx={{
+                                    minWidth: { xs: "100%", sm: 112 },
+                                    borderRadius: "10px",
+                                    fontWeight: 780,
+                                    whiteSpace: "nowrap",
+                                  }}
+                                >
+                                  {copiedProjectAction === "runtime-default"
+                                    ? "已设为默认"
+                                    : runtimeOptionsDefaultSaved
+                                      ? "当前默认"
+                                      : "设为默认"}
+                                </Button>
+                              </Stack>
                             </Stack>
 
                             <Stack spacing={0.55}>
@@ -3396,19 +3915,11 @@ export function ProjectsPage({
 
                             <Stack
                               direction="row"
-                              justifyContent="space-between"
-                              spacing={0.8}
+                              justifyContent="center"
+                              sx={{ pt: 0.1 }}
                             >
                               <Button
-                                size="small"
-                                color="inherit"
-                                onClick={() => setRuntimeOptionsEnvText("")}
-                                disabled={!runtimeOptionsEnvText.trim()}
-                              >
-                                清空变量
-                              </Button>
-                              <Button
-                                size="small"
+                                size="medium"
                                 variant="contained"
                                 startIcon={<PlayIcon fontSize="small" />}
                                 disabled={
@@ -3416,6 +3927,15 @@ export function ProjectsPage({
                                   Boolean(runtimeOptionsParseResult.error)
                                 }
                                 onClick={handleRuntimeOptionsStart}
+                                fullWidth
+                                sx={{
+                                  minHeight: 42,
+                                  borderRadius: "12px",
+                                  fontWeight: 820,
+                                  boxShadow: mono
+                                    ? "0 10px 24px rgba(0,0,0,0.22)"
+                                    : "0 12px 28px rgba(84,111,140,0.16)",
+                                }}
                               >
                                 使用此配置启动
                               </Button>
@@ -3510,7 +4030,7 @@ export function ProjectsPage({
                               <span>
                                 <IconButton
                                   aria-label="刷新运行日志"
-                                  disabled={runtimeLog.loading}
+                                  disabled={runtimeLog.loading || runtimeLogClearing}
                                   onClick={() =>
                                     setRuntimeLogRefreshKey((current) => current + 1)
                                   }
@@ -3527,11 +4047,37 @@ export function ProjectsPage({
                                 </IconButton>
                               </span>
                             </Tooltip>
+                            <Tooltip title={runtimeLog.path ? "清空当前日志" : "日志尚未生成"}>
+                              <span>
+                                <IconButton
+                                  aria-label="清空当前运行日志"
+                                  disabled={
+                                    !runtimeLog.path ||
+                                    runtimeLog.loading ||
+                                    runtimeLogClearing
+                                  }
+                                  onClick={() => void handleClearRuntimeLog()}
+                                  sx={{
+                                    width: 28,
+                                    height: 28,
+                                    borderRadius: "999px",
+                                    bgcolor: tone.stopButtonBg,
+                                    color:
+                                      runtimeLog.path && !runtimeLogClearing
+                                        ? tone.stopButtonColor
+                                        : tone.stopButtonDisabledColor,
+                                    border: `1px solid ${tone.stopButtonBorder}`,
+                                  }}
+                                >
+                                  <TrashIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
                             <Tooltip title={runtimeLog.path ? "复制日志路径" : "日志尚未生成"}>
                               <span>
                                 <IconButton
                                   aria-label="复制日志路径"
-                                  disabled={!runtimeLog.path}
+                                  disabled={!runtimeLog.path || runtimeLogClearing}
                                   onClick={() =>
                                     void handleCopyProjectValue(runtimeLog.path, "log")
                                   }
@@ -3572,7 +4118,188 @@ export function ProjectsPage({
                           {runtimeLog.path || "日志会在下次运行后生成"}
                         </Typography>
 
+                        <Stack
+                          direction="row"
+                          spacing={0.45}
+                          alignItems="center"
+                          flexWrap="wrap"
+                          useFlexGap
+                          sx={{ mb: 0.65 }}
+                        >
+                          <Chip
+                            size="small"
+                            label={
+                              runtimeLog.sessionSummary.active
+                                ? `会话 ${formatDateTime(runtimeLog.sessionSummary.startedAtMs)}`
+                                : "会话 未记录"
+                            }
+                            sx={{
+                              height: 22,
+                              bgcolor: tone.categoryChipBg,
+                              color: tone.categoryChipColor,
+                              border: `1px solid ${tone.categoryChipBorder}`,
+                              "& .MuiChip-label": {
+                                px: 0.75,
+                                fontSize: "0.64rem",
+                                fontWeight: 720,
+                              },
+                            }}
+                          />
+                          <Chip
+                            size="small"
+                            label={`PID ${
+                              runtimeLog.sessionSummary.pid ??
+                              (runtimeLog.kind === "build"
+                                ? detailsProjectEntry.buildPid
+                                : detailsProjectEntry.pid) ??
+                              "未运行"
+                            }`}
+                            sx={{
+                              height: 22,
+                              bgcolor: tone.categoryChipBg,
+                              color: tone.categoryChipColor,
+                              border: `1px solid ${tone.categoryChipBorder}`,
+                              "& .MuiChip-label": {
+                                px: 0.75,
+                                fontSize: "0.64rem",
+                                fontWeight: 720,
+                              },
+                            }}
+                          />
+                          <Chip
+                            size="small"
+                            label={
+                              runtimeLogAutoRefreshMs
+                                ? `自动刷新 ${Math.round(runtimeLogAutoRefreshMs / 1000)}s`
+                                : "自动刷新 暂停"
+                            }
+                            sx={{
+                              height: 22,
+                              bgcolor: runtimeLogAutoRefreshMs
+                                ? tone.successPillBg
+                                : tone.categoryChipBg,
+                              color: runtimeLogAutoRefreshMs
+                                ? tone.successPillColor
+                                : tone.categoryChipColor,
+                              border: `1px solid ${
+                                runtimeLogAutoRefreshMs
+                                  ? tone.successPillBorder
+                                  : tone.categoryChipBorder
+                              }`,
+                              "& .MuiChip-label": {
+                                px: 0.75,
+                                fontSize: "0.64rem",
+                                fontWeight: 720,
+                              },
+                            }}
+                          />
+                          <Chip
+                            size="small"
+                            label={`行 ${runtimeLog.sessionSummary.currentLineCount}/${runtimeLog.sessionSummary.totalLineCount}`}
+                            sx={{
+                              height: 22,
+                              bgcolor: tone.categoryChipBg,
+                              color: tone.categoryChipColor,
+                              border: `1px solid ${tone.categoryChipBorder}`,
+                              "& .MuiChip-label": {
+                                px: 0.75,
+                                fontSize: "0.64rem",
+                                fontWeight: 720,
+                              },
+                            }}
+                          />
+                          {(runtimeLog.sessionSummary.cwd ||
+                            runtimeLog.sessionSummary.command) && (
+                            <Tooltip
+                              title={[
+                                runtimeLog.sessionSummary.cwd
+                                  ? `cwd: ${runtimeLog.sessionSummary.cwd}`
+                                  : "",
+                                runtimeLog.sessionSummary.command
+                                  ? `command: ${runtimeLog.sessionSummary.command}`
+                                  : "",
+                              ]
+                                .filter(Boolean)
+                                .join("\n")}
+                            >
+                              <Typography
+                                variant="caption"
+                                noWrap
+                                sx={{
+                                  minWidth: 0,
+                                  maxWidth: "100%",
+                                  color: tone.rowHint,
+                                  fontFamily:
+                                    '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                }}
+                              >
+                                {runtimeLog.sessionSummary.cwd ||
+                                  runtimeLog.sessionSummary.command}
+                              </Typography>
+                            </Tooltip>
+                          )}
+                        </Stack>
+
+                        {runtimeLog.kind === "dev" &&
+                        runtimeLog.readySummary.enabled ? (
+                          <Stack
+                            direction="row"
+                            spacing={0.5}
+                            alignItems="center"
+                            flexWrap="wrap"
+                            useFlexGap
+                            sx={{ mb: 0.7 }}
+                          >
+                            <Chip
+                              size="small"
+                              label={runtimeLog.readySummary.statusLabel}
+                              sx={{
+                                height: 22,
+                                bgcolor: runtimeLog.readySummary.ready
+                                  ? tone.successPillBg
+                                  : runtimeLog.readySummary.failed
+                                  ? tone.dangerPillBg
+                                  : tone.categoryChipBg,
+                                color: runtimeLog.readySummary.ready
+                                  ? tone.successPillColor
+                                  : runtimeLog.readySummary.failed
+                                  ? tone.dangerPillColor
+                                  : tone.categoryChipColor,
+                                border: `1px solid ${
+                                  runtimeLog.readySummary.ready
+                                    ? tone.successPillBorder
+                                    : runtimeLog.readySummary.failed
+                                    ? tone.dangerPillBorder
+                                    : tone.categoryChipBorder
+                                }`,
+                                "& .MuiChip-label": {
+                                  px: 0.8,
+                                  fontSize: "0.66rem",
+                                  fontWeight: 750,
+                                },
+                              }}
+                            />
+                            {(runtimeLog.readySummary.url ||
+                              runtimeLog.readySummary.detail) && (
+                              <Typography
+                                variant="caption"
+                                sx={{
+                                  minWidth: 0,
+                                  color: tone.rowHint,
+                                  overflowWrap: "anywhere",
+                                  fontFamily:
+                                    '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                }}
+                              >
+                                {runtimeLog.readySummary.url ||
+                                  runtimeLog.readySummary.detail}
+                              </Typography>
+                            )}
+                          </Stack>
+                        ) : null}
+
                         <Box
+                          ref={runtimeLogBoxRef}
                           sx={{
                             flex: 1,
                             minHeight: 260,
@@ -3590,7 +4317,9 @@ export function ProjectsPage({
                             overflowWrap: "anywhere",
                           }}
                         >
-                          {runtimeLog.loading ? (
+                          {runtimeLogClearing ? (
+                            "正在清空日志..."
+                          ) : runtimeLog.loading ? (
                             "正在读取日志..."
                           ) : runtimeLog.error ? (
                             runtimeLog.error
@@ -3605,11 +4334,100 @@ export function ProjectsPage({
 
                       {detailsPanelTab === "webActions" &&
                       detailsWebActionsContext ? (
-                        <WebActionsPanel
-                          active
-                          compact
-                          context={detailsWebActionsContext}
-                        />
+                        <Stack spacing={0.85}>
+                          {(() => {
+                            const preflight = runtimePreflight.response;
+                            const webChecks = (preflight?.checks ?? []).filter(
+                              (check) => check.category === "webActions",
+                            );
+                            const palette = buildPreflightPalette(
+                              preflight?.statusKey ?? "info",
+                              mono,
+                            );
+                            return (
+                              <Box
+                                sx={{
+                                  px: 0.9,
+                                  py: 0.72,
+                                  borderRadius: "14px",
+                                  border: `1px solid ${tone.searchWrapBorder}`,
+                                  bgcolor: tone.searchWrapBg,
+                                  boxShadow: tone.searchWrapShadow,
+                                }}
+                              >
+                                <Stack
+                                  direction="row"
+                                  alignItems="center"
+                                  spacing={0.65}
+                                  sx={{ minWidth: 0 }}
+                                >
+                                  <Box
+                                    sx={{
+                                      width: 6,
+                                      height: 6,
+                                      borderRadius: "50%",
+                                      bgcolor: palette.dot,
+                                      flex: "0 0 auto",
+                                    }}
+                                  />
+                                  <Typography
+                                    variant="caption"
+                                    noWrap
+                                    sx={{
+                                      color: tone.rowTitle,
+                                      fontWeight: 800,
+                                      flex: "0 0 auto",
+                                    }}
+                                  >
+                                    受控链路
+                                  </Typography>
+                                  <Typography
+                                    variant="caption"
+                                    noWrap
+                                    sx={{
+                                      color: tone.rowHint,
+                                      minWidth: 0,
+                                      flex: 1,
+                                    }}
+                                  >
+                                    {runtimePreflight.loading
+                                      ? "检查中"
+                                      : webChecks
+                                          .map(
+                                            (check) =>
+                                              `${check.title}: ${check.statusLabel}`,
+                                          )
+                                          .join(" · ") ||
+                                        preflight?.summary ||
+                                        "未检查"}
+                                  </Typography>
+                                  <IconButton
+                                    aria-label="刷新受控链路预检"
+                                    disabled={runtimePreflight.loading}
+                                    onClick={() =>
+                                      setRuntimePreflightRefreshKey(
+                                        (current) => current + 1,
+                                      )
+                                    }
+                                    sx={{
+                                      width: 26,
+                                      height: 26,
+                                      borderRadius: "9px",
+                                      color: tone.toolButtonColor,
+                                    }}
+                                  >
+                                    <RefreshIcon fontSize="small" />
+                                  </IconButton>
+                                </Stack>
+                              </Box>
+                            );
+                          })()}
+                          <WebActionsPanel
+                            active
+                            compact
+                            context={detailsWebActionsContext}
+                          />
+                        </Stack>
                       ) : null}
 	                </RuntimePanelDrawer>
 	              ) : null}
@@ -4296,44 +5114,22 @@ export function ProjectsPage({
               </Dialog>
 
               {!finderIsProjects && totalShortcutCount === 0 ? (
-                <Box
-                  sx={{
-                    px: 1.2,
-                    py: 0.86,
-                    borderRadius: "12px",
-                    border: `1px solid ${tone.emptyBorder}`,
-                    backgroundColor: tone.emptyBg,
-                    boxShadow: tone.emptyShadow,
-                  }}
-                >
-                  <Typography variant="body2" sx={{ color: tone.emptyText }}>
-                    还没有配置这类入口，检查 `navigation.toml` 或继续补充快捷入口。
-                  </Typography>
-                </Box>
+                <AppEmptyState
+                  compact
+                  title="暂无入口"
+                  description="检查 navigation.toml 或继续补充快捷入口。"
+                />
               ) : null}
 
               {!finderIsProjects &&
               totalShortcutCount > 0 &&
               filteredShortcutEntries.length === 0 ? (
-                <Box
-                  sx={{
-                    px: 1.2,
-                    py: 1.1,
-                    borderRadius: "16px",
-                    border: `1px solid ${tone.emptyBorder}`,
-                    backgroundColor: tone.emptyBg,
-                    boxShadow: tone.emptyShadow,
-                  }}
-                >
-                  <Typography variant="body2" sx={{ color: tone.emptyText }}>
-                    当前没有匹配入口，试试切换分类或调整搜索词。
-                  </Typography>
-                </Box>
+                <AppEmptyState compact title="没有匹配入口" description="切换分类或调整搜索词。" />
               ) : null}
 
               {!finderIsProjects && filteredShortcutEntries.length > 0 ? (
                 <Stack
-                  spacing={0.6}
+                  spacing={0.4}
                   minWidth={0}
                   minHeight={0}
                   flex="1 1 auto"
@@ -4342,15 +5138,16 @@ export function ProjectsPage({
                   <Box
                     ref={finderListRef}
                     className="module-list-scroll finder-list-scroll"
+                    onScroll={handleFinderListScroll}
                     sx={{
                       display: "grid",
-                      gap: 0.56,
+                      gap: 0.32,
                       alignContent: "start",
                       flex: "1 1 auto",
                       minHeight: 0,
                     }}
                   >
-                    {pagedShortcutEntries.map((item, index) => {
+                    {visibleShortcutEntries.map((item, index) => {
                     const detailLines = buildFinderEntryDetails(item);
                     const shortcutKey = buildFinderShortcutKey(item);
                     const shortcutConfirmed =
@@ -4408,16 +5205,16 @@ export function ProjectsPage({
                               xs: "minmax(0,1fr)",
                               md: "minmax(0, 1fr) max-content",
                             },
-                            columnGap: { xs: 0.9, md: 0.85 },
-                            rowGap: 0.58,
+                            columnGap: { xs: 0.94, md: 0.9 },
+                            rowGap: 0.5,
                             alignItems: "center",
                             width: "100%",
                             minWidth: 0,
-                            minHeight: { xs: 58, md: 48 },
+                            minHeight: { xs: 62, md: 54 },
                             px: 1.05,
-                            py: { xs: 0.9, md: 0.72 },
-                            pr: { xs: 10.1, md: 1.05 },
-                            borderRadius: "14px",
+                            py: { xs: 0.9, md: 0.76 },
+                            pr: { xs: 10.8, md: 1.05 },
+                            borderRadius: "15px",
                             cursor: "pointer",
                             textAlign: "left",
                             font: "inherit",
@@ -4452,7 +5249,7 @@ export function ProjectsPage({
                           <Stack
                             direction="row"
                             alignItems="center"
-                            spacing={0.9}
+                            spacing={0.85}
                             minWidth={0}
                             sx={{
                               pr: { xs: 0.75, md: 0 },
@@ -4462,12 +5259,12 @@ export function ProjectsPage({
                             <Box
                               aria-hidden="true"
                               sx={{
-                                width: 26,
-                                height: 26,
+                                width: 28,
+                                height: 28,
                                 display: "grid",
                                 placeItems: "center",
                                 flexShrink: 0,
-                                borderRadius: "9px",
+                                borderRadius: "10px",
                                 border: `1px solid ${tone.actionGroupBorder}`,
                                 backgroundColor: shortcutConfirmed
                                   ? mono
@@ -4502,6 +5299,7 @@ export function ProjectsPage({
                                   sx={{
                                     minWidth: 0,
                                     fontWeight: 760,
+                                    fontSize: "0.92rem",
                                     lineHeight: 1.18,
                                     color: tone.rowTitle,
                                   }}
@@ -4545,7 +5343,7 @@ export function ProjectsPage({
                                 noWrap
                                 sx={{
                                   display: "block",
-                                  mt: 0.28,
+                                  mt: 0.22,
                                   overflow: "hidden",
                                   textOverflow: "ellipsis",
                                   letterSpacing: 0,
@@ -4559,7 +5357,7 @@ export function ProjectsPage({
 
                           <Stack
                             direction="row"
-                            spacing={0.45}
+                            spacing={0.38}
                             justifyContent={{ xs: "flex-start", md: "flex-end" }}
                             sx={{
                               gridColumn: { md: 2 },
@@ -4568,8 +5366,8 @@ export function ProjectsPage({
                               flexShrink: 0,
                               justifySelf: { md: "end" },
                               alignSelf: "center",
-                              px: 0.45,
-                              py: 0.26,
+                              px: 0.42,
+                              py: 0.24,
                               borderRadius: "999px",
                               border: `1px solid ${tone.actionGroupBorder}`,
                               backgroundColor: tone.actionGroupBg,
@@ -4588,8 +5386,8 @@ export function ProjectsPage({
                                   void handleOpenShortcut(item, shortcutKey);
                                 }}
                                 sx={{
-                                  width: 26,
-                                  height: 26,
+                                  width: 28,
+                                  height: 28,
                                   borderRadius: "999px",
                                   bgcolor: tone.startButtonBg,
                                   color: tone.startButtonColor,
@@ -4611,8 +5409,8 @@ export function ProjectsPage({
                                   setShortcutMenuKey(shortcutKey);
                                 }}
                                 sx={{
-                                  width: 26,
-                                  height: 26,
+                                  width: 28,
+                                  height: 28,
                                   borderRadius: "999px",
                                   bgcolor: tone.stopButtonBg,
                                   color: tone.stopButtonColor,
@@ -4630,32 +5428,29 @@ export function ProjectsPage({
                       </Tooltip>
                     );
                     })}
-                  </Box>
-                  {finderPageCount > 1 ? (
                     <Stack
-                      direction="row"
-                      justifyContent="flex-end"
-                      sx={{ pt: 0.25 }}
+                      className={
+                        hasMoreFinderEntries
+                          ? "workflow-history-footer"
+                          : "workflow-history-footer workflow-history-footer--done"
+                      }
                     >
-                      <Pagination
-                        aria-label="访达分页"
-                        size="small"
-                        page={activeFinderPage}
-                        count={finderPageCount}
-                        siblingCount={0}
-                        boundaryCount={1}
-                        onChange={(_, nextPage) => setFinderPage(nextPage)}
-                        sx={{
-                          "& .MuiPaginationItem-root": {
-                            minWidth: 26,
-                            height: 26,
-                            borderRadius: "9px",
-                            fontWeight: 800,
-                          },
-                        }}
-                      />
+                      {hasMoreFinderEntries ? (
+                        <Button
+                          size="small"
+                          variant="text"
+                          onClick={loadMoreFinderEntries}
+                          className="workflow-history-footer-action"
+                        >
+                          下滑加载更多
+                        </Button>
+                      ) : (
+                        <Typography variant="caption" className="workflow-history-footer-text">
+                          没有更多了
+                        </Typography>
+                      )}
                     </Stack>
-                  ) : null}
+                  </Box>
                 </Stack>
               ) : null}
               <Menu
