@@ -9,11 +9,14 @@ import type {
   BranchPushAction,
   BranchPushStatus,
   BranchTaskHistoryEntry,
+  BranchTaskReplayRequest,
   BranchWorkflowMode,
   BranchWorktreeSummary,
+  AppExitRuntimePolicy,
   CreateProjectWorkspacePayload,
   InitDemandWorkspacePayload,
   InitDemandWorkspaceResult,
+  ProjectManagementViewKey,
   ProjectWorkspaceSummary,
 } from "./app-types";
 import type {
@@ -21,13 +24,17 @@ import type {
   ProjectSummary,
 } from "./hooks/useBranchContext";
 import type { BuildRequest } from "./hooks/useBuildContext";
+import type { BuildReplayOptions } from "./hooks/useBuildHistoryState";
 import type { WorkflowSignalsState } from "./hooks/useWorkflowSignals";
 import type { WorkflowProjectReplay } from "./lib/workflowSignals";
+import type { AppStyleMode } from "./theme";
 import type { BuildPageProps } from "./pages/BuildPage";
 import type { MergePageProps } from "./pages/MergePage";
 import type { OverviewPageProps } from "./pages/OverviewPage";
+import type { ProjectManagementPageProps } from "./pages/ProjectManagementPage";
 import type { ProxyPageProps } from "./pages/ProxyPage";
 import type { ProjectsPageProps } from "./pages/ProjectsPage";
+import type { ResourcesPageProps } from "./pages/ResourcesPage";
 
 export type PageComponent = LazyExoticComponent<ComponentType<any>>;
 
@@ -36,11 +43,12 @@ export type AppPagePropsMap = {
   build: BuildPageProps;
   merge: MergePageProps;
   proxy: ProxyPageProps;
-  projects: ProjectsPageProps;
+  projectManagement: ProjectManagementPageProps;
+  resources: ResourcesPageProps;
 };
 
 export type AppShellContext = {
-  enabledPages: Array<"overview" | "projects" | "merge" | "build" | "proxy">;
+  enabledPages: Array<"overview" | "projectManagement" | "resources" | "merge" | "build" | "proxy">;
   projects: ProjectSummary[];
   buildProjects: ProjectSummary[];
   branchProjects: ProjectSummary[];
@@ -48,15 +56,32 @@ export type AppShellContext = {
   selectedProjectInfo: ProjectSummary | null;
   projectWorkspaces: ProjectWorkspaceSummary[];
   activeProjectWorkspaceKey: string;
+  page: "overview" | "projectManagement" | "resources" | "merge" | "build" | "proxy";
+  defaultPage: "overview" | "projectManagement" | "resources" | "merge" | "build" | "proxy";
+  projectManagementView: ProjectManagementViewKey;
+  styleMode: AppStyleMode;
+  setStyleMode: (mode: AppStyleMode) => void;
+  exitRuntimePolicy: AppExitRuntimePolicy;
+  setExitRuntimePolicy: (policy: AppExitRuntimePolicy) => void;
+  setEnabledPages: (pages: Array<"overview" | "projectManagement" | "resources" | "merge" | "build" | "proxy">) => void;
+  setDefaultPage: (page: "overview" | "projectManagement" | "resources" | "merge" | "build" | "proxy") => void;
+  setProjectManagementView: (view: ProjectManagementViewKey) => void;
   setSelectedProject: (projectKey: string) => void;
-  setPage: (page: "overview" | "projects" | "merge" | "build" | "proxy") => void;
+  setPage: (page: "overview" | "projectManagement" | "resources" | "merge" | "build" | "proxy") => void;
   onProjectWorkspaceChange: (workspaceKey: string) => Promise<void> | void;
   onCreateProjectWorkspace: (payload: CreateProjectWorkspacePayload) => Promise<void> | void;
   onInitDemandWorkspace: (
     payload: InitDemandWorkspacePayload,
   ) => Promise<InitDemandWorkspaceResult> | InitDemandWorkspaceResult;
   onProjectConfigSaved: () => Promise<void> | void;
+  workspaceConfigOpenSignal: number;
+  resourceConfigOpenSignal: number;
+  onOpenWorkspaceConfig: () => void;
+  onOpenResourceConfig: () => void;
   onOpenProjectWorkspacesDir: () => void;
+  onOpenConfigDir: () => void;
+  onOpenConfigFile: () => void;
+  onOpenNavigationConfigFile: () => void;
 };
 
 export type BuildModuleContext = {
@@ -82,7 +107,8 @@ export type BuildModuleContext = {
   handleTriggerBuildRequest: (
     request: BuildRequest,
     busyText?: string,
-  ) => Promise<void>;
+    options?: BuildReplayOptions,
+  ) => Promise<boolean>;
   handleRefreshBuild: () => Promise<void>;
   handleReplayBuildHistory: BuildPageProps["onReplayBuildHistory"];
   handleOpenBuildRecord: () => Promise<void>;
@@ -136,6 +162,8 @@ export type MergeModuleContext = {
   setPushAction: Dispatch<SetStateAction<BranchPushAction>>;
   pushCommitMessage: string;
   setPushCommitMessage: Dispatch<SetStateAction<string>>;
+  pushSelectedPaths: string[];
+  setPushSelectedPaths: Dispatch<SetStateAction<string[]>>;
   pushStatus: BranchPushStatus | null;
   pushStatusLoading: boolean;
   pushStatusError: string;
@@ -159,11 +187,22 @@ export type MergeModuleContext = {
   handleClearBranchTaskHistory: () => Promise<void>;
   handleChooseCheckoutDirectory: () => Promise<void>;
   handleChooseWorktreeDirectory: () => Promise<void>;
+  handleRepairWorktree: (repoPath?: string) => Promise<void>;
   handleExecuteSync: () => Promise<void>;
   handleExecuteCreate: () => Promise<void>;
   handleExecuteCheckout: () => Promise<void>;
   handleExecuteSwitch: () => Promise<void>;
   handleExecutePush: () => Promise<void>;
+  handleReplayBranchRequest: (
+    replay: BranchTaskReplayRequest,
+    options?: {
+      force?: boolean;
+      workspaceKey?: string | null;
+      chainId?: string | null;
+      parentId?: string | null;
+      stepLabel?: string | null;
+    },
+  ) => Promise<boolean>;
   handleReplayBranchTaskHistory: MergePageProps["onReplayBranchTaskHistory"];
   handleOpenTaskOutput: (path: string) => Promise<void>;
 };
@@ -203,6 +242,7 @@ export type ProjectsModuleContext = {
     envOverrides?: Record<string, string>,
   ) => Promise<void>;
   handleStopRuntime: (projectKey: string) => Promise<void>;
+  handleAdoptRuntime: (projectKey: string, debugProfileKey?: string) => Promise<void>;
   handleRunBuild: (projectKey: string) => Promise<void>;
   handleStopBuild: (projectKey: string) => Promise<void>;
   handleOpenBuildOutput: (projectKey: string) => Promise<void>;
@@ -225,7 +265,7 @@ export type ProxyModuleContext = {
   busy: string;
   error: string;
   setSelectedProfileId: ProxyPageProps["onSelectedProfileChange"];
-  loadProxyDashboard: () => Promise<void>;
+  loadProxyDashboard: (options?: Parameters<ProxyPageProps["onRefresh"]>[0]) => Promise<void>;
   saveProxyProfile: ProxyPageProps["onSaveProfile"];
   deleteProxyProfile: ProxyPageProps["onDeleteProfile"];
   saveProxyRule: ProxyPageProps["onSaveRule"];
@@ -235,7 +275,6 @@ export type ProxyModuleContext = {
   clearProxyEvents: ProxyPageProps["onClearEvents"];
   exportProxyProfilePack: ProxyPageProps["onExportProfilePack"];
   importProxyProfilePack: ProxyPageProps["onImportProfilePack"];
-  bindProxyRuntimeProfile: ProxyPageProps["onBindProxyRuntimeProfile"];
   diagnoseProxyRequest: ProxyPageProps["onDiagnoseRequest"];
 };
 

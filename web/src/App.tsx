@@ -1,5 +1,6 @@
 import {
   Suspense,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -11,9 +12,12 @@ import {
   ThemeProvider,
 } from "@mui/material";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { APP_MODULE_MAP, buildPagePropsFor } from "./app-modules";
 import { AppShellLayout } from "./components/AppShellLayout";
+import { AppExitDialog } from "./components/AppExitDialog";
 import { CommandPalette } from "./components/CommandPalette";
+import { ConfigSourceManagerDialog } from "./components/ConfigSourceManagerDialog";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { useAppShell } from "./hooks/useAppShell";
 import { useActivityCenter } from "./hooks/useActivityCenter";
@@ -35,6 +39,12 @@ import type {
   InitDemandWorkspaceResult,
 } from "./app-types";
 import type { ActivityEntry } from "./lib/activityCenter";
+import type { TrayPinnedAction } from "./lib/trayPins";
+import {
+  executeTrayPinnedActionWorkflow,
+  TRAY_DOMAIN_ACTION_REQUESTED_EVENT,
+} from "./lib/trayActionExecution";
+import { disposeTauriListener } from "./lib/tauriEvents";
 import { createAppTheme } from "./theme";
 
 type AppInfo = {
@@ -42,6 +52,7 @@ type AppInfo = {
   configPath?: string;
   workspacesPath?: string;
   navigationPath?: string;
+  linksPath?: string;
 };
 
 const WORKFLOW_AUTO_OPEN_WINDOW_MS = 10 * 60 * 1000;
@@ -55,8 +66,22 @@ function App() {
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [activityConfigSourceRequest, setActivityConfigSourceRequest] = useState<{
+    sourceId: string;
+    nonce: number;
+  } | null>(null);
 
   const appShell = useAppShell({ setError });
+  const [workspaceConfigOpenSignal, setWorkspaceConfigOpenSignal] = useState(0);
+  const [resourceConfigOpenSignal, setResourceConfigOpenSignal] = useState(0);
+  const openWorkspaceConfig = useCallback(() => {
+    appShell.setPage("overview");
+    setWorkspaceConfigOpenSignal((current) => current + 1);
+  }, [appShell]);
+  const openResourceConfig = useCallback(() => {
+    appShell.setPage("resources");
+    setResourceConfigOpenSignal((current) => current + 1);
+  }, [appShell]);
   const activeProjectWorkspace = useMemo(
     () =>
       appShell.projectWorkspaces.find(
@@ -75,12 +100,20 @@ function App() {
   });
   const workflowSignals = useWorkflowSignals({ setError });
   const workflowAutoRunKeyRef = useRef("");
-  const buildAvailable = appShell.enabledPages.includes("build");
-  const mergeAvailable = appShell.enabledPages.includes("merge");
-  const projectsAvailable = appShell.enabledPages.includes("projects");
+  const projectManagementAvailable = appShell.enabledPages.includes("projectManagement");
+  const resourcesAvailable = appShell.enabledPages.includes("resources");
+  const projectsAvailable = projectManagementAvailable || resourcesAvailable;
+  const buildAvailable = appShell.enabledPages.includes("build") || projectManagementAvailable;
+  const mergeAvailable = appShell.enabledPages.includes("merge") || projectManagementAvailable;
   const proxyAvailable = appShell.enabledPages.includes("proxy");
-  const buildEnabled = buildAvailable && appShell.page === "build";
-  const mergeEnabled = mergeAvailable && appShell.page === "merge";
+  const projectManagementBuildActive =
+    appShell.page === "projectManagement" && appShell.projectManagementView === "build";
+  const projectManagementGitActive =
+    appShell.page === "projectManagement" && appShell.projectManagementView === "git";
+  const buildEnabled =
+    buildAvailable && (appShell.page === "build" || projectManagementBuildActive);
+  const mergeEnabled =
+    mergeAvailable && (appShell.page === "merge" || projectManagementGitActive);
   const proxyEnabled = proxyAvailable && appShell.page === "proxy";
   const branchEnabled = buildEnabled || mergeEnabled;
   const buildProjects = useMemo(
@@ -92,9 +125,24 @@ function App() {
     [appShell.projects],
   );
 
-  const appTheme = useMemo(() => createAppTheme(appShell.styleMode), [appShell.styleMode]);
+  const appTheme = useMemo(
+    () => createAppTheme(appShell.effectiveStyleMode),
+    [appShell.effectiveStyleMode],
+  );
   const activeModule = APP_MODULE_MAP[appShell.page];
   const ActivePage = activeModule.component;
+
+  useEffect(() => {
+    if (appShell.page === "build") {
+      appShell.setProjectManagementView("build");
+      appShell.setPage("projectManagement");
+      return;
+    }
+    if (appShell.page === "merge") {
+      appShell.setProjectManagementView("git");
+      appShell.setPage("projectManagement");
+    }
+  }, [appShell]);
 
   useEffect(() => {
     if (!mergeEnabled) {
@@ -139,6 +187,7 @@ function App() {
 
   const buildModule = useBuildModule({
     buildEnabled,
+    activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
     selectedProject: appShell.selectedProject,
     branchOptions: branchContext.branchOptions,
     setBusy,
@@ -147,6 +196,13 @@ function App() {
     updateActivity: activityCenter.updateActivity,
     syncActivities: activityCenter.syncActivities,
   });
+
+  useEffect(() => {
+    if (!buildEnabled) {
+      return;
+    }
+    void buildModule.loadBuildHistory();
+  }, [appShell.activeProjectWorkspaceKey, buildEnabled]);
 
   useEffect(() => {
     if (
@@ -165,6 +221,7 @@ function App() {
 
   const mergeModule = useBranchWorkflowModule({
     enabled: mergeEnabled,
+    activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
     projects: branchProjects,
     selectedProject: appShell.selectedProject,
     sourceBranchOptions: mergeSelection.sourceBranchOptions,
@@ -176,8 +233,16 @@ function App() {
     recordActivity: activityCenter.recordActivity,
     updateActivity: activityCenter.updateActivity,
   });
+
+  useEffect(() => {
+    if (!mergeEnabled) {
+      return;
+    }
+    void mergeModule.loadBranchTaskHistory();
+  }, [appShell.activeProjectWorkspaceKey, mergeEnabled]);
   const projectsModule = useProjectsModule({
     enabled: projectsAvailable,
+    activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
     setBusy,
     setError,
     workflowBroadcastRules: workflowSignals.rules.broadcasts,
@@ -190,6 +255,65 @@ function App() {
     enabled: proxyEnabled,
     setError,
   });
+  const trayDomainActionRunningRef = useRef(false);
+  const trayDomainActionHandlerRef = useRef<
+    (action: TrayPinnedAction) => Promise<void>
+  >(async () => undefined);
+  trayDomainActionHandlerRef.current = async (action) => {
+    if (trayDomainActionRunningRef.current) {
+      return;
+    }
+    trayDomainActionRunningRef.current = true;
+    try {
+      await executeTrayPinnedActionWorkflow(action, {
+        activateWorkspace: async (workspaceKey) => {
+          if (workspaceKey !== appShell.activeProjectWorkspaceKey) {
+            await changeProjectWorkspace(workspaceKey);
+          }
+        },
+        replayBuild: (request, options) =>
+          buildModule.handleTriggerBuildRequest(
+            request,
+            "正在重播构建",
+            options,
+          ),
+        replayBranch: (replay, options) =>
+          mergeModule.handleReplayBranchRequest(replay, options),
+        executeFallback: (nextAction) =>
+          invoke("execute_tray_pinned_action", { action: nextAction }),
+        recordDomainExecution: (nextAction) =>
+          invoke("record_tray_pinned_action_execution", {
+            action: nextAction,
+          }),
+      });
+    } finally {
+      trayDomainActionRunningRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<TrayPinnedAction>(
+      TRAY_DOMAIN_ACTION_REQUESTED_EVENT,
+      (event) => {
+        void trayDomainActionHandlerRef.current(event.payload).catch((reason) => {
+          setError(String(reason));
+        });
+      },
+    ).then((nextUnlisten) => {
+      if (disposed) {
+        disposeTauriListener(nextUnlisten);
+      } else {
+        unlisten = nextUnlisten;
+      }
+    });
+    return () => {
+      disposed = true;
+      disposeTauriListener(unlisten);
+    };
+  }, []);
+
   const moduleRuntime = useMemo(
     () => ({
       appShell,
@@ -209,7 +333,14 @@ function App() {
       onCreateProjectWorkspace: createProjectWorkspace,
       onInitDemandWorkspace: initDemandWorkspace,
       onProjectConfigSaved: reloadProjectsAfterConfigSave,
+      workspaceConfigOpenSignal,
+      resourceConfigOpenSignal,
+      onOpenWorkspaceConfig: openWorkspaceConfig,
+      onOpenResourceConfig: openResourceConfig,
       onOpenProjectWorkspacesDir: openProjectWorkspacesDir,
+      onOpenConfigDir: openConfigDir,
+      onOpenConfigFile: openConfigFile,
+      onOpenNavigationConfigFile: openNavigationConfigFile,
     },
     branchContext,
     mergeSelection,
@@ -233,7 +364,11 @@ function App() {
     setError,
   });
 
-  usePageScrollReset(appShell.page);
+  usePageScrollReset(
+    appShell.page === "projectManagement"
+      ? `${appShell.page}:${appShell.projectManagementView}`
+      : appShell.page,
+  );
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -288,7 +423,7 @@ function App() {
     if (branchReceivers.length > 0 && !mergeAvailable) {
       return;
     }
-    if (projectReceivers.length > 0 && !projectsAvailable) {
+    if (projectReceivers.length > 0 && !projectManagementAvailable) {
       return;
     }
     if (buildReceivers.length > 0 && !buildAvailable) {
@@ -350,7 +485,7 @@ function App() {
     buildModule,
     mergeAvailable,
     mergeModule,
-    projectsAvailable,
+    projectManagementAvailable,
     projectsModule,
     workflowSignals,
   ]);
@@ -417,11 +552,9 @@ function App() {
       if (buildEnabled) {
         await buildModule.loadBuildHistory();
       }
-      if (proxyEnabled) {
-        await proxyModule.loadProxyDashboard();
-      }
     } catch (reason) {
       setError(String(reason));
+      throw reason;
     }
   }
 
@@ -473,17 +606,33 @@ function App() {
     if (target.projectKey) {
       appShell.setSelectedProject(target.projectKey);
     }
-    if (target.page === "merge" && target.branchMode) {
-      mergeModule.setMode(target.branchMode);
+    let nextPage = target.page;
+    if (target.page === "build") {
+      appShell.setProjectManagementView("build");
+      nextPage = "projectManagement";
     }
-    if (target.page === "projects") {
+    if (target.page === "merge") {
+      appShell.setProjectManagementView("git");
+      nextPage = "projectManagement";
+      if (target.branchMode) {
+        mergeModule.setMode(target.branchMode);
+      }
+    }
+    if (target.page === "projectManagement") {
+      appShell.setProjectManagementView("projects");
       projectsModule.setFinderType("项目");
       if (entry.projectName || entry.projectKey) {
         projectsModule.setFinderQuery(entry.projectName || entry.projectKey || "");
       }
       void projectsModule.loadFinderData();
     }
-    appShell.setPage(target.page);
+    if (target.page === "resources") {
+      if (projectsModule.finderType === "项目") {
+        projectsModule.setFinderType("网站");
+      }
+      void projectsModule.loadFinderData();
+    }
+    appShell.setPage(nextPage);
   }
 
   async function openActivityResource(entry: ActivityEntry) {
@@ -501,6 +650,46 @@ function App() {
     }
   }
 
+  async function runActivityAction(entry: ActivityEntry) {
+    const action = entry.action;
+    if (!action) {
+      return;
+    }
+    if (action.kind === "compareConfigSource") {
+      setActivityConfigSourceRequest({
+        sourceId: action.sourceId,
+        nonce: Date.now(),
+      });
+      return;
+    }
+
+    setBusy("正在重新加载配置");
+    setError("");
+    try {
+      await appShell.reloadWorkspaceConfiguration();
+      if (projectsAvailable) {
+        await projectsModule.loadFinderData({ force: true });
+      }
+      activityCenter.updateActivity(entry.id, {
+        status: "success",
+        summary: "已重新加载并应用最新配置",
+        action: null,
+        acknowledgedAt: new Date().toISOString(),
+      });
+    } catch (reason) {
+      const message = String(reason);
+      setError(message);
+      activityCenter.updateActivity(entry.id, {
+        status: "failed",
+        summary: "重新加载配置失败",
+        detail: message,
+        acknowledgedAt: null,
+      });
+    } finally {
+      setBusy("");
+    }
+  }
+
   return (
     <ThemeProvider theme={appTheme}>
       <CssBaseline />
@@ -508,12 +697,16 @@ function App() {
         visibleNavItems={appShell.visibleNavItems}
         activePage={appShell.page}
         onPageChange={appShell.setPage}
+        projectManagementView={appShell.projectManagementView}
+        onProjectManagementViewChange={appShell.setProjectManagementView}
         enabledPages={appShell.enabledPages}
         onEnabledPagesChange={appShell.setEnabledPages}
         defaultPage={appShell.defaultPage}
         onDefaultPageChange={appShell.setDefaultPage}
         styleMode={appShell.styleMode}
         onStyleModeChange={appShell.setStyleMode}
+        exitRuntimePolicy={appShell.exitRuntimePolicy}
+        onExitRuntimePolicyChange={appShell.setExitRuntimePolicy}
         projectWorkspaces={appShell.projectWorkspaces}
         activeProjectWorkspaceKey={appShell.activeProjectWorkspaceKey}
         onProjectWorkspaceChange={changeProjectWorkspace}
@@ -522,6 +715,8 @@ function App() {
         onOpenConfigFile={openConfigFile}
         onOpenProjectWorkspacesDir={openProjectWorkspacesDir}
         onOpenNavigationConfigFile={openNavigationConfigFile}
+        onOpenWorkspaceConfig={openWorkspaceConfig}
+        onOpenResourceConfig={openResourceConfig}
         onCreateProjectWorkspace={createProjectWorkspace}
         onProjectConfigSaved={reloadProjectsAfterConfigSave}
         activityItems={activityCenter.items}
@@ -530,6 +725,7 @@ function App() {
         onOpenActivityResource={(entry) => {
           void openActivityResource(entry);
         }}
+        onRunActivityAction={runActivityAction}
         onRefreshActivities={activityCenter.refreshBuildActivities}
         onAcknowledgeActivityEntry={(entry) => {
           activityCenter.acknowledgeActivity(entry.id);
@@ -562,12 +758,14 @@ function App() {
         open={commandPaletteOpen}
         navItems={appShell.visibleNavItems}
         activePage={appShell.page}
+        projectManagementView={appShell.projectManagementView}
         projects={appShell.projects}
         selectedProjectKey={appShell.selectedProject}
         runtimeEntries={projectsModule.runtimeEntries}
         shortcutEntries={projectsModule.shortcutEntries}
         onClose={() => setCommandPaletteOpen(false)}
         onPageChange={appShell.setPage}
+        onProjectManagementViewChange={appShell.setProjectManagementView}
         onProjectChange={appShell.setSelectedProject}
         onOpenFinderEntry={projectsModule.handleOpenFinderEntry}
         onStartRuntime={projectsModule.handleStartRuntime}
@@ -578,6 +776,14 @@ function App() {
         onFocusRuntime={projectsModule.handleFocusRuntime}
         onOpenProjectDirectory={projectsModule.handleOpenProjectDirectory}
       />
+      <ConfigSourceManagerDialog
+        key={activityConfigSourceRequest?.nonce ?? "activity-config-source"}
+        open={Boolean(activityConfigSourceRequest)}
+        initialSourceId={activityConfigSourceRequest?.sourceId}
+        compareOnOpen
+        onClose={() => setActivityConfigSourceRequest(null)}
+      />
+      <AppExitDialog onError={setError} />
     </ThemeProvider>
   );
 }

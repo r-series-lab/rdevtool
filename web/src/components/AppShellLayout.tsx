@@ -5,11 +5,17 @@ import {
   MenuItem,
 } from "@mui/material";
 import type { PageKey } from "../app-shell";
-import type { CreateProjectWorkspacePayload, ProjectWorkspaceSummary } from "../app-types";
+import type {
+  AppExitRuntimePolicy,
+  CreateProjectWorkspacePayload,
+  ProjectManagementViewKey,
+  ProjectWorkspaceSummary,
+} from "../app-types";
 import type { ActivityEntry } from "../lib/activityCenter";
 import type { AppStyleMode } from "../theme";
 import {
   CheckIcon,
+  CollapseIcon,
   ExpandIcon,
   FolderIcon,
   AppWindowIcon,
@@ -34,12 +40,16 @@ type AppShellLayoutProps = {
   visibleNavItems: NavItem[];
   activePage: PageKey;
   onPageChange: (page: PageKey) => void;
+  projectManagementView: ProjectManagementViewKey;
+  onProjectManagementViewChange: (view: ProjectManagementViewKey) => void;
   enabledPages: PageKey[];
   onEnabledPagesChange: (pages: PageKey[]) => void;
   defaultPage: PageKey;
   onDefaultPageChange: (page: PageKey) => void;
   styleMode: AppStyleMode;
   onStyleModeChange: (mode: AppStyleMode) => void;
+  exitRuntimePolicy: AppExitRuntimePolicy;
+  onExitRuntimePolicyChange: (policy: AppExitRuntimePolicy) => void;
   projectWorkspaces: ProjectWorkspaceSummary[];
   activeProjectWorkspaceKey: string;
   onProjectWorkspaceChange: (workspaceKey: string) => Promise<void> | void;
@@ -48,12 +58,15 @@ type AppShellLayoutProps = {
   onOpenConfigFile: () => void;
   onOpenProjectWorkspacesDir: () => void;
   onOpenNavigationConfigFile: () => void;
+  onOpenWorkspaceConfig: () => void;
+  onOpenResourceConfig: () => void;
   onCreateProjectWorkspace: (payload: CreateProjectWorkspacePayload) => Promise<void> | void;
   onProjectConfigSaved: () => Promise<void> | void;
   activityItems: ActivityEntry[];
   activityAlertCount: number;
   onOpenActivityEntry: (entry: ActivityEntry) => void;
   onOpenActivityResource: (entry: ActivityEntry) => void;
+  onRunActivityAction: (entry: ActivityEntry) => Promise<void> | void;
   onRefreshActivities: (options?: { force?: boolean }) => Promise<void> | void;
   onAcknowledgeActivityEntry: (entry: ActivityEntry) => void;
   onAcknowledgeActivityEntries: (entries: ActivityEntry[]) => void;
@@ -79,7 +92,9 @@ function navIconForPage(key: PageKey) {
   switch (key) {
     case "overview":
       return <AppWindowIcon className="nav-item-icon" fontSize="small" />;
-    case "projects":
+    case "projectManagement":
+      return <PackageIcon className="nav-item-icon" fontSize="small" />;
+    case "resources":
       return <FolderIcon className="nav-item-icon" fontSize="small" />;
     case "merge":
       return <WorkflowIcon className="nav-item-icon" fontSize="small" />;
@@ -96,12 +111,16 @@ export function AppShellLayout({
   visibleNavItems,
   activePage,
   onPageChange,
+  projectManagementView,
+  onProjectManagementViewChange,
   enabledPages,
   onEnabledPagesChange,
   defaultPage,
   onDefaultPageChange,
   styleMode,
   onStyleModeChange,
+  exitRuntimePolicy,
+  onExitRuntimePolicyChange,
   projectWorkspaces,
   activeProjectWorkspaceKey,
   onProjectWorkspaceChange,
@@ -110,12 +129,15 @@ export function AppShellLayout({
   onOpenConfigFile,
   onOpenProjectWorkspacesDir,
   onOpenNavigationConfigFile,
+  onOpenWorkspaceConfig,
+  onOpenResourceConfig,
   onCreateProjectWorkspace,
   onProjectConfigSaved,
   activityItems,
   activityAlertCount,
   onOpenActivityEntry,
   onOpenActivityResource,
+  onRunActivityAction,
   onRefreshActivities,
   onAcknowledgeActivityEntry,
   onAcknowledgeActivityEntries,
@@ -131,6 +153,9 @@ export function AppShellLayout({
   const [workspaceMenuAnchor, setWorkspaceMenuAnchor] = useState<HTMLElement | null>(null);
   const [workspaceSwitchingKey, setWorkspaceSwitchingKey] = useState("");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [projectManagementExpanded, setProjectManagementExpanded] = useState(
+    activePage === "projectManagement",
+  );
   const [activityPanelMode, setActivityPanelMode] = useState(() =>
     typeof window === "undefined"
       ? false
@@ -147,7 +172,26 @@ export function AppShellLayout({
     };
   }, []);
 
+  useEffect(() => {
+    if (activePage === "projectManagement") {
+      setProjectManagementExpanded(true);
+    }
+  }, [activePage]);
+
   function openSettings(section?: SettingsSection) {
+    if (section === "workspace") {
+      onOpenWorkspaceConfig();
+      return;
+    }
+    if (section === "finder") {
+      onOpenResourceConfig();
+      return;
+    }
+    if (document.activeElement instanceof HTMLElement) {
+      document.activeElement.blur();
+    }
+    setWorkspaceMenuAnchor(null);
+    setActivityOpen(false);
     setSettingsInitialSection(section);
     setSettingsOpen(true);
   }
@@ -172,6 +216,8 @@ export function AppShellLayout({
     setWorkspaceSwitchingKey(workspaceKey);
     try {
       await onProjectWorkspaceChange(workspaceKey);
+    } catch {
+      // The app-level workspace handler already reports the error.
     } finally {
       setWorkspaceSwitchingKey("");
     }
@@ -179,7 +225,29 @@ export function AppShellLayout({
 
   function openWorkspaceWorkbenchFromMenu() {
     closeWorkspaceMenu();
-    openSettings("workspace");
+    onOpenWorkspaceConfig();
+  }
+
+  function openProjectManagementFromSettings() {
+    closeSettings();
+    onPageChange("projectManagement");
+  }
+
+  function toggleProjectManagement() {
+    if (activePage !== "projectManagement") {
+      setProjectManagementExpanded(true);
+      onPageChange("projectManagement");
+      return;
+    }
+    setProjectManagementExpanded((current) => !current);
+  }
+
+  function selectProjectManagementView(view: ProjectManagementViewKey) {
+    setProjectManagementExpanded(true);
+    onProjectManagementViewChange(view);
+    if (activePage !== "projectManagement") {
+      onPageChange("projectManagement");
+    }
   }
 
   useEffect(() => {
@@ -201,6 +269,30 @@ export function AppShellLayout({
     null;
   const workspaceMenuOpen = Boolean(workspaceMenuAnchor);
   const toastMessage = error || visibleBusy;
+  const primaryNavItems = visibleNavItems.filter(
+    (item) => item.key !== "build" && item.key !== "merge",
+  );
+  const projectManagementItems: Array<{
+    key: ProjectManagementViewKey;
+    label: string;
+    icon: ReactNode;
+  }> = [
+    {
+      key: "projects",
+      label: "项目",
+      icon: <AppWindowIcon fontSize="small" />,
+    },
+    {
+      key: "build",
+      label: "构建",
+      icon: <PackageIcon fontSize="small" />,
+    },
+    {
+      key: "git",
+      label: "Git",
+      icon: <WorkflowIcon fontSize="small" />,
+    },
+  ];
 
   return (
       <div
@@ -253,26 +345,91 @@ export function AppShellLayout({
       </div>
       <aside className={`sidebar${desktopSidebarCollapsed ? " sidebar--collapsed" : ""}`}>
         <div className="shell-brand">
-          <div className="shell-brand-mark" aria-hidden="true">
-            R
+          <div className="shell-brand-wordmark" aria-label="rDevTool">
+            <span className="shell-brand-wordmark-accent">r</span>
+            <span>DevTool</span>
           </div>
         </div>
 
-        <nav className="nav-stack">
-          {visibleNavItems.map((item) => (
-            <Button
-              key={item.key}
-              variant="text"
-              color="inherit"
-              className={`nav-item${item.key === activePage ? " is-active" : ""}`}
-              onClick={() => onPageChange(item.key)}
-              title={item.label}
-              aria-current={item.key === activePage ? "page" : undefined}
-            >
-              {navIconForPage(item.key)}
-              <span className="nav-item-label">{item.shortLabel}</span>
-            </Button>
-          ))}
+        <nav className="nav-stack" aria-label="主菜单">
+          {primaryNavItems.map((item) =>
+            item.key === "projectManagement" ? (
+              <div
+                className={`nav-group nav-group--project-management${
+                  item.key === activePage ? " is-active" : ""
+                }`}
+                key={item.key}
+              >
+                <Button
+                  variant="text"
+                  color="inherit"
+                  className={`nav-item nav-item--parent${
+                    item.key === activePage ? " is-active" : ""
+                  }`}
+                  onClick={toggleProjectManagement}
+                  title={item.label}
+                  aria-current={item.key === activePage ? "page" : undefined}
+                  aria-expanded={projectManagementExpanded}
+                  aria-controls="project-management-sidebar-nav"
+                >
+                  {navIconForPage(item.key)}
+                  <span className="nav-item-label">{item.shortLabel}</span>
+                  {projectManagementExpanded ? (
+                    <CollapseIcon className="nav-item-chevron" fontSize="small" />
+                  ) : (
+                    <ExpandIcon className="nav-item-chevron" fontSize="small" />
+                  )}
+                </Button>
+                {projectManagementExpanded ? (
+                  <div
+                    className="project-management-sidebar-nav"
+                    id="project-management-sidebar-nav"
+                    aria-label="项目管理二级菜单"
+                  >
+                    {projectManagementItems.map((viewItem) => (
+                      <button
+                        type="button"
+                        key={viewItem.key}
+                        className={`project-management-sidebar-item${
+                          projectManagementView === viewItem.key &&
+                          activePage === "projectManagement"
+                            ? " is-active"
+                            : ""
+                        }`}
+                        onClick={() => selectProjectManagementView(viewItem.key)}
+                        aria-current={
+                          projectManagementView === viewItem.key &&
+                          activePage === "projectManagement"
+                            ? "page"
+                            : undefined
+                        }
+                      >
+                        <span className="project-management-sidebar-icon" aria-hidden="true">
+                          {viewItem.icon}
+                        </span>
+                        <span className="project-management-sidebar-label">
+                          {viewItem.label}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <Button
+                key={item.key}
+                variant="text"
+                color="inherit"
+                className={`nav-item${item.key === activePage ? " is-active" : ""}`}
+                onClick={() => onPageChange(item.key)}
+                title={item.label}
+                aria-current={item.key === activePage ? "page" : undefined}
+              >
+                {navIconForPage(item.key)}
+                <span className="nav-item-label">{item.shortLabel}</span>
+              </Button>
+            ),
+          )}
         </nav>
         {projectWorkspaces.length > 0 ? (
           <div className="sidebar-footer">
@@ -289,6 +446,9 @@ export function AppShellLayout({
                   : "切换工作区"
               }
             >
+              <span className="workspace-switcher-icon" aria-hidden="true">
+                <AppWindowIcon fontSize="small" />
+              </span>
               <span className="workspace-switcher-name">
                 {activeProjectWorkspace?.name ?? "工作区"}
               </span>
@@ -352,6 +512,8 @@ export function AppShellLayout({
         <SettingsPanel
           styleMode={styleMode}
           onStyleModeChange={onStyleModeChange}
+          exitRuntimePolicy={exitRuntimePolicy}
+          onExitRuntimePolicyChange={onExitRuntimePolicyChange}
           selectedProjectKey={selectedProjectKey}
           onOpenConfigDir={onOpenConfigDir}
           onOpenConfigFile={onOpenConfigFile}
@@ -367,6 +529,7 @@ export function AppShellLayout({
           defaultPage={defaultPage}
           onDefaultPageChange={onDefaultPageChange}
           onProjectConfigSaved={onProjectConfigSaved}
+          onOpenProjectManagement={openProjectManagementFromSettings}
           onClose={closeSettings}
         />
       ) : null}
@@ -377,6 +540,12 @@ export function AppShellLayout({
           onClose={() => setActivityOpen(false)}
           onClear={onClearActivities}
           onOpenResource={onOpenActivityResource}
+          onRunAction={async (entry) => {
+            if (entry.action?.kind === "compareConfigSource") {
+              setActivityOpen(false);
+            }
+            await onRunActivityAction(entry);
+          }}
           onRefresh={onRefreshActivities}
           onAcknowledgeEntry={onAcknowledgeActivityEntry}
           onAcknowledgeEntries={onAcknowledgeActivityEntries}
@@ -384,6 +553,14 @@ export function AppShellLayout({
             onOpenActivityEntry(entry);
             setActivityOpen(false);
           }}
+        />
+      ) : null}
+
+      {activityPanelMode && activityOpen ? (
+        <div
+          className="activity-outside-click-catcher"
+          role="presentation"
+          onClick={() => setActivityOpen(false)}
         />
       ) : null}
 
@@ -399,6 +576,12 @@ export function AppShellLayout({
             onClose={() => setActivityOpen(false)}
             onClear={onClearActivities}
             onOpenResource={onOpenActivityResource}
+            onRunAction={async (entry) => {
+              if (entry.action?.kind === "compareConfigSource") {
+                setActivityOpen(false);
+              }
+              await onRunActivityAction(entry);
+            }}
             onRefresh={onRefreshActivities}
             onAcknowledgeEntry={onAcknowledgeActivityEntry}
             onAcknowledgeEntries={onAcknowledgeActivityEntries}

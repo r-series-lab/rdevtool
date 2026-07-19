@@ -8,6 +8,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 const DEPLOY_HISTORY_LIMIT: usize = 20;
+const MERGE_HISTORY_LIMIT: usize = 20;
 
 #[derive(Debug, Clone)]
 pub struct Storage {
@@ -51,6 +52,10 @@ pub struct HistoryCommitInfo {
 #[serde(rename_all = "camelCase")]
 pub struct DeployHistoryEntry {
     pub history_key: String,
+    #[serde(default)]
+    pub workspace_key: Option<String>,
+    #[serde(default)]
+    pub project_instance_path: Option<String>,
     pub project_key: String,
     pub project_name: String,
     pub mode: String,
@@ -70,6 +75,10 @@ pub struct DeployHistoryEntry {
 #[serde(rename_all = "camelCase")]
 pub struct SaveDeployHistoryRequest {
     pub history_key: String,
+    #[serde(default)]
+    pub workspace_key: Option<String>,
+    #[serde(default)]
+    pub project_instance_path: Option<String>,
     pub project_key: String,
     pub project_name: String,
     pub mode: String,
@@ -90,6 +99,10 @@ pub type SaveBuildHistoryRequest = SaveDeployHistoryRequest;
 #[serde(rename_all = "camelCase")]
 pub struct MergeHistoryEntry {
     pub history_key: String,
+    #[serde(default)]
+    pub workspace_key: Option<String>,
+    #[serde(default)]
+    pub project_instance_path: Option<String>,
     pub project_key: String,
     pub project_name: String,
     pub source_branch: String,
@@ -108,6 +121,10 @@ pub struct MergeHistoryEntry {
 #[serde(rename_all = "camelCase")]
 pub struct SaveMergeHistoryRequest {
     pub history_key: String,
+    #[serde(default)]
+    pub workspace_key: Option<String>,
+    #[serde(default)]
+    pub project_instance_path: Option<String>,
     pub project_key: String,
     pub project_name: String,
     pub source_branch: String,
@@ -184,6 +201,8 @@ impl Storage {
 
                 CREATE TABLE IF NOT EXISTS deploy_history (
                     history_key TEXT PRIMARY KEY,
+                    workspace_key TEXT,
+                    project_instance_path TEXT,
                     project_key TEXT NOT NULL,
                     project_name TEXT NOT NULL,
                     mode TEXT NOT NULL,
@@ -203,6 +222,8 @@ impl Storage {
 
                 CREATE TABLE IF NOT EXISTS merge_history (
                     history_key TEXT PRIMARY KEY,
+                    workspace_key TEXT,
+                    project_instance_path TEXT,
                     project_key TEXT NOT NULL,
                     project_name TEXT NOT NULL,
                     source_branch TEXT NOT NULL,
@@ -218,6 +239,17 @@ impl Storage {
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_merge_history_created ON merge_history(created_at DESC);
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
+        ensure_history_scope_columns(&connection)?;
+        connection
+            .execute_batch(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_deploy_history_workspace_updated
+                    ON deploy_history(workspace_key, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_merge_history_workspace_created
+                    ON merge_history(workspace_key, created_at DESC);
                 "#,
             )
             .map_err(|error| error.to_string())
@@ -516,11 +548,17 @@ impl Storage {
             .execute(
                 r#"
                 INSERT INTO deploy_history(
-                    history_key, project_key, project_name, mode, env, branch, state_key, state_label,
-                    detail, queue_url, build_url, params_json, created_at, updated_at
+                    history_key, workspace_key, project_instance_path, project_key, project_name,
+                    mode, env, branch, state_key, state_label, detail, queue_url, build_url,
+                    params_json, created_at, updated_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 ON CONFLICT(history_key) DO UPDATE SET
+                    workspace_key = COALESCE(excluded.workspace_key, deploy_history.workspace_key),
+                    project_instance_path = COALESCE(
+                        excluded.project_instance_path,
+                        deploy_history.project_instance_path
+                    ),
                     state_key = excluded.state_key,
                     state_label = excluded.state_label,
                     detail = excluded.detail,
@@ -531,6 +569,8 @@ impl Storage {
                 "#,
                 params![
                     request.history_key,
+                    request.workspace_key,
+                    request.project_instance_path,
                     request.project_key,
                     request.project_name,
                     request.mode,
@@ -562,6 +602,16 @@ impl Storage {
             .map_err(|error| error.to_string())
     }
 
+    pub fn clear_deploy_history_for_workspace(&self, workspace_key: &str) -> Result<usize, String> {
+        let connection = self.open()?;
+        connection
+            .execute(
+                "DELETE FROM deploy_history WHERE workspace_key = ?1",
+                params![workspace_key],
+            )
+            .map_err(|error| error.to_string())
+    }
+
     pub fn clear_deploy_history_for_projects(
         &self,
         project_keys: &[String],
@@ -587,8 +637,9 @@ impl Storage {
         let mut statement = connection
             .prepare(
                 r#"
-                SELECT history_key, project_key, project_name, mode, env, branch, state_key, state_label,
-                       detail, queue_url, build_url, params_json, created_at, updated_at
+                SELECT history_key, workspace_key, project_instance_path, project_key, project_name,
+                       mode, env, branch, state_key, state_label, detail, queue_url, build_url,
+                       params_json, created_at, updated_at
                 FROM deploy_history
                 ORDER BY updated_at DESC, created_at DESC
                 "#,
@@ -597,23 +648,25 @@ impl Storage {
 
         let rows = statement
             .query_map([], |row| {
-                let params_json = row.get::<_, String>(11)?;
+                let params_json = row.get::<_, String>(13)?;
                 let params = serde_json::from_str::<Value>(&params_json).unwrap_or(Value::Null);
                 Ok(DeployHistoryEntry {
                     history_key: row.get(0)?,
-                    project_key: row.get(1)?,
-                    project_name: row.get(2)?,
-                    mode: row.get(3)?,
-                    env: row.get(4)?,
-                    branch: row.get(5)?,
-                    state_key: row.get(6)?,
-                    state_label: row.get(7)?,
-                    detail: row.get(8)?,
-                    queue_url: row.get(9)?,
-                    build_url: row.get(10)?,
+                    workspace_key: row.get(1)?,
+                    project_instance_path: row.get(2)?,
+                    project_key: row.get(3)?,
+                    project_name: row.get(4)?,
+                    mode: row.get(5)?,
+                    env: row.get(6)?,
+                    branch: row.get(7)?,
+                    state_key: row.get(8)?,
+                    state_label: row.get(9)?,
+                    detail: row.get(10)?,
+                    queue_url: row.get(11)?,
+                    build_url: row.get(12)?,
                     params,
-                    created_at: row.get(12)?,
-                    updated_at: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -630,11 +683,14 @@ impl Storage {
             .execute(
                 r#"
                 INSERT INTO deploy_history(
-                    history_key, project_key, project_name, mode, env, branch, state_key, state_label,
-                    detail, queue_url, build_url, params_json, created_at, updated_at
+                    history_key, workspace_key, project_instance_path, project_key, project_name,
+                    mode, env, branch, state_key, state_label, detail, queue_url, build_url,
+                    params_json, created_at, updated_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
                 ON CONFLICT(history_key) DO UPDATE SET
+                    workspace_key = excluded.workspace_key,
+                    project_instance_path = excluded.project_instance_path,
                     project_key = excluded.project_key,
                     project_name = excluded.project_name,
                     mode = excluded.mode,
@@ -651,6 +707,8 @@ impl Storage {
                 "#,
                 params![
                     entry.history_key,
+                    entry.workspace_key,
+                    entry.project_instance_path,
                     entry.project_key,
                     entry.project_name,
                     entry.mode,
@@ -685,8 +743,9 @@ impl Storage {
         let mut statement = connection
             .prepare(
                 r#"
-                SELECT history_key, project_key, project_name, mode, env, branch, state_key, state_label,
-                       detail, queue_url, build_url, params_json, created_at, updated_at
+                SELECT history_key, workspace_key, project_instance_path, project_key, project_name,
+                       mode, env, branch, state_key, state_label, detail, queue_url, build_url,
+                       params_json, created_at, updated_at
                 FROM deploy_history
                 WHERE (?1 IS NULL OR project_key = ?1)
                 ORDER BY updated_at DESC, created_at DESC
@@ -697,23 +756,25 @@ impl Storage {
 
         let rows = statement
             .query_map(params![project_key, limit], |row| {
-                let params_json = row.get::<_, String>(11)?;
+                let params_json = row.get::<_, String>(13)?;
                 let params = serde_json::from_str::<Value>(&params_json).unwrap_or(Value::Null);
                 Ok(DeployHistoryEntry {
                     history_key: row.get(0)?,
-                    project_key: row.get(1)?,
-                    project_name: row.get(2)?,
-                    mode: row.get(3)?,
-                    env: row.get(4)?,
-                    branch: row.get(5)?,
-                    state_key: row.get(6)?,
-                    state_label: row.get(7)?,
-                    detail: row.get(8)?,
-                    queue_url: row.get(9)?,
-                    build_url: row.get(10)?,
+                    workspace_key: row.get(1)?,
+                    project_instance_path: row.get(2)?,
+                    project_key: row.get(3)?,
+                    project_name: row.get(4)?,
+                    mode: row.get(5)?,
+                    env: row.get(6)?,
+                    branch: row.get(7)?,
+                    state_key: row.get(8)?,
+                    state_label: row.get(9)?,
+                    detail: row.get(10)?,
+                    queue_url: row.get(11)?,
+                    build_url: row.get(12)?,
                     params,
-                    created_at: row.get(12)?,
-                    updated_at: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -740,11 +801,17 @@ impl Storage {
             .execute(
                 r#"
                 INSERT INTO merge_history(
-                    history_key, project_key, project_name, source_branch, target_branch, success, remote,
-                    summary, detail, merged_commit, source_commit_json, target_commit_json, created_at
+                    history_key, workspace_key, project_instance_path, project_key, project_name,
+                    source_branch, target_branch, success, remote, summary, detail, merged_commit,
+                    source_commit_json, target_commit_json, created_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 ON CONFLICT(history_key) DO UPDATE SET
+                    workspace_key = COALESCE(excluded.workspace_key, merge_history.workspace_key),
+                    project_instance_path = COALESCE(
+                        excluded.project_instance_path,
+                        merge_history.project_instance_path
+                    ),
                     success = excluded.success,
                     remote = excluded.remote,
                     summary = excluded.summary,
@@ -755,6 +822,8 @@ impl Storage {
                 "#,
                 params![
                     request.history_key,
+                    request.workspace_key,
+                    request.project_instance_path,
                     request.project_key,
                     request.project_name,
                     request.source_branch,
@@ -770,6 +839,7 @@ impl Storage {
                 ],
             )
             .map_err(|error| error.to_string())?;
+        prune_merge_history(&connection)?;
         Ok(())
     }
 
@@ -781,6 +851,16 @@ impl Storage {
         let connection = self.open()?;
         connection
             .execute("DELETE FROM merge_history", [])
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn clear_merge_history_for_workspace(&self, workspace_key: &str) -> Result<usize, String> {
+        let connection = self.open()?;
+        connection
+            .execute(
+                "DELETE FROM merge_history WHERE workspace_key = ?1",
+                params![workspace_key],
+            )
             .map_err(|error| error.to_string())
     }
 
@@ -809,8 +889,9 @@ impl Storage {
         let mut statement = connection
             .prepare(
                 r#"
-                SELECT history_key, project_key, project_name, source_branch, target_branch, success, remote,
-                       summary, detail, merged_commit, source_commit_json, target_commit_json, created_at
+                SELECT history_key, workspace_key, project_instance_path, project_key, project_name,
+                       source_branch, target_branch, success, remote, summary, detail, merged_commit,
+                       source_commit_json, target_commit_json, created_at
                 FROM merge_history
                 ORDER BY created_at DESC
                 "#,
@@ -819,22 +900,24 @@ impl Storage {
 
         let rows = statement
             .query_map([], |row| {
-                let source_commit = parse_commit_json(row.get::<_, Option<String>>(10)?);
-                let target_commit = parse_commit_json(row.get::<_, Option<String>>(11)?);
+                let source_commit = parse_commit_json(row.get::<_, Option<String>>(12)?);
+                let target_commit = parse_commit_json(row.get::<_, Option<String>>(13)?);
                 Ok(MergeHistoryEntry {
                     history_key: row.get(0)?,
-                    project_key: row.get(1)?,
-                    project_name: row.get(2)?,
-                    source_branch: row.get(3)?,
-                    target_branch: row.get(4)?,
-                    success: row.get::<_, i64>(5)? != 0,
-                    remote: row.get::<_, i64>(6)? != 0,
-                    summary: row.get(7)?,
-                    detail: row.get(8)?,
-                    merged_commit: row.get(9)?,
+                    workspace_key: row.get(1)?,
+                    project_instance_path: row.get(2)?,
+                    project_key: row.get(3)?,
+                    project_name: row.get(4)?,
+                    source_branch: row.get(5)?,
+                    target_branch: row.get(6)?,
+                    success: row.get::<_, i64>(7)? != 0,
+                    remote: row.get::<_, i64>(8)? != 0,
+                    summary: row.get(9)?,
+                    detail: row.get(10)?,
+                    merged_commit: row.get(11)?,
                     source_commit,
                     target_commit,
-                    created_at: row.get(12)?,
+                    created_at: row.get(14)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -860,11 +943,14 @@ impl Storage {
             .execute(
                 r#"
                 INSERT INTO merge_history(
-                    history_key, project_key, project_name, source_branch, target_branch, success, remote,
-                    summary, detail, merged_commit, source_commit_json, target_commit_json, created_at
+                    history_key, workspace_key, project_instance_path, project_key, project_name,
+                    source_branch, target_branch, success, remote, summary, detail, merged_commit,
+                    source_commit_json, target_commit_json, created_at
                 )
-                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
                 ON CONFLICT(history_key) DO UPDATE SET
+                    workspace_key = excluded.workspace_key,
+                    project_instance_path = excluded.project_instance_path,
                     project_key = excluded.project_key,
                     project_name = excluded.project_name,
                     source_branch = excluded.source_branch,
@@ -880,6 +966,8 @@ impl Storage {
                 "#,
                 params![
                     entry.history_key,
+                    entry.workspace_key,
+                    entry.project_instance_path,
                     entry.project_key,
                     entry.project_name,
                     entry.source_branch,
@@ -895,6 +983,7 @@ impl Storage {
                 ],
             )
             .map_err(|error| error.to_string())?;
+        prune_merge_history(&connection)?;
         Ok(())
     }
 
@@ -912,8 +1001,9 @@ impl Storage {
         let mut statement = connection
             .prepare(
                 r#"
-                SELECT history_key, project_key, project_name, source_branch, target_branch, success, remote,
-                       summary, detail, merged_commit, source_commit_json, target_commit_json, created_at
+                SELECT history_key, workspace_key, project_instance_path, project_key, project_name,
+                       source_branch, target_branch, success, remote, summary, detail, merged_commit,
+                       source_commit_json, target_commit_json, created_at
                 FROM merge_history
                 WHERE (?1 IS NULL OR project_key = ?1)
                 ORDER BY created_at DESC
@@ -924,22 +1014,24 @@ impl Storage {
 
         let rows = statement
             .query_map(params![project_key, limit], |row| {
-                let source_commit = parse_commit_json(row.get::<_, Option<String>>(10)?);
-                let target_commit = parse_commit_json(row.get::<_, Option<String>>(11)?);
+                let source_commit = parse_commit_json(row.get::<_, Option<String>>(12)?);
+                let target_commit = parse_commit_json(row.get::<_, Option<String>>(13)?);
                 Ok(MergeHistoryEntry {
                     history_key: row.get(0)?,
-                    project_key: row.get(1)?,
-                    project_name: row.get(2)?,
-                    source_branch: row.get(3)?,
-                    target_branch: row.get(4)?,
-                    success: row.get::<_, i64>(5)? != 0,
-                    remote: row.get::<_, i64>(6)? != 0,
-                    summary: row.get(7)?,
-                    detail: row.get(8)?,
-                    merged_commit: row.get(9)?,
+                    workspace_key: row.get(1)?,
+                    project_instance_path: row.get(2)?,
+                    project_key: row.get(3)?,
+                    project_name: row.get(4)?,
+                    source_branch: row.get(5)?,
+                    target_branch: row.get(6)?,
+                    success: row.get::<_, i64>(7)? != 0,
+                    remote: row.get::<_, i64>(8)? != 0,
+                    summary: row.get(9)?,
+                    detail: row.get(10)?,
+                    merged_commit: row.get(11)?,
                     source_commit,
                     target_commit,
-                    created_at: row.get(12)?,
+                    created_at: row.get(14)?,
                 })
             })
             .map_err(|error| error.to_string())?;
@@ -947,6 +1039,42 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())
     }
+}
+
+fn ensure_history_scope_columns(connection: &Connection) -> Result<(), String> {
+    ensure_table_column(connection, "deploy_history", "workspace_key", "TEXT")?;
+    ensure_table_column(
+        connection,
+        "deploy_history",
+        "project_instance_path",
+        "TEXT",
+    )?;
+    ensure_table_column(connection, "merge_history", "workspace_key", "TEXT")?;
+    ensure_table_column(connection, "merge_history", "project_instance_path", "TEXT")
+}
+
+fn ensure_table_column(
+    connection: &Connection,
+    table: &str,
+    column: &str,
+    column_type: &str,
+) -> Result<(), String> {
+    let mut statement = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(|error| error.to_string())?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    if columns.iter().any(|current| current == column) {
+        return Ok(());
+    }
+    connection
+        .execute_batch(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column} {column_type}"
+        ))
+        .map_err(|error| error.to_string())
 }
 
 pub fn default_storage_path() -> PathBuf {
@@ -1031,14 +1159,44 @@ fn prune_deploy_history(connection: &Connection) -> Result<(), String> {
         .execute(
             r#"
             DELETE FROM deploy_history
-            WHERE history_key NOT IN (
-                SELECT history_key
-                FROM deploy_history
-                ORDER BY updated_at DESC, created_at DESC
-                LIMIT ?1
+            WHERE history_key IN (
+                SELECT history_key FROM (
+                    SELECT
+                        history_key,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY COALESCE(workspace_key, '')
+                            ORDER BY updated_at DESC, created_at DESC
+                        ) AS scope_row
+                    FROM deploy_history
+                )
+                WHERE scope_row > ?1
             )
             "#,
             params![DEPLOY_HISTORY_LIMIT as i64],
+        )
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+fn prune_merge_history(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute(
+            r#"
+            DELETE FROM merge_history
+            WHERE history_key IN (
+                SELECT history_key FROM (
+                    SELECT
+                        history_key,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY COALESCE(workspace_key, '')
+                            ORDER BY created_at DESC
+                        ) AS scope_row
+                    FROM merge_history
+                )
+                WHERE scope_row > ?1
+            )
+            "#,
+            params![MERGE_HISTORY_LIMIT as i64],
         )
         .map(|_| ())
         .map_err(|error| error.to_string())
@@ -1051,4 +1209,109 @@ fn now_iso() -> String {
 #[allow(dead_code)]
 pub fn db_path(storage: &Storage) -> &Path {
     &storage.db_path
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_db_path(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "rdevtool-storage-{label}-{}-{}.sqlite",
+            std::process::id(),
+            Uuid::new_v4()
+        ))
+    }
+
+    fn remove_test_db(path: &Path) {
+        let _ = fs::remove_file(path);
+        let _ = fs::remove_file(format!("{}-wal", path.display()));
+        let _ = fs::remove_file(format!("{}-shm", path.display()));
+    }
+
+    fn build_request(workspace_key: &str, index: usize) -> SaveDeployHistoryRequest {
+        SaveDeployHistoryRequest {
+            history_key: format!("{workspace_key}-{index}"),
+            workspace_key: Some(workspace_key.to_string()),
+            project_instance_path: Some(format!("/worktrees/{workspace_key}")),
+            project_key: "demo".to_string(),
+            project_name: "Demo".to_string(),
+            mode: "default".to_string(),
+            env: Some("test".to_string()),
+            branch: Some(format!("feature/{workspace_key}")),
+            state_key: "success".to_string(),
+            state_label: "构建成功".to_string(),
+            detail: "ok".to_string(),
+            queue_url: None,
+            build_url: None,
+            params: Value::Object(Default::default()),
+        }
+    }
+
+    #[test]
+    fn adds_history_scope_columns_to_existing_tables() {
+        let path = temp_db_path("migration");
+        let connection = Connection::open(&path).expect("open test database");
+        connection
+            .execute_batch(
+                r#"
+                CREATE TABLE deploy_history (history_key TEXT PRIMARY KEY);
+                CREATE TABLE merge_history (history_key TEXT PRIMARY KEY);
+                "#,
+            )
+            .expect("create legacy tables");
+
+        ensure_history_scope_columns(&connection).expect("migrate history tables");
+
+        for table in ["deploy_history", "merge_history"] {
+            let mut statement = connection
+                .prepare(&format!("PRAGMA table_info({table})"))
+                .expect("read table columns");
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("query table columns")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect table columns");
+            assert!(columns.iter().any(|column| column == "workspace_key"));
+            assert!(
+                columns
+                    .iter()
+                    .any(|column| column == "project_instance_path")
+            );
+        }
+
+        drop(connection);
+        remove_test_db(&path);
+    }
+
+    #[test]
+    fn keeps_build_history_limit_per_workspace() {
+        let path = temp_db_path("scope-limit");
+        let storage = Storage::new(path.clone()).expect("create storage");
+
+        for index in 0..=DEPLOY_HISTORY_LIMIT {
+            storage
+                .save_deploy_history(build_request("feature", index))
+                .expect("save feature history");
+            storage
+                .save_deploy_history(build_request("release", index))
+                .expect("save release history");
+        }
+
+        let history = storage
+            .list_all_deploy_history()
+            .expect("list scoped build history");
+        let feature_count = history
+            .iter()
+            .filter(|entry| entry.workspace_key.as_deref() == Some("feature"))
+            .count();
+        let release_count = history
+            .iter()
+            .filter(|entry| entry.workspace_key.as_deref() == Some("release"))
+            .count();
+        assert_eq!(feature_count, DEPLOY_HISTORY_LIMIT);
+        assert_eq!(release_count, DEPLOY_HISTORY_LIMIT);
+
+        remove_test_db(&path);
+    }
 }

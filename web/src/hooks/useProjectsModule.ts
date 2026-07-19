@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { ProjectRuntimeEntry, ProjectWorkflowAction } from "../app-types";
+import type {
+  ProjectDebugProfileSummary,
+  ProjectRuntimeEntry,
+  ProjectRuntimePreflightResponse,
+  ProjectWorkflowAction,
+} from "../app-types";
 import type {
   ActivityPatch,
   ActivityResource,
@@ -17,9 +22,11 @@ import {
   type WorkflowProjectReplay,
   type WorkflowSignal,
 } from "../lib/workflowSignals";
+import { configSourceIdForWorkspace } from "../lib/configSources";
 
 type UseProjectsModuleOptions = {
   enabled: boolean;
+  activeProjectWorkspaceKey: string;
   setBusy: (value: string) => void;
   setError: (value: string) => void;
   workflowBroadcastRules: WorkflowBroadcastRule[];
@@ -42,6 +49,9 @@ type NavigationEntry = {
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  tool?: string | null;
+  toolKey?: string | null;
+  toolAction?: string | null;
   path?: string | null;
   cwd?: string | null;
   note?: string | null;
@@ -171,6 +181,72 @@ function normalizeRuntimeEntries(value: unknown): ProjectRuntimeEntry[] {
           typeof (item as { key?: unknown }).key === "string",
       ),
   );
+}
+
+export type ProjectRuntimeDebugProfileSelection = {
+  key: string;
+  profile: ProjectDebugProfileSummary | null;
+};
+
+export function resolveProjectRuntimeDebugProfile(
+  entry: Pick<ProjectRuntimeEntry, "debugProfiles"> | null | undefined,
+  requestedKey?: string | null,
+): ProjectRuntimeDebugProfileSelection {
+  const candidate = requestedKey?.trim() ?? "";
+  const profile =
+    candidate && Array.isArray(entry?.debugProfiles)
+      ? entry.debugProfiles.find((item) => item.key === candidate) ?? null
+      : null;
+  return {
+    key: profile?.key ?? "",
+    profile,
+  };
+}
+
+type ProjectRuntimeLaunchPlanOptions = {
+  projectKey: string;
+  runtimeEntry: Pick<ProjectRuntimeEntry, "debugProfiles"> | null | undefined;
+  requestedDebugProfileKey?: string | null;
+  envOverrides?: Record<string, string>;
+};
+
+export function buildProjectRuntimeLaunchPlan({
+  projectKey,
+  runtimeEntry,
+  requestedDebugProfileKey,
+  envOverrides,
+}: ProjectRuntimeLaunchPlanOptions) {
+  const selection = resolveProjectRuntimeDebugProfile(
+    runtimeEntry,
+    requestedDebugProfileKey,
+  );
+  const debugProfile = selection.key || null;
+  const hasExplicitEnvOverrides = envOverrides != null;
+  const normalizedEnvOverrides = normalizeRuntimeEnvOverrides(envOverrides);
+  return {
+    selection,
+    hasExplicitEnvOverrides,
+    preflightArgs: {
+      project: projectKey,
+      debugProfile,
+    },
+    startArgs: {
+      project: projectKey,
+      debugProfile,
+      envOverrides: hasExplicitEnvOverrides ? normalizedEnvOverrides : null,
+    },
+  };
+}
+
+export function projectRuntimePreflightBlocksStart(statusKey: string) {
+  return statusKey.trim().toLowerCase() === "error";
+}
+
+export function projectRuntimePreferencesAllowStart(
+  enabled: boolean,
+  preferencesHydrated: boolean,
+) {
+  return enabled && preferencesHydrated;
 }
 
 function normalizeNavigationData(value: unknown): NavigationData | null {
@@ -306,7 +382,7 @@ function entry_matches_finder_type(entry: NavigationEntry, value: FinderType) {
     case "目录":
       return entry.kind === "directory";
     case "工具":
-      return entry.kind === "app" || entry.kind === "script";
+      return entry.kind === "app" || entry.kind === "script" || entry.kind === "tool";
     default:
       return false;
   }
@@ -344,6 +420,9 @@ function buildShortcutHaystack(item: FinderShortcutItem): string {
     item.entry.bundleId ?? "",
     item.entry.appName ?? "",
     item.entry.script ?? "",
+    item.entry.tool ?? "",
+    item.entry.toolKey ?? "",
+    item.entry.toolAction ?? "",
     item.entry.path ?? "",
     item.entry.cwd ?? "",
   ]
@@ -358,6 +437,8 @@ function buildFinderShortcutKey(item: FinderShortcutItem): string {
     item.entry.kind,
     item.entry.name,
     item.entry.targetLabel,
+    item.entry.tool ?? "",
+    item.entry.toolKey ?? "",
   ].join("\u0000");
 }
 
@@ -435,6 +516,7 @@ export type ProjectsModuleState = {
   favoriteShortcutKeys: string[];
   recentShortcutKeys: string[];
   selectedDebugProfileKeys: Record<string, string>;
+  preferencesHydrated: boolean;
   toggleProjectFavorite: (projectKey: string) => void;
   toggleShortcutFavorite: (item: FinderShortcutItem) => void;
   setProjectDebugProfile: (projectKey: string, profileKey: string) => void;
@@ -448,6 +530,7 @@ export type ProjectsModuleState = {
     envOverrides?: Record<string, string>,
   ) => Promise<void>;
   handleStopRuntime: (projectKey: string) => Promise<void>;
+  handleAdoptRuntime: (projectKey: string, debugProfileKey?: string) => Promise<void>;
   handleRunBuild: (projectKey: string) => Promise<void>;
   handleStopBuild: (projectKey: string) => Promise<void>;
   handleOpenBuildOutput: (projectKey: string) => Promise<void>;
@@ -461,6 +544,7 @@ export type ProjectsModuleState = {
 
 export function useProjectsModule({
   enabled,
+  activeProjectWorkspaceKey,
   setBusy,
   setError,
   workflowBroadcastRules,
@@ -479,7 +563,12 @@ export function useProjectsModule({
   );
   const [preferencesHydrated, setPreferencesHydrated] = useState(false);
   const [documentHidden, setDocumentHidden] = useState(getInitialDocumentHidden);
+  const navigationConfigSourceId = useMemo(
+    () => configSourceIdForWorkspace(activeProjectWorkspaceKey),
+    [activeProjectWorkspaceKey],
+  );
   const finderDataLoadedAtRef = useRef(0);
+  const finderDataSourceIdRef = useRef("");
   const finderDataPromiseRef = useRef<Promise<void> | null>(null);
   const activeRuntimeKeysRef = useRef<string[]>([]);
   const activeBuildActivityIdsRef = useRef<Record<string, string>>({});
@@ -538,7 +627,7 @@ export function useProjectsModule({
         (count, category) =>
           count +
           category.entries.filter(
-            (entry) => entry.kind === "app" || entry.kind === "script",
+            (entry) => entry.kind === "app" || entry.kind === "script" || entry.kind === "tool",
           ).length,
         0,
       ),
@@ -648,7 +737,7 @@ export function useProjectsModule({
   const activeRuntimeKeys = useMemo(
     () =>
       runtimeItems
-        .filter((item) => item.canStop || item.canStopBuild)
+        .filter((item) => item.canStop || item.canAdopt || item.canStopBuild)
         .map((item) => item.key),
     [runtimeItems],
   );
@@ -765,7 +854,7 @@ export function useProjectsModule({
 
   function runtimeActivityTarget(projectKey: string) {
     return {
-      page: "projects" as const,
+      page: "projectManagement" as const,
       projectKey,
     };
   }
@@ -890,7 +979,9 @@ export function useProjectsModule({
       return;
     }
     try {
-      const data = await invoke<unknown>("load_page_navigation");
+      const data = await invoke<unknown>("load_page_navigation", {
+        sourceId: navigationConfigSourceId,
+      });
       setNavigationData(normalizeNavigationData(data));
     } catch (reason) {
       setError(String(reason));
@@ -907,6 +998,7 @@ export function useProjectsModule({
     }
 
     const cacheFresh =
+      finderDataSourceIdRef.current === navigationConfigSourceId &&
       finderDataLoadedAtRef.current > 0 &&
       Date.now() - finderDataLoadedAtRef.current < FINDER_DATA_CACHE_TTL_MS;
     if (!options?.force && cacheFresh) {
@@ -921,6 +1013,7 @@ export function useProjectsModule({
       loadNavigationEntries(),
     ])
       .then(() => {
+        finderDataSourceIdRef.current = navigationConfigSourceId;
         finderDataLoadedAtRef.current = Date.now();
       })
       .finally(() => {
@@ -931,6 +1024,14 @@ export function useProjectsModule({
     finderDataPromiseRef.current = nextPromise;
     await nextPromise;
   }
+
+  useEffect(() => {
+    finderDataLoadedAtRef.current = 0;
+    finderDataPromiseRef.current = null;
+    if (enabled) {
+      void loadFinderData({ force: true });
+    }
+  }, [enabled, navigationConfigSourceId]);
 
   async function loadProjectRuntimes() {
     await refreshProjectRuntimes();
@@ -1155,12 +1256,19 @@ export function useProjectsModule({
         status: "running",
         title: "打开入口",
         summary: `${entry.name} · ${entry.targetLabel}`,
-        detail: entry.note || entry.url || entry.bundleId || entry.path || entry.script || null,
+        detail:
+          entry.note ||
+          entry.url ||
+          entry.bundleId ||
+          entry.path ||
+          entry.script ||
+          entry.toolKey ||
+          null,
         executionKey: shortcutActivityExecutionKey(entry),
         ...projectWorkflowChainFields("打开入口"),
         resource: shortcutResource(entry),
         target: {
-          page: "projects",
+          page: "resources",
         },
       }) || "";
     try {
@@ -1194,16 +1302,22 @@ export function useProjectsModule({
     debugProfileKey?: string,
     envOverrides?: Record<string, string>,
   ) {
-    if (!enabled) {
+    if (!projectRuntimePreferencesAllowStart(enabled, preferencesHydrated)) {
       return;
     }
-    const selectedDebugProfile =
-      (debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey] ?? "").trim();
-    const hasExplicitEnvOverrides = envOverrides != null;
-    const normalizedEnvOverrides = normalizeRuntimeEnvOverrides(envOverrides);
+    const launchPlan = buildProjectRuntimeLaunchPlan({
+      projectKey,
+      runtimeEntry: runtimeItems.find((item) => item.key === projectKey),
+      requestedDebugProfileKey:
+        debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey],
+      envOverrides,
+    });
+    const selectedDebugProfile = launchPlan.selection.key;
+    const { hasExplicitEnvOverrides } = launchPlan;
+    const normalizedEnvOverrides = launchPlan.startArgs.envOverrides ?? {};
     const envOverrideCount = Object.keys(normalizedEnvOverrides).length;
 
-    setBusy("正在启动 dev 服务");
+    setBusy("正在检查并启动 dev 服务");
     setError("");
     const activityId =
       recordActivity?.({
@@ -1228,10 +1342,24 @@ export function useProjectsModule({
         target: runtimeActivityTarget(projectKey),
       }) || "";
     try {
+      const preflight = await invoke<ProjectRuntimePreflightResponse>(
+        "preflight_project_runtime",
+        launchPlan.preflightArgs,
+      );
+      if (projectRuntimePreflightBlocksStart(preflight.statusKey)) {
+        const detail = preflight.summary.trim() || preflight.statusLabel || "启动前检查未通过";
+        if (activityId) {
+          updateActivity?.(activityId, {
+            status: "failed",
+            title: "启动前检查未通过",
+            summary: detail,
+          });
+        }
+        setError(detail);
+        return;
+      }
       const updated = await invoke<ProjectRuntimeEntry>("start_project_runtime", {
-        project: projectKey,
-        debugProfile: selectedDebugProfile || null,
-        envOverrides: hasExplicitEnvOverrides ? normalizedEnvOverrides : null,
+        ...launchPlan.startArgs,
       });
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
@@ -1321,6 +1449,61 @@ export function useProjectsModule({
         updateActivity?.(activityId, {
           status: "failed",
           summary: "dev 服务停止失败",
+          detail: String(reason),
+        });
+      }
+      setError(String(reason));
+      await loadProjectRuntimes();
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleAdoptRuntime(projectKey: string, debugProfileKey?: string) {
+    if (!enabled) {
+      return;
+    }
+    const runtime = runtimeItems.find((item) => item.key === projectKey);
+    if (!runtime?.canAdopt || !runtime.pid) {
+      setError("未检测到可认领的外部 dev 服务");
+      return;
+    }
+    const selectedDebugProfile =
+      debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey];
+    setBusy("正在认领外部 dev 服务");
+    setError("");
+    const activityId =
+      recordActivity?.({
+        kind: "runtime",
+        status: "running",
+        title: "认领外部 dev 服务",
+        summary: runtimeProjectName(projectKey),
+        executionKey: projectActivityExecutionKey("project.runtime.adopt", projectKey),
+        projectKey,
+        projectName: runtimeProjectName(projectKey),
+        target: runtimeActivityTarget(projectKey),
+      }) || "";
+    try {
+      const updated = await invoke<ProjectRuntimeEntry>("adopt_project_runtime", {
+        project: projectKey,
+        pid: runtime.pid,
+        debugProfile: selectedDebugProfile || null,
+      });
+      replaceRuntimeEntry(projectKey, updated);
+      touchProjectUsage(projectKey);
+      if (activityId) {
+        updateActivity?.(activityId, {
+          status: "success",
+          summary: `${updated.name} 已由 Runtime Daemon 托管`,
+          detail: updated.detail,
+          projectName: updated.name,
+        });
+      }
+    } catch (reason) {
+      if (activityId) {
+        updateActivity?.(activityId, {
+          status: "failed",
+          summary: "外部 dev 服务认领失败",
           detail: String(reason),
         });
       }
@@ -1535,8 +1718,10 @@ export function useProjectsModule({
       return;
     }
 
-    const selectedDebugProfile =
-      (debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey] ?? "").trim();
+    const selectedDebugProfile = resolveProjectRuntimeDebugProfile(
+      runtimeItems.find((item) => item.key === projectKey),
+      debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey],
+    ).key;
     setBusy("正在唤起运行中的项目");
     setError("");
     const activityId =
@@ -1732,6 +1917,7 @@ export function useProjectsModule({
     favoriteShortcutKeys: preferences.favoriteShortcutKeys,
     recentShortcutKeys: preferences.recentShortcutKeys,
     selectedDebugProfileKeys: preferences.debugProfileKeysByProject,
+    preferencesHydrated,
     toggleProjectFavorite,
     toggleShortcutFavorite,
     setProjectDebugProfile,
@@ -1741,6 +1927,7 @@ export function useProjectsModule({
     handleOpenFinderEntry,
     handleStartRuntime,
     handleStopRuntime,
+    handleAdoptRuntime,
     handleRunBuild,
     handleStopBuild,
     handleOpenBuildOutput,

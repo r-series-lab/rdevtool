@@ -246,6 +246,8 @@ pub struct BranchPushRequest {
     #[serde(default)]
     pub commit_before_push: bool,
     pub commit_message: Option<String>,
+    #[serde(default)]
+    pub selected_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -278,6 +280,35 @@ pub struct BranchPushStatus {
     pub conflicted_count: usize,
     pub files: Vec<BranchPushFileStatus>,
     pub latest_commit: Option<BranchCommitInfo>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchFileDiffRequest {
+    pub project: String,
+    #[serde(default)]
+    pub repo_path: Option<String>,
+    pub path: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub max_bytes: Option<usize>,
+    #[serde(default)]
+    pub max_lines: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BranchFileDiffResponse {
+    pub project_key: String,
+    pub project_name: String,
+    pub repo_path: String,
+    pub path: String,
+    pub mode: String,
+    pub diff: String,
+    pub truncated: bool,
+    pub binary: bool,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1134,6 +1165,7 @@ fn branch_status_for_project_path(
     detached_hint: bool,
 ) -> BranchWorktreeSummary {
     let repo_path_text = repo_path.display().to_string();
+    let path_missing = !repo_path.exists();
     match git::working_tree_status(repo_path) {
         Ok(status) => {
             let latest_commit = if status.detached || status.current_branch.is_empty() {
@@ -1185,13 +1217,64 @@ fn branch_status_for_project_path(
                 is_git_worktree,
                 is_workspace_instance,
                 managed,
-                status_key: "unavailable".to_string(),
-                status_label: "不可用".to_string(),
-                detail: error.to_string(),
+                status_key: if path_missing {
+                    "missing"
+                } else {
+                    "unavailable"
+                }
+                .to_string(),
+                status_label: if path_missing {
+                    "目录缺失"
+                } else {
+                    "不可用"
+                }
+                .to_string(),
+                detail: if path_missing {
+                    if is_git_worktree {
+                        "目录已被删除，但 Git 仍保留工作副本登记；可直接修复并重建。".to_string()
+                    } else {
+                        "本地工作副本目录不存在，请重新选择或绑定目录。".to_string()
+                    }
+                } else {
+                    error.to_string()
+                },
                 latest_commit: None,
             }
         }
     }
+}
+
+pub fn repair_project_worktree(
+    config: &AppConfig,
+    key: &str,
+    repo_path: &Path,
+) -> Result<BranchWorktreeSummary> {
+    let project = config.find_project(key)?;
+    let default_repo_path = project
+        .repo_path
+        .as_ref()
+        .with_context(|| format!("project {} has no repo_path configured", project.key))?;
+    if !default_repo_path.exists() {
+        anyhow::bail!(
+            "项目默认目录不存在，无法修复工作副本：{}",
+            default_repo_path.display()
+        );
+    }
+    if repo_path.exists() {
+        anyhow::bail!("工作副本目录仍然存在，无需修复：{}", repo_path.display());
+    }
+
+    let repaired = git::repair_missing_worktree(default_repo_path, repo_path)?;
+    Ok(branch_status_for_project_path(
+        project,
+        &repaired.path,
+        false,
+        true,
+        false,
+        false,
+        Some(&repaired.branch),
+        false,
+    ))
 }
 
 pub fn project_worktrees(config: &AppConfig, key: &str) -> Result<Vec<BranchWorktreeSummary>> {
@@ -1367,6 +1450,33 @@ pub fn branch_push_status(
     })
 }
 
+pub fn branch_file_diff(
+    config: &AppConfig,
+    request: &BranchFileDiffRequest,
+) -> Result<BranchFileDiffResponse> {
+    let project = config.find_project(&request.project)?;
+    let repo_path = resolve_branch_repo_path(project, request.repo_path.as_deref())?;
+    let diff = git::changed_file_diff(
+        &repo_path,
+        &request.path,
+        request.mode.as_deref(),
+        request.max_bytes,
+        request.max_lines,
+    )?;
+
+    Ok(BranchFileDiffResponse {
+        project_key: project.key.clone(),
+        project_name: project.name.clone(),
+        repo_path: repo_path.display().to_string(),
+        path: diff.path,
+        mode: diff.mode,
+        diff: diff.diff,
+        truncated: diff.truncated,
+        binary: diff.binary,
+        warnings: diff.warnings,
+    })
+}
+
 pub fn execute_branch_push(
     config: &AppConfig,
     request: &BranchPushRequest,
@@ -1382,6 +1492,7 @@ pub fn execute_branch_push(
         &repo_path,
         request.commit_before_push,
         request.commit_message.as_deref(),
+        &request.selected_paths,
     );
     let items = match result {
         Ok(value) => {

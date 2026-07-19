@@ -4,6 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config_store::write_config_text_atomic;
+
 const APP_CONFIG_DIR_NAME: &str = "rDevTool";
 const DEFAULT_PROJECTS_TEMPLATE: &str = include_str!("../projects.template.toml");
 const DEFAULT_WORKSPACE_TEMPLATE: &str = include_str!("../workspace.template.toml");
@@ -34,6 +36,8 @@ pub struct WorkspaceAppConfig {
     pub enabled_pages: Vec<String>,
     #[serde(default)]
     pub active_workspace: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub config_source_preferences: BTreeMap<String, String>,
 }
 
 fn default_workspace_style_mode() -> String {
@@ -57,6 +61,7 @@ impl Default for WorkspaceAppConfig {
             default_page: None,
             enabled_pages: default_workspace_enabled_pages(),
             active_workspace: None,
+            config_source_preferences: BTreeMap::new(),
         }
     }
 }
@@ -133,6 +138,12 @@ pub struct ProjectWorkspaceResourceEntryConfig {
     pub app_name: Option<String>,
     #[serde(default)]
     pub script: Option<String>,
+    #[serde(default)]
+    pub tool: Option<String>,
+    #[serde(default, alias = "tool_key")]
+    pub tool_key: Option<String>,
+    #[serde(default, alias = "tool_action")]
+    pub tool_action: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
@@ -409,6 +420,10 @@ fn default_project_ready_failure_markers() -> Vec<String> {
 pub struct ProjectDebugProfileConfig {
     pub key: String,
     pub label: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub expected_port: Option<u16>,
     #[serde(default)]
     pub runtime_profile: Option<String>,
     #[serde(default)]
@@ -765,7 +780,7 @@ pub fn save_config(path: &Path, config: &AppConfig) -> Result<()> {
 
     let content = toml::to_string_pretty(config)
         .with_context(|| format!("failed to serialize config: {}", path.display()))?;
-    fs::write(path, content)
+    write_config_text_atomic(path, content)
         .with_context(|| format!("failed to write config: {}", path.display()))?;
     Ok(())
 }
@@ -790,7 +805,7 @@ pub fn save_workspace_config(path: &Path, config: &WorkspaceConfig) -> Result<()
 
     let content = toml::to_string_pretty(config)
         .with_context(|| format!("failed to serialize workspace config: {}", path.display()))?;
-    fs::write(path, content)
+    write_config_text_atomic(path, content)
         .with_context(|| format!("failed to write workspace config: {}", path.display()))?;
     Ok(())
 }
@@ -846,7 +861,7 @@ pub fn ensure_default_configs() -> Result<ConfigPaths> {
                 )
             })?;
         } else {
-            fs::write(&projects, DEFAULT_PROJECTS_TEMPLATE).with_context(|| {
+            write_config_text_atomic(&projects, DEFAULT_PROJECTS_TEMPLATE).with_context(|| {
                 format!(
                     "failed to write default projects config: {}",
                     projects.display()
@@ -865,7 +880,7 @@ pub fn ensure_default_configs() -> Result<ConfigPaths> {
 
     let workspace = default_workspace_path();
     if !workspace.exists() {
-        fs::write(&workspace, DEFAULT_WORKSPACE_TEMPLATE).with_context(|| {
+        write_config_text_atomic(&workspace, DEFAULT_WORKSPACE_TEMPLATE).with_context(|| {
             format!(
                 "failed to write default workspace config: {}",
                 workspace.display()
@@ -882,12 +897,13 @@ pub fn ensure_default_configs() -> Result<ConfigPaths> {
     })?;
     let system_workspace = project_workspaces.join(format!("{SYSTEM_PROJECT_WORKSPACE_KEY}.toml"));
     if !system_workspace.exists() {
-        fs::write(&system_workspace, DEFAULT_PROJECT_WORKSPACE_TEMPLATE).with_context(|| {
-            format!(
-                "failed to write default project workspace: {}",
-                system_workspace.display()
-            )
-        })?;
+        write_config_text_atomic(&system_workspace, DEFAULT_PROJECT_WORKSPACE_TEMPLATE)
+            .with_context(|| {
+                format!(
+                    "failed to write default project workspace: {}",
+                    system_workspace.display()
+                )
+            })?;
     }
 
     Ok(ConfigPaths {
@@ -992,7 +1008,7 @@ pub fn save_project_workspace_config(path: &Path, config: &ProjectWorkspaceConfi
     }
     let content = toml::to_string_pretty(&config.clone().normalized())
         .with_context(|| format!("failed to serialize project workspace: {}", path.display()))?;
-    fs::write(path, content)
+    write_config_text_atomic(path, content)
         .with_context(|| format!("failed to write project workspace: {}", path.display()))?;
     Ok(())
 }
@@ -1356,6 +1372,9 @@ fn normalize_workspace_resource_entries(
             bundle_id: normalize_optional_text(value.bundle_id),
             app_name: normalize_optional_text(value.app_name),
             script: normalize_optional_text(value.script),
+            tool: normalize_optional_text(value.tool),
+            tool_key: normalize_optional_text(value.tool_key),
+            tool_action: normalize_optional_text(value.tool_action),
             path: normalize_optional_text(value.path),
             cwd: normalize_optional_text(value.cwd),
             note: normalize_optional_text(value.note),

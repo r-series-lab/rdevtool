@@ -1,4 +1,11 @@
-import { useMemo, type Dispatch, type SetStateAction } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { BranchOption } from "../app-types";
 
@@ -48,6 +55,26 @@ const LEGACY_PROJECT_SELECTION_STORAGE_KEY = "ruritool.project-selection.v1";
 export const DEFAULT_SOURCE_BRANCH_KEYWORDS = ["release", "feature"];
 export const DEFAULT_TARGET_BRANCH_KEYWORDS = ["variant", "pre", "master", "release"];
 const BRANCH_SYNC_TIMEOUT_MS = 12000;
+
+export class BranchSyncRequestTracker {
+  private readonly inFlight = new Map<string, Promise<void>>();
+
+  run(projectKey: string, task: () => Promise<void>): Promise<void> {
+    const current = this.inFlight.get(projectKey);
+    if (current) {
+      return current;
+    }
+
+    let request: Promise<void>;
+    request = task().finally(() => {
+      if (this.inFlight.get(projectKey) === request) {
+        this.inFlight.delete(projectKey);
+      }
+    });
+    this.inFlight.set(projectKey, request);
+    return request;
+  }
+}
 
 function normalizeBranchOption(value: unknown): BranchOption | null {
   if (typeof value === "string") {
@@ -261,17 +288,17 @@ async function withTimeout<T>(
   timeoutMs: number,
   message: string,
 ): Promise<T> {
-  let timer: number | undefined;
+  let timer: ReturnType<typeof globalThis.setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<T>((_, reject) => {
-        timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer = globalThis.setTimeout(() => reject(new Error(message)), timeoutMs);
       }),
     ]);
   } finally {
-    if (timer) {
-      window.clearTimeout(timer);
+    if (timer !== undefined) {
+      globalThis.clearTimeout(timer);
     }
   }
 }
@@ -310,39 +337,71 @@ export function useBranchContext({
     return normalizeBranchOptions(branchCache[selectedProject]?.branches ?? []);
   }, [branchCache, enabled, selectedProject]);
   const branchOptions = useMemo(() => branchOptionNames(branchEntries), [branchEntries]);
+  const selectedProjectRef = useRef(selectedProject);
+  const syncTrackerRef = useRef(new BranchSyncRequestTracker());
+  const activeSyncProjectsRef = useRef(new Set<string>());
 
-  async function handleSyncBranches(projectKey: string) {
-    if (!projectKey || !enabled) {
+  useEffect(() => {
+    selectedProjectRef.current = selectedProject;
+  }, [selectedProject]);
+
+  const syncBranches = useCallback(
+    async (projectKey: string) => {
+      if (!projectKey || !enabled) {
+        return;
+      }
+
+      await syncTrackerRef.current.run(projectKey, async () => {
+        activeSyncProjectsRef.current.add(projectKey);
+        setBusy("正在同步分支");
+        if (projectKey === selectedProjectRef.current) {
+          setError("");
+        }
+        try {
+          const branches = normalizeBranchOptions(
+            await withTimeout(
+              invoke<BranchOption[]>("get_project_branches", { project: projectKey }),
+              BRANCH_SYNC_TIMEOUT_MS,
+              "同步分支超时，请检查 Git 网络后重试",
+            ),
+          );
+          const syncedAt = Date.now();
+          setBranchCache((current) => {
+            const next = {
+              ...current,
+              [projectKey]: {
+                branches,
+                syncedAt,
+              },
+            };
+            return next;
+          });
+        } catch (reason) {
+          if (projectKey === selectedProjectRef.current) {
+            setError(String(reason));
+          }
+        } finally {
+          activeSyncProjectsRef.current.delete(projectKey);
+          if (activeSyncProjectsRef.current.size === 0) {
+            setBusy("");
+          }
+        }
+      });
+    },
+    [enabled, setBranchCache, setBusy, setError],
+  );
+
+  const handleSyncBranches = useCallback(
+    (projectKey: string) => syncBranches(projectKey),
+    [syncBranches],
+  );
+
+  useEffect(() => {
+    if (!enabled || !selectedProject) {
       return;
     }
-    setBusy("正在同步分支");
-    setError("");
-    try {
-      const branches = normalizeBranchOptions(
-        await withTimeout(
-          invoke<BranchOption[]>("get_project_branches", { project: projectKey }),
-          BRANCH_SYNC_TIMEOUT_MS,
-          "同步分支超时，请检查 Git 网络后重试",
-        ),
-      );
-      const syncedAt = Date.now();
-      setBranchCache((current) => ({
-        ...current,
-        [projectKey]: {
-          branches,
-          syncedAt,
-        },
-      }));
-
-      if (projectKey === selectedProject) {
-        // 当前项目的分支选项直接由缓存派生，这里只需要更新缓存即可。
-      }
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setBusy("");
-    }
-  }
+    void syncBranches(selectedProject);
+  }, [enabled, selectedProject, syncBranches]);
 
   return {
     branchEntries,
@@ -351,7 +410,7 @@ export function useBranchContext({
     selectedProjectSelection,
     handleSyncBranches,
     branchSyncText: selectedBranchCache
-      ? `默认使用上次同步分支（${formatBranchSyncTime(selectedBranchCache.syncedAt)}）`
-      : "默认使用本地/默认分支，可点右侧刷新图标拉取远端最新列表",
+      ? `最近同步于 ${formatBranchSyncTime(selectedBranchCache.syncedAt)}；进入 Git 或切换项目会自动刷新`
+      : "进入 Git 或切换项目时会自动拉取远程分支，也可点右侧刷新图标重试",
   };
 }

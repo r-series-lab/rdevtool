@@ -6,7 +6,8 @@ export type ActivityKind =
   | "build"
   | "branch"
   | "deploy"
-  | "shortcut";
+  | "shortcut"
+  | "config";
 
 export type ActivityStatus = "running" | "success" | "failed" | "info";
 
@@ -24,6 +25,18 @@ export type ActivityResource = {
   value: string;
 };
 
+export type ActivityAction =
+  | {
+      kind: "reloadConfig";
+      label: string;
+      scope: "workspace" | "projects" | "projectWorkspaces";
+    }
+  | {
+      kind: "compareConfigSource";
+      label: string;
+      sourceId: string;
+    };
+
 export type ActivityEntry = {
   id: string;
   kind: ActivityKind;
@@ -40,6 +53,7 @@ export type ActivityEntry = {
   projectName?: string | null;
   target?: ActivityTarget | null;
   resource?: ActivityResource | null;
+  action?: ActivityAction | null;
   syncFailureCount?: number;
   acknowledgedAt?: string | null;
   createdAt: string;
@@ -69,6 +83,7 @@ export type ActivityPatch = Partial<
     | "projectName"
     | "target"
     | "resource"
+    | "action"
     | "syncFailureCount"
     | "acknowledgedAt"
   >
@@ -94,6 +109,7 @@ const ACTIVITY_KINDS = new Set<ActivityKind>([
   "branch",
   "deploy",
   "shortcut",
+  "config",
 ]);
 
 const ACTIVITY_STATUSES = new Set<ActivityStatus>([
@@ -161,9 +177,22 @@ function normalizeActivityTarget(value: unknown): ActivityTarget | null {
   const candidate = value as Partial<ActivityTarget>;
   const rawPageValue = (value as Record<string, unknown>).page;
   const rawPage = typeof rawPageValue === "string" ? rawPageValue : "";
-  const page = rawPage === "deploy" ? "build" : rawPage;
+  const projectKey = normalizeNullableString(candidate.projectKey);
+  const page =
+    rawPage === "deploy"
+      ? "build"
+      : rawPage === "projects"
+        ? projectKey
+          ? "projectManagement"
+          : "resources"
+      : rawPage === "navigation"
+        ? "resources"
+        : rawPage;
   if (
-    page !== "projects" &&
+    page !== "overview" &&
+    page !== "projectManagement" &&
+    page !== "resources" &&
+    page !== "proxy" &&
     page !== "merge" &&
     page !== "build"
   ) {
@@ -172,7 +201,7 @@ function normalizeActivityTarget(value: unknown): ActivityTarget | null {
 
   return {
     page,
-    projectKey: normalizeNullableString(candidate.projectKey),
+    projectKey,
     branchMode:
       candidate.branchMode === "sync" ||
       candidate.branchMode === "create" ||
@@ -204,6 +233,35 @@ function normalizeActivityResource(value: unknown): ActivityResource | null {
     label,
     value: resourceValue,
   };
+}
+
+function normalizeActivityAction(value: unknown): ActivityAction | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const candidate = value as Partial<ActivityAction>;
+  const label = normalizeString(candidate.label).trim();
+  if (!label) {
+    return null;
+  }
+  if (candidate.kind === "reloadConfig") {
+    const scope = (value as { scope?: unknown }).scope;
+    if (
+      scope !== "workspace" &&
+      scope !== "projects" &&
+      scope !== "projectWorkspaces"
+    ) {
+      return null;
+    }
+    return { kind: candidate.kind, label, scope };
+  }
+  if (candidate.kind === "compareConfigSource") {
+    const sourceId = normalizeString(
+      (value as { sourceId?: unknown }).sourceId,
+    ).trim();
+    return sourceId ? { kind: candidate.kind, label, sourceId } : null;
+  }
+  return null;
 }
 
 export function stableActivityJson(value: unknown): string {
@@ -258,6 +316,24 @@ export function activityExecutionKey(
   ].join(":");
 }
 
+export function latestActivityExecutionStatus(
+  items: Array<
+    Pick<ActivityEntry, "id" | "status" | "createdAt" | "updatedAt">
+  >,
+): ActivityStatus {
+  const latest = items.reduce<(typeof items)[number] | null>((current, item) => {
+    if (!current) {
+      return item;
+    }
+    const order =
+      item.updatedAt.localeCompare(current.updatedAt) ||
+      item.createdAt.localeCompare(current.createdAt) ||
+      item.id.localeCompare(current.id);
+    return order > 0 ? item : current;
+  }, null);
+  return latest?.status ?? "info";
+}
+
 export function normalizeActivityEntry(value: unknown): ActivityEntry | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return null;
@@ -293,6 +369,7 @@ export function normalizeActivityEntry(value: unknown): ActivityEntry | null {
     projectName: normalizeNullableString(candidate.projectName),
     target: normalizeActivityTarget(candidate.target),
     resource: normalizeActivityResource(candidate.resource),
+    action: normalizeActivityAction(candidate.action),
     syncFailureCount: normalizeBuildSyncFailureCount(summary, candidate.syncFailureCount),
     acknowledgedAt: normalizeNullableString(candidate.acknowledgedAt),
     createdAt,
@@ -327,6 +404,7 @@ export function createActivityEntry(draft: ActivityDraft): ActivityEntry {
     projectName: draft.projectName ?? null,
     target: draft.target ?? null,
     resource: draft.resource ?? null,
+    action: draft.action ?? null,
     syncFailureCount: draft.syncFailureCount ?? 0,
     acknowledgedAt: draft.acknowledgedAt ?? null,
     createdAt: draft.createdAt || now,

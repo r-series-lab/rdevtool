@@ -86,13 +86,22 @@ pub fn capabilities() -> AgentCapabilities {
             "notes".to_string(),
             "navigation".to_string(),
             "navigation-open".to_string(),
+            "config-source-management".to_string(),
+            "config-source-compare".to_string(),
+            "config-source-copy".to_string(),
             "proxy-read".to_string(),
+            "proxy-config-source".to_string(),
             "proxy-profile-crud".to_string(),
             "proxy-rule-crud".to_string(),
+            "proxy-daemon-lifecycle".to_string(),
+            "proxy-diagnose".to_string(),
+            "proxy-verify".to_string(),
             "proxy-runtime-bind".to_string(),
             "runtime-cli".to_string(),
             "runtime-preflight".to_string(),
             "runtime-start".to_string(),
+            "runtime-daemon-lifecycle".to_string(),
+            "runtime-diagnose".to_string(),
             "runtime-focus".to_string(),
             "runtime-log".to_string(),
             "web-actions-cli".to_string(),
@@ -144,8 +153,9 @@ pub fn capabilities() -> AgentCapabilities {
             "notes list|get|create|save|delete|search".to_string(),
             "history build|deploy|merge|replay-plan|replay-run".to_string(),
             "navigation path|list|search|open|add|update|delete".to_string(),
-            "proxy path|list|show|add|update|delete|export|import|rule-list|rule-show|rule-add|rule-update|rule-delete|bind-runtime".to_string(),
-            "runtime profiles|profile-show|preflight|start|focus|log".to_string(),
+            "config-source list|show|compare|copy|use".to_string(),
+            "proxy path|source|list|start|stop|restart|status|show|add|update|delete|export|import|rule-list|rule-show|rule-add|rule-update|rule-delete|diagnose|verify|bind-runtime".to_string(),
+            "runtime profiles|profile-show|inspect|preflight|start|status|list|stop|restart|adopt|diagnose|focus|log".to_string(),
             "web-actions path|list|targets|open|run|script".to_string(),
             "agent capabilities|context".to_string(),
         ],
@@ -178,22 +188,10 @@ pub fn context_for_workspace(
         .transpose()?;
     let normalized_limit = normalize_limit(limit, 6);
     let filter_project_key = project_key.map(str::trim).filter(|value| !value.is_empty());
-    let workspace_project_filter = workspace.and_then(|workspace| {
-        (!workspace.include_all_projects).then(|| workspace.projects.iter().collect::<Vec<_>>())
-    });
-
-    let build_history = filtered_deploy_history(
-        storage,
-        filter_project_key,
-        workspace_project_filter.as_deref(),
-        normalized_limit,
-    )?;
-    let merge_history = filtered_merge_history(
-        storage,
-        filter_project_key,
-        workspace_project_filter.as_deref(),
-        normalized_limit,
-    )?;
+    let build_history =
+        filtered_deploy_history(storage, filter_project_key, workspace, normalized_limit)?;
+    let merge_history =
+        filtered_merge_history(storage, filter_project_key, workspace, normalized_limit)?;
     let replay_actions =
         replay_actions_from_history(&build_history, &merge_history, normalized_limit);
 
@@ -238,66 +236,49 @@ fn workspace_context(
 fn filtered_deploy_history(
     storage: &Storage,
     project_key: Option<&str>,
-    workspace_project_filter: Option<&[&String]>,
+    workspace: Option<&ProjectWorkspaceConfig>,
     limit: usize,
 ) -> Result<Vec<DeployHistoryEntry>> {
-    if let Some(project_key) = project_key {
-        if !workspace_allows_project(workspace_project_filter, project_key) {
+    if let Some(workspace) = workspace.filter(|workspace| !workspace.is_system()) {
+        if project_key.is_some_and(|project_key| !workspace.allows_project(project_key)) {
             return Ok(Vec::new());
         }
-        return storage
-            .list_deploy_history_filtered(Some(project_key), limit)
-            .map_err(anyhow::Error::msg);
-    }
-
-    match workspace_project_filter {
-        None => storage
-            .list_deploy_history_filtered(None, limit)
-            .map_err(anyhow::Error::msg),
-        Some(project_keys) if project_keys.is_empty() => Ok(Vec::new()),
-        Some(project_keys) => Ok(storage
+        return Ok(storage
             .list_all_deploy_history()
             .map_err(anyhow::Error::msg)?
             .into_iter()
-            .filter(|entry| workspace_allows_project(Some(project_keys), &entry.project_key))
+            .filter(|entry| entry.workspace_key.as_deref() == Some(workspace.key.as_str()))
+            .filter(|entry| project_key.is_none_or(|key| entry.project_key == key))
             .take(limit)
-            .collect()),
+            .collect());
     }
+    storage
+        .list_deploy_history_filtered(project_key, limit)
+        .map_err(anyhow::Error::msg)
 }
 
 fn filtered_merge_history(
     storage: &Storage,
     project_key: Option<&str>,
-    workspace_project_filter: Option<&[&String]>,
+    workspace: Option<&ProjectWorkspaceConfig>,
     limit: usize,
 ) -> Result<Vec<MergeHistoryEntry>> {
-    if let Some(project_key) = project_key {
-        if !workspace_allows_project(workspace_project_filter, project_key) {
+    if let Some(workspace) = workspace.filter(|workspace| !workspace.is_system()) {
+        if project_key.is_some_and(|project_key| !workspace.allows_project(project_key)) {
             return Ok(Vec::new());
         }
-        return storage
-            .list_merge_history_filtered(Some(project_key), limit)
-            .map_err(anyhow::Error::msg);
-    }
-
-    match workspace_project_filter {
-        None => storage
-            .list_merge_history_filtered(None, limit)
-            .map_err(anyhow::Error::msg),
-        Some(project_keys) if project_keys.is_empty() => Ok(Vec::new()),
-        Some(project_keys) => Ok(storage
+        return Ok(storage
             .list_all_merge_history()
             .map_err(anyhow::Error::msg)?
             .into_iter()
-            .filter(|entry| workspace_allows_project(Some(project_keys), &entry.project_key))
+            .filter(|entry| entry.workspace_key.as_deref() == Some(workspace.key.as_str()))
+            .filter(|entry| project_key.is_none_or(|key| entry.project_key == key))
             .take(limit)
-            .collect()),
+            .collect());
     }
-}
-
-fn workspace_allows_project(project_keys: Option<&[&String]>, project_key: &str) -> bool {
-    project_keys
-        .is_none_or(|project_keys| project_keys.iter().any(|key| key.as_str() == project_key))
+    storage
+        .list_merge_history_filtered(project_key, limit)
+        .map_err(anyhow::Error::msg)
 }
 
 fn build_project_context(config: &AppConfig, key: &str) -> Result<AgentProjectContext> {

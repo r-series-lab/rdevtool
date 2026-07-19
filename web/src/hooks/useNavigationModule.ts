@@ -12,6 +12,9 @@ type NavigationEntry = {
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  tool?: string | null;
+  toolKey?: string | null;
+  toolAction?: string | null;
   path?: string | null;
   cwd?: string | null;
   note?: string | null;
@@ -39,7 +42,7 @@ function matchesNavigationType(entry: NavigationEntry, filter: NavigationTypeFil
     case "目录":
       return entry.kind === "directory";
     case "工具":
-      return entry.kind === "app" || entry.kind === "script";
+      return entry.kind === "app" || entry.kind === "script" || entry.kind === "tool";
     default:
       return true;
   }
@@ -99,6 +102,8 @@ export function useNavigationModule({
         } else if (entry.kind === "app") {
           counts["工具"] += 1;
         } else if (entry.kind === "script") {
+          counts["工具"] += 1;
+        } else if (entry.kind === "tool") {
           counts["工具"] += 1;
         }
       }
@@ -169,7 +174,7 @@ export function useNavigationModule({
       category.entries
         .filter((entry) => {
           const haystack =
-            `${category.title} ${entry.kind} ${entry.name} ${entry.targetLabel} ${entry.note ?? ""} ${entry.runtimeProfile ?? ""} ${entry.path ?? ""} ${entry.script ?? ""} ${entry.cwd ?? ""}`.toLowerCase();
+            `${category.title} ${entry.kind} ${entry.name} ${entry.targetLabel} ${entry.note ?? ""} ${entry.runtimeProfile ?? ""} ${entry.path ?? ""} ${entry.script ?? ""} ${entry.tool ?? ""} ${entry.toolKey ?? ""} ${entry.toolAction ?? ""} ${entry.cwd ?? ""}`.toLowerCase();
           return (
             matchesNavigationType(entry, navigationTypeFilter) &&
             haystack.includes(keyword)

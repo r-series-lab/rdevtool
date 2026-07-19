@@ -16,12 +16,23 @@ use rdevtool_core::config::{
     load_project_workspace_by_key, load_project_workspaces, load_workspace_config,
     resolve_config_path, save_config, save_project_workspace_config, save_workspace_config,
 };
+use rdevtool_core::config_sources::{
+    CopyConfigSourceRequest, compare_config_sources, config_sources_file_path, copy_config_source,
+    list_config_sources, preferred_config_source_id_for_scope, resolve_config_source,
+    save_config_source_preference,
+};
 use rdevtool_core::core::{
-    self, BranchCheckoutRequest, BranchCommitOverview, BranchCreateRequest, BranchPushRequest,
-    BranchPushStatus, BranchSwitchRequest, BranchSyncRequest, BranchTaskResponse,
-    BuildStatusResponse, DeployRequest, DeployTargetMeta, MergeRequest, MergeResponse,
-    StatusRequest, branch_push_status, checkout_branch_to_directory, execute_branch_create,
-    execute_branch_push, execute_branch_switch, execute_branch_sync, parse_extra_params_args,
+    self, BranchCheckoutRequest, BranchCommitOverview, BranchCreateRequest, BranchFileDiffRequest,
+    BranchFileDiffResponse, BranchPushRequest, BranchPushStatus, BranchSwitchRequest,
+    BranchSyncRequest, BranchTaskResponse, BuildStatusResponse, DeployRequest, DeployTargetMeta,
+    MergeRequest, MergeResponse, StatusRequest, branch_file_diff, branch_push_status,
+    checkout_branch_to_directory, execute_branch_create, execute_branch_push,
+    execute_branch_switch, execute_branch_sync, parse_extra_params_args,
+};
+use rdevtool_core::link::{
+    LinkConfig, LinkExecutionReport, LinkExecutionStepReport, LinkStepConfig,
+    LinkWorkspaceAttachRequest, attach_link_to_workspace, delete_link as core_delete_link,
+    get_link, links_file_path, list_link_summaries, plan_link as core_plan_link, upsert_link,
 };
 use rdevtool_core::navigation::{
     NavigationEditorCategory, NavigationEditorEntry, NavigationIndexEntry,
@@ -38,16 +49,26 @@ use rdevtool_core::proxy::{
     import_proxy_profile_pack, load_proxy_config, save_proxy_config, upsert_proxy_profile,
     upsert_proxy_rule, validate_proxy_profile, validate_proxy_rule,
 };
+use rdevtool_core::proxy_daemon::{
+    ProxyDaemonStatus, proxy_daemon_restart, proxy_daemon_start, proxy_daemon_status,
+    proxy_daemon_stop,
+};
 use rdevtool_core::replay::{
     ReplayAction, build_replay_action, merge_replay_action, replay_kind_and_history_key,
 };
 use rdevtool_core::runtime::{
-    ProjectRuntimeFocusResponse, ProjectRuntimeInspectResponse, ProjectRuntimeLogKind,
-    ProjectRuntimeLogResponse, ProjectRuntimePreflightResponse, ProjectRuntimeStartResponse,
-    RuntimeProfileSummary, RuntimeProfilesResponse, clear_project_runtime_log,
-    focus_project_runtime, inspect_project_runtime, project_runtime_preflight,
+    ProjectRuntimeFocusResponse, ProjectRuntimeInspectResponse, ProjectRuntimeLaunchOptions,
+    ProjectRuntimeLogKind, ProjectRuntimeLogResponse, ProjectRuntimePreflightResponse,
+    ProjectRuntimeStartResponse, RuntimeProfileSummary, RuntimeProfilesResponse,
+    adopt_project_runtime_with_options, clear_project_runtime_log,
+    inspect_project_runtime_with_options, project_runtime_preflight_with_options,
     read_project_runtime_log, runtime_profile_show, runtime_profiles,
-    start_project_runtime_detached,
+    start_project_runtime_detached_with_options,
+};
+use rdevtool_core::runtime_daemon::{
+    RuntimeDaemonAdoptResponse, RuntimeDaemonDiagnosis, RuntimeDaemonStatus,
+    diagnose as diagnose_runtime_daemon, list as list_runtime_daemons,
+    status as runtime_daemon_status, stop as stop_runtime_daemon,
 };
 use rdevtool_core::runtime_link::{BindProxyRuntimeRequest, bind_proxy_runtime_profile};
 use rdevtool_core::storage::{
@@ -234,7 +255,17 @@ enum Commands {
         #[command(subcommand)]
         command: NavigationCommands,
     },
+    Link {
+        #[command(subcommand)]
+        command: LinkCommands,
+    },
+    ConfigSource {
+        #[command(subcommand)]
+        command: ConfigSourceCommands,
+    },
     Proxy {
+        #[arg(long, global = true)]
+        source: Option<String>,
         #[command(subcommand)]
         command: ProxyCommands,
     },
@@ -775,12 +806,32 @@ enum GitCommands {
     PushStatus {
         #[arg(long)]
         project: String,
+        #[arg(long)]
+        repo_path: Option<String>,
+    },
+    Diff {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        path: String,
+        #[arg(long)]
+        repo_path: Option<String>,
+        #[arg(long)]
+        mode: Option<String>,
+        #[arg(long)]
+        max_bytes: Option<usize>,
+        #[arg(long)]
+        max_lines: Option<usize>,
     },
     Push {
         #[arg(long)]
         project: String,
         #[arg(long)]
         message: Option<String>,
+        #[arg(long)]
+        repo_path: Option<String>,
+        #[arg(long = "path")]
+        selected_paths: Vec<String>,
     },
     History {
         #[arg(long)]
@@ -894,6 +945,12 @@ enum NavigationCommands {
         #[arg(long)]
         script: Option<String>,
         #[arg(long)]
+        tool: Option<String>,
+        #[arg(long)]
+        tool_key: Option<String>,
+        #[arg(long)]
+        tool_action: Option<String>,
+        #[arg(long)]
         cwd: Option<String>,
         #[arg(long)]
         browser: Option<String>,
@@ -928,6 +985,12 @@ enum NavigationCommands {
         #[arg(long)]
         script: Option<String>,
         #[arg(long)]
+        tool: Option<String>,
+        #[arg(long)]
+        tool_key: Option<String>,
+        #[arg(long)]
+        tool_action: Option<String>,
+        #[arg(long)]
         cwd: Option<String>,
         #[arg(long)]
         browser: Option<String>,
@@ -951,9 +1014,101 @@ enum NavigationCommands {
 }
 
 #[derive(Subcommand)]
-enum ProxyCommands {
+enum LinkCommands {
     Path,
     List,
+    Show {
+        key: String,
+    },
+    Plan {
+        key: String,
+    },
+    Check {
+        key: String,
+    },
+    Run {
+        key: String,
+    },
+    Stop {
+        key: String,
+    },
+    Save {
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long = "step")]
+        steps: Vec<String>,
+    },
+    Delete {
+        key: String,
+    },
+    Attach {
+        key: String,
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long, default_value = "工具")]
+        category: String,
+        #[arg(long)]
+        short_label: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigSourceCommands {
+    List,
+    Show {
+        source: String,
+    },
+    Compare {
+        left: String,
+        right: String,
+    },
+    Copy {
+        source: String,
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long = "base-dir")]
+        base_dir: Option<PathBuf>,
+    },
+    Use {
+        source: String,
+        #[arg(long, default_value = "resource")]
+        capability: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProxyCommands {
+    Path,
+    Source {
+        #[arg(long = "set")]
+        source_id: Option<String>,
+    },
+    List,
+    Start {
+        profile: String,
+    },
+    Stop {
+        profile: String,
+    },
+    Restart {
+        profile: String,
+    },
+    Status {
+        #[arg(long)]
+        profile: Option<String>,
+    },
     Show {
         profile: String,
     },
@@ -1121,6 +1276,24 @@ enum ProxyCommands {
         #[arg(long = "header")]
         headers: Vec<String>,
     },
+    Verify {
+        #[arg(long)]
+        profile: String,
+        #[arg(long, default_value = "GET")]
+        method: String,
+        #[arg(long)]
+        url: String,
+        #[arg(long = "header")]
+        headers: Vec<String>,
+        #[arg(long)]
+        body: Option<String>,
+        #[arg(long = "expect-status")]
+        expected_status: Option<u16>,
+        #[arg(long = "contains")]
+        expected_body_text: Option<String>,
+        #[arg(long, default_value_t = 5000)]
+        timeout_ms: u64,
+    },
     BindRuntime {
         #[arg(long)]
         profile: String,
@@ -1154,26 +1327,92 @@ enum RuntimeCommands {
         project: String,
         #[arg(long = "debug-profile")]
         debug_profile: Option<String>,
+        #[arg(long = "runtime-profile")]
+        runtime_profile: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long = "expect-port")]
+        expected_port: Option<u16>,
+        #[arg(long = "env")]
+        env: Vec<String>,
     },
     Preflight {
         #[arg(long)]
         project: String,
         #[arg(long = "debug-profile")]
         debug_profile: Option<String>,
+        #[arg(long = "runtime-profile")]
+        runtime_profile: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long = "expect-port")]
+        expected_port: Option<u16>,
+        #[arg(long = "env")]
+        env: Vec<String>,
     },
     Start {
         #[arg(long)]
         project: String,
         #[arg(long = "debug-profile")]
         debug_profile: Option<String>,
+        #[arg(long = "runtime-profile")]
+        runtime_profile: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long = "expect-port")]
+        expected_port: Option<u16>,
         #[arg(long = "env")]
         env: Vec<String>,
+    },
+    Status {
+        #[arg(long)]
+        project: String,
+    },
+    List {
+        #[arg(long)]
+        running_only: bool,
+    },
+    Stop {
+        #[arg(long)]
+        project: String,
+    },
+    Restart {
+        #[arg(long)]
+        project: String,
+        #[arg(long = "debug-profile")]
+        debug_profile: Option<String>,
+        #[arg(long = "runtime-profile")]
+        runtime_profile: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long = "expect-port")]
+        expected_port: Option<u16>,
+        #[arg(long = "env")]
+        env: Vec<String>,
+    },
+    Adopt {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        pid: u32,
+        #[arg(long = "debug-profile")]
+        debug_profile: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long = "expect-port")]
+        expected_port: Option<u16>,
+    },
+    Diagnose {
+        #[arg(long)]
+        project: String,
     },
     Focus {
         #[arg(long)]
         project: String,
         #[arg(long = "debug-profile")]
         debug_profile: Option<String>,
+        #[arg(long = "runtime-profile")]
+        runtime_profile: Option<String>,
         #[arg(long)]
         url: Option<String>,
     },
@@ -1187,6 +1426,26 @@ enum RuntimeCommands {
         #[arg(long)]
         clear: bool,
     },
+}
+
+impl RuntimeCommands {
+    fn json_command_name(&self) -> &'static str {
+        match self {
+            Self::Profiles => "runtime.profiles",
+            Self::ProfileShow { .. } => "runtime.profile-show",
+            Self::Inspect { .. } => "runtime.inspect",
+            Self::Preflight { .. } => "runtime.preflight",
+            Self::Start { .. } => "runtime.start",
+            Self::Status { .. } => "runtime.status",
+            Self::List { .. } => "runtime.list",
+            Self::Stop { .. } => "runtime.stop",
+            Self::Restart { .. } => "runtime.restart",
+            Self::Adopt { .. } => "runtime.adopt",
+            Self::Diagnose { .. } => "runtime.diagnose",
+            Self::Focus { .. } => "runtime.focus",
+            Self::Log { .. } => "runtime.log",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -1261,6 +1520,20 @@ enum AgentCommands {
 
 fn main() {
     let args: Vec<_> = std::env::args_os().collect();
+    if let Some(result) = rdevtool_core::runtime_daemon::run_runtime_daemon_from_args(&args) {
+        if let Err(error) = result {
+            eprintln!("runtime daemon failed: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    if let Some(result) = rdevtool_core::proxy_daemon::run_proxy_daemon_from_args(&args) {
+        if let Err(error) = result {
+            eprintln!("proxy daemon failed: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     let json_mode = args.iter().any(|value| value == "--json");
 
     let exit_code = match Cli::try_parse_from(&args) {
@@ -1462,7 +1735,11 @@ fn run_cli(cli: Cli) -> Result<()> {
             run_push_branch(&config, project, message, json)
         }
         Commands::Navigation { command } => run_navigation(command, json),
-        Commands::Proxy { command } => run_proxy(command, config_override, json),
+        Commands::Link { command } => run_link(command, config_override, json),
+        Commands::ConfigSource { command } => run_config_source(command, json),
+        Commands::Proxy { source, command } => {
+            run_proxy(command, config_override, source.as_deref(), json)
+        }
         Commands::Runtime { command } => {
             let (config, _) = load_cli_effective_config(config_override)?;
             run_runtime(&config, command, json)
@@ -1541,6 +1818,8 @@ struct DoctorPaths {
     workspaces_dir: String,
     navigation: String,
     proxy: String,
+    config_sources: String,
+    proxy_active: Option<String>,
     web_actions: String,
     storage: String,
 }
@@ -1557,10 +1836,60 @@ struct DoctorCheck {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyCliInfo {
+    source_id: String,
+    source_name: String,
     path: String,
     workspace: ProjectWorkspaceCliInfo,
     profiles: Vec<ProxyProfile>,
     rules: Vec<ProxyRule>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyStatusResponse {
+    source_id: String,
+    source_name: String,
+    path: String,
+    profiles: Vec<ProxyStatusItem>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyStatusItem {
+    profile_id: String,
+    profile_name: String,
+    listen_url: String,
+    listening: bool,
+    managed: bool,
+    version_compatible: bool,
+    protocol_version: Option<u16>,
+    app_version: Option<String>,
+    pid: Option<u32>,
+    started_at: Option<String>,
+    owner: Option<String>,
+    ownership: String,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyVerifyResponse {
+    profile_id: String,
+    profile_name: String,
+    listen_url: String,
+    request_url: String,
+    method: String,
+    diagnosis: ProxyRequestDiagnosis,
+    status: u16,
+    content_type: Option<String>,
+    body_preview: String,
+    body_truncated: bool,
+    elapsed_ms: u128,
+    expected_status: Option<u16>,
+    expected_body_text_provided: bool,
+    status_matches: bool,
+    body_matches: bool,
+    verified: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1730,6 +2059,11 @@ fn classify_error(error: &anyhow::Error) -> (&'static str, i32) {
         || message.contains("choose only one")
         || message.contains("must be")
         || message.contains("failed to parse")
+        || message.contains("已存在")
+        || message.contains("冲突")
+        || message.contains("不能为空")
+        || message.contains("必须")
+        || message.contains("非空")
     {
         ("invalid_arguments", 2)
     } else {
@@ -1873,6 +2207,9 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
     let paths = ensure_default_configs()?;
     let mut checks = Vec::new();
     let mut active_workspace = None;
+    let mut active_workspace_config = None;
+    let mut app_workspace_config = None;
+    let mut config_source_workspaces = Vec::new();
     let mut config_for_workspace = None;
     let mut known_workspace_keys = BTreeSet::new();
 
@@ -1882,13 +2219,15 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
         .map(|(_, path)| path.clone())
         .unwrap_or_else(|_| paths.projects.clone());
 
-    let doctor_paths = DoctorPaths {
+    let mut doctor_paths = DoctorPaths {
         config_dir: paths.dir.display().to_string(),
         projects: config_path.display().to_string(),
         workspace: paths.workspace.display().to_string(),
         workspaces_dir: paths.project_workspaces.display().to_string(),
         navigation: navigation_file_path(),
         proxy: default_proxy_path().display().to_string(),
+        config_sources: config_sources_file_path().display().to_string(),
+        proxy_active: None,
         web_actions: default_web_actions_path().display().to_string(),
         storage: storage::default_storage_path().display().to_string(),
     };
@@ -1919,6 +2258,7 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
     match load_workspace_config(&paths.workspace) {
         Ok(workspace_config) => {
             let active_key = active_project_workspace_key(&workspace_config);
+            app_workspace_config = Some(workspace_config.clone());
             push_check(
                 &mut checks,
                 DoctorStatus::Ok,
@@ -1928,15 +2268,17 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
             );
             match load_project_workspaces(&paths.project_workspaces) {
                 Ok(workspaces) => {
+                    let workspace_count = workspaces.len();
                     known_workspace_keys = workspaces
                         .iter()
                         .map(|workspace| workspace.key.clone())
                         .collect();
+                    config_source_workspaces = workspaces;
                     push_check(
                         &mut checks,
                         DoctorStatus::Ok,
                         "workspace_catalog",
-                        format!("loaded {} workspaces", workspaces.len()),
+                        format!("loaded {} workspaces", workspace_count),
                         Some(paths.project_workspaces.display().to_string()),
                     );
                 }
@@ -1959,6 +2301,7 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
                         ));
                     }
                     check_navigation_config(&mut checks, &workspace);
+                    active_workspace_config = Some(workspace);
                 }
                 Err(error) => push_check(
                     &mut checks,
@@ -1978,7 +2321,15 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
         ),
     }
 
-    check_proxy_config(&mut checks, &known_workspace_keys);
+    let active_proxy_path = check_config_sources(
+        &mut checks,
+        &config_source_workspaces,
+        active_workspace_config.as_ref(),
+        app_workspace_config.as_ref(),
+    )
+    .unwrap_or_else(default_proxy_path);
+    doctor_paths.proxy_active = Some(active_proxy_path.display().to_string());
+    check_proxy_config(&mut checks, &known_workspace_keys, &active_proxy_path);
     check_storage(&mut checks);
     check_web_actions(&mut checks);
 
@@ -2140,22 +2491,124 @@ fn check_navigation_config(checks: &mut Vec<DoctorCheck>, workspace: &ProjectWor
     }
 }
 
-fn check_proxy_config(checks: &mut Vec<DoctorCheck>, known_workspace_keys: &BTreeSet<String>) {
-    let proxy_path = match ensure_proxy_config() {
-        Ok(path) => path,
+fn check_config_sources(
+    checks: &mut Vec<DoctorCheck>,
+    workspaces: &[ProjectWorkspaceConfig],
+    active_workspace: Option<&ProjectWorkspaceConfig>,
+    app_workspace: Option<&rdevtool_core::config::WorkspaceConfig>,
+) -> Option<PathBuf> {
+    let sources = match list_config_sources(workspaces) {
+        Ok(sources) => sources,
         Err(error) => {
             push_check(
                 checks,
                 DoctorStatus::Error,
-                "proxy_config",
-                "failed to ensure proxy config",
+                "config_sources",
+                "failed to load config sources",
                 Some(error.to_string()),
             );
-            return;
+            return None;
         }
     };
+    let capability_summary = ["resource", "link", "proxy", "runtime"]
+        .into_iter()
+        .map(|capability| {
+            let count = sources
+                .iter()
+                .filter(|source| {
+                    source
+                        .capabilities
+                        .iter()
+                        .any(|item| item.eq_ignore_ascii_case(capability))
+                })
+                .count();
+            format!("{capability}={count}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    push_check(
+        checks,
+        DoctorStatus::Ok,
+        "config_sources",
+        format!("loaded {} config sources", sources.len()),
+        Some(format!(
+            "{}; {}",
+            config_sources_file_path().display(),
+            capability_summary
+        )),
+    );
 
-    let proxy_config = match load_proxy_config(&proxy_path) {
+    let preferred_source_id = match (active_workspace, app_workspace) {
+        (Some(workspace), Some(app_workspace)) => {
+            preferred_config_source_id_for_scope(workspace, app_workspace, "proxy")
+        }
+        _ => "default".to_string(),
+    };
+    let preferred_normalized = preferred_source_id.replace('_', "-");
+    let preferred_source = sources.iter().find(|source| {
+        source.id == preferred_source_id || source.id.replace('_', "-") == preferred_normalized
+    });
+    let source = preferred_source.or_else(|| sources.iter().find(|source| source.is_default))?;
+    if preferred_source.is_none() {
+        push_check(
+            checks,
+            DoctorStatus::Warning,
+            "proxy_source",
+            "preferred proxy config source no longer exists; using default",
+            Some(preferred_source_id),
+        );
+    }
+    if !source
+        .capabilities
+        .iter()
+        .any(|capability| capability.eq_ignore_ascii_case("proxy"))
+    {
+        push_check(
+            checks,
+            DoctorStatus::Error,
+            "proxy_source",
+            "active config source does not support proxy",
+            Some(format!("{} ({})", source.name, source.id)),
+        );
+        return None;
+    }
+    let path = source.files.proxy.as_deref().map(PathBuf::from);
+    match &path {
+        Some(path) => push_check(
+            checks,
+            DoctorStatus::Ok,
+            "proxy_source",
+            format!("active proxy source is {} ({})", source.name, source.id),
+            Some(path.display().to_string()),
+        ),
+        None => push_check(
+            checks,
+            DoctorStatus::Error,
+            "proxy_source",
+            "active config source has no proxy file mapping",
+            Some(format!("{} ({})", source.name, source.id)),
+        ),
+    }
+    path
+}
+
+fn check_proxy_config(
+    checks: &mut Vec<DoctorCheck>,
+    known_workspace_keys: &BTreeSet<String>,
+    proxy_path: &Path,
+) {
+    if !proxy_path.exists() {
+        push_check(
+            checks,
+            DoctorStatus::Warning,
+            "proxy_config",
+            "active proxy config has not been initialized",
+            Some(proxy_path.display().to_string()),
+        );
+        return;
+    }
+
+    let proxy_config = match load_proxy_config(proxy_path) {
         Ok(config) => config,
         Err(error) => {
             push_check(
@@ -2173,6 +2626,8 @@ fn check_proxy_config(checks: &mut Vec<DoctorCheck>, known_workspace_keys: &BTre
     let mut workspace_warnings = Vec::new();
     let mut listen_addrs = BTreeSet::new();
     let mut duplicate_addrs = Vec::new();
+    let mut managed_addrs = Vec::new();
+    let mut outdated_daemons = Vec::new();
     let mut unavailable_addrs = Vec::new();
 
     for profile in &proxy_config.profiles {
@@ -2189,8 +2644,37 @@ fn check_proxy_config(checks: &mut Vec<DoctorCheck>, known_workspace_keys: &BTre
             duplicate_addrs.push(listen_addr.clone());
         }
         if TcpListener::bind(&listen_addr).is_err() {
-            unavailable_addrs.push(listen_addr);
+            let daemon_status = proxy_daemon_status(&proxy_path, &profile.id).ok();
+            if proxy_listener_is_managed(daemon_status.as_ref()) {
+                if daemon_status
+                    .as_ref()
+                    .is_some_and(|status| !status.version_compatible)
+                {
+                    outdated_daemons.push(format!("{} ({})", profile.id, listen_addr));
+                }
+                managed_addrs.push(listen_addr);
+            } else {
+                unavailable_addrs.push(listen_addr);
+            }
         }
+    }
+
+    if outdated_daemons.is_empty() {
+        push_check(
+            checks,
+            DoctorStatus::Ok,
+            "proxy_daemon_versions",
+            "running proxy daemons use the current runtime",
+            None,
+        );
+    } else {
+        push_check(
+            checks,
+            DoctorStatus::Warning,
+            "proxy_daemon_versions",
+            "some proxy daemons will be upgraded on next start or restart",
+            Some(outdated_daemons.join(", ")),
+        );
     }
 
     for rule in &proxy_config.rules {
@@ -2244,8 +2728,9 @@ fn check_proxy_config(checks: &mut Vec<DoctorCheck>, known_workspace_keys: &BTre
             checks,
             DoctorStatus::Ok,
             "proxy_ports",
-            "proxy listen ports look available",
-            None,
+            "proxy listen ports look available or managed by rDevTool",
+            (!managed_addrs.is_empty())
+                .then(|| format!("managed by rDevTool: {}", managed_addrs.join(", "))),
         );
     } else {
         let detail = [
@@ -2269,6 +2754,251 @@ fn check_proxy_config(checks: &mut Vec<DoctorCheck>, known_workspace_keys: &BTre
             "some proxy listen addresses need attention",
             Some(detail),
         );
+    }
+}
+
+fn proxy_listener_is_managed(status: Option<&ProxyDaemonStatus>) -> bool {
+    status.is_some_and(|status| status.running && status.managed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Cli, Commands, ConfigSourceCommands, ProxyDaemonStatus, RuntimeCommands,
+        proxy_listener_is_managed, resolve_project_runtime_lookup_cwd,
+    };
+    use clap::Parser;
+    use rdevtool_core::config::{ProjectCommandConfig, ProjectConfig};
+    use std::path::PathBuf;
+
+    fn daemon_status(running: bool, managed: bool) -> ProxyDaemonStatus {
+        ProxyDaemonStatus {
+            profile_id: "profile".to_string(),
+            profile_name: "Profile".to_string(),
+            config_path: "/tmp/proxy.toml".to_string(),
+            listen_url: "http://127.0.0.1:8787".to_string(),
+            running,
+            managed,
+            version_compatible: true,
+            protocol_version: managed.then_some(1),
+            app_version: managed.then(|| "0.1.0".to_string()),
+            pid: managed.then_some(42),
+            started_at: None,
+            owner: None,
+            state_path: "/tmp/proxy-state.json".to_string(),
+            detail: String::new(),
+        }
+    }
+
+    fn parse_runtime_command(args: &[&str]) -> RuntimeCommands {
+        let mut values = vec!["rdevtool", "runtime"];
+        values.extend_from_slice(args);
+        let cli = Cli::try_parse_from(values).unwrap();
+        match cli.command {
+            Commands::Runtime { command } => command,
+            _ => panic!("expected runtime command"),
+        }
+    }
+
+    fn runtime_project(repo_path: Option<PathBuf>, cwd: Option<PathBuf>) -> ProjectConfig {
+        ProjectConfig {
+            key: "sample".to_string(),
+            name: "Sample".to_string(),
+            category: "Workspace".to_string(),
+            repo_path,
+            git_url: String::new(),
+            deploy_targets: Vec::new(),
+            jobs: Default::default(),
+            dev: Some(ProjectCommandConfig {
+                command: "npm run dev".to_string(),
+                cwd,
+                ..ProjectCommandConfig::default()
+            }),
+            build: None,
+            focus: Default::default(),
+            branch_rules: Default::default(),
+            debug_profiles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn doctor_accepts_only_running_managed_proxy_listeners() {
+        assert!(proxy_listener_is_managed(Some(&daemon_status(true, true))));
+        assert!(!proxy_listener_is_managed(Some(&daemon_status(
+            true, false
+        ))));
+        assert!(!proxy_listener_is_managed(Some(&daemon_status(
+            false, true
+        ))));
+        assert!(!proxy_listener_is_managed(None));
+    }
+
+    #[test]
+    fn parses_generic_config_source_commands() {
+        let list = Cli::try_parse_from(["rdevtool", "config-source", "list"]).unwrap();
+        assert!(matches!(
+            list.command,
+            Commands::ConfigSource {
+                command: ConfigSourceCommands::List
+            }
+        ));
+
+        let select = Cli::try_parse_from([
+            "rdevtool",
+            "config-source",
+            "use",
+            "team-local",
+            "--capability",
+            "proxy",
+        ])
+        .unwrap();
+        assert!(matches!(
+            select.command,
+            Commands::ConfigSource {
+                command: ConfigSourceCommands::Use { source, capability }
+            } if source == "team-local" && capability == "proxy"
+        ));
+
+        let compare =
+            Cli::try_parse_from(["rdevtool", "config-source", "compare", "default", "team"])
+                .unwrap();
+        assert!(matches!(
+            compare.command,
+            Commands::ConfigSource {
+                command: ConfigSourceCommands::Compare { left, right }
+            } if left == "default" && right == "team"
+        ));
+
+        let copy = Cli::try_parse_from([
+            "rdevtool",
+            "config-source",
+            "copy",
+            "workspace-demo",
+            "--id",
+            "team-copy",
+            "--name",
+            "Team Copy",
+            "--base-dir",
+            "/tmp/team-copy",
+        ])
+        .unwrap();
+        assert!(matches!(
+            copy.command,
+            Commands::ConfigSource {
+                command: ConfigSourceCommands::Copy {
+                    source,
+                    id,
+                    name,
+                    base_dir: Some(base_dir),
+                }
+            } if source == "workspace-demo"
+                && id == "team-copy"
+                && name == "Team Copy"
+                && base_dir == PathBuf::from("/tmp/team-copy")
+        ));
+    }
+
+    #[test]
+    fn parses_runtime_lifecycle_commands_with_stable_json_names() {
+        let status = parse_runtime_command(&["status", "--project", "sample"]);
+        assert_eq!(status.json_command_name(), "runtime.status");
+        assert!(matches!(
+            status,
+            RuntimeCommands::Status { project } if project == "sample"
+        ));
+
+        let list = parse_runtime_command(&["list", "--running-only"]);
+        assert_eq!(list.json_command_name(), "runtime.list");
+        assert!(matches!(list, RuntimeCommands::List { running_only: true }));
+
+        let stop = parse_runtime_command(&["stop", "--project", "sample"]);
+        assert_eq!(stop.json_command_name(), "runtime.stop");
+        assert!(matches!(
+            stop,
+            RuntimeCommands::Stop { project } if project == "sample"
+        ));
+
+        let adopt = parse_runtime_command(&["adopt", "--project", "sample", "--pid", "4242"]);
+        assert_eq!(adopt.json_command_name(), "runtime.adopt");
+        assert!(matches!(
+            adopt,
+            RuntimeCommands::Adopt {
+                project,
+                pid,
+                debug_profile: None,
+                command: None,
+                expected_port: None,
+            } if project == "sample" && pid == 4242
+        ));
+
+        let diagnose = parse_runtime_command(&["diagnose", "--project", "sample"]);
+        assert_eq!(diagnose.json_command_name(), "runtime.diagnose");
+        assert!(matches!(
+            diagnose,
+            RuntimeCommands::Diagnose { project } if project == "sample"
+        ));
+    }
+
+    #[test]
+    fn runtime_restart_accepts_the_same_launch_overrides_as_start() {
+        let restart = parse_runtime_command(&[
+            "restart",
+            "--project",
+            "sample",
+            "--debug-profile",
+            "debug",
+            "--runtime-profile",
+            "browser",
+            "--command",
+            "npm run dev:local",
+            "--expect-port",
+            "4173",
+            "--env",
+            "MODE=local",
+            "--env",
+            "DEBUG=true",
+        ]);
+        assert_eq!(restart.json_command_name(), "runtime.restart");
+        assert!(matches!(
+            restart,
+            RuntimeCommands::Restart {
+                project,
+                debug_profile: Some(debug_profile),
+                runtime_profile: Some(runtime_profile),
+                command: Some(command),
+                expected_port: Some(4173),
+                env,
+            } if project == "sample"
+                && debug_profile == "debug"
+                && runtime_profile == "browser"
+                && command == "npm run dev:local"
+                && env == ["MODE=local", "DEBUG=true"]
+        ));
+    }
+
+    #[test]
+    fn runtime_lookup_cwd_prefers_dev_cwd_and_canonicalizes_it() {
+        let repo_path = std::env::current_dir().unwrap();
+        let project = runtime_project(Some(repo_path.clone()), Some(PathBuf::from("src")));
+        let cwd = resolve_project_runtime_lookup_cwd(&project).unwrap();
+        assert_eq!(cwd, repo_path.join("src").canonicalize().unwrap());
+
+        let absolute_dev_cwd = repo_path.join("docs");
+        let project = runtime_project(Some(repo_path.clone()), Some(absolute_dev_cwd.clone()));
+        let cwd = resolve_project_runtime_lookup_cwd(&project).unwrap();
+        assert_eq!(cwd, absolute_dev_cwd.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn runtime_lookup_cwd_falls_back_to_repo_path() {
+        let repo_path = std::env::current_dir().unwrap();
+        let project = runtime_project(Some(repo_path.clone()), None);
+        let cwd = resolve_project_runtime_lookup_cwd(&project).unwrap();
+        assert_eq!(cwd, repo_path.canonicalize().unwrap());
+
+        let project = runtime_project(None, Some(PathBuf::from("src")));
+        let error = resolve_project_runtime_lookup_cwd(&project).unwrap_err();
+        assert!(error.to_string().contains("relative dev.cwd"));
     }
 }
 
@@ -2751,6 +3481,8 @@ fn workspace_resource_entry_target(entry: &ProjectWorkspaceResourceEntryConfig) 
                 .path
                 .clone()
                 .or_else(|| entry.script.clone())
+                .or_else(|| entry.tool_key.clone())
+                .or_else(|| entry.tool.clone())
                 .or_else(|| entry.bundle_id.clone())
                 .or_else(|| entry.app_name.clone())
                 .unwrap_or_default()
@@ -4842,12 +5574,33 @@ fn run_git(config: &AppConfig, command: GitCommands, json_mode: bool) -> Result<
             project,
             target_branch,
         } => run_branch_switch_command(config, project, target_branch, json_mode, "git.switch"),
-        GitCommands::PushStatus { project } => {
-            run_push_status_command(config, project, json_mode, "git.push-status")
+        GitCommands::PushStatus { project, repo_path } => {
+            run_push_status_command(config, project, repo_path, json_mode, "git.push-status")
         }
-        GitCommands::Push { project, message } => {
-            run_push_branch_command(config, project, message, json_mode, "git.push")
-        }
+        GitCommands::Diff {
+            project,
+            path,
+            repo_path,
+            mode,
+            max_bytes,
+            max_lines,
+        } => run_branch_file_diff_command(
+            config, project, path, repo_path, mode, max_bytes, max_lines, json_mode, "git.diff",
+        ),
+        GitCommands::Push {
+            project,
+            message,
+            repo_path,
+            selected_paths,
+        } => run_push_branch_command(
+            config,
+            project,
+            message,
+            repo_path,
+            selected_paths,
+            json_mode,
+            "git.push",
+        ),
         GitCommands::History { project, limit } => {
             let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
             let items = storage
@@ -4985,20 +5738,51 @@ fn run_branch_switch_command(
 }
 
 fn run_push_status(config: &AppConfig, project: String, json_mode: bool) -> Result<()> {
-    run_push_status_command(config, project, json_mode, "push-status")
+    run_push_status_command(config, project, None, json_mode, "push-status")
 }
 
 fn run_push_status_command(
     config: &AppConfig,
     project: String,
+    repo_path: Option<String>,
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
-    let status = branch_push_status(config, &project, None)?;
+    let status = branch_push_status(config, &project, repo_path.as_deref())?;
     if json_mode {
         return print_json_command(command_name, &status);
     }
     print_push_status(&status);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_branch_file_diff_command(
+    config: &AppConfig,
+    project: String,
+    path: String,
+    repo_path: Option<String>,
+    mode: Option<String>,
+    max_bytes: Option<usize>,
+    max_lines: Option<usize>,
+    json_mode: bool,
+    command_name: &str,
+) -> Result<()> {
+    let response = branch_file_diff(
+        config,
+        &BranchFileDiffRequest {
+            project,
+            repo_path,
+            path,
+            mode,
+            max_bytes,
+            max_lines,
+        },
+    )?;
+    if json_mode {
+        return print_json_command(command_name, &response);
+    }
+    print_branch_file_diff(&response);
     Ok(())
 }
 
@@ -5008,13 +5792,23 @@ fn run_push_branch(
     message: Option<String>,
     json_mode: bool,
 ) -> Result<()> {
-    run_push_branch_command(config, project, message, json_mode, "push-branch")
+    run_push_branch_command(
+        config,
+        project,
+        message,
+        None,
+        Vec::new(),
+        json_mode,
+        "push-branch",
+    )
 }
 
 fn run_push_branch_command(
     config: &AppConfig,
     project: String,
     message: Option<String>,
+    repo_path: Option<String>,
+    selected_paths: Vec<String>,
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
@@ -5026,9 +5820,10 @@ fn run_push_branch_command(
         config,
         &BranchPushRequest {
             project,
-            repo_path: None,
+            repo_path,
             commit_before_push,
             commit_message: message,
+            selected_paths,
         },
     )?;
     if json_mode {
@@ -5200,6 +5995,9 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
             bundle_id,
             app_name,
             script,
+            tool,
+            tool_key,
+            tool_action,
             cwd,
             browser,
             browser_profile,
@@ -5218,6 +6016,9 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
                 bundle_id,
                 app_name,
                 script,
+                tool,
+                tool_key,
+                tool_action,
                 cwd,
                 browser,
                 browser_profile,
@@ -5258,6 +6059,9 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
             bundle_id,
             app_name,
             script,
+            tool,
+            tool_key,
+            tool_action,
             cwd,
             browser,
             browser_profile,
@@ -5275,6 +6079,9 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
                 bundle_id,
                 app_name,
                 script,
+                tool,
+                tool_key,
+                tool_action,
                 cwd,
                 browser,
                 browser_profile,
@@ -5326,6 +6133,861 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
     }
 }
 
+fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bool) -> Result<()> {
+    match command {
+        LinkCommands::Path => {
+            let path = links_file_path();
+            if json_mode {
+                print_json_command("link.path", &json!({ "path": path }))
+            } else {
+                println!("{path}");
+                Ok(())
+            }
+        }
+        LinkCommands::List => {
+            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
+            let summaries = list_link_summaries(&config, &workspaces, &proxy_config)?;
+            if json_mode {
+                print_json_command("link.list", &summaries)
+            } else {
+                print_link_summaries(&summaries);
+                Ok(())
+            }
+        }
+        LinkCommands::Show { key } => {
+            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
+            let link = get_link(&key)?;
+            let plan = core_plan_link(&key, &config, &workspaces, &proxy_config)?;
+            if json_mode {
+                print_json_command("link.show", &json!({ "link": link, "plan": plan }))
+            } else {
+                println!("{} {}", link.key, link.name);
+                if let Some(workspace_key) = link.workspace_key.as_deref() {
+                    println!("workspace: {workspace_key}");
+                }
+                if let Some(project) = link.project.as_deref() {
+                    println!("project  : {project}");
+                }
+                print_link_plan(&plan);
+                Ok(())
+            }
+        }
+        LinkCommands::Plan { key } => {
+            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
+            let plan = core_plan_link(&key, &config, &workspaces, &proxy_config)?;
+            if json_mode {
+                print_json_command("link.plan", &plan)
+            } else {
+                print_link_plan(&plan);
+                Ok(())
+            }
+        }
+        LinkCommands::Check { key } => {
+            let report = execute_link_cli(&key, "check", config_override)?;
+            if json_mode {
+                print_json_command("link.check", &report)
+            } else {
+                print_link_execution_report(&report);
+                Ok(())
+            }
+        }
+        LinkCommands::Run { key } => {
+            let report = execute_link_cli(&key, "run", config_override)?;
+            if json_mode {
+                print_json_command("link.run", &report)
+            } else {
+                print_link_execution_report(&report);
+                Ok(())
+            }
+        }
+        LinkCommands::Stop { key } => {
+            let report = execute_link_cli(&key, "stop", config_override)?;
+            if json_mode {
+                print_json_command("link.stop", &report)
+            } else {
+                print_link_execution_report(&report);
+                Ok(())
+            }
+        }
+        LinkCommands::Save {
+            key,
+            name,
+            workspace,
+            project,
+            steps,
+        } => {
+            let link = LinkConfig {
+                key,
+                name,
+                kind: None,
+                ui_profile: None,
+                schema_version: None,
+                workspace_key: workspace,
+                project,
+                steps: steps
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| parse_link_step_cli_arg(value, index))
+                    .collect::<Result<Vec<_>>>()?,
+            };
+            let link = upsert_link(link)?;
+            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
+            let plan = core_plan_link(&link.key, &config, &workspaces, &proxy_config)?;
+            if json_mode {
+                print_json_command("link.save", &json!({ "link": link, "plan": plan }))
+            } else {
+                println!("saved link: {} {}", link.key, link.name);
+                print_link_plan(&plan);
+                Ok(())
+            }
+        }
+        LinkCommands::Delete { key } => {
+            let deleted = core_delete_link(&key)?;
+            if json_mode {
+                print_json_command("link.delete", &json!({ "key": key, "deleted": deleted }))
+            } else {
+                println!(
+                    "{} link: {}",
+                    if deleted { "deleted" } else { "missing" },
+                    key
+                );
+                Ok(())
+            }
+        }
+        LinkCommands::Attach {
+            key,
+            workspace,
+            category,
+            short_label,
+            name,
+            note,
+        } => {
+            let paths = ensure_default_configs()?;
+            let workspace_key = match workspace {
+                Some(value) => value,
+                None => load_active_project_workspace(&paths)?.key,
+            };
+            let result = attach_link_to_workspace(
+                &paths.project_workspaces,
+                LinkWorkspaceAttachRequest {
+                    workspace_key,
+                    link_key: key.clone(),
+                    category: Some(category),
+                    short_label,
+                    name,
+                    note,
+                },
+            )?;
+            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
+            let plan = core_plan_link(&key, &config, &workspaces, &proxy_config)?;
+            if json_mode {
+                print_json_command("link.attach", &json!({ "result": result, "plan": plan }))
+            } else {
+                println!(
+                    "{} workspace tool entry: {}/{} -> {}",
+                    if result.created { "created" } else { "updated" },
+                    result.category,
+                    result.entry_name,
+                    result.link_key
+                );
+                print_link_plan(&plan);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn parse_link_step_cli_arg(value: &str, index: usize) -> Result<LinkStepConfig> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("link step cannot be empty");
+    }
+
+    let mut step = LinkStepConfig {
+        id: format!("step-{}", index + 1),
+        ..LinkStepConfig::default()
+    };
+    let rest = if value.contains(':') && !value.split(':').next().unwrap_or("").contains('=') {
+        let mut parts = value.splitn(3, ':');
+        if let Some(id) = parts.next().map(str::trim).filter(|item| !item.is_empty()) {
+            step.id = id.to_string();
+        }
+        if let Some(step_type) = parts.next().map(str::trim).filter(|item| !item.is_empty()) {
+            step.step_type = step_type.to_string();
+        }
+        parts.next().unwrap_or("")
+    } else {
+        value
+    };
+
+    for pair in rest.split(',') {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((key, value)) = pair.split_once('=') else {
+            anyhow::bail!("invalid link step segment: {pair}");
+        };
+        let key = key.trim();
+        let value = value.trim();
+        match key {
+            "id" => step.id = value.to_string(),
+            "type" | "stepType" | "step_type" => step.step_type = value.to_string(),
+            "label" => step.label = Some(value.to_string()),
+            "project" => step.project = Some(value.to_string()),
+            "path" => step.path = Some(value.to_string()),
+            "profile" => step.profile = Some(value.to_string()),
+            "debugProfile" | "debug_profile" | "debug-profile" => {
+                step.debug_profile = Some(value.to_string())
+            }
+            "runtimeProfile" | "runtime_profile" | "runtime-profile" => {
+                step.runtime_profile = Some(value.to_string())
+            }
+            "command" => step.command = Some(value.to_string()),
+            "expectedPort" | "expected_port" | "expected-port" => {
+                step.expected_port =
+                    Some(value.parse().map_err(|_| {
+                        anyhow::anyhow!("invalid expected port in link step: {value}")
+                    })?)
+            }
+            key if key.starts_with("env.") => {
+                step.env.insert(
+                    key.trim_start_matches("env.").to_string(),
+                    value.to_string(),
+                );
+            }
+            "note" => step.note = Some(value.to_string()),
+            other => {
+                step.extra
+                    .insert(other.to_string(), toml::Value::String(value.to_string()));
+            }
+        }
+    }
+
+    if step.step_type.trim().is_empty() {
+        anyhow::bail!("link step requires type: {}", value);
+    }
+    Ok(step)
+}
+
+fn load_link_cli_context(
+    config_override: Option<&Path>,
+) -> Result<(AppConfig, Vec<ProjectWorkspaceConfig>, ProxyConfig)> {
+    let (config, _) = load_cli_effective_config(config_override)?;
+    let paths = ensure_default_configs()?;
+    let workspaces = load_project_workspaces(&paths.project_workspaces)?;
+    let proxy_config = load_proxy_config(&default_proxy_path())?;
+    Ok((config, workspaces, proxy_config))
+}
+
+fn execute_link_cli(
+    key: &str,
+    mode: &str,
+    config_override: Option<&Path>,
+) -> Result<LinkExecutionReport> {
+    let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
+    let link = get_link(key)?;
+    let plan = core_plan_link(&link.key, &config, &workspaces, &proxy_config)?;
+    let mut warnings = plan.warnings.clone();
+    let mut indices = (0..link.steps.len()).collect::<Vec<_>>();
+    if mode == "stop" {
+        indices.reverse();
+    }
+
+    let mut steps = Vec::new();
+    for index in indices {
+        let step = &link.steps[index];
+        let report = execute_link_step_cli(
+            mode,
+            &config,
+            &proxy_config,
+            &link,
+            step,
+            plan.steps.get(index),
+            index,
+        );
+        for risk in &report.risks {
+            if report.status == "skipped" || report.status == "failed" {
+                push_unique_warning(&mut warnings, risk.clone());
+            }
+        }
+        steps.push(report);
+    }
+
+    Ok(LinkExecutionReport {
+        key: plan.key.clone(),
+        name: plan.name.clone(),
+        mode: mode.to_string(),
+        plan,
+        steps,
+        warnings,
+    })
+}
+
+fn execute_link_step_cli(
+    mode: &str,
+    config: &AppConfig,
+    proxy_config: &ProxyConfig,
+    link: &LinkConfig,
+    step: &LinkStepConfig,
+    plan_step: Option<&rdevtool_core::link::LinkPlanStep>,
+    index: usize,
+) -> LinkExecutionStepReport {
+    let id = plan_step
+        .map(|item| item.id.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("step-{}", index + 1));
+    let step_type = plan_step
+        .map(|item| item.step_type.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| step.step_type.trim().to_string());
+    let label = plan_step
+        .map(|item| item.label.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| id.clone());
+    let planned_summary = plan_step
+        .map(|item| item.summary.clone())
+        .unwrap_or_else(|| "Link step".to_string());
+    let planned_risks = plan_step.map(|item| item.risks.clone()).unwrap_or_default();
+
+    if !planned_risks.is_empty() {
+        return LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: "计划校验未通过，已跳过执行。".to_string(),
+            detail: None,
+            risks: planned_risks,
+        };
+    }
+
+    match mode {
+        "check" => check_link_step_cli(
+            config,
+            proxy_config,
+            link,
+            step,
+            id,
+            step_type,
+            label,
+            planned_summary,
+        ),
+        "run" => run_link_step_cli(
+            config,
+            proxy_config,
+            link,
+            step,
+            id,
+            step_type,
+            label,
+            planned_summary,
+        ),
+        "stop" => stop_link_step_cli(
+            proxy_config,
+            link,
+            step,
+            id,
+            step_type,
+            label,
+            planned_summary,
+        ),
+        _ => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "failed".to_string(),
+            summary: format!("不支持的 Link 执行模式：{mode}"),
+            detail: None,
+            risks: vec![format!("不支持的 Link 执行模式：{mode}")],
+        },
+    }
+}
+
+fn check_link_step_cli(
+    config: &AppConfig,
+    proxy_config: &ProxyConfig,
+    link: &LinkConfig,
+    step: &LinkStepConfig,
+    id: String,
+    step_type: String,
+    label: String,
+    planned_summary: String,
+) -> LinkExecutionStepReport {
+    match step_type.as_str() {
+        "localFile.ensure" => {
+            let project_key = link_step_project(link, step);
+            let path = optional_trimmed(step.path.as_deref());
+            let mut risks = Vec::new();
+            let detail = match (project_key.as_deref(), path.as_deref()) {
+                (Some(project_key), Some(path)) => match config.find_project(project_key) {
+                    Ok(project) => {
+                        let absolute_path = project.repo_path.as_ref().map(|repo| repo.join(path));
+                        json!({
+                            "project": project_key,
+                            "path": path,
+                            "absolutePath": absolute_path.as_ref().map(|value| value.display().to_string()),
+                            "exists": absolute_path.as_ref().is_some_and(|value| value.exists())
+                        })
+                    }
+                    Err(error) => {
+                        risks.push(error.to_string());
+                        json!({ "project": project_key, "path": path })
+                    }
+                },
+                _ => json!({ "project": project_key, "path": path }),
+            };
+            LinkExecutionStepReport {
+                id,
+                step_type,
+                label,
+                status: if risks.is_empty() {
+                    "checked".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                summary: "本地覆盖文件由运行调试配置在启动前应用。".to_string(),
+                detail: Some(detail),
+                risks,
+            }
+        }
+        "proxy.start" | "proxy.check" => match link_step_proxy_profile(step)
+            .and_then(|profile_key| find_proxy_profile_cli(proxy_config, &profile_key))
+        {
+            Some(profile) => {
+                let runtime_status = proxy_daemon_status(&default_proxy_path(), &profile.id).ok();
+                let listening = runtime_status.as_ref().is_some_and(|status| status.running);
+                let managed = runtime_status.as_ref().is_some_and(|status| status.managed);
+                let ready = listening && (step_type == "proxy.check" || managed);
+                let mut risks = Vec::new();
+                if !listening {
+                    risks.push(format!("代理端口未监听：{}", profile.listen_url()));
+                } else if step_type == "proxy.start" && !managed {
+                    risks.push("代理端口由非 rDevTool 进程占用，无法安全接管。".to_string());
+                }
+                LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: if ready {
+                        "checked".to_string()
+                    } else {
+                        "failed".to_string()
+                    },
+                    summary: if listening {
+                        format!("代理正在监听 {}", profile.listen_url())
+                    } else {
+                        format!("代理未启动，期望监听 {}", profile.listen_url())
+                    },
+                    detail: Some(json!({
+                        "profileId": profile.id,
+                        "profileName": profile.name,
+                        "listenUrl": profile.listen_url(),
+                        "listening": listening,
+                        "managed": managed,
+                        "runtimeStatus": runtime_status
+                    })),
+                    risks,
+                }
+            }
+            None => LinkExecutionStepReport {
+                id,
+                step_type,
+                label,
+                status: "failed".to_string(),
+                summary: planned_summary,
+                detail: None,
+                risks: vec!["代理 profile 不存在，无法检查监听。".to_string()],
+            },
+        },
+        "runtime.start" => {
+            let Some(project_key) = link_step_project(link, step) else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "缺少项目，无法执行运行前检查。".to_string(),
+                    detail: None,
+                    risks: vec!["缺少 project。".to_string()],
+                };
+            };
+            let options = link_step_runtime_launch_options(step);
+            match project_runtime_preflight_with_options(config, &project_key, &options) {
+                Ok(response) => {
+                    let status = if response.status_key == "error" {
+                        "failed"
+                    } else {
+                        "checked"
+                    };
+                    let risks = response
+                        .checks
+                        .iter()
+                        .filter(|check| check.status_key == "error")
+                        .map(|check| format!("{}：{}", check.title, check.detail))
+                        .collect::<Vec<_>>();
+                    LinkExecutionStepReport {
+                        id,
+                        step_type,
+                        label,
+                        status: status.to_string(),
+                        summary: response.summary.clone(),
+                        detail: Some(json!(response)),
+                        risks,
+                    }
+                }
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("运行前检查失败：{error}"),
+                    detail: None,
+                    risks: vec![error],
+                },
+            }
+        }
+        "runtime.focus" => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "checked".to_string(),
+            summary: "打开页面步骤已识别，CLI 检查模式不执行打开动作。".to_string(),
+            detail: None,
+            risks: Vec::new(),
+        },
+        _ => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: planned_summary,
+            detail: None,
+            risks: vec!["该步骤类型尚未接入 CLI 检查器。".to_string()],
+        },
+    }
+}
+
+fn run_link_step_cli(
+    config: &AppConfig,
+    proxy_config: &ProxyConfig,
+    link: &LinkConfig,
+    step: &LinkStepConfig,
+    id: String,
+    step_type: String,
+    label: String,
+    planned_summary: String,
+) -> LinkExecutionStepReport {
+    match step_type.as_str() {
+        "localFile.ensure" => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "checked".to_string(),
+            summary: "本地覆盖文件不会由 Link CLI 直接写入；启动 runtime 时由调试配置应用。"
+                .to_string(),
+            detail: Some(json!({
+                "project": link_step_project(link, step),
+                "path": optional_trimmed(step.path.as_deref())
+            })),
+            risks: Vec::new(),
+        },
+        "proxy.start" => {
+            let Some(profile) = link_step_proxy_profile(step)
+                .and_then(|profile_key| find_proxy_profile_cli(proxy_config, &profile_key))
+            else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "代理 profile 不存在，无法启动。".to_string(),
+                    detail: None,
+                    risks: vec!["代理 profile 不存在，无法启动。".to_string()],
+                };
+            };
+            match proxy_daemon_start(&default_proxy_path(), &profile.id) {
+                Ok(status) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "started".to_string(),
+                    summary: format!("代理已由共享守护进程启动：{}", status.listen_url),
+                    detail: Some(json!(status)),
+                    risks: Vec::new(),
+                },
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("代理启动失败：{error}"),
+                    detail: None,
+                    risks: vec![error.to_string()],
+                },
+            }
+        }
+        "runtime.start" => {
+            let Some(project_key) = link_step_project(link, step) else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "缺少项目，无法启动 runtime。".to_string(),
+                    detail: None,
+                    risks: vec!["缺少 project。".to_string()],
+                };
+            };
+            let options = link_step_runtime_launch_options(step);
+            match start_project_runtime_detached_with_options(config, &project_key, &options) {
+                Ok(response) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "started".to_string(),
+                    summary: format!("{}：{}", response.status_label, response.detail),
+                    detail: Some(json!(response)),
+                    risks: Vec::new(),
+                },
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("项目启动失败：{error}"),
+                    detail: None,
+                    risks: vec![error],
+                },
+            }
+        }
+        "runtime.focus" => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: "CLI Link run 暂不打开浏览器页面；可使用 runtime focus 或 App 查看。"
+                .to_string(),
+            detail: None,
+            risks: vec!["打开页面动作未在 Link CLI 中执行。".to_string()],
+        },
+        _ => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: planned_summary,
+            detail: None,
+            risks: vec!["该步骤类型尚未接入 CLI 执行器。".to_string()],
+        },
+    }
+}
+
+fn stop_link_step_cli(
+    proxy_config: &ProxyConfig,
+    link: &LinkConfig,
+    step: &LinkStepConfig,
+    id: String,
+    step_type: String,
+    label: String,
+    planned_summary: String,
+) -> LinkExecutionStepReport {
+    match step_type.as_str() {
+        "proxy.start" => {
+            let Some(profile) = link_step_proxy_profile(step)
+                .and_then(|profile_key| find_proxy_profile_cli(proxy_config, &profile_key))
+            else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "代理 profile 不存在，无法停止。".to_string(),
+                    detail: None,
+                    risks: vec!["代理 profile 不存在，无法停止。".to_string()],
+                };
+            };
+            match proxy_daemon_stop(&default_proxy_path(), &profile.id) {
+                Ok(status) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "stopped".to_string(),
+                    summary: format!("代理已停止：{}", profile.name),
+                    detail: Some(json!(status)),
+                    risks: Vec::new(),
+                },
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("代理停止失败：{error}"),
+                    detail: None,
+                    risks: vec![error.to_string()],
+                },
+            }
+        }
+        "runtime.start" => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: "CLI detached runtime 暂无 Link stop 所有权语义，未执行停止。".to_string(),
+            detail: Some(json!({
+                "project": link_step_project(link, step),
+                "debugProfile": optional_trimmed(step.debug_profile.as_deref())
+            })),
+            risks: vec![
+                "请在 App 中停止 Link，或用运行日志定位后手动停止明确归属的进程。".to_string(),
+            ],
+        },
+        "localFile.ensure" => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: "本地覆盖文件不会在 Link stop 中自动删除。".to_string(),
+            detail: Some(json!({
+                "project": link_step_project(link, step),
+                "path": optional_trimmed(step.path.as_deref())
+            })),
+            risks: Vec::new(),
+        },
+        _ => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: planned_summary,
+            detail: None,
+            risks: Vec::new(),
+        },
+    }
+}
+
+fn link_step_project(link: &LinkConfig, step: &LinkStepConfig) -> Option<String> {
+    optional_trimmed(step.project.as_deref()).or_else(|| optional_trimmed(link.project.as_deref()))
+}
+
+fn link_step_proxy_profile(step: &LinkStepConfig) -> Option<String> {
+    optional_trimmed(step.profile.as_deref())
+}
+
+fn link_step_runtime_launch_options(step: &LinkStepConfig) -> ProjectRuntimeLaunchOptions {
+    ProjectRuntimeLaunchOptions {
+        debug_profile: optional_trimmed(step.debug_profile.as_deref()),
+        runtime_profile: optional_trimmed(step.runtime_profile.as_deref()),
+        command: optional_trimmed(step.command.as_deref()),
+        expected_port: step.expected_port,
+        env: step.env.clone(),
+    }
+}
+
+fn optional_trimmed(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn find_proxy_profile_cli<'a>(config: &'a ProxyConfig, key: &str) -> Option<&'a ProxyProfile> {
+    config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == key || profile.name == key)
+}
+
+fn push_unique_warning(warnings: &mut Vec<String>, warning: String) {
+    if !warnings.iter().any(|item| item == &warning) {
+        warnings.push(warning);
+    }
+}
+
+fn print_link_summaries(summaries: &[rdevtool_core::link::LinkSummary]) {
+    if summaries.is_empty() {
+        println!("no links configured");
+        return;
+    }
+    for link in summaries {
+        let proxy = if link.proxy_profiles.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " · proxy {}",
+                link.proxy_profiles
+                    .iter()
+                    .map(|profile| format!("{}({})", profile.name, profile.listen_url))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        };
+        let warning = if link.warnings.is_empty() {
+            String::new()
+        } else {
+            format!(" · {} warning(s)", link.warnings.len())
+        };
+        println!(
+            "{} {} · {} step(s){}{}",
+            link.key, link.name, link.step_count, proxy, warning
+        );
+    }
+}
+
+fn print_link_plan(plan: &rdevtool_core::link::LinkPlan) {
+    println!("{} {}", plan.key, plan.name);
+    if let Some(workspace_key) = plan.workspace_key.as_deref() {
+        println!("workspace: {workspace_key}");
+    }
+    if let Some(project) = plan.project.as_deref() {
+        println!("project  : {project}");
+    }
+    if !plan.warnings.is_empty() {
+        println!("warnings :");
+        for warning in &plan.warnings {
+            println!("  - {warning}");
+        }
+    }
+    if plan.steps.is_empty() {
+        println!("steps    : none");
+        return;
+    }
+    println!("steps    :");
+    for step in &plan.steps {
+        println!(
+            "  - {} [{}] {} - {}",
+            step.id, step.status, step.label, step.summary
+        );
+        for risk in &step.risks {
+            println!("    risk: {risk}");
+        }
+    }
+}
+
+fn print_link_execution_report(report: &LinkExecutionReport) {
+    println!("{} {} · {}", report.key, report.name, report.mode);
+    if !report.warnings.is_empty() {
+        println!("warnings :");
+        for warning in &report.warnings {
+            println!("  - {warning}");
+        }
+    }
+    if report.steps.is_empty() {
+        println!("steps    : none");
+        return;
+    }
+    println!("steps    :");
+    for step in &report.steps {
+        println!(
+            "  - {} [{}] {} - {}",
+            step.id, step.status, step.label, step.summary
+        );
+        for risk in &step.risks {
+            println!("    risk: {risk}");
+        }
+    }
+}
+
 struct NavigationEntryCliInput {
     category: String,
     name: String,
@@ -5336,6 +6998,9 @@ struct NavigationEntryCliInput {
     bundle_id: Option<String>,
     app_name: Option<String>,
     script: Option<String>,
+    tool: Option<String>,
+    tool_key: Option<String>,
+    tool_action: Option<String>,
     cwd: Option<String>,
     browser: Option<String>,
     browser_profile: Option<String>,
@@ -5581,6 +7246,9 @@ fn workspace_resource_entry_from_editor(
         bundle_id: entry.bundle_id,
         app_name: entry.app_name,
         script: entry.script,
+        tool: entry.tool,
+        tool_key: entry.tool_key,
+        tool_action: entry.tool_action,
         path: entry.path,
         cwd: entry.cwd,
         note: entry.note,
@@ -5602,6 +7270,9 @@ fn navigation_editor_entry_from_workspace_resource(
         bundle_id: entry.bundle_id.clone(),
         app_name: entry.app_name.clone(),
         script: entry.script.clone(),
+        tool: entry.tool.clone(),
+        tool_key: entry.tool_key.clone(),
+        tool_action: entry.tool_action.clone(),
         path: entry.path.clone(),
         cwd: entry.cwd.clone(),
         note: entry.note.clone(),
@@ -5639,6 +7310,9 @@ fn navigation_editor_entry_from_cli(
         bundle_id: None,
         app_name: None,
         script: None,
+        tool: None,
+        tool_key: None,
+        tool_action: None,
         path: None,
         cwd: None,
         note: None,
@@ -5659,6 +7333,9 @@ fn navigation_editor_entry_from_cli(
     apply_optional_cli_text(&mut entry.bundle_id, input.bundle_id);
     apply_optional_cli_text(&mut entry.app_name, input.app_name);
     apply_optional_cli_text(&mut entry.script, input.script);
+    apply_optional_cli_text(&mut entry.tool, input.tool);
+    apply_optional_cli_text(&mut entry.tool_key, input.tool_key);
+    apply_optional_cli_text(&mut entry.tool_action, input.tool_action);
     apply_optional_cli_text(&mut entry.cwd, input.cwd);
     apply_optional_cli_text(&mut entry.browser, input.browser);
     apply_optional_cli_text(&mut entry.browser_profile, input.browser_profile);
@@ -5673,23 +7350,197 @@ fn apply_optional_cli_text(target: &mut Option<String>, value: Option<String>) {
     }
 }
 
+fn run_config_source(command: ConfigSourceCommands, json_mode: bool) -> Result<()> {
+    let paths = ensure_default_configs()?;
+    let app_workspace = load_workspace_config(&paths.workspace)?;
+    let workspace_key = active_project_workspace_key(&app_workspace);
+    let workspace = load_project_workspace_by_key(&paths.project_workspaces, &workspace_key)?;
+    let workspaces = load_project_workspaces(&paths.project_workspaces)?;
+    match command {
+        ConfigSourceCommands::List => {
+            let sources = list_config_sources(&workspaces)?;
+            let preferences = ["resource", "link", "proxy", "runtime"]
+                .into_iter()
+                .map(|capability| {
+                    (
+                        capability,
+                        preferred_config_source_id_for_scope(
+                            &workspace,
+                            &app_workspace,
+                            capability,
+                        ),
+                    )
+                })
+                .collect::<BTreeMap<_, _>>();
+            if json_mode {
+                print_json_command(
+                    "config-source.list",
+                    &json!({
+                        "workspaceKey": workspace_key,
+                        "preferences": preferences,
+                        "sources": sources,
+                    }),
+                )
+            } else {
+                println!("workspace   : {workspace_key}");
+                for (capability, source_id) in preferences {
+                    println!("{capability:<12}: {source_id}");
+                }
+                println!("sources:");
+                for source in sources {
+                    println!("  {:<28} {:<18} {}", source.id, source.kind, source.name);
+                }
+                Ok(())
+            }
+        }
+        ConfigSourceCommands::Show { source } => {
+            let source = resolve_config_source(Some(&source), &workspaces)?;
+            if json_mode {
+                print_json_command("config-source.show", &source)
+            } else {
+                println!("source      : {} ({})", source.name, source.id);
+                println!("kind        : {}", source.kind);
+                println!("base dir    : {}", source.base_dir);
+                println!("capabilities: {}", source.capabilities.join(", "));
+                println!("navigation  : {}", source.files.navigation);
+                println!("links       : {}", source.files.links);
+                if let Some(path) = &source.files.proxy {
+                    println!("proxy       : {path}");
+                }
+                if let Some(path) = &source.files.runtime_overrides {
+                    println!("runtime     : {path}");
+                }
+                Ok(())
+            }
+        }
+        ConfigSourceCommands::Compare { left, right } => {
+            let comparison = compare_config_sources(&workspaces, &left, &right)?;
+            if json_mode {
+                print_json_command("config-source.compare", &comparison)
+            } else {
+                println!(
+                    "left        : {} ({})",
+                    comparison.left.name, comparison.left.id
+                );
+                println!(
+                    "right       : {} ({})",
+                    comparison.right.name, comparison.right.id
+                );
+                println!("identical   : {}", comparison.identical);
+                for file in comparison.files {
+                    println!("{:<16}: {:<20} {}", file.key, file.status, file.summary);
+                }
+                Ok(())
+            }
+        }
+        ConfigSourceCommands::Copy {
+            source,
+            id,
+            name,
+            base_dir,
+        } => {
+            let result = copy_config_source(
+                &workspaces,
+                CopyConfigSourceRequest {
+                    source_id: source,
+                    id,
+                    name,
+                    base_dir: base_dir.map(|path| path.display().to_string()),
+                },
+            )?;
+            if json_mode {
+                print_json_command("config-source.copy", &result)
+            } else {
+                println!(
+                    "source      : {} ({})",
+                    result.source.name, result.source.id
+                );
+                println!(
+                    "target      : {} ({})",
+                    result.target.name, result.target.id
+                );
+                println!("base dir    : {}", result.target.base_dir);
+                println!("copied      : {}", result.copied_count);
+                println!("missing     : {}", result.missing_count);
+                Ok(())
+            }
+        }
+        ConfigSourceCommands::Use { source, capability } => {
+            let capability = capability.trim().to_ascii_lowercase();
+            if !matches!(
+                capability.as_str(),
+                "resource" | "link" | "proxy" | "runtime"
+            ) {
+                anyhow::bail!("unsupported config source capability: {capability}");
+            }
+            let source =
+                save_config_source_preference(&paths, &workspace_key, &capability, &source)?;
+            if json_mode {
+                print_json_command(
+                    "config-source.use",
+                    &json!({
+                        "workspaceKey": workspace_key,
+                        "capability": capability,
+                        "source": source,
+                    }),
+                )
+            } else {
+                println!("workspace   : {workspace_key}");
+                println!("capability  : {capability}");
+                println!("source      : {} ({})", source.name, source.id);
+                Ok(())
+            }
+        }
+    }
+}
+
 fn run_proxy(
     command: ProxyCommands,
     config_override: Option<&Path>,
+    source_id: Option<&str>,
     json_mode: bool,
 ) -> Result<()> {
+    let initial_info = load_proxy_cli_info(config_override, source_id)?;
+    let proxy_path = PathBuf::from(&initial_info.path);
     match command {
         ProxyCommands::Path => {
-            let path = ensure_proxy_config()?;
             if json_mode {
-                print_json_command("proxy.path", &json!({ "path": path.display().to_string() }))
+                print_json_command(
+                    "proxy.path",
+                    &json!({
+                        "sourceId": initial_info.source_id,
+                        "sourceName": initial_info.source_name,
+                        "path": initial_info.path,
+                    }),
+                )
             } else {
-                println!("{}", path.display());
+                println!("{}", initial_info.path);
+                Ok(())
+            }
+        }
+        ProxyCommands::Source { source_id } => {
+            if let Some(source_id) = source_id {
+                save_proxy_source_preference_for_active_workspace(&source_id)?;
+            }
+            let info = load_proxy_cli_info(config_override, None)?;
+            if json_mode {
+                print_json_command(
+                    "proxy.source",
+                    &json!({
+                        "sourceId": info.source_id,
+                        "sourceName": info.source_name,
+                        "path": info.path,
+                        "workspace": info.workspace,
+                    }),
+                )
+            } else {
+                println!("source    : {} ({})", info.source_name, info.source_id);
+                println!("path      : {}", info.path);
                 Ok(())
             }
         }
         ProxyCommands::List => {
-            let info = load_proxy_cli_info(config_override)?;
+            let info = initial_info;
             if json_mode {
                 print_json_command("proxy.list", &info)
             } else {
@@ -5697,8 +7548,66 @@ fn run_proxy(
                 Ok(())
             }
         }
+        ProxyCommands::Start { profile } => {
+            let info = initial_info;
+            let selected = info
+                .profiles
+                .iter()
+                .find(|item| item.id == profile || item.name == profile)
+                .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {profile}"))?;
+            proxy_daemon_start(Path::new(&info.path), &selected.id)?;
+            let response = proxy_status_response(&info, Some(&selected.id))?;
+            if json_mode {
+                print_json_command("proxy.start", &response)
+            } else {
+                print_proxy_status(&response);
+                Ok(())
+            }
+        }
+        ProxyCommands::Stop { profile } => {
+            let info = initial_info;
+            let selected = info
+                .profiles
+                .iter()
+                .find(|item| item.id == profile || item.name == profile)
+                .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {profile}"))?;
+            proxy_daemon_stop(Path::new(&info.path), &selected.id)?;
+            let response = proxy_status_response(&info, Some(&selected.id))?;
+            if json_mode {
+                print_json_command("proxy.stop", &response)
+            } else {
+                print_proxy_status(&response);
+                Ok(())
+            }
+        }
+        ProxyCommands::Restart { profile } => {
+            let info = initial_info;
+            let selected = info
+                .profiles
+                .iter()
+                .find(|item| item.id == profile || item.name == profile)
+                .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {profile}"))?;
+            proxy_daemon_restart(Path::new(&info.path), &selected.id)?;
+            let response = proxy_status_response(&info, Some(&selected.id))?;
+            if json_mode {
+                print_json_command("proxy.restart", &response)
+            } else {
+                print_proxy_status(&response);
+                Ok(())
+            }
+        }
+        ProxyCommands::Status { profile } => {
+            let info = initial_info;
+            let response = proxy_status_response(&info, profile.as_deref())?;
+            if json_mode {
+                print_json_command("proxy.status", &response)
+            } else {
+                print_proxy_status(&response);
+                Ok(())
+            }
+        }
         ProxyCommands::Show { profile } => {
-            let mut info = load_proxy_cli_info(config_override)?;
+            let mut info = initial_info;
             let Some(selected) = info
                 .profiles
                 .iter()
@@ -5739,9 +7648,8 @@ fn run_proxy(
                 max_body_bytes: 4096,
             };
             validate_proxy_profile(&profile)?;
-            let path = ensure_proxy_config()?;
-            upsert_proxy_profile(&path, profile)?;
-            let info = load_proxy_cli_info(config_override)?;
+            upsert_proxy_profile(&proxy_path, profile)?;
+            let info = load_proxy_cli_info(config_override, source_id)?;
             if json_mode {
                 print_json_command("proxy.add", &info)
             } else {
@@ -5759,8 +7667,7 @@ fn run_proxy(
             workspace,
             clear_workspace,
         } => {
-            let path = ensure_proxy_config()?;
-            let mut profile = find_proxy_profile(&load_proxy_config(&path)?, &profile)?;
+            let mut profile = find_proxy_profile(&load_proxy_config(&proxy_path)?, &profile)?;
             if let Some(name) = name {
                 profile.name = name;
             }
@@ -5785,8 +7692,8 @@ fn run_proxy(
                 profile.workspace_key = resolve_proxy_workspace_key(workspace, false)?;
             }
             validate_proxy_profile(&profile)?;
-            upsert_proxy_profile(&path, profile)?;
-            let info = load_proxy_cli_info(config_override)?;
+            upsert_proxy_profile(&proxy_path, profile)?;
+            let info = load_proxy_cli_info(config_override, source_id)?;
             if json_mode {
                 print_json_command("proxy.update", &info)
             } else {
@@ -5795,10 +7702,9 @@ fn run_proxy(
             }
         }
         ProxyCommands::Delete { profile } => {
-            let path = ensure_proxy_config()?;
-            let profile = find_proxy_profile(&load_proxy_config(&path)?, &profile)?;
-            core_delete_proxy_profile(&path, &profile.id)?;
-            let info = load_proxy_cli_info(config_override)?;
+            let profile = find_proxy_profile(&load_proxy_config(&proxy_path)?, &profile)?;
+            core_delete_proxy_profile(&proxy_path, &profile.id)?;
+            let info = load_proxy_cli_info(config_override, source_id)?;
             if json_mode {
                 print_json_command("proxy.delete", &info)
             } else {
@@ -5807,9 +7713,8 @@ fn run_proxy(
             }
         }
         ProxyCommands::Export { profile, output } => {
-            let path = ensure_proxy_config()?;
-            let profile = find_proxy_profile(&load_proxy_config(&path)?, &profile)?;
-            let pack = export_proxy_profile_pack(&path, &profile.id)?;
+            let profile = find_proxy_profile(&load_proxy_config(&proxy_path)?, &profile)?;
+            let pack = export_proxy_profile_pack(&proxy_path, &profile.id)?;
             if let Some(output) = output {
                 let output = if output.is_absolute() {
                     output
@@ -5841,8 +7746,7 @@ fn run_proxy(
             workspace,
             global,
         } => {
-            let path = ensure_proxy_config()?;
-            let before = load_proxy_config(&path)?
+            let before = load_proxy_config(&proxy_path)?
                 .profiles
                 .into_iter()
                 .map(|profile| profile.id)
@@ -5857,7 +7761,7 @@ fn run_proxy(
             for profile in &mut pack.profiles {
                 profile.workspace_key = workspace_key.clone();
             }
-            let mut proxy_config = import_proxy_profile_pack(&path, pack)?;
+            let mut proxy_config = import_proxy_profile_pack(&proxy_path, pack)?;
             let imported_ids = proxy_config
                 .profiles
                 .iter()
@@ -5870,9 +7774,9 @@ fn run_proxy(
                         profile.workspace_key = workspace_key.clone();
                     }
                 }
-                save_proxy_config(&path, &proxy_config)?;
+                save_proxy_config(&proxy_path, &proxy_config)?;
             }
-            let info = load_proxy_cli_info(config_override)?;
+            let info = load_proxy_cli_info(config_override, source_id)?;
             if json_mode {
                 print_json_command("proxy.import", &info)
             } else {
@@ -5881,7 +7785,7 @@ fn run_proxy(
             }
         }
         ProxyCommands::RuleList { profile } => {
-            let mut info = load_proxy_cli_info(config_override)?;
+            let mut info = initial_info;
             if let Some(profile) = profile {
                 let profile = find_proxy_profile_in_info(&info, &profile)?;
                 info.profiles = vec![profile.clone()];
@@ -5896,7 +7800,7 @@ fn run_proxy(
             }
         }
         ProxyCommands::RuleShow { rule } => {
-            let mut info = load_proxy_cli_info(config_override)?;
+            let mut info = initial_info;
             let selected = find_proxy_rule_in_info(&info, &rule)?;
             let profile_id = selected.profile_id.clone();
             info.profiles.retain(|profile| profile.id == profile_id);
@@ -5933,8 +7837,7 @@ fn run_proxy(
             headers,
             delay_ms,
         } => {
-            let path = ensure_proxy_config()?;
-            let config = load_proxy_config(&path)?;
+            let config = load_proxy_config(&proxy_path)?;
             let profile = find_proxy_profile(&config, &profile)?;
             let rule = build_proxy_rule_from_patch(
                 None,
@@ -5964,8 +7867,8 @@ fn run_proxy(
                 },
             )?;
             validate_proxy_rule(&rule)?;
-            upsert_proxy_rule(&path, rule)?;
-            let info = load_proxy_cli_info(config_override)?;
+            upsert_proxy_rule(&proxy_path, rule)?;
+            let info = load_proxy_cli_info(config_override, source_id)?;
             if json_mode {
                 print_json_command("proxy.rule-add", &info)
             } else {
@@ -6002,8 +7905,7 @@ fn run_proxy(
             if enable && disable {
                 anyhow::bail!("choose only one of --enable or --disable");
             }
-            let path = ensure_proxy_config()?;
-            let config = load_proxy_config(&path)?;
+            let config = load_proxy_config(&proxy_path)?;
             let current = find_proxy_rule(&config, &rule)?;
             let profile = profile
                 .map(|profile| find_proxy_profile(&config, &profile).map(|profile| profile.id))
@@ -6036,8 +7938,8 @@ fn run_proxy(
                 },
             )?;
             validate_proxy_rule(&rule)?;
-            upsert_proxy_rule(&path, rule)?;
-            let info = load_proxy_cli_info(config_override)?;
+            upsert_proxy_rule(&proxy_path, rule)?;
+            let info = load_proxy_cli_info(config_override, source_id)?;
             if json_mode {
                 print_json_command("proxy.rule-update", &info)
             } else {
@@ -6047,10 +7949,9 @@ fn run_proxy(
             }
         }
         ProxyCommands::RuleDelete { rule } => {
-            let path = ensure_proxy_config()?;
-            let rule = find_proxy_rule(&load_proxy_config(&path)?, &rule)?;
-            core_delete_proxy_rule(&path, &rule.id)?;
-            let info = load_proxy_cli_info(config_override)?;
+            let rule = find_proxy_rule(&load_proxy_config(&proxy_path)?, &rule)?;
+            core_delete_proxy_rule(&proxy_path, &rule.id)?;
+            let info = load_proxy_cli_info(config_override, source_id)?;
             if json_mode {
                 print_json_command("proxy.rule-delete", &info)
             } else {
@@ -6065,7 +7966,7 @@ fn run_proxy(
             url,
             headers,
         } => {
-            let info = load_proxy_cli_info(config_override)?;
+            let info = initial_info;
             let selected_profile = select_proxy_profile_for_diagnosis(&info, profile.as_deref())?;
             let header_map = parse_key_value_map(&headers)?;
             let diagnosis = diagnose_proxy_request(
@@ -6085,6 +7986,35 @@ fn run_proxy(
                 Ok(())
             }
         }
+        ProxyCommands::Verify {
+            profile,
+            method,
+            url,
+            headers,
+            body,
+            expected_status,
+            expected_body_text,
+            timeout_ms,
+        } => {
+            let info = initial_info;
+            let response = verify_proxy_request(
+                &info,
+                &profile,
+                &method,
+                &url,
+                &parse_key_value_map(&headers)?,
+                body.as_deref(),
+                expected_status,
+                expected_body_text.as_deref(),
+                timeout_ms,
+            )?;
+            if json_mode {
+                print_json_command("proxy.verify", &response)
+            } else {
+                print_proxy_verify(&response);
+                Ok(())
+            }
+        }
         ProxyCommands::BindRuntime {
             profile,
             runtime_profile,
@@ -6097,7 +8027,6 @@ fn run_proxy(
             node_hook,
         } => {
             let (mut config, config_path) = load_cli_config(config_override)?;
-            let proxy_path = ensure_proxy_config()?;
             let proxy_config = load_proxy_config(&proxy_path)?;
             let result = bind_proxy_runtime_profile(
                 &mut config,
@@ -6139,12 +8068,56 @@ fn run_proxy(
     }
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeRestartResponse {
+    stopped: RuntimeDaemonStatus,
+    started: ProjectRuntimeStartResponse,
+}
+
+fn resolve_runtime_lookup_cwd(config: &AppConfig, project_key: &str) -> Result<PathBuf> {
+    let project = config.find_project(project_key)?;
+    resolve_project_runtime_lookup_cwd(project)
+}
+
+fn resolve_project_runtime_lookup_cwd(project: &ProjectConfig) -> Result<PathBuf> {
+    let cwd = match project
+        .dev
+        .as_ref()
+        .and_then(|command| command.cwd.as_ref())
+    {
+        Some(cwd) if cwd.is_absolute() => cwd.clone(),
+        Some(cwd) => {
+            let repo_path = project.repo_path.as_ref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "project {} uses a relative dev.cwd but has no repo_path",
+                    project.key
+                )
+            })?;
+            repo_path.join(cwd)
+        }
+        None => project.repo_path.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "project {} has no dev.cwd or repo_path for runtime lookup",
+                project.key
+            )
+        })?,
+    };
+    let absolute = if cwd.is_absolute() {
+        cwd
+    } else {
+        std::env::current_dir()?.join(cwd)
+    };
+    Ok(fs::canonicalize(&absolute).unwrap_or(absolute))
+}
+
 fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) -> Result<()> {
+    let json_command = command.json_command_name();
     match command {
         RuntimeCommands::Profiles => {
             let info = runtime_profiles(config);
             if json_mode {
-                print_json_command("runtime.profiles", &info)
+                print_json_command(json_command, &info)
             } else {
                 print_runtime_profiles(&info);
                 Ok(())
@@ -6154,7 +8127,7 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
             let profile =
                 runtime_profile_show(config, &key).map_err(|error| anyhow::anyhow!(error))?;
             if json_mode {
-                print_json_command("runtime.profile-show", &profile)
+                print_json_command(json_command, &profile)
             } else {
                 print_runtime_profile(&profile);
                 Ok(())
@@ -6163,13 +8136,24 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
         RuntimeCommands::Inspect {
             project,
             debug_profile,
+            runtime_profile,
+            command,
+            expected_port,
+            env,
         } => {
             let proxy_config = load_proxy_config(&default_proxy_path())?;
+            let options = ProjectRuntimeLaunchOptions {
+                debug_profile,
+                runtime_profile,
+                command,
+                expected_port,
+                env: parse_key_value_map(&env)?,
+            };
             let response =
-                inspect_project_runtime(config, &proxy_config, &project, debug_profile.as_deref())
+                inspect_project_runtime_with_options(config, &proxy_config, &project, &options)
                     .map_err(|error| anyhow::anyhow!(error))?;
             if json_mode {
-                print_json_command("runtime.inspect", &response)
+                print_json_command(json_command, &response)
             } else {
                 print_runtime_inspect(&response);
                 Ok(())
@@ -6178,11 +8162,22 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
         RuntimeCommands::Preflight {
             project,
             debug_profile,
+            runtime_profile,
+            command,
+            expected_port,
+            env,
         } => {
-            let response = project_runtime_preflight(config, &project, debug_profile.as_deref())
+            let options = ProjectRuntimeLaunchOptions {
+                debug_profile,
+                runtime_profile,
+                command,
+                expected_port,
+                env: parse_key_value_map(&env)?,
+            };
+            let response = project_runtime_preflight_with_options(config, &project, &options)
                 .map_err(|error| anyhow::anyhow!(error))?;
             if json_mode {
-                print_json_command("runtime.preflight", &response)
+                print_json_command(json_command, &response)
             } else {
                 print_runtime_preflight(&response);
                 Ok(())
@@ -6191,33 +8186,142 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
         RuntimeCommands::Start {
             project,
             debug_profile,
+            runtime_profile,
+            command,
+            expected_port,
             env,
         } => {
-            let env_overrides = parse_key_value_map(&env)?;
-            let response = start_project_runtime_detached(
-                config,
-                &project,
-                debug_profile.as_deref(),
-                &env_overrides,
-            )
-            .map_err(|error| anyhow::anyhow!(error))?;
+            let options = ProjectRuntimeLaunchOptions {
+                debug_profile,
+                runtime_profile,
+                command,
+                expected_port,
+                env: parse_key_value_map(&env)?,
+            };
+            let response = start_project_runtime_detached_with_options(config, &project, &options)
+                .map_err(|error| anyhow::anyhow!(error))?;
             if json_mode {
-                print_json_command("runtime.start", &response)
+                print_json_command(json_command, &response)
             } else {
                 print_runtime_start(&response);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Status { project } => {
+            let cwd = resolve_runtime_lookup_cwd(config, &project)?;
+            let response = runtime_daemon_status(&project, &cwd)?;
+            if json_mode {
+                print_json_command(json_command, &response)
+            } else {
+                print_runtime_daemon_status(&response);
+                Ok(())
+            }
+        }
+        RuntimeCommands::List { running_only } => {
+            let mut response = list_runtime_daemons()?;
+            if running_only {
+                response.retain(|status| status.running);
+            }
+            if json_mode {
+                print_json_command(json_command, &response)
+            } else {
+                print_runtime_daemon_list(&response);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Stop { project } => {
+            let cwd = resolve_runtime_lookup_cwd(config, &project)?;
+            let response = stop_runtime_daemon(&project, &cwd)?;
+            if json_mode {
+                print_json_command(json_command, &response)
+            } else {
+                print_runtime_daemon_status(&response);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Restart {
+            project,
+            debug_profile,
+            runtime_profile,
+            command,
+            expected_port,
+            env,
+        } => {
+            let options = ProjectRuntimeLaunchOptions {
+                debug_profile,
+                runtime_profile,
+                command,
+                expected_port,
+                env: parse_key_value_map(&env)?,
+            };
+            let cwd = resolve_runtime_lookup_cwd(config, &project)?;
+            let stopped = stop_runtime_daemon(&project, &cwd)?;
+            let started = start_project_runtime_detached_with_options(config, &project, &options)
+                .map_err(|error| anyhow::anyhow!(error))?;
+            let response = RuntimeRestartResponse { stopped, started };
+            if json_mode {
+                print_json_command(json_command, &response)
+            } else {
+                println!("stop:");
+                print_runtime_daemon_status(&response.stopped);
+                println!();
+                println!("start:");
+                print_runtime_start(&response.started);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Adopt {
+            project,
+            pid,
+            debug_profile,
+            command,
+            expected_port,
+        } => {
+            let response = adopt_project_runtime_with_options(
+                config,
+                &project,
+                pid,
+                &ProjectRuntimeLaunchOptions {
+                    debug_profile,
+                    command,
+                    expected_port,
+                    ..ProjectRuntimeLaunchOptions::default()
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+            if json_mode {
+                print_json_command(json_command, &response)
+            } else {
+                print_runtime_daemon_adopt(&response);
+                Ok(())
+            }
+        }
+        RuntimeCommands::Diagnose { project } => {
+            let cwd = resolve_runtime_lookup_cwd(config, &project)?;
+            let response = diagnose_runtime_daemon(&project, &cwd)?;
+            if json_mode {
+                print_json_command(json_command, &response)
+            } else {
+                print_runtime_diagnosis(&response);
                 Ok(())
             }
         }
         RuntimeCommands::Focus {
             project,
             debug_profile,
+            runtime_profile,
             url,
         } => {
-            let response =
-                focus_project_runtime(config, &project, debug_profile.as_deref(), url.as_deref())
-                    .map_err(|error| anyhow::anyhow!(error))?;
+            let response = rdevtool_core::runtime::focus_project_runtime_with_profile(
+                config,
+                &project,
+                debug_profile.as_deref(),
+                runtime_profile.as_deref(),
+                url.as_deref(),
+            )
+            .map_err(|error| anyhow::anyhow!(error))?;
             if json_mode {
-                print_json_command("runtime.focus", &response)
+                print_json_command(json_command, &response)
             } else {
                 print_runtime_focus(&response);
                 Ok(())
@@ -6237,12 +8341,69 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
             }
             .map_err(|error| anyhow::anyhow!(error))?;
             if json_mode {
-                print_json_command("runtime.log", &response)
+                print_json_command(json_command, &response)
             } else {
                 print_runtime_log(&response);
                 Ok(())
             }
         }
+    }
+}
+
+fn print_runtime_daemon_status(status: &RuntimeDaemonStatus) {
+    println!("project   : {}", status.project_key);
+    println!("cwd       : {}", status.canonical_cwd);
+    println!("status    : {}", status.phase_key);
+    println!("managed   : {}", status.managed);
+    println!("compatible: {}", status.version_compatible);
+    if let Some(state) = status.state.as_ref() {
+        println!("phase     : {:?}", state.phase);
+        println!("daemon pid: {}", state.daemon_pid);
+        if let Some(pid) = state.worker_pid {
+            println!("worker pid: {pid}");
+        }
+        if let Some(url) = state.ready_url.as_deref() {
+            println!("ready url : {url}");
+        }
+    }
+    println!("detail    : {}", status.detail);
+}
+
+fn print_runtime_daemon_list(statuses: &[RuntimeDaemonStatus]) {
+    if statuses.is_empty() {
+        println!("no runtime daemon states found");
+        return;
+    }
+    for status in statuses {
+        println!(
+            "{}  {}  managed={}  {}",
+            status.project_key, status.phase_key, status.managed, status.canonical_cwd
+        );
+    }
+}
+
+fn print_runtime_daemon_adopt(response: &RuntimeDaemonAdoptResponse) {
+    println!("project  : {}", response.project_key);
+    println!("cwd      : {}", response.canonical_cwd);
+    println!("pid      : {}", response.pid);
+    println!("pgid     : {}", response.pgid);
+    println!("command  : {}", response.command);
+    println!("supported: {}", response.supported);
+    println!("detail   : {}", response.detail);
+    print_runtime_daemon_status(&response.status);
+}
+
+fn print_runtime_diagnosis(response: &RuntimeDaemonDiagnosis) {
+    print_runtime_daemon_status(&response.status);
+    println!("healthy   : {}", response.healthy);
+    if !response.issues.is_empty() {
+        println!("issues:");
+        for issue in &response.issues {
+            println!("- {issue}");
+        }
+    }
+    if let Some(command) = response.process_command.as_deref() {
+        println!("process command: {command}");
     }
 }
 
@@ -6570,21 +8731,286 @@ fn resolve_web_action_script_content(
     anyhow::bail!("temporary script is required; use --script, --file, or --stdin")
 }
 
-fn load_proxy_cli_info(config_override: Option<&Path>) -> Result<ProxyCliInfo> {
+fn save_proxy_source_preference_for_active_workspace(source_id: &str) -> Result<()> {
+    let paths = ensure_default_configs()?;
+    let app_workspace = load_workspace_config(&paths.workspace)?;
+    let workspace_key = active_project_workspace_key(&app_workspace);
+    save_config_source_preference(&paths, &workspace_key, "proxy", source_id)?;
+    Ok(())
+}
+
+fn load_proxy_cli_info(
+    config_override: Option<&Path>,
+    requested_source_id: Option<&str>,
+) -> Result<ProxyCliInfo> {
     let (config, _) = load_cli_config(config_override)?;
     let paths = ensure_default_configs()?;
     let app_workspace = load_workspace_config(&paths.workspace)?;
     let active_key = active_project_workspace_key(&app_workspace);
     let workspace = load_active_project_workspace(&paths)?;
-    let path = ensure_proxy_config()?;
-    let proxy_config = filter_proxy_config_for_workspace(load_proxy_config(&path)?, &workspace);
+    let workspaces = load_project_workspaces(&paths.project_workspaces)?;
+    let source_id = requested_source_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            preferred_config_source_id_for_scope(&workspace, &app_workspace, "proxy")
+        });
+    let source = resolve_config_source(Some(&source_id), &workspaces)?;
+    if !source
+        .capabilities
+        .iter()
+        .any(|capability| capability == "proxy")
+    {
+        anyhow::bail!("config source does not support proxy: {}", source.id);
+    }
+    let path = source
+        .files
+        .proxy
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("config source has no proxy file: {}", source.id))?;
+    if !path.exists() {
+        save_proxy_config(&path, &ProxyConfig::default())?;
+    }
+    let proxy_config = load_proxy_config(&path)?;
+    let proxy_config = if source.is_default {
+        filter_proxy_config_for_workspace(proxy_config, &workspace)
+    } else {
+        proxy_config
+    };
 
     Ok(ProxyCliInfo {
+        source_id: source.id,
+        source_name: source.name,
         path: path.display().to_string(),
         workspace: project_workspace_cli_info(workspace, &config, &active_key),
         profiles: proxy_config.profiles,
         rules: proxy_config.rules,
     })
+}
+
+fn proxy_status_response(
+    info: &ProxyCliInfo,
+    profile: Option<&str>,
+) -> Result<ProxyStatusResponse> {
+    let profiles = match profile.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(profile) => vec![
+            info.profiles
+                .iter()
+                .find(|item| item.id == profile || item.name == profile)
+                .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {profile}"))?,
+        ],
+        None => info.profiles.iter().collect(),
+    };
+    Ok(ProxyStatusResponse {
+        source_id: info.source_id.clone(),
+        source_name: info.source_name.clone(),
+        path: info.path.clone(),
+        profiles: profiles
+            .into_iter()
+            .map(|profile| -> Result<ProxyStatusItem> {
+                let status = proxy_daemon_status(Path::new(&info.path), &profile.id)?;
+                Ok(ProxyStatusItem {
+                    profile_id: profile.id.clone(),
+                    profile_name: profile.name.clone(),
+                    listen_url: profile.listen_url(),
+                    listening: status.running,
+                    managed: status.managed,
+                    version_compatible: status.version_compatible,
+                    protocol_version: status.protocol_version,
+                    app_version: status.app_version,
+                    pid: status.pid,
+                    started_at: status.started_at,
+                    owner: status.owner,
+                    ownership: if status.managed {
+                        "rdevtool-daemon".to_string()
+                    } else if status.running {
+                        "external".to_string()
+                    } else {
+                        "none".to_string()
+                    },
+                    detail: status.detail,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn verify_proxy_request(
+    info: &ProxyCliInfo,
+    profile_key: &str,
+    method: &str,
+    raw_url: &str,
+    headers: &BTreeMap<String, String>,
+    body: Option<&str>,
+    expected_status: Option<u16>,
+    expected_body_text: Option<&str>,
+    timeout_ms: u64,
+) -> Result<ProxyVerifyResponse> {
+    let profile = info
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_key || profile.name == profile_key)
+        .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {profile_key}"))?;
+    let diagnosis = diagnose_proxy_request(
+        &ProxyConfig {
+            profiles: info.profiles.clone(),
+            rules: info.rules.clone(),
+        },
+        &profile.id,
+        method,
+        raw_url,
+        headers,
+    )?;
+    let request_url = proxy_local_request_url(profile, raw_url)?;
+    let method = reqwest::Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes())?;
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_millis(timeout_ms.max(1)))
+        .build()?;
+    let mut request = client.request(method.clone(), &request_url);
+    for (key, value) in headers {
+        request = request.header(key, value);
+    }
+    if let Some(body) = body {
+        request = request.body(body.to_string());
+    }
+    let started = std::time::Instant::now();
+    let response = request.send().map_err(|error| {
+        anyhow::anyhow!(
+            "proxy verify request failed for {}: {}",
+            profile.listen_url(),
+            error
+        )
+    })?;
+    let elapsed_ms = started.elapsed().as_millis();
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+    let response_body = response.text()?;
+    let body_matches = expected_body_text
+        .map(|expected| response_body.contains(expected))
+        .unwrap_or(true);
+    let status_matches = expected_status
+        .map(|expected| expected == status)
+        .unwrap_or(true);
+    let (body_preview, body_truncated) =
+        proxy_body_preview(&response_body, content_type.as_deref());
+
+    Ok(ProxyVerifyResponse {
+        profile_id: profile.id.clone(),
+        profile_name: profile.name.clone(),
+        listen_url: profile.listen_url(),
+        request_url,
+        method: method.to_string(),
+        diagnosis,
+        status,
+        content_type,
+        body_preview,
+        body_truncated,
+        elapsed_ms,
+        expected_status,
+        expected_body_text_provided: expected_body_text.is_some(),
+        status_matches,
+        body_matches,
+        verified: status_matches && body_matches,
+    })
+}
+
+fn proxy_local_request_url(profile: &ProxyProfile, raw_url: &str) -> Result<String> {
+    let path = if raw_url.starts_with("http://") || raw_url.starts_with("https://") {
+        let parsed = reqwest::Url::parse(raw_url)?;
+        match parsed.query() {
+            Some(query) => format!("{}?{}", parsed.path(), query),
+            None => parsed.path().to_string(),
+        }
+    } else if raw_url.starts_with('/') {
+        raw_url.to_string()
+    } else {
+        format!("/{raw_url}")
+    };
+    let host = match profile.listen_host.trim() {
+        "" | "0.0.0.0" | "::" | "[::]" => "127.0.0.1".to_string(),
+        value if value.contains(':') && !value.starts_with('[') => format!("[{value}]"),
+        value => value.to_string(),
+    };
+    Ok(format!("http://{}:{}{}", host, profile.listen_port, path))
+}
+
+fn proxy_body_preview(body: &str, content_type: Option<&str>) -> (String, bool) {
+    const MAX_CHARS: usize = 2048;
+    let redacted = serde_json::from_str::<serde_json::Value>(body)
+        .map(|mut value| {
+            redact_sensitive_json(&mut value);
+            serde_json::to_string(&value).unwrap_or_else(|_| "<json response>".to_string())
+        })
+        .unwrap_or_else(|_| redact_sensitive_text(body, content_type));
+    let truncated = redacted.chars().count() > MAX_CHARS;
+    let preview = redacted.chars().take(MAX_CHARS).collect::<String>();
+    (preview, truncated)
+}
+
+fn redact_sensitive_text(body: &str, content_type: Option<&str>) -> String {
+    if content_type.is_some_and(|value| {
+        !value.starts_with("text/")
+            && !value.contains("json")
+            && !value.contains("xml")
+            && !value.contains("javascript")
+    }) {
+        return "<non-text response>".to_string();
+    }
+    body.lines()
+        .map(|line| {
+            for separator in [':', '='] {
+                if let Some((key, _)) = line.split_once(separator) {
+                    if is_sensitive_output_key(key.trim()) {
+                        return format!("{}{} <redacted>", key.trim(), separator);
+                    }
+                }
+            }
+            line.to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn redact_sensitive_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, value) in map {
+                if is_sensitive_output_key(key) {
+                    *value = serde_json::Value::String("<redacted>".to_string());
+                } else {
+                    redact_sensitive_json(value);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_sensitive_json(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_sensitive_output_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "password",
+        "secret",
+        "token",
+        "authorization",
+        "cookie",
+        "private_key",
+        "privatekey",
+    ]
+    .iter()
+    .any(|marker| key.contains(marker))
 }
 
 fn resolve_proxy_workspace_key(workspace: Option<String>, global: bool) -> Result<Option<String>> {
@@ -6918,6 +9344,7 @@ fn filter_proxy_config_for_workspace(
 }
 
 fn print_proxy_profiles(info: &ProxyCliInfo) {
+    println!("source    : {} ({})", info.source_name, info.source_id);
     println!(
         "workspace : {} ({})",
         info.workspace.name, info.workspace.key
@@ -6933,6 +9360,65 @@ fn print_proxy_profiles(info: &ProxyCliInfo) {
         );
     }
     println!("rules     : {}", info.rules.len());
+}
+
+fn print_proxy_status(response: &ProxyStatusResponse) {
+    println!(
+        "source    : {} ({})",
+        response.source_name, response.source_id
+    );
+    println!("path      : {}", response.path);
+    for profile in &response.profiles {
+        println!(
+            "{:<20} {:<10} {}{}{}",
+            profile.profile_name,
+            if profile.listening {
+                "listening"
+            } else {
+                "stopped"
+            },
+            profile.listen_url,
+            profile
+                .owner
+                .as_ref()
+                .map(|owner| format!(" · {}", owner))
+                .unwrap_or_default(),
+            if profile.managed && !profile.version_compatible {
+                " · managed · upgrade available"
+            } else if profile.managed {
+                " · managed"
+            } else {
+                ""
+            }
+        );
+    }
+}
+
+fn print_proxy_verify(response: &ProxyVerifyResponse) {
+    println!(
+        "{} {} -> {} ({} ms)",
+        response.method, response.request_url, response.status, response.elapsed_ms
+    );
+    println!(
+        "profile: {} ({}) {}",
+        response.profile_name, response.profile_id, response.listen_url
+    );
+    println!(
+        "matched: {}",
+        response
+            .diagnosis
+            .matched_rule
+            .as_ref()
+            .map(|rule| format!("{} ({})", rule.name, rule.id))
+            .unwrap_or_else(|| "no explicit rule".to_string())
+    );
+    println!(
+        "verified: {} (status={}, body={})",
+        response.verified, response.status_matches, response.body_matches
+    );
+    if !response.body_preview.is_empty() {
+        println!("body: {}", response.body_preview);
+    }
 }
 
 fn print_proxy_rules(rules: &[ProxyRule]) {
@@ -6995,13 +9481,9 @@ fn proxy_rule_action_label(action: &ProxyRuleAction) -> &'static str {
     }
 }
 
-fn active_workspace_project_filter_cli() -> Result<Option<BTreeSet<String>>> {
+fn active_history_workspace_cli() -> Result<ProjectWorkspaceConfig> {
     let paths = ensure_default_configs()?;
-    let workspace = load_active_project_workspace(&paths)?;
-    if workspace.include_all_projects {
-        return Ok(None);
-    }
-    Ok(Some(workspace.projects.into_iter().collect()))
+    load_active_project_workspace(&paths)
 }
 
 fn list_deploy_history_for_workspace(
@@ -7009,31 +9491,23 @@ fn list_deploy_history_for_workspace(
     project: Option<&str>,
     limit: usize,
 ) -> Result<Vec<DeployHistoryEntry>> {
-    let filter = active_workspace_project_filter_cli()?;
-    if let Some(project) = project {
-        if filter
-            .as_ref()
-            .is_some_and(|project_keys| !project_keys.contains(project))
-        {
-            return Ok(Vec::new());
-        }
+    let workspace = active_history_workspace_cli()?;
+    if workspace.is_system() {
         return storage
-            .list_deploy_history_filtered(Some(project), limit)
+            .list_deploy_history_filtered(project, limit)
             .map_err(anyhow::Error::msg);
     }
-    match filter {
-        None => storage
-            .list_deploy_history_filtered(None, limit)
-            .map_err(anyhow::Error::msg),
-        Some(project_keys) if project_keys.is_empty() => Ok(Vec::new()),
-        Some(project_keys) => Ok(storage
-            .list_all_deploy_history()
-            .map_err(anyhow::Error::msg)?
-            .into_iter()
-            .filter(|entry| project_keys.contains(&entry.project_key))
-            .take(limit)
-            .collect()),
+    if project.is_some_and(|project| !workspace.allows_project(project)) {
+        return Ok(Vec::new());
     }
+    Ok(storage
+        .list_all_deploy_history()
+        .map_err(anyhow::Error::msg)?
+        .into_iter()
+        .filter(|entry| entry.workspace_key.as_deref() == Some(workspace.key.as_str()))
+        .filter(|entry| project.is_none_or(|key| entry.project_key == key))
+        .take(limit)
+        .collect())
 }
 
 fn list_merge_history_for_workspace(
@@ -7041,31 +9515,23 @@ fn list_merge_history_for_workspace(
     project: Option<&str>,
     limit: usize,
 ) -> Result<Vec<MergeHistoryEntry>> {
-    let filter = active_workspace_project_filter_cli()?;
-    if let Some(project) = project {
-        if filter
-            .as_ref()
-            .is_some_and(|project_keys| !project_keys.contains(project))
-        {
-            return Ok(Vec::new());
-        }
+    let workspace = active_history_workspace_cli()?;
+    if workspace.is_system() {
         return storage
-            .list_merge_history_filtered(Some(project), limit)
+            .list_merge_history_filtered(project, limit)
             .map_err(anyhow::Error::msg);
     }
-    match filter {
-        None => storage
-            .list_merge_history_filtered(None, limit)
-            .map_err(anyhow::Error::msg),
-        Some(project_keys) if project_keys.is_empty() => Ok(Vec::new()),
-        Some(project_keys) => Ok(storage
-            .list_all_merge_history()
-            .map_err(anyhow::Error::msg)?
-            .into_iter()
-            .filter(|entry| project_keys.contains(&entry.project_key))
-            .take(limit)
-            .collect()),
+    if project.is_some_and(|project| !workspace.allows_project(project)) {
+        return Ok(Vec::new());
     }
+    Ok(storage
+        .list_all_merge_history()
+        .map_err(anyhow::Error::msg)?
+        .into_iter()
+        .filter(|entry| entry.workspace_key.as_deref() == Some(workspace.key.as_str()))
+        .filter(|entry| project.is_none_or(|key| entry.project_key == key))
+        .take(limit)
+        .collect())
 }
 
 #[derive(Debug, Serialize)]
@@ -7402,7 +9868,11 @@ fn print_doctor_report(value: &DoctorReport) {
     println!("workspace     : {}", value.paths.workspace);
     println!("workspaces dir: {}", value.paths.workspaces_dir);
     println!("navigation    : {}", value.paths.navigation);
-    println!("proxy         : {}", value.paths.proxy);
+    println!("proxy default : {}", value.paths.proxy);
+    println!("config sources: {}", value.paths.config_sources);
+    if let Some(proxy_active) = &value.paths.proxy_active {
+        println!("proxy active  : {proxy_active}");
+    }
     println!("web actions   : {}", value.paths.web_actions);
     println!("storage       : {}", value.paths.storage);
     if let Some(workspace) = &value.active_workspace {
@@ -7535,6 +10005,21 @@ fn print_push_status(status: &BranchPushStatus) {
     println!("files         : {}", status.files.len());
     if let Some(commit) = &status.latest_commit {
         println!("latest commit : {} {}", commit.short_hash, commit.subject);
+    }
+}
+
+fn print_branch_file_diff(response: &BranchFileDiffResponse) {
+    println!("project       : {}", response.project_name);
+    println!("repo path     : {}", response.repo_path);
+    println!("file          : {}", response.path);
+    println!("mode          : {}", response.mode);
+    println!("binary        : {}", response.binary);
+    println!("truncated     : {}", response.truncated);
+    for warning in &response.warnings {
+        println!("warning       : {warning}");
+    }
+    if !response.diff.is_empty() {
+        println!("{}", response.diff);
     }
 }
 

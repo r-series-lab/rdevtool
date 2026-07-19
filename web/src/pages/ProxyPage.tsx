@@ -1,4 +1,13 @@
-import { useEffect, useMemo, useState, type KeyboardEvent, type ReactNode, type UIEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+  type UIEvent,
+} from "react";
 import {
   Alert,
   Box,
@@ -20,8 +29,7 @@ import {
 } from "@mui/material";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import type {
-  BindProxyRuntimeRequest,
-  ProjectWorkspaceSummary,
+  ConfigSource,
   ProxyDashboard,
   ProxyEvent,
   ProxyOutboundMode,
@@ -32,14 +40,20 @@ import type {
   ProxyRuleAction,
 } from "../app-types";
 import {
+  ActivityIcon,
+  AppWindowIcon,
   CheckIcon,
   ClearIcon,
+  CollapseIcon,
   CopyIcon,
   DownloadIcon,
   EditIcon,
+  ExpandIcon,
+  PackageIcon,
   PlayIcon,
   PlusIcon,
   RefreshIcon,
+  SettingsIcon,
   StopIcon,
   TrashIcon,
   UploadIcon,
@@ -47,7 +61,16 @@ import {
 } from "../components/AppIcons";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import { AppEmptyState } from "../components/AppEmptyState";
+import { AppListEndState } from "../components/AppListEndState";
 import { AppToast } from "../components/AppToast";
+import { ConfigSourceManagerDialog } from "../components/ConfigSourceManagerDialog";
+import { ConfigSourceBar } from "../components/ConfigSourceBar";
+import {
+  WorkspacePageToolbar,
+  WorkspacePageToolbarAction,
+} from "../components/WorkspacePageToolbar";
+import { useConfigSource, type ConfigSourceStatus } from "../hooks/useConfigSource";
+import { configSourceSupports } from "../lib/configSources";
 
 const HTTP_METHODS = ["", "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 const ACTION_KINDS: Array<{ value: ProxyRuleAction["kind"]; label: string }> = [
@@ -65,6 +88,8 @@ const OUTBOUND_MODES: Array<{ value: ProxyOutboundMode; label: string; helper: s
 type RequestFilter = "all" | "success" | "failed" | "mock" | "forward" | "block";
 
 const REQUEST_EVENT_LOAD_BATCH_SIZE = 50;
+const REQUEST_EVENT_AUTO_REFRESH_MS = 2500;
+const PROXY_SERVICE_PANEL_COLLAPSED_STORAGE_KEY = "rdevtool:proxy:service-panel-collapsed";
 
 const REQUEST_FILTERS: Array<{ value: RequestFilter; label: string }> = [
   { value: "all", label: "全部" },
@@ -75,53 +100,44 @@ const REQUEST_FILTERS: Array<{ value: RequestFilter; label: string }> = [
   { value: "block", label: "阻断" },
 ];
 
-type InterfaceProxyDraft = {
-  serviceName: string;
-  ruleName: string;
-  listenHost: string;
-  listenPort: number;
-  method: string;
-  pathPrefix: string;
-  actionKind: ProxyRuleAction["kind"];
-  targetBaseUrl: string;
-  rewritePrefix: string;
-  mockStatus: number;
-  mockContentType: string;
-  mockBody: string;
-  blockStatus: number;
-  blockBody: string;
-  bindRuntime: boolean;
-  runtimeProfileKey: string;
-  runtimeProfileLabel: string;
-  project: string;
-  createDebugProfile: boolean;
-  debugProfileLabel: string;
-  enableNetworkProxy: boolean;
-  nodeHook: boolean;
+function readProxyServicePanelCollapsed() {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  return window.localStorage.getItem(PROXY_SERVICE_PANEL_COLLAPSED_STORAGE_KEY) === "1";
+}
+
+type ProxyRefreshOptions = {
+  silent?: boolean;
+  sourceId?: string;
 };
 
 export type ProxyPageProps = {
   dashboard: ProxyDashboard | null;
-  selectedProfileId: string;
   activeProjectWorkspaceKey: string;
-  projectWorkspaces: ProjectWorkspaceSummary[];
-  projects: Array<{ key: string; name: string }>;
+  selectedProfileId: string;
   loading: boolean;
   busy: string;
   error: string;
   onSelectedProfileChange: (profileId: string) => void;
-  onRefresh: () => Promise<void> | void;
-  onSaveProfile: (profile: ProxyProfile) => Promise<ProxyDashboard> | void;
-  onDeleteProfile: (profileId: string) => Promise<ProxyDashboard> | void;
-  onSaveRule: (rule: ProxyRule) => Promise<ProxyDashboard> | void;
-  onDeleteRule: (ruleId: string) => Promise<ProxyDashboard> | void;
-  onStartProfile: (profileId: string) => Promise<ProxyDashboard> | void;
-  onStopProfile: (profileId: string) => Promise<ProxyDashboard> | void;
-  onClearEvents: (profileId?: string | null) => Promise<ProxyDashboard> | void;
-  onExportProfilePack: (profileId: string, path: string) => Promise<ProxyDashboard> | void;
-  onImportProfilePack: (path: string) => Promise<ProxyDashboard> | void;
-  onBindProxyRuntimeProfile: (request: BindProxyRuntimeRequest) => Promise<ProxyDashboard> | void;
-  onDiagnoseRequest: (request: ProxyRequestDiagnosisInput) => Promise<ProxyRequestDiagnosis>;
+  onRefresh: (options?: ProxyRefreshOptions) => Promise<void> | void;
+  onSaveProfile: (profile: ProxyProfile, sourceId?: string) => Promise<ProxyDashboard> | void;
+  onDeleteProfile: (profileId: string, sourceId?: string) => Promise<ProxyDashboard> | void;
+  onSaveRule: (rule: ProxyRule, sourceId?: string) => Promise<ProxyDashboard> | void;
+  onDeleteRule: (ruleId: string, sourceId?: string) => Promise<ProxyDashboard> | void;
+  onStartProfile: (profileId: string, sourceId?: string) => Promise<ProxyDashboard> | void;
+  onStopProfile: (profileId: string, sourceId?: string) => Promise<ProxyDashboard> | void;
+  onClearEvents: (profileId?: string | null, sourceId?: string) => Promise<ProxyDashboard> | void;
+  onExportProfilePack: (
+    profileId: string,
+    path: string,
+    sourceId?: string,
+  ) => Promise<ProxyDashboard> | void;
+  onImportProfilePack: (path: string, sourceId?: string) => Promise<ProxyDashboard> | void;
+  onDiagnoseRequest: (
+    request: ProxyRequestDiagnosisInput,
+    sourceId?: string,
+  ) => Promise<ProxyRequestDiagnosis>;
 };
 
 function newId(prefix: string) {
@@ -165,33 +181,6 @@ function createRule(profileId: string, priority = 10): ProxyRule {
       headers: {},
       delayMs: 0,
     },
-  };
-}
-
-function createInterfaceProxyDraft(port = 8787, project = ""): InterfaceProxyDraft {
-  return {
-    serviceName: "接口代理",
-    ruleName: "默认接口规则",
-    listenHost: "127.0.0.1",
-    listenPort: port,
-    method: "",
-    pathPrefix: "/api/",
-    actionKind: "forward",
-    targetBaseUrl: "",
-    rewritePrefix: "",
-    mockStatus: 200,
-    mockContentType: "application/json; charset=utf-8",
-    mockBody: '{\n  "ok": true\n}',
-    blockStatus: 403,
-    blockBody: "Blocked by rDevTool proxy",
-    bindRuntime: true,
-    runtimeProfileKey: "",
-    runtimeProfileLabel: "接口代理运行配置",
-    project,
-    createDebugProfile: Boolean(project),
-    debugProfileLabel: "代理启动",
-    enableNetworkProxy: false,
-    nodeHook: false,
   };
 }
 
@@ -465,6 +454,17 @@ function actionKindLabel(kind: ProxyRuleAction["kind"]) {
   return ACTION_KINDS.find((item) => item.value === kind)?.label ?? kind;
 }
 
+function ruleMethodTone(method: string) {
+  const normalized = method.trim().toUpperCase();
+  if (!normalized) {
+    return "any";
+  }
+  if (["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"].includes(normalized)) {
+    return normalized.toLowerCase();
+  }
+  return "custom";
+}
+
 function outboundModeLabel(mode?: ProxyOutboundMode) {
   return OUTBOUND_MODES.find((item) => item.value === (mode ?? "inherit"))?.label ?? "继承默认";
 }
@@ -505,65 +505,10 @@ function normalizePathPrefix(value: string) {
   return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
 }
 
-function profileFromInterfaceDraft(draft: InterfaceProxyDraft): ProxyProfile {
-  return {
-    ...createProfile(draft.listenPort),
-    name: draft.serviceName.trim(),
-    listenHost: draft.listenHost.trim(),
-    listenPort: draft.listenPort,
-  };
-}
-
-function ruleActionFromInterfaceDraft(draft: InterfaceProxyDraft): ProxyRuleAction {
-  if (draft.actionKind === "mock") {
-    return {
-      kind: "mock",
-      status: draft.mockStatus,
-      contentType: draft.mockContentType.trim() || "application/json; charset=utf-8",
-      body: draft.mockBody,
-      headers: {},
-      delayMs: 0,
-    };
-  }
-  if (draft.actionKind === "block") {
-    return {
-      kind: "block",
-      status: draft.blockStatus,
-      body: draft.blockBody,
-      delayMs: 0,
-    };
-  }
-  return {
-    kind: "forward",
-    targetBaseUrl: draft.targetBaseUrl.trim(),
-    rewritePrefix: draft.rewritePrefix.trim(),
-    requestHeaders: {},
-    responseHeaders: {},
-    outboundMode: "inherit",
-    outboundProxy: "",
-    delayMs: 0,
-  };
-}
-
-function ruleFromInterfaceDraft(
-  profileId: string,
-  draft: InterfaceProxyDraft,
-): ProxyRule {
-  return {
-    ...createRule(profileId, 10),
-    name: draft.ruleName.trim(),
-    method: draft.method.trim(),
-    pathPrefix: normalizePathPrefix(draft.pathPrefix),
-    action: ruleActionFromInterfaceDraft(draft),
-  };
-}
-
 export function ProxyPage({
   dashboard,
-  selectedProfileId,
   activeProjectWorkspaceKey,
-  projectWorkspaces,
-  projects,
+  selectedProfileId,
   loading,
   busy,
   error,
@@ -578,11 +523,32 @@ export function ProxyPage({
   onClearEvents,
   onExportProfilePack,
   onImportProfilePack,
-  onBindProxyRuntimeProfile,
   onDiagnoseRequest,
 }: ProxyPageProps) {
-  const statuses = useMemo(() => statusByProfile(dashboard), [dashboard]);
-  const profiles = dashboard?.config.profiles ?? [];
+  const {
+    sources: configSources,
+    selectedSource: selectedConfigSource,
+    selectedSourceId,
+    preferredSourceId,
+    sourceBusy,
+    sourceError,
+    sourceStatus,
+    refreshSources,
+    adoptSources,
+    selectSource,
+    supports,
+  } = useConfigSource({
+    workspaceKey: activeProjectWorkspaceKey,
+    requiredCapability: "proxy",
+  });
+  const visibleDashboard =
+    dashboard &&
+    selectedConfigSource?.files.proxy &&
+    dashboard.configPath === selectedConfigSource.files.proxy
+      ? dashboard
+      : null;
+  const statuses = useMemo(() => statusByProfile(visibleDashboard), [visibleDashboard]);
+  const profiles = visibleDashboard?.config.profiles ?? [];
   const selectedProfile =
     profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? null;
   const selectedStatus = selectedProfile ? statuses.get(selectedProfile.id) : null;
@@ -590,24 +556,24 @@ export function ProxyPage({
     () =>
       selectedProfile
         ? sortedRules(
-            dashboard?.config.rules.filter((rule) => rule.profileId === selectedProfile.id) ?? [],
+            visibleDashboard?.config.rules.filter((rule) => rule.profileId === selectedProfile.id) ?? [],
           )
         : [],
-    [dashboard?.config.rules, selectedProfile],
+    [visibleDashboard?.config.rules, selectedProfile],
   );
   const events = useMemo(
     () =>
       selectedProfile
-        ? (dashboard?.events ?? []).filter((event) => event.profileId === selectedProfile.id)
+        ? (visibleDashboard?.events ?? []).filter((event) => event.profileId === selectedProfile.id)
         : [],
-    [dashboard?.events, selectedProfile],
+    [visibleDashboard?.events, selectedProfile],
   );
-  const [profileDraft, setProfileDraft] = useState<ProxyProfile | null>(null);
+  const [configProfileDraft, setConfigProfileDraft] = useState<ProxyProfile | null>(null);
   const [ruleDraft, setRuleDraft] = useState<ProxyRule | null>(null);
-  const [interfaceProxyDraft, setInterfaceProxyDraft] = useState<InterfaceProxyDraft | null>(null);
-  const [profileDialogOpen, setProfileDialogOpen] = useState(false);
   const [ruleDialogOpen, setRuleDialogOpen] = useState(false);
-  const [interfaceProxyDialogOpen, setInterfaceProxyDialogOpen] = useState(false);
+  const [proxyConfigDialogOpen, setProxyConfigDialogOpen] = useState(false);
+  const [configSourceManagerOpen, setConfigSourceManagerOpen] = useState(false);
+  const [configSelectedProfileId, setConfigSelectedProfileId] = useState("");
   const [requestsDialogOpen, setRequestsDialogOpen] = useState(false);
   const [requestQuery, setRequestQuery] = useState("");
   const [requestFilter, setRequestFilter] = useState<RequestFilter>("all");
@@ -625,7 +591,13 @@ export function ProxyPage({
   const [diagnosisResult, setDiagnosisResult] = useState<ProxyRequestDiagnosis | null>(null);
   const [diagnosisLoading, setDiagnosisLoading] = useState(false);
   const [requestVisibleCount, setRequestVisibleCount] = useState(REQUEST_EVENT_LOAD_BATCH_SIZE);
+  const [servicePanelCollapsed, setServicePanelCollapsed] = useState(
+    readProxyServicePanelCollapsed,
+  );
   const [confirm, confirmDialog] = useAppConfirmDialog();
+  const onRefreshRef = useRef(onRefresh);
+  const requestRefreshInFlightRef = useRef(false);
+  const sourceAllowsProxy = supports("proxy");
   const filteredEvents = useMemo(
     () =>
       events.filter(
@@ -639,6 +611,30 @@ export function ProxyPage({
   const hasMoreRequestEvents = visibleEvents.length < filteredEvents.length;
   const selectedEvent =
     filteredEvents.find((event) => event.id === selectedEventId) ?? filteredEvents[0] ?? null;
+  const savedConfigSelectedProfile =
+    profiles.find((profile) => profile.id === configSelectedProfileId) ?? null;
+  const configDraftIsUnsaved = Boolean(
+    configProfileDraft && !profiles.some((profile) => profile.id === configProfileDraft.id),
+  );
+  const configDraftHasChanges = Boolean(
+    configProfileDraft &&
+      (configDraftIsUnsaved ||
+        JSON.stringify(configProfileDraft) !==
+          JSON.stringify(profiles.find((profile) => profile.id === configProfileDraft.id))),
+  );
+  const configSelectedProfile =
+    savedConfigSelectedProfile ??
+    (configDraftIsUnsaved && configProfileDraft?.id === configSelectedProfileId
+      ? configProfileDraft
+      : null) ??
+    selectedProfile ??
+    profiles[0] ??
+    null;
+  const configDraftDirty = Boolean(
+    configProfileDraft &&
+      (configDraftIsUnsaved ||
+        JSON.stringify(configProfileDraft) !== JSON.stringify(configSelectedProfile)),
+  );
   const nextPort =
     Array.from({ length: 20 }, (_, index) => 8787 + index).find(
       (port) => !profiles.some((profile) => profile.listenPort === port),
@@ -648,23 +644,78 @@ export function ProxyPage({
     ruleDraft && rules.some((rule) => rule.id === ruleDraft.id) ? ruleDraft : null;
   const enabledRuleCount = rules.filter((rule) => rule.enabled).length;
   const disabledRuleCount = rules.length - enabledRuleCount;
+  const runningServiceCount = profiles.filter(
+    (profile) => statuses.get(profile.id)?.running,
+  ).length;
+  const totalRuleCount = visibleDashboard?.config.rules.length ?? 0;
+  const totalRequestCount = visibleDashboard?.events.length ?? 0;
   const ruleSaveBusy = busy === "正在保存代理规则";
   const blockingBusy = Boolean(busy) && !ruleSaveBusy;
-  const activeWorkspace =
-    projectWorkspaces.find((workspace) => workspace.key === activeProjectWorkspaceKey) ?? null;
-  const workspaceSaveLabel = activeWorkspace
-    ? activeWorkspace.system
-      ? "全局视图"
-      : activeWorkspace.name
-    : activeProjectWorkspaceKey || "当前工作区";
-  const defaultBindProject = projects.length === 1 ? projects[0].key : "";
-
   function setFormError(value: string) {
     setFormErrorValue(value);
     if (value.trim()) {
       setToastNonce((current) => current + 1);
     }
   }
+
+  const loadConfigSources = useCallback(
+    async (sourceId?: string) => {
+      try {
+        const result = await refreshSources(sourceId);
+        if (!result) return;
+        await onRefresh({ sourceId: result.sourceId });
+      } catch (reason) {
+        setFormError(String(reason));
+      }
+    },
+    [onRefresh, refreshSources],
+  );
+
+  const refreshRequests = useCallback(async (options: ProxyRefreshOptions = {}) => {
+    if (requestRefreshInFlightRef.current) {
+      return;
+    }
+    requestRefreshInFlightRef.current = true;
+    try {
+      await onRefreshRef.current({ ...options, sourceId: options.sourceId ?? selectedSourceId });
+    } finally {
+      requestRefreshInFlightRef.current = false;
+    }
+  }, [selectedSourceId]);
+
+  useEffect(() => {
+    onRefreshRef.current = onRefresh;
+  }, [onRefresh]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      PROXY_SERVICE_PANEL_COLLAPSED_STORAGE_KEY,
+      servicePanelCollapsed ? "1" : "0",
+    );
+  }, [servicePanelCollapsed]);
+
+  useEffect(() => {
+    void loadConfigSources();
+  }, [loadConfigSources, preferredSourceId]);
+
+  useEffect(() => {
+    if (!requestsDialogOpen || !selectedProfile || !selectedStatus?.running) {
+      return;
+    }
+    const refreshIfVisible = () => {
+      if (typeof document !== "undefined" && document.visibilityState !== "visible") {
+        return;
+      }
+      void refreshRequests({ silent: true });
+    };
+    refreshIfVisible();
+    const timer = window.setInterval(refreshIfVisible, REQUEST_EVENT_AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [refreshRequests, requestsDialogOpen, selectedProfile?.id, selectedStatus?.running]);
 
   useEffect(() => {
     if (!selectedEvent || filteredEvents.some((event) => event.id === selectedEventId)) {
@@ -685,6 +736,52 @@ export function ProxyPage({
     setRequestVisibleCount(REQUEST_EVENT_LOAD_BATCH_SIZE);
   }, [requestFilter, requestQuery, selectedProfile?.id]);
 
+  useEffect(() => {
+    if (!proxyConfigDialogOpen) {
+      return;
+    }
+    if (profiles.length === 0) {
+      if (configSelectedProfileId) {
+        setConfigSelectedProfileId("");
+      }
+      return;
+    }
+    const selectedIsUnsavedDraft =
+      configDraftIsUnsaved && configProfileDraft?.id === configSelectedProfileId;
+    if (!profiles.some((profile) => profile.id === configSelectedProfileId) && !selectedIsUnsavedDraft) {
+      setConfigSelectedProfileId(selectedProfile?.id ?? profiles[0].id);
+    }
+  }, [
+    configDraftIsUnsaved,
+    configProfileDraft?.id,
+    configSelectedProfileId,
+    profiles,
+    proxyConfigDialogOpen,
+    selectedProfile?.id,
+  ]);
+
+  useEffect(() => {
+    if (!proxyConfigDialogOpen) {
+      setConfigProfileDraft(null);
+      return;
+    }
+    setConfigProfileDraft((current) => {
+      if (
+        current?.id === configSelectedProfileId &&
+        !profiles.some((profile) => profile.id === current.id)
+      ) {
+        return current;
+      }
+      if (!configSelectedProfile) {
+        return null;
+      }
+      if (current?.id === configSelectedProfile.id) {
+        return current;
+      }
+      return { ...configSelectedProfile };
+    });
+  }, [configSelectedProfile?.id, configSelectedProfileId, profiles, proxyConfigDialogOpen]);
+
   function loadMoreRequestEvents() {
     setRequestVisibleCount((current) =>
       Math.min(current + REQUEST_EVENT_LOAD_BATCH_SIZE, filteredEvents.length),
@@ -701,27 +798,54 @@ export function ProxyPage({
     }
   }
 
-  function openProfileDialog(profile: ProxyProfile) {
+  function openProxyConfigDialog() {
     setFormError("");
-    setProfileDraft(profile);
-    setProfileDialogOpen(true);
+    setConfigSelectedProfileId(selectedProfile?.id ?? profiles[0]?.id ?? "");
+    setProxyConfigDialogOpen(true);
   }
 
-  function openInterfaceProxyDialog() {
+  async function handleSourceChange(nextSourceId: string) {
+    if (nextSourceId === selectedSourceId || busy) {
+      return;
+    }
+    const nextSource = configSources.find((source) => source.id === nextSourceId) ?? null;
+    if (!configSourceSupports(nextSource, "proxy")) {
+      setFormError("这个配置源不支持代理配置。");
+      return;
+    }
+    if (configDraftDirty || ruleDialogOpen) {
+      setFormError("请先保存或取消当前代理改动，再切换配置源。");
+      return;
+    }
     setFormError("");
-    setInterfaceProxyDraft(createInterfaceProxyDraft(nextPort, defaultBindProject));
-    setInterfaceProxyDialogOpen(true);
+    try {
+      const source = await selectSource(nextSourceId);
+      if (!source) return;
+      setConfigProfileDraft(null);
+      setConfigSelectedProfileId("");
+      setRuleDraft(null);
+      setDiagnosisResult(null);
+      await onRefresh({ sourceId: source.id });
+    } catch (reason) {
+      setFormError(String(reason));
+    }
   }
 
-  function closeProfileDialog() {
-    setProfileDialogOpen(false);
-    setProfileDraft(null);
+  function startNewConfigProfileDraft() {
+    const draft = createProfile(nextPort);
     setFormError("");
+    setConfigProfileDraft(draft);
+    setConfigSelectedProfileId(draft.id);
   }
 
-  function closeInterfaceProxyDialog() {
-    setInterfaceProxyDialogOpen(false);
-    setInterfaceProxyDraft(null);
+  function discardConfigProfileDraft() {
+    setFormError("");
+    setConfigProfileDraft(null);
+    setConfigSelectedProfileId(selectedProfile?.id ?? profiles[0]?.id ?? "");
+  }
+
+  function closeProxyConfigDialog() {
+    setProxyConfigDialogOpen(false);
     setFormError("");
   }
 
@@ -744,12 +868,8 @@ export function ProxyPage({
     setMockHeadersText("");
   }
 
-  function updateProfileDraft(patch: Partial<ProxyProfile>) {
-    setProfileDraft((current) => (current ? { ...current, ...patch } : current));
-  }
-
-  function updateInterfaceProxyDraft(patch: Partial<InterfaceProxyDraft>) {
-    setInterfaceProxyDraft((current) => (current ? { ...current, ...patch } : current));
+  function updateConfigProfileDraft(patch: Partial<ProxyProfile>) {
+    setConfigProfileDraft((current) => (current ? { ...current, ...patch } : current));
   }
 
   function updateRuleDraft(patch: Partial<ProxyRule>) {
@@ -815,12 +935,15 @@ export function ProxyPage({
     setFormError("");
     setDiagnosisLoading(true);
     try {
-      const result = await onDiagnoseRequest({
-        profile: selectedProfile.id,
-        method: diagnosisMethod.trim() || "GET",
-        url,
-        headers: {},
-      });
+      const result = await onDiagnoseRequest(
+        {
+          profile: selectedProfile.id,
+          method: diagnosisMethod.trim() || "GET",
+          url,
+          headers: {},
+        },
+        selectedSourceId,
+      );
       setDiagnosisResult(result);
     } catch (reason) {
       setFormError(String(reason));
@@ -829,73 +952,22 @@ export function ProxyPage({
     }
   }
 
-  async function saveProfileDraft() {
-    if (!profileDraft) {
+  async function saveConfigProfileDraft() {
+    if (!configProfileDraft) {
       return;
     }
     setFormError("");
-    if (!profileDraft.name.trim()) {
+    if (!configProfileDraft.name.trim()) {
       setFormError("代理名称不能为空");
       return;
     }
-    if (!profileDraft.listenHost.trim() || !profileDraft.listenPort) {
+    if (!configProfileDraft.listenHost.trim() || !configProfileDraft.listenPort) {
       setFormError("监听地址和端口不能为空");
       return;
     }
-    await onSaveProfile(profileDraft);
-    onSelectedProfileChange(profileDraft.id);
-    closeProfileDialog();
-  }
-
-  async function saveInterfaceProxyDraft() {
-    if (!interfaceProxyDraft) {
-      return;
-    }
-    setFormError("");
-    if (!interfaceProxyDraft.serviceName.trim()) {
-      setFormError("服务名称不能为空");
-      return;
-    }
-    if (!interfaceProxyDraft.ruleName.trim()) {
-      setFormError("规则名称不能为空");
-      return;
-    }
-    if (!interfaceProxyDraft.listenHost.trim() || !interfaceProxyDraft.listenPort) {
-      setFormError("监听地址和端口不能为空");
-      return;
-    }
-    if (!normalizePathPrefix(interfaceProxyDraft.pathPrefix)) {
-      setFormError("接口前缀不能为空");
-      return;
-    }
-    if (interfaceProxyDraft.actionKind === "forward" && !interfaceProxyDraft.targetBaseUrl.trim()) {
-      setFormError("转发目标不能为空");
-      return;
-    }
-    const profile = profileFromInterfaceDraft(interfaceProxyDraft);
-    const rule = ruleFromInterfaceDraft(profile.id, interfaceProxyDraft);
-    await onSaveProfile(profile);
-    await onSaveRule(rule);
-    if (interfaceProxyDraft.bindRuntime) {
-      await onBindProxyRuntimeProfile({
-        proxyProfile: profile.id,
-        runtimeProfileKey: interfaceProxyDraft.runtimeProfileKey.trim() || null,
-        runtimeProfileLabel: interfaceProxyDraft.runtimeProfileLabel.trim() || null,
-        project:
-          interfaceProxyDraft.project.trim() && interfaceProxyDraft.createDebugProfile
-            ? interfaceProxyDraft.project.trim()
-            : null,
-        debugProfile: null,
-        createDebugProfile: Boolean(
-          interfaceProxyDraft.project.trim() && interfaceProxyDraft.createDebugProfile,
-        ),
-        debugProfileLabel: interfaceProxyDraft.debugProfileLabel.trim() || null,
-        enableNetworkProxy: interfaceProxyDraft.enableNetworkProxy,
-        nodeHook: interfaceProxyDraft.nodeHook,
-      });
-    }
-    onSelectedProfileChange(profile.id);
-    closeInterfaceProxyDialog();
+    await onSaveProfile(configProfileDraft, selectedSourceId);
+    onSelectedProfileChange(configProfileDraft.id);
+    setConfigSelectedProfileId(configProfileDraft.id);
   }
 
   async function deleteProfile(profile: ProxyProfile) {
@@ -908,7 +980,7 @@ export function ProxyPage({
     if (!confirmed) {
       return;
     }
-    await onDeleteProfile(profile.id);
+    await onDeleteProfile(profile.id, selectedSourceId);
   }
 
   async function saveRuleDraft() {
@@ -942,7 +1014,7 @@ export function ProxyPage({
       setFormError(String(reason instanceof Error ? reason.message : reason));
       return;
     }
-    await onSaveRule({ ...ruleDraft, action });
+    await onSaveRule({ ...ruleDraft, action }, selectedSourceId);
     closeRuleDialog();
   }
 
@@ -952,7 +1024,7 @@ export function ProxyPage({
     }
     setSavingRuleIds((current) => (current.includes(rule.id) ? current : [...current, rule.id]));
     try {
-      await onSaveRule({ ...rule, enabled });
+      await onSaveRule({ ...rule, enabled }, selectedSourceId);
     } finally {
       setSavingRuleIds((current) => current.filter((id) => id !== rule.id));
     }
@@ -967,7 +1039,7 @@ export function ProxyPage({
     setSavingRuleIds((current) => Array.from(new Set([...current, ...changedRules.map((rule) => rule.id)])));
     try {
       for (const rule of changedRules) {
-        await onSaveRule({ ...rule, enabled });
+        await onSaveRule({ ...rule, enabled }, selectedSourceId);
       }
     } finally {
       const changedIds = new Set(changedRules.map((rule) => rule.id));
@@ -986,7 +1058,7 @@ export function ProxyPage({
     if (!confirmed) {
       return;
     }
-    await onDeleteRule(rule.id);
+    await onDeleteRule(rule.id, selectedSourceId);
     closeRuleDialog();
   }
 
@@ -1011,14 +1083,14 @@ export function ProxyPage({
       if (!confirmed) {
         return;
       }
-      await onImportProfilePack(selected);
+      await onImportProfilePack(selected, selectedSourceId);
     } catch (reason) {
       setFormError(String(reason instanceof Error ? reason.message : reason));
     }
   }
 
-  async function exportSelectedProfilePack() {
-    if (!selectedProfile) {
+  async function exportProfilePack(profile: ProxyProfile | null) {
+    if (!profile) {
       return;
     }
     const confirmed = await confirm({
@@ -1033,7 +1105,7 @@ export function ProxyPage({
     try {
       const selected = await save({
         title: "导出代理包",
-        defaultPath: `${safeFileName(selectedProfile.name)}.rdevproxy.json`,
+        defaultPath: `${safeFileName(profile.name)}.rdevproxy.json`,
         filters: [
           { name: "rDevTool Proxy Pack", extensions: ["json"] },
         ],
@@ -1041,13 +1113,13 @@ export function ProxyPage({
       if (typeof selected !== "string") {
         return;
       }
-      await onExportProfilePack(selectedProfile.id, selected);
+      await onExportProfilePack(profile.id, selected, selectedSourceId);
     } catch (reason) {
       setFormError(String(reason instanceof Error ? reason.message : reason));
     }
   }
 
-  if (!dashboard && loading) {
+  if (!visibleDashboard && loading) {
     return (
       <Box className="workspace workspace--narrow proxy-workspace">
         <Alert severity="info">正在加载代理配置…</Alert>
@@ -1064,81 +1136,102 @@ export function ProxyPage({
         nonce={toastNonce}
       />
 
+      <WorkspacePageToolbar
+        ariaLabel="本地代理概览与配置"
+        metrics={[
+          {
+            key: "services",
+            label: "服务",
+            value: profiles.length,
+            icon: <AppWindowIcon fontSize="small" />,
+            tone: "blue",
+          },
+          {
+            key: "running",
+            label: "运行中",
+            value: runningServiceCount,
+            tone: "green",
+          },
+          {
+            key: "rules",
+            label: "规则",
+            value: totalRuleCount,
+            icon: <PackageIcon fontSize="small" />,
+            tone: "violet",
+          },
+          {
+            key: "requests",
+            label: "请求",
+            value: totalRequestCount,
+            icon: <ActivityIcon fontSize="small" />,
+            tone: "cyan",
+          },
+        ]}
+        actions={
+          <>
+            <WorkspacePageToolbarAction
+              startIcon={<WebsiteIcon fontSize="small" />}
+              disabled={!selectedProfile}
+              onClick={() => setRequestsDialogOpen(true)}
+            >
+              请求记录
+            </WorkspacePageToolbarAction>
+            <WorkspacePageToolbarAction
+              startIcon={<SettingsIcon fontSize="small" />}
+              onClick={openProxyConfigDialog}
+            >
+              代理配置
+            </WorkspacePageToolbarAction>
+          </>
+        }
+      />
+
       <Box className="proxy-main-grid proxy-main-grid--config">
         <section className="workflow-panel proxy-control-panel" aria-label="代理服务与规则">
-          <Box className="proxy-control-split">
-            <Box component="section" className="proxy-section proxy-service-panel" aria-labelledby="proxy-service-title">
+          <Box className={`proxy-control-split${servicePanelCollapsed ? " is-service-collapsed" : ""}`}>
+            <Box
+              component="section"
+              className={`proxy-section proxy-service-panel${servicePanelCollapsed ? " is-collapsed" : ""}`}
+              aria-labelledby="proxy-service-title"
+            >
               <PanelHeader
                 id="proxy-service-title"
                 title="服务"
                 aside={
-                  <Stack direction="row" spacing={0.6} alignItems="center">
-                    <Button
-                      variant="contained"
-                      startIcon={<PlusIcon fontSize="small" />}
-                      disabled={blockingBusy}
-                      onClick={openInterfaceProxyDialog}
+                  <Tooltip title={servicePanelCollapsed ? "展开服务列表" : "向左收起服务列表"}>
+                    <IconButton
+                      className="proxy-service-collapse-toggle"
+                      aria-label={servicePanelCollapsed ? "展开服务列表" : "向左收起服务列表"}
+                      aria-controls={servicePanelCollapsed ? undefined : "proxy-service-list"}
+                      aria-expanded={!servicePanelCollapsed}
+                      onClick={() => setServicePanelCollapsed((current) => !current)}
                     >
-                      接口代理
-                    </Button>
-                    <Button
-                      className="proxy-request-open-button"
-                      variant="outlined"
-                      color="inherit"
-                      startIcon={<WebsiteIcon fontSize="small" />}
-                      disabled={!selectedProfile}
-                      onClick={() => setRequestsDialogOpen(true)}
-                    >
-                      请求 {events.length}
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      color="inherit"
-                      startIcon={<UploadIcon fontSize="small" />}
-                      disabled={blockingBusy}
-                      onClick={() => void importProfilePack()}
-                    >
-                      导入
-                    </Button>
-                    <Button
-                      variant="outlined"
-                      color="inherit"
-                      startIcon={<DownloadIcon fontSize="small" />}
-                      disabled={!selectedProfile || blockingBusy}
-                      onClick={() => void exportSelectedProfilePack()}
-                    >
-                      导出
-                    </Button>
-                    <Tooltip title="新建代理配置">
-                      <IconButton
-                        aria-label="新建代理配置"
-                        onClick={() => openProfileDialog(createProfile(nextPort))}
-                      >
-                        <PlusIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title="刷新代理状态">
-                      <IconButton onClick={() => void onRefresh()} aria-label="刷新代理状态">
-                        <RefreshIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                  </Stack>
+                      {servicePanelCollapsed ? (
+                        <ExpandIcon fontSize="small" />
+                      ) : (
+                        <CollapseIcon fontSize="small" />
+                      )}
+                    </IconButton>
+                  </Tooltip>
                 }
               />
 
-              <Box
-                className={`proxy-card-list module-list-scroll${profiles.length === 0 ? " is-empty" : ""}`}
-                role="list"
-                aria-label="代理服务列表"
-              >
+              {!servicePanelCollapsed ? (
+                <Box
+                  id="proxy-service-list"
+                  className={`proxy-card-list module-list-scroll${profiles.length === 0 ? " is-empty" : ""}`}
+                  role="list"
+                  aria-label="代理服务列表"
+                >
                 {profiles.length > 0 ? (
-                  profiles.map((profile) => {
+                  <>
+                  {profiles.map((profile) => {
                     const status = statuses.get(profile.id);
                     const selected = selectedProfile?.id === profile.id;
                     const listenUrl =
                       status?.listenUrl ?? `http://${profile.listenHost}:${profile.listenPort}`;
-                    const ruleCount = rulesForProfile(dashboard, profile.id).length;
-                    const eventCount = eventsForProfile(dashboard, profile.id).length;
+                    const ruleCount = rulesForProfile(visibleDashboard, profile.id).length;
+                    const eventCount = eventsForProfile(visibleDashboard, profile.id).length;
                     return (
                       <Box
                         key={profile.id}
@@ -1181,13 +1274,13 @@ export function ProxyPage({
                               variant={status?.running ? "filled" : "outlined"}
                             />
                             <Chip
-                              className="proxy-service-metric-chip"
+                              className="proxy-service-metric-chip proxy-service-metric-chip--rules"
                               size="small"
                               label={`${ruleCount} 规则`}
                               variant="outlined"
                             />
                             <Chip
-                              className="proxy-service-metric-chip"
+                              className="proxy-service-metric-chip proxy-service-metric-chip--requests"
                               size="small"
                               label={`${eventCount} 请求`}
                               variant="outlined"
@@ -1200,88 +1293,82 @@ export function ProxyPage({
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   void (status?.running
-                                    ? onStopProfile(profile.id)
-                                    : onStartProfile(profile.id));
+                                    ? onStopProfile(profile.id, selectedSourceId)
+                                    : onStartProfile(profile.id, selectedSourceId));
                                 }}
                               >
                                 {status?.running ? <StopIcon fontSize="small" /> : <PlayIcon fontSize="small" />}
                               </IconButton>
                             </Tooltip>
-                            <Tooltip title="编辑代理配置">
-                              <IconButton
-                                aria-label="编辑代理配置"
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  openProfileDialog(profile);
-                                }}
-                              >
-                                <EditIcon fontSize="small" />
-                              </IconButton>
-                            </Tooltip>
-                            <Tooltip title="删除代理配置">
-                              <span>
-                                <IconButton
-                                  aria-label="删除代理配置"
-                                  disabled={profiles.length <= 1 || blockingBusy}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void deleteProfile(profile);
-                                  }}
-                                >
-                                  <TrashIcon fontSize="small" />
-                                </IconButton>
-                              </span>
-                            </Tooltip>
                           </span>
                         </span>
                       </Box>
                     );
-                  })
+                  })}
+                  <AppListEndState />
+                  </>
                 ) : (
-                  <EmptyProxyState title="暂无代理配置" description="新增一个本地代理后即可开始监听请求。" />
+                  <EmptyProxyState title="暂无服务" description="打开代理配置新增服务或导入代理包。" />
                 )}
-              </Box>
+                </Box>
+              ) : null}
             </Box>
 
             <Box component="section" className="proxy-section proxy-rules-panel" aria-labelledby="proxy-rule-title">
               <PanelHeader
                 id="proxy-rule-title"
-                title="规则"
+                title={selectedProfile ? selectedProfile.name : "规则"}
+                description={
+                  selectedProfile
+                    ? selectedStatus?.listenUrl ?? `http://${selectedProfile.listenHost}:${selectedProfile.listenPort}`
+                    : "请先在代理配置中新增服务"
+                }
                 aside={
                   <Stack className="proxy-rule-bulk-actions" direction="row" spacing={0.55} alignItems="center">
                     <Button
-                      className="proxy-rule-bulk-button"
+                      className="proxy-rule-bulk-button proxy-tool-button proxy-tool-button--enable"
                       variant="outlined"
                       color="inherit"
                       startIcon={<PlayIcon fontSize="small" />}
                       disabled={!selectedProfile || disabledRuleCount === 0 || blockingBusy || bulkRuleSaving}
                       onClick={() => void setAllRulesEnabled(true)}
                     >
-                      全部启用
+                      启用
                     </Button>
                     <Button
-                      className="proxy-rule-bulk-button"
+                      className="proxy-rule-bulk-button proxy-tool-button proxy-tool-button--disable"
                       variant="outlined"
                       color="inherit"
                       startIcon={<StopIcon fontSize="small" />}
                       disabled={!selectedProfile || enabledRuleCount === 0 || blockingBusy || bulkRuleSaving}
                       onClick={() => void setAllRulesEnabled(false)}
                     >
-                      全部停用
+                      停用
                     </Button>
-                    <Button
-                      variant="outlined"
-                      color="inherit"
-                      startIcon={<PlusIcon fontSize="small" />}
-                      disabled={!selectedProfile}
-                      onClick={() => {
-                        if (selectedProfile) {
-                          openRuleDialog(createRule(selectedProfile.id, nextRulePriority));
-                        }
-                      }}
-                    >
-                      新规则
-                    </Button>
+                    <Tooltip title="新规则">
+                      <span>
+                        <IconButton
+                          className="proxy-tool-icon-button proxy-tool-icon-button--add"
+                          aria-label="新规则"
+                          disabled={!selectedProfile}
+                          onClick={() => {
+                            if (selectedProfile) {
+                              openRuleDialog(createRule(selectedProfile.id, nextRulePriority));
+                            }
+                          }}
+                        >
+                          <PlusIcon fontSize="small" />
+                        </IconButton>
+                      </span>
+                    </Tooltip>
+                    <Tooltip title="刷新代理状态">
+                      <IconButton
+                        onClick={() => void onRefresh({ sourceId: selectedSourceId })}
+                        aria-label="刷新代理状态"
+                      >
+                        <RefreshIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
                   </Stack>
                 }
               />
@@ -1291,10 +1378,14 @@ export function ProxyPage({
                 role="list"
                 aria-label="代理规则列表"
               >
-                {rules.length > 0 ? (
-                  rules.map((rule) => {
+                {!selectedProfile ? (
+                  <EmptyProxyState title="请选择服务" description="请先在代理配置中新增服务。" />
+                ) : rules.length > 0 ? (
+                  <>
+                  {rules.map((rule) => {
                     const matchMethod = rule.method || "任意";
                     const matchTarget = rule.pathPrefix || rule.urlContains || "自定义匹配";
+                    const methodTone = ruleMethodTone(rule.method);
                     return (
                       <Box
                         key={rule.id}
@@ -1330,7 +1421,9 @@ export function ProxyPage({
                               </span>
                             </span>
                             <span className="proxy-rule-match-line" translate="no">
-                              <span className="proxy-rule-method">{matchMethod}</span>
+                              <span className={`proxy-rule-method proxy-rule-method--${methodTone}`}>
+                                {matchMethod}
+                              </span>
                               <span className="proxy-rule-match-separator">·</span>
                               <small>{matchTarget}</small>
                             </span>
@@ -1369,7 +1462,9 @@ export function ProxyPage({
                         </span>
                       </Box>
                     );
-                  })
+                  })}
+                  <AppListEndState />
+                  </>
                 ) : (
                   <EmptyProxyState title="暂无规则" description="新建规则后可转发、Mock 或阻断请求。" />
                 )}
@@ -1378,6 +1473,39 @@ export function ProxyPage({
           </Box>
         </section>
       </Box>
+
+      <ProxyConfigDialog
+        open={proxyConfigDialogOpen}
+        profiles={profiles}
+        dashboard={visibleDashboard}
+        statuses={statuses}
+        configSources={configSources}
+        selectedSourceId={selectedSourceId}
+        selectedConfigSource={selectedConfigSource}
+        sourceAllowsProxy={sourceAllowsProxy}
+        sourceBusy={sourceBusy}
+        sourceError={sourceError}
+        sourceStatus={sourceStatus}
+        selectedProfile={configSelectedProfile}
+        selectedProfileId={configSelectedProfile?.id ?? ""}
+        profileDraft={configProfileDraft}
+        busy={busy}
+        error={formError}
+        copiedKey={copiedKey}
+        onClose={closeProxyConfigDialog}
+        onSourceChange={(sourceId) => void handleSourceChange(sourceId)}
+        onManageSources={() => setConfigSourceManagerOpen(true)}
+        manageSourcesDisabled={configDraftHasChanges}
+        onSelectProfile={setConfigSelectedProfileId}
+        onCreateProfile={startNewConfigProfileDraft}
+        onDiscardProfile={discardConfigProfileDraft}
+        onImport={() => void importProfilePack()}
+        onExport={() => void exportProfilePack(configSelectedProfile)}
+        onChangeProfile={updateConfigProfileDraft}
+        onCopy={copyText}
+        onSaveProfile={() => void saveConfigProfileDraft()}
+        onDelete={(profile) => void deleteProfile(profile)}
+      />
 
       <Dialog
         open={requestsDialogOpen}
@@ -1399,8 +1527,8 @@ export function ProxyPage({
               />
             </Stack>
             <Stack direction="row" spacing={0.6}>
-              <Tooltip title="刷新请求记录">
-                <IconButton onClick={() => void onRefresh()} aria-label="刷新请求记录">
+              <Tooltip title={selectedStatus?.running ? "刷新请求记录（打开时自动刷新）" : "刷新请求记录"}>
+                <IconButton onClick={() => void refreshRequests()} aria-label="刷新请求记录">
                   <RefreshIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
@@ -1455,7 +1583,7 @@ export function ProxyPage({
                 color="inherit"
                 startIcon={<TrashIcon fontSize="small" />}
                 disabled={!selectedProfile || events.length === 0 || Boolean(busy)}
-                onClick={() => void onClearEvents(selectedProfile?.id)}
+                onClick={() => void onClearEvents(selectedProfile?.id, selectedSourceId)}
               >
                 清空
               </Button>
@@ -1615,9 +1743,7 @@ export function ProxyPage({
                         下滑加载更多
                       </Button>
                     ) : (
-                      <Typography variant="caption" className="workflow-history-footer-text">
-                        没有更多了
-                      </Typography>
+                      <AppListEndState />
                     )}
                   </Box>
                 </>
@@ -1631,7 +1757,9 @@ export function ProxyPage({
             </Box>
 
             <Box
-              className={`proxy-event-detail module-list-scroll${selectedEvent ? "" : " is-empty"}`}
+              className={`proxy-event-detail proxy-event-detail--modal module-list-scroll${
+                selectedEvent ? "" : " is-empty"
+              }`}
             >
               {selectedEvent ? (
                 <Stack spacing={1} minWidth={0}>
@@ -1677,31 +1805,6 @@ export function ProxyPage({
 
       {confirmDialog}
 
-      <InterfaceProxyDialog
-        open={interfaceProxyDialogOpen}
-        draft={interfaceProxyDraft}
-        busy={busy}
-        error={formError}
-        workspaceLabel={workspaceSaveLabel}
-        projects={projects}
-        onClose={closeInterfaceProxyDialog}
-        onChange={updateInterfaceProxyDraft}
-        onSave={() => void saveInterfaceProxyDraft()}
-      />
-
-      <ProfileDialog
-        open={profileDialogOpen}
-        draft={profileDraft}
-        busy={busy}
-        error={formError}
-        copiedKey={copiedKey}
-        selectedStatusUrl={profileDraft ? statuses.get(profileDraft.id)?.listenUrl : null}
-        onClose={closeProfileDialog}
-        onChange={updateProfileDraft}
-        onCopy={copyText}
-        onSave={() => void saveProfileDraft()}
-      />
-
       <RuleDialog
         open={ruleDialogOpen}
         draft={ruleDraft}
@@ -1722,6 +1825,23 @@ export function ProxyPage({
         onSave={() => void saveRuleDraft()}
         onDelete={existingRuleDraft ? () => void deleteRule(existingRuleDraft) : null}
       />
+      <ConfigSourceManagerDialog
+        open={configSourceManagerOpen}
+        initialSourceId={selectedSourceId}
+        onClose={() => setConfigSourceManagerOpen(false)}
+        onChanged={async (sources) => {
+          try {
+            const result = adoptSources(sources, selectedSourceId);
+            if (result.sourceId !== selectedSourceId) {
+              const source = await selectSource(result.sourceId);
+              if (!source) return;
+              await onRefresh({ sourceId: source.id });
+            }
+          } catch (reason) {
+            setFormError(String(reason));
+          }
+        }}
+      />
     </Box>
   );
 }
@@ -1734,7 +1854,17 @@ function eventsForProfile(dashboard: ProxyDashboard | null, profileId: string) {
   return dashboard?.events.filter((event) => event.profileId === profileId) ?? [];
 }
 
-function PanelHeader({ id, title, aside }: { id: string; title: string; aside?: ReactNode }) {
+function PanelHeader({
+  id,
+  title,
+  description,
+  aside,
+}: {
+  id: string;
+  title: string;
+  description?: ReactNode;
+  aside?: ReactNode;
+}) {
   return (
     <Stack
       className="proxy-panel-header"
@@ -1744,9 +1874,16 @@ function PanelHeader({ id, title, aside }: { id: string; title: string; aside?: 
       spacing={1}
       minWidth={0}
     >
-      <Typography id={id} variant="h6" sx={{ fontWeight: 820, textWrap: "balance" }}>
-        {title}
-      </Typography>
+      <Box className="proxy-panel-title-copy" minWidth={0}>
+        <Typography id={id} variant="h6" sx={{ fontWeight: 760 }} noWrap>
+          {title}
+        </Typography>
+        {description ? (
+          <Typography className="proxy-panel-description" variant="caption" color="text.secondary" noWrap>
+            {description}
+          </Typography>
+        ) : null}
+      </Box>
       {aside}
     </Stack>
   );
@@ -1764,533 +1901,498 @@ function EmptyProxyState({
   );
 }
 
-function InterfaceProxyDialog({
+function ProxyConfigDialog({
   open,
-  draft,
+  profiles,
+  dashboard,
+  statuses,
+  configSources,
+  selectedSourceId,
+  selectedConfigSource,
+  sourceAllowsProxy,
+  sourceBusy,
+  sourceError,
+  sourceStatus,
+  selectedProfile,
+  selectedProfileId,
+  profileDraft,
   busy,
   error,
-  workspaceLabel,
-  projects,
+  copiedKey,
   onClose,
-  onChange,
-  onSave,
+  onSourceChange,
+  onManageSources,
+  manageSourcesDisabled,
+  onSelectProfile,
+  onCreateProfile,
+  onDiscardProfile,
+  onImport,
+  onExport,
+  onChangeProfile,
+  onCopy,
+  onSaveProfile,
+  onDelete,
 }: {
   open: boolean;
-  draft: InterfaceProxyDraft | null;
+  profiles: ProxyProfile[];
+  dashboard: ProxyDashboard | null;
+  statuses: ReturnType<typeof statusByProfile>;
+  configSources: ConfigSource[];
+  selectedSourceId: string;
+  selectedConfigSource: ConfigSource | null;
+  sourceAllowsProxy: boolean;
+  sourceBusy: boolean;
+  sourceError: string;
+  sourceStatus: ConfigSourceStatus;
+  selectedProfile: ProxyProfile | null;
+  selectedProfileId: string;
+  profileDraft: ProxyProfile | null;
   busy: string;
   error: string;
-  workspaceLabel: string;
-  projects: Array<{ key: string; name: string }>;
+  copiedKey: string;
   onClose: () => void;
-  onChange: (patch: Partial<InterfaceProxyDraft>) => void;
-  onSave: () => void;
+  onSourceChange: (sourceId: string) => void;
+  onManageSources: () => void;
+  manageSourcesDisabled: boolean;
+  onSelectProfile: (profileId: string) => void;
+  onCreateProfile: () => void;
+  onDiscardProfile: () => void;
+  onImport: () => void;
+  onExport: () => void;
+  onChangeProfile: (patch: Partial<ProxyProfile>) => void;
+  onCopy: (key: string, value: string) => Promise<void>;
+  onSaveProfile: () => void;
+  onDelete: (profile: ProxyProfile) => void;
 }) {
+  const selectedStatus = selectedProfile ? statuses.get(selectedProfile.id) : null;
+  const selectedRules = selectedProfile ? rulesForProfile(dashboard, selectedProfile.id) : [];
+  const selectedEvents = selectedProfile ? eventsForProfile(dashboard, selectedProfile.id) : [];
+  const selectedListenUrl = profileDraft ? profileUrl(profileDraft) : "";
+  const busyDisabled = Boolean(busy) || sourceBusy;
+  const draftIsUnsaved = Boolean(
+    profileDraft && !profiles.some((profile) => profile.id === profileDraft.id),
+  );
+  const displayProfiles =
+    draftIsUnsaved && profileDraft ? [profileDraft, ...profiles] : profiles;
+  const serviceCountLabel = draftIsUnsaved ? `${profiles.length} 个 + 草稿` : `${profiles.length} 个`;
+  const canExportSelected = Boolean(selectedProfile && !draftIsUnsaved);
+
   return (
     <Dialog
       open={open}
       onClose={onClose}
-      maxWidth="md"
+      maxWidth={false}
       fullWidth
-      className="proxy-config-dialog proxy-interface-dialog"
+      className="proxy-config-dialog proxy-config-manager-dialog"
     >
       <DialogTitle>
-        <Stack className="proxy-profile-title" direction="row" alignItems="flex-start" justifyContent="space-between" gap={1}>
-          <Box minWidth={0}>
-            <Typography variant="h6">接口代理</Typography>
-            <Typography variant="body2" color="text.secondary">
-              创建本地服务，并生成第一条接口规则。
-            </Typography>
-          </Box>
-          <Chip className="proxy-profile-url-chip" label={`保存到 ${workspaceLabel}`} size="small" />
-        </Stack>
-      </DialogTitle>
-      <DialogContent dividers>
-        {error ? <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert> : null}
-        {draft ? (
-          <Stack className="proxy-profile-form" spacing={1.1} minWidth={0}>
-            <Box className="proxy-profile-section">
-              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                <Box minWidth={0}>
-                  <Typography variant="subtitle2">服务</Typography>
-                </Box>
-                <Chip label={`http://${draft.listenHost}:${draft.listenPort}`} size="small" />
-              </Stack>
-              <Stack spacing={1}>
-                <Box className="proxy-two-fields">
-                  <TextField
-                    label="服务名称"
-                    name="proxy-interface-service-name"
-                    autoComplete="off"
-                    value={draft.serviceName}
-                    onChange={(event) => onChange({ serviceName: event.target.value })}
-                  />
-                  <TextField
-                    label="规则名称"
-                    name="proxy-interface-rule-name"
-                    autoComplete="off"
-                    value={draft.ruleName}
-                    onChange={(event) => onChange({ ruleName: event.target.value })}
-                  />
-                </Box>
-                <Box className="proxy-two-fields">
-                  <TextField
-                    label="监听地址"
-                    name="proxy-interface-listen-host"
-                    autoComplete="off"
-                    value={draft.listenHost}
-                    onChange={(event) => onChange({ listenHost: event.target.value })}
-                    inputProps={{ spellCheck: false, translate: "no" }}
-                  />
-                  <TextField
-                    label="端口"
-                    name="proxy-interface-listen-port"
-                    type="number"
-                    inputMode="numeric"
-                    autoComplete="off"
-                    value={draft.listenPort}
-                    onChange={(event) =>
-                      onChange({ listenPort: Math.max(1, Number(event.target.value) || 0) })
-                    }
-                  />
-                </Box>
-              </Stack>
-            </Box>
-
-            <Box className="proxy-profile-section proxy-profile-section--route">
-              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                <Box minWidth={0}>
-                  <Typography variant="subtitle2">接口</Typography>
-                </Box>
-                <Chip label={actionKindLabel(draft.actionKind)} size="small" color="primary" />
-              </Stack>
-              <Stack spacing={1}>
-                <Box className="proxy-three-fields">
-                  <TextField
-                    select
-                    label="方法"
-                    name="proxy-interface-method"
-                    value={draft.method}
-                    onChange={(event) => onChange({ method: event.target.value })}
-                  >
-                    {HTTP_METHODS.map((method) => (
-                      <MenuItem key={method || "any"} value={method}>
-                        {method || "任意"}
-                      </MenuItem>
-                    ))}
-                  </TextField>
-                  <TextField
-                    label="接口前缀"
-                    name="proxy-interface-path-prefix"
-                    autoComplete="off"
-                    placeholder="/api/"
-                    value={draft.pathPrefix}
-                    onChange={(event) => onChange({ pathPrefix: event.target.value })}
-                    inputProps={{ spellCheck: false, translate: "no" }}
-                  />
-                  <TextField
-                    select
-                    label="动作"
-                    name="proxy-interface-action-kind"
-                    value={draft.actionKind}
-                    onChange={(event) =>
-                      onChange({ actionKind: event.target.value as ProxyRuleAction["kind"] })
-                    }
-                  >
-                    {ACTION_KINDS.map((item) => (
-                      <MenuItem key={item.value} value={item.value}>
-                        {item.label}
-                      </MenuItem>
-                    ))}
-                  </TextField>
-                </Box>
-
-                {draft.actionKind === "forward" ? (
-                  <Box className="proxy-two-fields">
-                    <TextField
-                      label="转发目标"
-                      name="proxy-interface-target-base-url"
-                      autoComplete="off"
-                      placeholder="https://api.example.com"
-                      value={draft.targetBaseUrl}
-                      onChange={(event) => onChange({ targetBaseUrl: event.target.value })}
-                      inputProps={{ spellCheck: false, translate: "no" }}
-                    />
-                    <TextField
-                      label="路径改写"
-                      name="proxy-interface-rewrite-prefix"
-                      autoComplete="off"
-                      placeholder="/"
-                      value={draft.rewritePrefix}
-                      onChange={(event) => onChange({ rewritePrefix: event.target.value })}
-                      inputProps={{ spellCheck: false, translate: "no" }}
-                    />
-                  </Box>
-                ) : null}
-
-                {draft.actionKind === "mock" ? (
-                  <Stack spacing={1}>
-                    <Box className="proxy-two-fields">
-                      <TextField
-                        label="状态码"
-                        name="proxy-interface-mock-status"
-                        type="number"
-                        inputMode="numeric"
-                        autoComplete="off"
-                        value={draft.mockStatus}
-                        onChange={(event) =>
-                          onChange({ mockStatus: Number(event.target.value) || 200 })
-                        }
-                      />
-                      <TextField
-                        label="Content-Type"
-                        name="proxy-interface-mock-content-type"
-                        autoComplete="off"
-                        value={draft.mockContentType}
-                        onChange={(event) => onChange({ mockContentType: event.target.value })}
-                        inputProps={{ spellCheck: false, translate: "no" }}
-                      />
-                    </Box>
-                    <TextField
-                      label="响应正文"
-                      name="proxy-interface-mock-body"
-                      multiline
-                      minRows={4}
-                      autoComplete="off"
-                      value={draft.mockBody}
-                      onChange={(event) => onChange({ mockBody: event.target.value })}
-                      inputProps={{ spellCheck: false, translate: "no" }}
-                    />
-                  </Stack>
-                ) : null}
-
-                {draft.actionKind === "block" ? (
-                  <Box className="proxy-two-fields">
-                    <TextField
-                      label="状态码"
-                      name="proxy-interface-block-status"
-                      type="number"
-                      inputMode="numeric"
-                      autoComplete="off"
-                      value={draft.blockStatus}
-                      onChange={(event) =>
-                        onChange({ blockStatus: Number(event.target.value) || 403 })
-                      }
-                    />
-                    <TextField
-                      label="阻断响应"
-                      name="proxy-interface-block-body"
-                      autoComplete="off"
-                      value={draft.blockBody}
-                      onChange={(event) => onChange({ blockBody: event.target.value })}
-                    />
-                  </Box>
-                ) : null}
-              </Stack>
-            </Box>
-
-            <Box className="proxy-profile-section proxy-profile-section--runtime">
-              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                <Box minWidth={0}>
-                  <Typography variant="subtitle2">运行配置</Typography>
-                </Box>
-                <Switch
-                  checked={draft.bindRuntime}
-                  onChange={(event) => onChange({ bindRuntime: event.target.checked })}
-                  inputProps={{ "aria-label": "接入运行配置" }}
-                />
-              </Stack>
-              <Stack spacing={1}>
-                <Box className="proxy-two-fields">
-                  <TextField
-                    label="配置 Key"
-                    name="proxy-interface-runtime-key"
-                    autoComplete="off"
-                    placeholder="自动生成"
-                    value={draft.runtimeProfileKey}
-                    disabled={!draft.bindRuntime}
-                    onChange={(event) => onChange({ runtimeProfileKey: event.target.value })}
-                    inputProps={{ spellCheck: false, translate: "no" }}
-                  />
-                  <TextField
-                    label="配置名称"
-                    name="proxy-interface-runtime-label"
-                    autoComplete="off"
-                    value={draft.runtimeProfileLabel}
-                    disabled={!draft.bindRuntime}
-                    onChange={(event) => onChange({ runtimeProfileLabel: event.target.value })}
-                  />
-                </Box>
-                <Box className="proxy-two-fields">
-                  <TextField
-                    select
-                    label="绑定项目"
-                    name="proxy-interface-runtime-project"
-                    value={draft.project}
-                    disabled={!draft.bindRuntime || projects.length === 0}
-                    onChange={(event) =>
-                      onChange({
-                        project: event.target.value,
-                        createDebugProfile: Boolean(event.target.value),
-                      })
-                    }
-                  >
-                    <MenuItem value="">不绑定项目</MenuItem>
-                    {projects.map((project) => (
-                      <MenuItem key={project.key} value={project.key}>
-                        {project.name} · {project.key}
-                      </MenuItem>
-                    ))}
-                  </TextField>
-                  <TextField
-                    label="项目启动档案"
-                    name="proxy-interface-debug-profile-label"
-                    autoComplete="off"
-                    value={draft.debugProfileLabel}
-                    disabled={!draft.bindRuntime || !draft.project || !draft.createDebugProfile}
-                    onChange={(event) => onChange({ debugProfileLabel: event.target.value })}
-                  />
-                </Box>
-                <Box className="proxy-runtime-options">
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={draft.createDebugProfile}
-                        disabled={!draft.bindRuntime || !draft.project}
-                        onChange={(event) => onChange({ createDebugProfile: event.target.checked })}
-                      />
-                    }
-                    label="创建项目启动档案"
-                  />
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={draft.enableNetworkProxy}
-                        disabled={!draft.bindRuntime}
-                        onChange={(event) =>
-                          onChange({
-                            enableNetworkProxy: event.target.checked,
-                            nodeHook: event.target.checked ? draft.nodeHook : false,
-                          })
-                        }
-                      />
-                    }
-                    label="启动命令也走代理"
-                  />
-                  <FormControlLabel
-                    control={
-                      <Switch
-                        checked={draft.nodeHook}
-                        disabled={!draft.bindRuntime || !draft.enableNetworkProxy}
-                        onChange={(event) => onChange({ nodeHook: event.target.checked })}
-                      />
-                    }
-                    label="Node Hook"
-                  />
-                </Box>
-              </Stack>
+        <Stack
+          className="proxy-config-manager-title"
+          direction="row"
+          alignItems="center"
+          justifyContent="space-between"
+          spacing={1.2}
+        >
+          <Stack direction="row" alignItems="center" spacing={1} minWidth={0}>
+            <span className="proxy-config-manager-icon" aria-hidden="true">
+              <SettingsIcon fontSize="small" />
+            </span>
+            <Box minWidth={0}>
+              <Typography variant="h6" noWrap>
+                代理配置
+              </Typography>
+              <Typography variant="body2" color="text.secondary" noWrap>
+                管理本地代理服务、默认转发和代理包。
+              </Typography>
             </Box>
           </Stack>
+          <Stack className="proxy-config-manager-actions" direction="row" spacing={0.7} alignItems="center">
+            <Button
+              variant="contained"
+              startIcon={<PlusIcon fontSize="small" />}
+              disabled={busyDisabled}
+              onClick={onCreateProfile}
+            >
+              新建服务
+            </Button>
+            <Button
+              variant="outlined"
+              color="inherit"
+              startIcon={<UploadIcon fontSize="small" />}
+              disabled={busyDisabled}
+              onClick={onImport}
+            >
+              导入
+            </Button>
+            <Button
+              variant="outlined"
+              color="inherit"
+              startIcon={<DownloadIcon fontSize="small" />}
+              disabled={!canExportSelected || busyDisabled}
+              onClick={onExport}
+            >
+              导出选中
+            </Button>
+            <Tooltip title="关闭">
+              <IconButton
+                className="proxy-config-manager-close"
+                aria-label="关闭代理配置"
+                onClick={onClose}
+              >
+                <ClearIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Stack>
+        </Stack>
+      </DialogTitle>
+      <DialogContent className="proxy-config-manager-content-root">
+        {configSources.length > 0 ? (
+          <Box className="proxy-config-source-bar">
+            <ConfigSourceBar
+              sources={configSources}
+              selectedSourceId={selectedSourceId}
+              selectedSource={selectedConfigSource}
+              path={dashboard?.configPath || selectedConfigSource?.files.proxy}
+              requiredCapability="proxy"
+              profileFallback="proxy"
+              warningLabel={!sourceAllowsProxy ? "不支持代理" : null}
+              disabled={busyDisabled}
+              status={sourceStatus}
+              error={sourceError}
+              manageDisabled={manageSourcesDisabled}
+              onSourceChange={onSourceChange}
+              onManage={onManageSources}
+              className="proxy-config-source-strip"
+            />
+          </Box>
         ) : null}
+        <Box className="proxy-config-manager-content">
+          <Box className="proxy-config-manager-sidebar">
+            <Stack
+              className="proxy-config-manager-section-head"
+              direction="row"
+              alignItems="center"
+              justifyContent="space-between"
+              spacing={1}
+            >
+              <Typography variant="subtitle2">服务配置</Typography>
+              <Chip size="small" label={serviceCountLabel} variant="outlined" />
+            </Stack>
+            <Box
+              className={`proxy-config-service-list module-list-scroll${
+                displayProfiles.length === 0 ? " is-empty" : ""
+              }`}
+              role="list"
+              aria-label="代理服务配置列表"
+            >
+              {displayProfiles.length > 0 ? (
+                displayProfiles.map((profile) => {
+                  const isDraft = draftIsUnsaved && profileDraft?.id === profile.id;
+                  const status = isDraft ? null : statuses.get(profile.id);
+                  const selected = profile.id === selectedProfileId;
+                  const listenUrl = status?.listenUrl ?? profileUrl(profile);
+                  const ruleCount = isDraft ? 0 : rulesForProfile(dashboard, profile.id).length;
+                  const eventCount = isDraft ? 0 : eventsForProfile(dashboard, profile.id).length;
+                  const running = Boolean(status?.running);
+                  return (
+                    <Box
+                      key={profile.id}
+                      component="button"
+                      type="button"
+                      className={`proxy-config-service-item${selected ? " is-active" : ""}`}
+                      onClick={() => onSelectProfile(profile.id)}
+                    >
+                      <span className="proxy-config-service-main">
+                        <span className="proxy-config-service-title-row">
+                          <b>{profile.name}</b>
+                          <span className={`proxy-config-service-state${running ? " is-running" : ""}${isDraft ? " is-draft" : ""}`}>
+                            {isDraft ? "未保存" : running ? "运行中" : "已停止"}
+                          </span>
+                        </span>
+                        <small translate="no">{listenUrl}</small>
+                      </span>
+                      <span className="proxy-config-service-meta">
+                        <span>{ruleCount} 规则</span>
+                        <span>{eventCount} 请求</span>
+                      </span>
+                    </Box>
+                  );
+                })
+              ) : (
+                <EmptyProxyState title="暂无服务" description="新建服务或导入代理包后会显示在这里。" />
+              )}
+            </Box>
+          </Box>
+
+          <Box className="proxy-config-manager-detail">
+            {profileDraft ? (
+              <Stack className="proxy-config-editor-shell" spacing={0}>
+                <Stack
+                  className="proxy-config-editor-head"
+                  direction={{ xs: "column", sm: "row" }}
+                  alignItems={{ xs: "flex-start", sm: "center" }}
+                  justifyContent="space-between"
+                  spacing={1}
+                >
+                  <Box minWidth={0}>
+                    <Typography variant="h6" noWrap>
+                      {profileDraft.name || "未命名代理"}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" noWrap translate="no">
+                      {selectedListenUrl}
+                    </Typography>
+                  </Box>
+                  <Stack
+                    className="proxy-config-editor-stats"
+                    direction="row"
+                    spacing={0.6}
+                    alignItems="center"
+                    flexWrap="wrap"
+                    useFlexGap
+                  >
+                    <Chip
+                      size="small"
+                      label={draftIsUnsaved ? "未保存" : selectedStatus?.running ? "运行中" : "已停止"}
+                      color={selectedStatus?.running ? "success" : "default"}
+                      variant={selectedStatus?.running ? "filled" : "outlined"}
+                    />
+                    <Chip size="small" label={`${draftIsUnsaved ? 0 : selectedRules.length} 规则`} variant="outlined" />
+                    <Chip size="small" label={`${draftIsUnsaved ? 0 : selectedEvents.length} 请求`} variant="outlined" />
+                  </Stack>
+                </Stack>
+
+                <Box className="proxy-config-editor-body module-list-scroll">
+                  <ProfileFormContent
+                    draft={profileDraft}
+                    error={error}
+                    copiedKey={copiedKey}
+                    proxyUrl={selectedListenUrl}
+                    onChange={onChangeProfile}
+                    onCopy={onCopy}
+                  />
+                </Box>
+
+                <Stack
+                  className="proxy-config-editor-actions"
+                  direction="row"
+                  spacing={0.8}
+                  alignItems="center"
+                  justifyContent="flex-end"
+                >
+                  {draftIsUnsaved ? (
+                    <Button
+                      variant="outlined"
+                      color="inherit"
+                      startIcon={<ClearIcon fontSize="small" />}
+                      disabled={busyDisabled}
+                      onClick={onDiscardProfile}
+                    >
+                      取消新建
+                    </Button>
+                  ) : (
+                    <Tooltip title={profiles.length <= 1 ? "至少保留一个服务" : "删除服务"}>
+                      <span>
+                        <Button
+                          variant="outlined"
+                          color="error"
+                          startIcon={<TrashIcon fontSize="small" />}
+                          disabled={!selectedProfile || profiles.length <= 1 || busyDisabled}
+                          onClick={() => selectedProfile && onDelete(selectedProfile)}
+                        >
+                          删除
+                        </Button>
+                      </span>
+                    </Tooltip>
+                  )}
+                  <Button
+                    variant="contained"
+                    startIcon={<CheckIcon fontSize="small" />}
+                    disabled={busyDisabled}
+                    onClick={onSaveProfile}
+                  >
+                    保存服务
+                  </Button>
+                </Stack>
+              </Stack>
+            ) : (
+              <EmptyProxyState title="暂无服务" description="请先新建服务或导入代理包。" />
+            )}
+          </Box>
+        </Box>
       </DialogContent>
-      <DialogActions>
-        <Button color="inherit" onClick={onClose}>取消</Button>
-        <Button variant="contained" onClick={onSave} disabled={Boolean(busy)}>创建</Button>
-      </DialogActions>
     </Dialog>
   );
 }
 
-function ProfileDialog({
-  open,
+function profileUrl(profile: ProxyProfile) {
+  return `http://${profile.listenHost}:${profile.listenPort}`;
+}
+
+function ProfileFormContent({
   draft,
-  busy,
   error,
   copiedKey,
-  selectedStatusUrl,
-  onClose,
+  proxyUrl,
   onChange,
   onCopy,
-  onSave,
 }: {
-  open: boolean;
   draft: ProxyProfile | null;
-  busy: string;
   error: string;
   copiedKey: string;
-  selectedStatusUrl?: string | null;
-  onClose: () => void;
+  proxyUrl: string;
   onChange: (patch: Partial<ProxyProfile>) => void;
   onCopy: (key: string, value: string) => Promise<void>;
-  onSave: () => void;
 }) {
-  const proxyUrl = selectedStatusUrl || (draft ? `http://${draft.listenHost}:${draft.listenPort}` : "");
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth className="proxy-config-dialog">
-      <DialogTitle>
-        <Stack className="proxy-profile-title" direction="row" alignItems="flex-start" justifyContent="space-between" gap={1}>
-          <Box minWidth={0}>
-            <Typography variant="h6">{draft?.name ? "代理配置" : "新建代理"}</Typography>
-            <Typography variant="body2" color="text.secondary">
-              配置本机监听入口、默认转发目标和请求记录策略。
-            </Typography>
-          </Box>
-          {proxyUrl ? <Chip className="proxy-profile-url-chip" label={proxyUrl} size="small" /> : null}
-        </Stack>
-      </DialogTitle>
-      <DialogContent dividers>
-        {error ? <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert> : null}
-        {draft ? (
-          <Stack className="proxy-profile-form" spacing={1.1} minWidth={0}>
-            <Box className="proxy-profile-section">
-              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                <Box minWidth={0}>
-                  <Typography variant="subtitle2">监听入口</Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    其他应用连接到这个本地地址后，请求会进入 rDevTool 代理服务。
-                  </Typography>
-                </Box>
-                <Chip label="HTTP / HTTPS" size="small" />
-              </Stack>
-              <Stack spacing={1}>
-                <TextField
-                  label="名称"
-                  name="proxy-profile-name"
-                  autoComplete="off"
-                  value={draft.name}
-                  onChange={(event) => onChange({ name: event.target.value })}
-                />
-                <Box className="proxy-two-fields">
-                  <TextField
-                    label="监听地址"
-                    name="proxy-listen-host"
-                    autoComplete="off"
-                    value={draft.listenHost}
-                    onChange={(event) => onChange({ listenHost: event.target.value })}
-                    inputProps={{ spellCheck: false, translate: "no" }}
-                  />
-                  <TextField
-                    label="端口"
-                    name="proxy-listen-port"
-                    type="number"
-                    inputMode="numeric"
-                    autoComplete="off"
-                    value={draft.listenPort}
-                    onChange={(event) =>
-                      onChange({ listenPort: Math.max(1, Number(event.target.value) || 0) })
-                    }
-                  />
-                </Box>
-              </Stack>
-            </Box>
-
-            <Box className="proxy-profile-section proxy-profile-section--route">
-              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                <Box minWidth={0}>
-                  <Typography variant="subtitle2">默认转发</Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    没有被规则改写时使用；规则里的出站设置可以覆盖这里。
-                  </Typography>
-                </Box>
-                <Chip label={draft.upstreamProxy ? "代理中转" : "默认直连"} size="small" color={draft.upstreamProxy ? "primary" : "default"} />
-              </Stack>
+    <>
+      {error ? <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert> : null}
+      {draft ? (
+        <Stack className="proxy-profile-form" spacing={1.1} minWidth={0}>
+          <Box className="proxy-profile-section">
+            <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+              <Box minWidth={0}>
+                <Typography variant="subtitle2">监听入口</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  其他应用连接到这个本地地址后，请求会进入 rDevTool 代理服务。
+                </Typography>
+              </Box>
+              <Chip label="HTTP / HTTPS" size="small" />
+            </Stack>
+            <Stack spacing={1}>
+              <TextField
+                label="名称"
+                name="proxy-profile-name"
+                autoComplete="off"
+                value={draft.name}
+                onChange={(event) => onChange({ name: event.target.value })}
+              />
               <Box className="proxy-two-fields">
                 <TextField
-                  label="上游地址"
-                  name="proxy-upstream-base-url"
+                  label="监听地址"
+                  name="proxy-listen-host"
                   autoComplete="off"
-                  placeholder="https://api.example.com"
-                  value={draft.upstreamBaseUrl}
-                  onChange={(event) => onChange({ upstreamBaseUrl: event.target.value })}
-                  helperText="可空。用于相对路径请求的默认目标；为空时按请求原目标转发。"
+                  value={draft.listenHost}
+                  onChange={(event) => onChange({ listenHost: event.target.value })}
                   inputProps={{ spellCheck: false, translate: "no" }}
                 />
                 <TextField
-                  label="上游代理"
-                  name="proxy-upstream-proxy"
-                  autoComplete="off"
-                  placeholder="socks5://127.0.0.1:7890"
-                  value={draft.upstreamProxy}
-                  onChange={(event) => onChange({ upstreamProxy: event.target.value })}
-                  helperText="可空。作为服务默认出站代理；规则选择“继承默认”时使用。"
-                  inputProps={{ spellCheck: false, translate: "no" }}
-                />
-              </Box>
-            </Box>
-
-            <Box className="proxy-profile-section proxy-profile-section--capture">
-              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                <Box minWidth={0}>
-                  <Typography variant="subtitle2">记录</Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    控制请求面板里是否保存 Body 预览，Header 与基础信息会继续记录。
-                  </Typography>
-                </Box>
-                <Switch
-                  checked={draft.captureBody}
-                  onChange={(event) => onChange({ captureBody: event.target.checked })}
-                  inputProps={{ "aria-label": "记录正文" }}
-                />
-              </Stack>
-              <Box className="proxy-two-fields proxy-profile-capture-grid">
-                <Box className="proxy-profile-capture-card">
-                  <Typography variant="body2" sx={{ fontWeight: 780 }}>记录正文</Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {draft.captureBody ? "已开启，会保存请求与响应正文预览。" : "已关闭，只记录 URL、状态码、耗时和 Header。"}
-                  </Typography>
-                </Box>
-                <TextField
-                  label="正文预览字节"
-                  name="proxy-max-body-bytes"
+                  label="端口"
+                  name="proxy-listen-port"
                   type="number"
                   inputMode="numeric"
                   autoComplete="off"
-                  value={draft.maxBodyBytes}
+                  value={draft.listenPort}
                   onChange={(event) =>
-                    onChange({ maxBodyBytes: Math.max(512, Number(event.target.value) || 512) })
+                    onChange({ listenPort: Math.max(1, Number(event.target.value) || 0) })
                   }
-                  helperText="每个请求/响应最多保留的正文预览大小。"
                 />
               </Box>
-            </Box>
+            </Stack>
+          </Box>
 
-            {proxyUrl ? (
-              <Box className="proxy-profile-section proxy-profile-section--env">
-                <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
-                  <Box minWidth={0}>
-                    <Typography variant="subtitle2">环境变量</Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      复制到终端或项目运行配置里，让命令行请求走这个代理入口。
-                    </Typography>
-                  </Box>
-                </Stack>
-                <Box className="proxy-profile-env-list">
-                  {[
-                    ["HTTP_PROXY", proxyUrl],
-                    ["HTTPS_PROXY", proxyUrl],
-                  ].map(([key, value]) => (
-                    <Button
-                      key={key}
-                      className="proxy-profile-env-button"
-                      variant="outlined"
-                      color="inherit"
-                      onClick={() => void onCopy(key, `${key}=${value}`)}
-                      startIcon={copiedKey === key ? <CheckIcon fontSize="small" /> : <CopyIcon fontSize="small" />}
-                    >
-                      <span>{key}</span>
-                      <code>{value}</code>
-                    </Button>
-                  ))}
-                </Box>
+          <Box className="proxy-profile-section proxy-profile-section--route">
+            <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+              <Box minWidth={0}>
+                <Typography variant="subtitle2">默认转发</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  没有被规则改写时使用；规则里的出站设置可以覆盖这里。
+                </Typography>
               </Box>
-            ) : null}
-          </Stack>
-        ) : null}
-      </DialogContent>
-      <DialogActions>
-        <Button color="inherit" onClick={onClose}>取消</Button>
-        <Button variant="contained" onClick={onSave} disabled={Boolean(busy)}>保存配置</Button>
-      </DialogActions>
-    </Dialog>
+              <Chip label={draft.upstreamProxy ? "代理中转" : "默认直连"} size="small" color={draft.upstreamProxy ? "primary" : "default"} />
+            </Stack>
+            <Box className="proxy-two-fields">
+              <TextField
+                label="上游地址"
+                name="proxy-upstream-base-url"
+                autoComplete="off"
+                placeholder="https://api.example.com"
+                value={draft.upstreamBaseUrl}
+                onChange={(event) => onChange({ upstreamBaseUrl: event.target.value })}
+                helperText="可空。用于相对路径请求的默认目标；为空时按请求原目标转发。"
+                inputProps={{ spellCheck: false, translate: "no" }}
+              />
+              <TextField
+                label="上游代理"
+                name="proxy-upstream-proxy"
+                autoComplete="off"
+                placeholder="socks5://127.0.0.1:7890"
+                value={draft.upstreamProxy}
+                onChange={(event) => onChange({ upstreamProxy: event.target.value })}
+                helperText="可空。作为服务默认出站代理；规则选择“继承默认”时使用。"
+                inputProps={{ spellCheck: false, translate: "no" }}
+              />
+            </Box>
+          </Box>
+
+          <Box className="proxy-profile-section proxy-profile-section--capture">
+            <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+              <Box minWidth={0}>
+                <Typography variant="subtitle2">记录</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  控制请求面板里是否保存 Body 预览，Header 与基础信息会继续记录。
+                </Typography>
+              </Box>
+              <Switch
+                checked={draft.captureBody}
+                onChange={(event) => onChange({ captureBody: event.target.checked })}
+                inputProps={{ "aria-label": "记录正文" }}
+              />
+            </Stack>
+            <Box className="proxy-two-fields proxy-profile-capture-grid">
+              <Box className="proxy-profile-capture-card">
+                <Typography variant="body2" sx={{ fontWeight: 780 }}>记录正文</Typography>
+                <Typography variant="caption" color="text.secondary">
+                  {draft.captureBody ? "已开启，会保存请求与响应正文预览。" : "已关闭，只记录 URL、状态码、耗时和 Header。"}
+                </Typography>
+              </Box>
+              <TextField
+                label="正文预览字节"
+                name="proxy-max-body-bytes"
+                type="number"
+                inputMode="numeric"
+                autoComplete="off"
+                value={draft.maxBodyBytes}
+                onChange={(event) =>
+                  onChange({ maxBodyBytes: Math.max(512, Number(event.target.value) || 512) })
+                }
+                helperText="每个请求/响应最多保留的正文预览大小。"
+              />
+            </Box>
+          </Box>
+
+          {proxyUrl ? (
+            <Box className="proxy-profile-section proxy-profile-section--env">
+              <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
+                <Box minWidth={0}>
+                  <Typography variant="subtitle2">环境变量</Typography>
+                  <Typography variant="caption" color="text.secondary">
+                    复制到终端或项目运行配置里，让命令行请求走这个代理入口。
+                  </Typography>
+                </Box>
+              </Stack>
+              <Box className="proxy-profile-env-list">
+                {[
+                  ["HTTP_PROXY", proxyUrl],
+                  ["HTTPS_PROXY", proxyUrl],
+                ].map(([key, value]) => (
+                  <Button
+                    key={key}
+                    className="proxy-profile-env-button"
+                    variant="outlined"
+                    color="inherit"
+                    onClick={() => void onCopy(key, `${key}=${value}`)}
+                    startIcon={copiedKey === key ? <CheckIcon fontSize="small" /> : <CopyIcon fontSize="small" />}
+                  >
+                    <span>{key}</span>
+                    <code>{value}</code>
+                  </Button>
+                ))}
+              </Box>
+            </Box>
+          ) : null}
+        </Stack>
+      ) : null}
+    </>
   );
 }
 

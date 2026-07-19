@@ -121,7 +121,16 @@ rdevtool --json navigation open --name "Jenkins"
 代理 CLI 支持按当前工作区查询，也支持 profile 级配置管理：
 
 ```bash
+rdevtool --json config-source list
+rdevtool --json config-source show default
 rdevtool --json proxy list
+rdevtool --json proxy source
+rdevtool --json proxy status
+rdevtool --json proxy diagnose --profile default --method GET --url /api/health
+rdevtool --json proxy verify --profile default --url /api/health --expect-status 200
+rdevtool --json proxy start default
+rdevtool --json proxy restart default
+rdevtool --json proxy stop default
 rdevtool --json proxy show default
 rdevtool --json proxy add --name "需求代理" --listen-port 8789 --workspace r-series
 rdevtool --json proxy update default --listen-port 8788
@@ -131,7 +140,7 @@ rdevtool --json proxy rule-list --profile default
 rdevtool --json proxy rule-add --profile default --name "Mock 用户" --path-prefix /api/user --action mock --status 200 --body '{"ok":true}'
 ```
 
-复杂规则批量迁移仍可使用桌面设置面板或 profile pack；只有用户明确要求时才直接编辑 `proxy.toml`。
+先用 `proxy source` 确认实际配置源，再操作 profile。`diagnose` 只说明规则匹配，不能替代真实请求；端到端结果必须用 `verify`。复杂规则批量迁移仍可使用桌面设置面板或 profile pack；只有用户明确要求时才直接编辑配置源对应的 `proxy.toml`。
 
 ## Reporting
 

@@ -13,7 +13,7 @@ import {
   TextField,
   Typography,
 } from "@mui/material";
-import { useEffect, useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type KeyboardEvent, type ReactNode } from "react";
 import type { SelectChangeEvent } from "@mui/material/Select";
 import type {
   BranchOption,
@@ -37,6 +37,7 @@ import {
 } from "../components/WorkflowLinksDialog";
 import { WorkflowRulesConfigDialog } from "../components/WorkflowRulesConfigDialog";
 import { InlineWarningNotice } from "../components/InlineWarningNotice";
+import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import {
   ClearIcon,
   FolderIcon,
@@ -57,6 +58,7 @@ type ProjectOption = {
 };
 
 type LocalBranchOperation = "switch" | "clone";
+type BranchPushFileStatusItem = BranchPushStatus["files"][number];
 
 export type MergePageProps = {
   projects: ProjectOption[];
@@ -92,6 +94,8 @@ export type MergePageProps = {
   onPushActionChange: (value: BranchPushAction) => void;
   pushCommitMessage: string;
   onPushCommitMessageChange: (value: string) => void;
+  pushSelectedPaths: string[];
+  onPushSelectedPathsChange: (value: string[]) => void;
   pushStatus: BranchPushStatus | null;
   pushStatusLoading: boolean;
   pushStatusError: string;
@@ -102,6 +106,7 @@ export type MergePageProps = {
   selectedWorktreePath: string;
   onWorktreePathChange: (value: string) => void;
   onChooseWorktreeDirectory: () => void;
+  onRepairWorktree: (repoPath: string) => void;
   onRefreshWorktrees: () => void;
   onRefreshPushStatus: () => void;
   onSyncBranches: () => void;
@@ -146,6 +151,7 @@ export type MergePageProps = {
 
 const PUSH_STATUS_STALE_MS = 60_000;
 const PUSH_STATUS_CLOCK_INTERVAL_MS = 15_000;
+const PUSH_CONFIRM_FILE_PREVIEW_LIMIT = 12;
 
 function formatBranchUpdatedAt(item?: BranchOption) {
   if (!item?.updatedAt) {
@@ -158,12 +164,118 @@ function normalizeBranchValues(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
 }
 
+function branchPushFileStatusLabel(item: BranchPushFileStatusItem) {
+  if (item.conflicted) return "冲突";
+  if (item.untracked) return "新文件";
+  if (item.staged && item.unstaged) return "已暂存 + 未暂存";
+  if (item.staged) return "已暂存";
+  if (item.unstaged) return "未暂存";
+  return item.code || "变更";
+}
+
+function PushCommitConfirmDescription({
+  files,
+  repoPath,
+  partial,
+  summary,
+}: {
+  files: BranchPushFileStatusItem[];
+  repoPath: string;
+  partial: boolean;
+  summary?: ReactNode;
+}) {
+  const visibleFiles = files.slice(0, PUSH_CONFIRM_FILE_PREVIEW_LIMIT);
+  const hiddenCount = Math.max(0, files.length - visibleFiles.length);
+
+  return (
+    <Stack spacing={1}>
+      {summary ? (
+        <Typography variant="body2">{summary}</Typography>
+      ) : (
+        <Typography variant="body2">
+          {partial
+            ? `将提交已选 ${files.length} 个文件并推送当前分支。`
+            : `将提交当前工作副本全部 ${files.length} 个变更文件并推送。`}
+        </Typography>
+      )}
+      {repoPath ? (
+        <Typography
+          variant="caption"
+          sx={{
+            fontFamily: '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+            overflowWrap: "anywhere",
+          }}
+        >
+          {repoPath}
+        </Typography>
+      ) : null}
+      <Stack spacing={0.45}>
+        {visibleFiles.map((item) => (
+          <Box
+            key={`${item.code}-${item.path}`}
+            sx={{
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 1fr) auto",
+              gap: 0.8,
+              alignItems: "center",
+              px: 0.8,
+              py: 0.55,
+              borderRadius: "9px",
+              border: "1px solid",
+              borderColor: "divider",
+            }}
+          >
+            <Typography
+              variant="caption"
+              sx={{
+                minWidth: 0,
+                fontFamily: '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                overflowWrap: "anywhere",
+              }}
+            >
+              {item.path}
+            </Typography>
+            <Chip size="small" label={branchPushFileStatusLabel(item)} variant="outlined" />
+          </Box>
+        ))}
+      </Stack>
+      {hiddenCount > 0 ? (
+        <Typography variant="caption" color="text.secondary">
+          还有 {hiddenCount} 个文件未在确认框中展开。
+        </Typography>
+      ) : null}
+    </Stack>
+  );
+}
+
 function missingBranchValues(values: string[], options: string[]) {
   if (options.length === 0) {
     return [];
   }
   const optionSet = new Set(options);
   return normalizeBranchValues(values).filter((value) => !optionSet.has(value));
+}
+
+export function hasExplicitBranchValues({
+  sourceBranch = "",
+  targetBranch = "",
+  targetBranches = [],
+  requireSource = false,
+  requireTarget = false,
+  requireTargets = false,
+}: {
+  sourceBranch?: string;
+  targetBranch?: string;
+  targetBranches?: string[];
+  requireSource?: boolean;
+  requireTarget?: boolean;
+  requireTargets?: boolean;
+}): boolean {
+  return (
+    (!requireSource || Boolean(sourceBranch.trim())) &&
+    (!requireTarget || Boolean(targetBranch.trim())) &&
+    (!requireTargets || normalizeBranchValues(targetBranches).length > 0)
+  );
 }
 
 function groupWorkflowBroadcastRules(
@@ -318,7 +430,7 @@ function joinWorkspacePath(rootDir: string, projectKey: string) {
   return normalizedRoot && normalizedProject ? `${normalizedRoot}/${normalizedProject}` : "";
 }
 
-function WorktreeSelector({
+export function WorktreeSelector({
   items,
   value,
   loading,
@@ -326,6 +438,7 @@ function WorktreeSelector({
   disabled,
   onChange,
   onChooseDirectory,
+  onRepair,
   onRefresh,
 }: {
   items: BranchWorktreeSummary[];
@@ -335,9 +448,14 @@ function WorktreeSelector({
   disabled: boolean;
   onChange: (value: string) => void;
   onChooseDirectory: () => void;
+  onRepair: (repoPath: string) => void;
   onRefresh: () => void;
 }) {
+  const labelId = useId();
   const selected = items.find((item) => item.repoPath === value) ?? null;
+  const canRepair = Boolean(
+    selected?.statusKey === "missing" && selected.isGitWorktree,
+  );
   const helperText =
     error ||
     selected?.detail ||
@@ -349,14 +467,15 @@ function WorktreeSelector({
       <Box
         sx={{
           display: "grid",
-          gridTemplateColumns: "minmax(0, 1fr) auto auto",
+          gridTemplateColumns: "minmax(0, 1fr) auto",
           gap: 0.45,
           alignItems: "stretch",
         }}
       >
         <FormControl fullWidth disabled={disabled}>
-          <InputLabel>项目实例</InputLabel>
+          <InputLabel id={labelId}>项目实例</InputLabel>
           <Select
+            labelId={labelId}
             value={value}
             label="项目实例"
             displayEmpty
@@ -366,7 +485,7 @@ function WorktreeSelector({
               if (!item) {
                 return loading ? "正在读取项目实例" : "选择项目实例";
               }
-              return `${item.label} · ${worktreeBranchLabel(item)}`;
+              return `${item.label} · ${worktreeBranchLabel(item)} · ${item.statusLabel}`;
             }}
           >
             {items.map((item) => (
@@ -385,7 +504,7 @@ function WorktreeSelector({
                     <Chip
                       size="small"
                       label={item.statusLabel}
-                      color={item.statusKey === "clean" ? "success" : item.statusKey === "unavailable" ? "error" : "primary"}
+                      color={item.statusKey === "clean" ? "success" : ["missing", "unavailable"].includes(item.statusKey) ? "error" : "primary"}
                       variant={item.statusKey === "clean" ? "outlined" : "filled"}
                     />
                   </Stack>
@@ -402,28 +521,41 @@ function WorktreeSelector({
             ))}
           </Select>
         </FormControl>
-        <IconButton
-          onClick={onRefresh}
-          disabled={disabled || loading}
-          aria-label="刷新项目实例"
-          title="刷新项目实例"
-          sx={{ alignSelf: "center" }}
-        >
-          <RefreshIcon fontSize="small" />
-        </IconButton>
-        <IconButton
-          onClick={onChooseDirectory}
-          disabled={disabled}
-          aria-label="选择本地目录"
-          title="选择本地目录"
-          sx={{ alignSelf: "center" }}
-        >
-          <FolderIcon fontSize="small" />
-        </IconButton>
+        <Stack direction="row" spacing={0.35} alignItems="center">
+          {canRepair && selected ? (
+            <Button
+              size="small"
+              variant="outlined"
+              color="warning"
+              startIcon={<RefreshIcon fontSize="small" />}
+              onClick={() => onRepair(selected.repoPath)}
+              disabled={disabled || loading}
+              sx={{ whiteSpace: "nowrap", minHeight: 32 }}
+            >
+              修复副本
+            </Button>
+          ) : null}
+          <IconButton
+            onClick={onRefresh}
+            disabled={disabled || loading}
+            aria-label="刷新项目实例"
+            title="刷新项目实例"
+          >
+            <RefreshIcon fontSize="small" />
+          </IconButton>
+          <IconButton
+            onClick={onChooseDirectory}
+            disabled={disabled}
+            aria-label="选择本地目录"
+            title="选择本地目录"
+          >
+            <FolderIcon fontSize="small" />
+          </IconButton>
+        </Stack>
       </Box>
       <Typography
         variant="caption"
-        color={error ? "error" : "text.secondary"}
+        color={error || selected?.statusKey === "missing" ? "error" : "text.secondary"}
         sx={{ display: "block", minHeight: 16, overflowWrap: "anywhere", lineHeight: 1.35 }}
       >
         {helperText}
@@ -607,6 +739,8 @@ export function MergePage({
   onPushActionChange,
   pushCommitMessage,
   onPushCommitMessageChange,
+  pushSelectedPaths,
+  onPushSelectedPathsChange,
   pushStatus,
   pushStatusLoading,
   pushStatusError,
@@ -617,6 +751,7 @@ export function MergePage({
   selectedWorktreePath,
   onWorktreePathChange,
   onChooseWorktreeDirectory,
+  onRepairWorktree,
   onRefreshWorktrees,
   onRefreshPushStatus,
   onSyncBranches,
@@ -660,6 +795,7 @@ export function MergePage({
   const [switchFilesExpanded, setSwitchFilesExpanded] = useState(false);
   const [localOperation, setLocalOperation] = useState<LocalBranchOperation>("switch");
   const [nowMs, setNowMs] = useState(Date.now());
+  const [confirm, confirmDialog] = useAppConfirmDialog();
   const sourceBranchEntryMap = useMemo(
     () => new Map(sourceBranchEntries.map((item) => [item.name, item])),
     [sourceBranchEntries],
@@ -672,27 +808,29 @@ export function MergePage({
     () => projects.filter((project) => createProjects.includes(project.key)),
     [createProjects, projects],
   );
-  const defaultSourceBranch = sourceBranchOptions[0] || "";
-  const defaultSyncTargetBranch =
-    targetBranchOptions.find((item) => item !== syncSource) ||
-    targetBranchOptions[0] ||
-    "";
-  const defaultTargetBranch = targetBranchOptions[0] || "";
   const pushStatusStale = Boolean(
     pushStatusUpdatedAtMs && nowMs - pushStatusUpdatedAtMs > PUSH_STATUS_STALE_MS,
   );
   const syncReady =
     Boolean(selectedProject) &&
-    Boolean(syncSource.trim()) &&
-    normalizeBranchValues(syncTargets).length > 0;
+    hasExplicitBranchValues({
+      sourceBranch: syncSource,
+      targetBranches: syncTargets,
+      requireSource: true,
+      requireTargets: true,
+    });
   const createReady =
     createProjects.length > 0 &&
-    Boolean(createSource.trim()) &&
-    Boolean(createTarget.trim()) &&
+    hasExplicitBranchValues({
+      sourceBranch: createSource,
+      targetBranch: createTarget,
+      requireSource: true,
+      requireTarget: true,
+    }) &&
     createSource.trim() !== createTarget.trim();
   const checkoutReady =
     Boolean(selectedProject) &&
-    Boolean(checkoutSource.trim()) &&
+    hasExplicitBranchValues({ sourceBranch: checkoutSource, requireSource: true }) &&
     Boolean(checkoutDestinationDir.trim());
   const workspaceInstancePath = useMemo(
     () =>
@@ -713,7 +851,7 @@ export function MergePage({
   const switchReady =
     Boolean(selectedProject) &&
     hasSelectedWorktree &&
-    Boolean(normalizedSwitchTarget) &&
+    hasExplicitBranchValues({ targetBranch: normalizedSwitchTarget, requireTarget: true }) &&
     Boolean(pushStatus) &&
     !switchSameAsCurrent &&
     !switchBlockedByStatus;
@@ -723,6 +861,53 @@ export function MergePage({
     Boolean(pushStatus) &&
     Boolean(pushStatus?.canPush) &&
     (pushAction === "pushOnly" || Boolean(pushCommitMessage.trim()));
+  const pushButtonLabel =
+    pushAction === "commitAndPush"
+      ? pushSelectedPaths.length > 0
+        ? `提交已选 ${pushSelectedPaths.length} 个文件并推送`
+        : "提交全部并推送"
+      : "执行推送";
+  const handlePushSelectedPathsChange = useCallback(
+    (value: string[]) => {
+      const normalized = normalizeBranchValues(value);
+      onPushSelectedPathsChange(normalized);
+      if (normalized.length > 0 && pushAction !== "commitAndPush") {
+        onPushActionChange("commitAndPush");
+      }
+    },
+    [onPushActionChange, onPushSelectedPathsChange, pushAction],
+  );
+  const normalizedPushSelectedPaths = useMemo(
+    () => normalizeBranchValues(pushSelectedPaths),
+    [pushSelectedPaths],
+  );
+  const pushSelectedPathSet = useMemo(
+    () => new Set(normalizedPushSelectedPaths),
+    [normalizedPushSelectedPaths],
+  );
+  const pushCommitPreviewFiles = useMemo(() => {
+    if (!pushStatus) {
+      return [];
+    }
+    return normalizedPushSelectedPaths.length > 0
+      ? pushStatus.files.filter((item) => pushSelectedPathSet.has(item.path))
+      : pushStatus.files;
+  }, [normalizedPushSelectedPaths.length, pushSelectedPathSet, pushStatus]);
+  const pushMissingSelectedPaths = useMemo(() => {
+    if (!pushStatus || normalizedPushSelectedPaths.length === 0) {
+      return [];
+    }
+    const currentPaths = new Set(pushStatus.files.map((item) => item.path));
+    return normalizedPushSelectedPaths.filter((path) => !currentPaths.has(path));
+  }, [normalizedPushSelectedPaths, pushStatus]);
+  const pushUnselectedStagedFiles = useMemo(() => {
+    if (!pushStatus || normalizedPushSelectedPaths.length === 0) {
+      return [];
+    }
+    return pushStatus.files.filter(
+      (item) => item.staged && !pushSelectedPathSet.has(item.path),
+    );
+  }, [normalizedPushSelectedPaths.length, pushSelectedPathSet, pushStatus]);
   const switchStatusHelper = pushStatusError
     || (pushStatusLoading
       ? "正在读取本地仓库状态"
@@ -823,6 +1008,88 @@ export function MergePage({
     setWorkflowOpen(true);
   }
 
+  async function handleExecutePushClick() {
+    if (pushAction !== "commitAndPush" || !pushStatus || pushStatus.clean) {
+      onExecutePush();
+      return;
+    }
+
+    if (pushStatus.conflictedCount > 0) {
+      await confirm({
+        title: "存在冲突文件",
+        description: "当前工作副本存在冲突文件，请先解决冲突后再提交并推送。",
+        confirmLabel: "知道了",
+        cancelLabel: "关闭",
+      });
+      return;
+    }
+
+    if (pushMissingSelectedPaths.length > 0) {
+      await confirm({
+        title: "所选文件已过期",
+        description: (
+          <Stack spacing={0.8}>
+            <Typography variant="body2">
+              有所选文件已经不在当前变更列表中，请刷新状态后重试。
+            </Typography>
+            <Typography
+              variant="caption"
+              sx={{
+                fontFamily: '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                overflowWrap: "anywhere",
+              }}
+            >
+              {pushMissingSelectedPaths.join(", ")}
+            </Typography>
+          </Stack>
+        ),
+        confirmLabel: "知道了",
+        cancelLabel: "关闭",
+      });
+      return;
+    }
+
+    if (pushUnselectedStagedFiles.length > 0) {
+      await confirm({
+        title: "暂存区需要处理",
+        description: (
+          <PushCommitConfirmDescription
+            files={pushUnselectedStagedFiles}
+            repoPath={pushStatus.repoPath}
+            partial
+            summary={`以下 ${pushUnselectedStagedFiles.length} 个文件已经暂存但没有被选择。部分提交会被阻止，请先处理暂存区或一并选择这些文件。`}
+          />
+        ),
+        confirmLabel: "知道了",
+        cancelLabel: "关闭",
+      });
+      return;
+    }
+
+    if (pushCommitPreviewFiles.length === 0) {
+      onExecutePush();
+      return;
+    }
+
+    const partial = normalizedPushSelectedPaths.length > 0;
+    const confirmed = await confirm({
+      title: partial ? "确认提交已选文件？" : "确认提交全部变更？",
+      description: (
+        <PushCommitConfirmDescription
+          files={pushCommitPreviewFiles}
+          repoPath={pushStatus.repoPath}
+          partial={partial}
+        />
+      ),
+      confirmLabel: partial
+        ? `提交 ${pushCommitPreviewFiles.length} 个文件并推送`
+        : "提交全部并推送",
+    });
+    if (confirmed) {
+      onExecutePush();
+    }
+  }
+
   const workflowReplay = workflowEntry ? workflowReplayFromBranchHistory(workflowEntry) : null;
 
   return (
@@ -861,7 +1128,7 @@ export function MergePage({
                   label="源分支"
                   values={[syncSource]}
                   options={sourceBranchOptions}
-                  onReset={() => onSyncSourceChange(defaultSourceBranch)}
+                  onReset={onClearSyncSource}
                 />
                 <Autocomplete<string, true, true, true>
                   multiple
@@ -969,9 +1236,7 @@ export function MergePage({
                   label="目标分支"
                   values={syncTargets}
                   options={targetBranchOptions}
-                  onReset={() =>
-                    onSyncTargetsChange(defaultSyncTargetBranch ? [defaultSyncTargetBranch] : [])
-                  }
+                  onReset={() => onSyncTargetsChange([])}
                 />
                 <Button
                   variant="contained"
@@ -1033,7 +1298,7 @@ export function MergePage({
                   label="源分支"
                   values={[createSource]}
                   options={sourceBranchOptions}
-                  onReset={() => onCreateSourceChange(defaultSourceBranch)}
+                  onReset={onClearCreateSource}
                 />
                 <Button
                   variant="contained"
@@ -1113,6 +1378,7 @@ export function MergePage({
                       disabled={!selectedProject || Boolean(busy)}
                       onChange={onWorktreePathChange}
                       onChooseDirectory={onChooseWorktreeDirectory}
+                      onRepair={onRepairWorktree}
                       onRefresh={() => {
                         onRefreshWorktrees();
                         onRefreshPushStatus();
@@ -1146,7 +1412,7 @@ export function MergePage({
                       label="目标分支"
                       values={[switchTarget]}
                       options={targetBranchOptions}
-                      onReset={() => onSwitchTargetChange(defaultTargetBranch)}
+                      onReset={onClearSwitchTarget}
                     />
 
                     {pushStatus ? (
@@ -1188,7 +1454,7 @@ export function MergePage({
                       label="源分支"
                       values={[checkoutSource]}
                       options={sourceBranchOptions}
-                      onReset={() => onCheckoutSourceChange(defaultSourceBranch)}
+                      onReset={onClearCheckoutSource}
                     />
                     <TextField
                       label="目标目录"
@@ -1263,6 +1529,7 @@ export function MergePage({
                   disabled={!selectedProject || Boolean(busy)}
                   onChange={onWorktreePathChange}
                   onChooseDirectory={onChooseWorktreeDirectory}
+                  onRepair={onRepairWorktree}
                   onRefresh={() => {
                     onRefreshWorktrees();
                     onRefreshPushStatus();
@@ -1282,6 +1549,9 @@ export function MergePage({
                     onToggleFilesExpanded={() =>
                       setPushFilesExpanded((current) => !current)
                     }
+                    selectionEnabled
+                    selectedPaths={pushSelectedPaths}
+                    onSelectedPathsChange={handlePushSelectedPathsChange}
                   />
                 ) : null}
 
@@ -1337,11 +1607,11 @@ export function MergePage({
 
                 <Button
                   variant="contained"
-                  onClick={onExecutePush}
+                  onClick={() => void handleExecutePushClick()}
                   disabled={actionDisabled}
                   sx={{ minHeight: 34, borderRadius: "11px" }}
                 >
-                  执行推送
+                  {pushButtonLabel}
                 </Button>
               </Stack>
             ) : null}
@@ -1441,6 +1711,7 @@ export function MergePage({
           }
         }}
       />
+      {confirmDialog}
     </Box>
   );
 }

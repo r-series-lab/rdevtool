@@ -5,14 +5,18 @@ use rdevtool_core::config::{
 };
 use rdevtool_core::navigation::{NavigationEntry, open_in_current_chrome};
 pub use rdevtool_core::runtime::{
-    ProjectRuntimeLogKind, ProjectRuntimeLogResponse, ProjectRuntimeLogSessionSummary,
-    ProjectRuntimePreflightResponse, ProjectRuntimeReadySummary,
+    ProjectRuntimeLaunchOptions, ProjectRuntimeLogKind, ProjectRuntimeLogResponse,
+    ProjectRuntimeLogSessionSummary, ProjectRuntimePreflightResponse, ProjectRuntimeReadySummary,
 };
 use rdevtool_core::runtime::{
+    adopt_project_runtime_with_options as core_adopt_project_runtime,
     clear_project_runtime_log as core_clear_project_runtime_log,
-    project_runtime_preflight_for_project,
+    detect_external_project_runtime_for_project_with_options,
+    project_runtime_preflight_for_project_with_options,
     read_project_runtime_log as core_read_project_runtime_log,
+    start_project_runtime_detached_with_options as core_start_project_runtime,
 };
+use rdevtool_core::runtime_daemon::{self, RuntimeDaemonPhase, RuntimeDaemonStatus};
 use rdevtool_core::web_actions::{
     WebActionRunRequest, open_web_action_navigation_target, run_web_action_navigation,
 };
@@ -21,7 +25,7 @@ use serde_json::json;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -56,6 +60,7 @@ pub struct ProjectRuntimeSnapshot {
     pub updated_at_ms: u64,
     pub can_start: bool,
     pub can_stop: bool,
+    pub can_adopt: bool,
     pub can_build: bool,
     pub can_stop_build: bool,
     pub can_open_build_output: bool,
@@ -68,6 +73,8 @@ pub struct ProjectRuntimeSnapshot {
 pub struct ProjectDebugProfileSummary {
     pub key: String,
     pub label: String,
+    pub command: Option<String>,
+    pub expected_port: Option<u16>,
     pub env: BTreeMap<String, String>,
     pub env_count: usize,
     pub local_file_count: usize,
@@ -138,6 +145,22 @@ pub struct ProjectRuntimeState {
     inner: Arc<ProjectRuntimeRegistry>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStartedRuntimeSummary {
+    pub count: usize,
+    pub project_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppStartedRuntimeShutdownReport {
+    pub requested: usize,
+    pub stopped: usize,
+    pub skipped: usize,
+    pub failures: Vec<String>,
+}
+
 #[derive(Default)]
 struct ProjectRuntimeRegistry {
     state: Mutex<ProjectRuntimeStore>,
@@ -145,22 +168,13 @@ struct ProjectRuntimeRegistry {
 
 #[derive(Default)]
 struct ProjectRuntimeStore {
-    running: HashMap<String, RunningProjectProcess>,
-    last_results: HashMap<String, ProjectTaskLastState>,
     running_builds: HashMap<String, RunningProjectProcess>,
     last_build_results: HashMap<String, ProjectTaskLastState>,
+    app_started_runtimes: HashMap<String, AppStartedRuntimeSession>,
+    external_runtime_cache: HashMap<String, ExternalRuntimeCacheEntry>,
 }
 
 impl ProjectRuntimeStore {
-    fn dev_parts(
-        &mut self,
-    ) -> (
-        &mut HashMap<String, RunningProjectProcess>,
-        &mut HashMap<String, ProjectTaskLastState>,
-    ) {
-        (&mut self.running, &mut self.last_results)
-    }
-
     fn build_parts(
         &mut self,
     ) -> (
@@ -175,13 +189,15 @@ struct RunningProjectProcess {
     child: Child,
     pid: u32,
     started_at_ms: u64,
-    local_proxy: Option<RunningLocalProxyProcess>,
 }
 
-struct RunningLocalProxyProcess {
-    child: Child,
-    pid: u32,
-    listen: String,
+#[derive(Clone)]
+struct AppStartedRuntimeSession {
+    status_key: String,
+    project_key: String,
+    project_name: String,
+    cwd: PathBuf,
+    run_id: String,
 }
 
 #[derive(Clone)]
@@ -190,6 +206,12 @@ struct ProjectTaskLastState {
     status_label: String,
     detail: String,
     updated_at_ms: u64,
+}
+
+#[derive(Clone)]
+struct ExternalRuntimeCacheEntry {
+    checked_at_ms: u64,
+    detection: Option<rdevtool_core::runtime::ProjectRuntimeExternalDetection>,
 }
 
 #[derive(Clone)]
@@ -228,6 +250,8 @@ struct TaskSnapshotState {
     updated_at_ms: u64,
     is_running: bool,
     is_available: bool,
+    can_stop: bool,
+    can_adopt: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -235,407 +259,6 @@ enum ProjectCommandKind {
     Dev,
     Build,
 }
-
-const NODE_PROXY_HOOK_FILENAME: &str = "rdevtool-node-proxy-hook.cjs";
-const LOCAL_PROXY_SCRIPT_FILENAME: &str = "rdevtool-local-proxy.cjs";
-const NODE_PROXY_HOOK: &str = r#"'use strict';
-
-const http = require('http');
-const { URL } = require('url');
-
-const proxyRaw = process.env.RDEVTOOL_NETWORK_PROXY_URL || process.env.HTTP_PROXY || process.env.http_proxy || '';
-let proxyUrl = null;
-try {
-  proxyUrl = proxyRaw ? new URL(proxyRaw) : null;
-} catch (_) {
-  proxyUrl = null;
-}
-
-if (proxyUrl && proxyUrl.protocol === 'http:') {
-  const originalRequest = http.request;
-  const originalGet = http.get;
-  const noProxy = (process.env.RDEVTOOL_NETWORK_PROXY_NO_PROXY || process.env.NO_PROXY || process.env.no_proxy || '')
-    .split(',')
-    .map((item) => item.trim().toLowerCase())
-    .filter(Boolean);
-
-  function stripPort(hostname) {
-    return String(hostname || '').replace(/^\[/, '').replace(/\]$/, '').replace(/:\d+$/, '').toLowerCase();
-  }
-
-  function shouldBypass(hostname) {
-    const host = stripPort(hostname);
-    if (!host) return false;
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
-    return noProxy.some((rule) => {
-      if (rule === '*') return true;
-      const normalized = rule.replace(/^\./, '');
-      return host === normalized || host.endsWith(`.${normalized}`);
-    });
-  }
-
-  function optionsToUrl(options) {
-    const protocol = options.protocol || 'http:';
-    const host = options.hostname || options.host || 'localhost';
-    const port = options.port && !String(host).includes(':') ? `:${options.port}` : '';
-    const path = options.path || `${options.pathname || '/'}${options.search || ''}`;
-    return new URL(path, `${protocol}//${host}${port}`);
-  }
-
-  function normalizeArgs(args) {
-    const parts = Array.prototype.slice.call(args);
-    const callback = typeof parts[parts.length - 1] === 'function' ? parts.pop() : undefined;
-    let url;
-    let options = {};
-
-    if (typeof parts[0] === 'string' || parts[0] instanceof URL) {
-      url = new URL(parts[0].toString());
-      options = Object.assign({}, parts[1] || {});
-    } else {
-      options = Object.assign({}, parts[0] || {});
-      url = optionsToUrl(options);
-    }
-
-    return { url, options, callback };
-  }
-
-  function applyProxyAuth(headers) {
-    if (!proxyUrl.username && !proxyUrl.password) return headers;
-    const username = decodeURIComponent(proxyUrl.username || '');
-    const password = decodeURIComponent(proxyUrl.password || '');
-    return Object.assign({}, headers, {
-      'Proxy-Authorization': `Basic ${Buffer.from(`${username}:${password}`).toString('base64')}`,
-    });
-  }
-
-  function requestWithProxy() {
-    const normalized = normalizeArgs(arguments);
-    if (normalized.url.protocol !== 'http:' || shouldBypass(normalized.url.hostname)) {
-      return originalRequest.apply(http, arguments);
-    }
-
-    const headers = Object.assign({}, normalized.options.headers || {});
-    for (const key of Object.keys(headers)) {
-      if (key.toLowerCase() === 'host') {
-        delete headers[key];
-      }
-    }
-    headers.Host = normalized.url.host;
-
-    const proxyOptions = Object.assign({}, normalized.options, {
-      protocol: 'http:',
-      hostname: proxyUrl.hostname,
-      host: proxyUrl.hostname,
-      port: proxyUrl.port || 80,
-      path: normalized.url.href,
-      headers: applyProxyAuth(headers),
-    });
-    delete proxyOptions.href;
-    delete proxyOptions.origin;
-
-    return originalRequest.call(http, proxyOptions, normalized.callback);
-  }
-
-  http.request = requestWithProxy;
-  http.get = function getWithProxy() {
-    const req = requestWithProxy.apply(http, arguments);
-    req.end();
-    return req;
-  };
-}
-"#;
-
-const LOCAL_PROXY_SCRIPT: &str = r#"'use strict';
-
-const fs = require('fs');
-const http = require('http');
-const https = require('https');
-const net = require('net');
-const { URL } = require('url');
-
-const configPath = process.argv[2];
-if (!configPath) {
-  throw new Error('missing local proxy config path');
-}
-
-const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
-const proxyConfig = config.proxy || {};
-const routes = (proxyConfig.routes || [])
-  .filter((route) => route && route.enabled !== false && route.match_prefix && route.target);
-const frontendUrl = new URL(proxyConfig.frontend_url || 'http://127.0.0.1:3001');
-const upstreamProxy = parseOptionalUrl(proxyConfig.upstream_proxy);
-const authHelper = proxyConfig.auth_helper || {};
-const helperPath = ensurePath(authHelper.path || '/__auth-helper');
-const listen = parseListen(proxyConfig.listen || '127.0.0.1:3000');
-
-function parseOptionalUrl(value) {
-  const text = String(value || '').trim();
-  if (!text) return null;
-  return new URL(text);
-}
-
-function parseListen(value) {
-  const text = String(value || '').trim();
-  if (text.startsWith('[')) {
-    const end = text.indexOf(']');
-    const host = text.slice(1, end);
-    const port = Number(text.slice(end + 2));
-    return { host, port };
-  }
-  const splitAt = text.lastIndexOf(':');
-  if (splitAt < 0) {
-    return { host: '127.0.0.1', port: Number(text) };
-  }
-  const host = text.slice(0, splitAt) || '127.0.0.1';
-  const port = Number(text.slice(splitAt + 1));
-  return { host, port };
-}
-
-function ensurePath(value) {
-  const text = String(value || '').trim();
-  if (!text) return '/';
-  return text.startsWith('/') ? text : `/${text}`;
-}
-
-function pickRoute(pathname) {
-  return routes.find((route) => pathname.startsWith(route.match_prefix));
-}
-
-function appendPath(basePath, nextPath) {
-  const base = basePath && basePath !== '/' ? basePath.replace(/\/+$/, '') : '';
-  const next = ensurePath(nextPath).replace(/\/{2,}/g, '/');
-  return `${base}${next}` || '/';
-}
-
-function routeTargetUrl(route, requestUrl) {
-  const target = new URL(route.target);
-  const suffix = requestUrl.pathname.slice(route.match_prefix.length);
-  const mappedPath = route.rewrite_prefix
-    ? `${ensurePath(route.rewrite_prefix)}${suffix}`
-    : requestUrl.pathname;
-  target.pathname = appendPath(target.pathname, mappedPath);
-  target.search = requestUrl.search;
-  return target;
-}
-
-function frontendTargetUrl(rawUrl) {
-  const target = new URL(rawUrl || '/', frontendUrl);
-  target.protocol = frontendUrl.protocol;
-  target.hostname = frontendUrl.hostname;
-  target.port = frontendUrl.port;
-  if (frontendUrl.pathname && frontendUrl.pathname !== '/') {
-    target.pathname = appendPath(frontendUrl.pathname, target.pathname);
-  }
-  return target;
-}
-
-function prepareHeaders(req, target, extraHeaders) {
-  const headers = Object.assign({}, req.headers);
-  delete headers.host;
-  delete headers.connection;
-  delete headers['accept-encoding'];
-  Object.assign(headers, extraHeaders || {});
-  headers.host = target.host;
-  return headers;
-}
-
-function proxyHttpRequest(req, res, target, extraHeaders, useUpstreamProxy) {
-  const viaProxy = useUpstreamProxy && upstreamProxy && target.protocol === 'http:';
-  const headers = prepareHeaders(req, target, extraHeaders);
-  const transport = viaProxy ? http : target.protocol === 'https:' ? https : http;
-  const options = viaProxy
-    ? {
-        protocol: 'http:',
-        hostname: upstreamProxy.hostname,
-        port: upstreamProxy.port || 80,
-        method: req.method,
-        path: target.href,
-        headers,
-      }
-    : {
-        protocol: target.protocol,
-        hostname: target.hostname,
-        port: target.port || (target.protocol === 'https:' ? 443 : 80),
-        method: req.method,
-        path: `${target.pathname}${target.search}`,
-        headers,
-      };
-
-  const proxyReq = transport.request(options, (proxyRes) => {
-    const responseHeaders = Object.assign({}, proxyRes.headers);
-    delete responseHeaders['content-encoding'];
-    res.writeHead(proxyRes.statusCode || 502, responseHeaders);
-    proxyRes.pipe(res);
-  });
-
-  proxyReq.on('error', (error) => {
-    if (!res.headersSent) {
-      res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' });
-    }
-    res.end(`local proxy request failed: ${error.message}`);
-  });
-
-  req.pipe(proxyReq);
-}
-
-function rawHeaderBlock(headers) {
-  return Object.entries(headers)
-    .filter(([, value]) => value !== undefined)
-    .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(', ') : value}`)
-    .join('\r\n');
-}
-
-function proxyUpgrade(req, socket, head, target) {
-  if (target.protocol !== 'http:') {
-    socket.destroy();
-    return;
-  }
-
-  const headers = prepareHeaders(req, target, {});
-  headers.connection = 'Upgrade';
-  headers.upgrade = req.headers.upgrade || 'websocket';
-  const requestHead = [
-    `${req.method} ${target.pathname}${target.search} HTTP/${req.httpVersion}`,
-    rawHeaderBlock(headers),
-    '',
-    '',
-  ].join('\r\n');
-  const targetSocket = net.connect(target.port || 80, target.hostname, () => {
-    targetSocket.write(requestHead);
-    if (head && head.length > 0) {
-      targetSocket.write(head);
-    }
-    socket.pipe(targetSocket);
-    targetSocket.pipe(socket);
-  });
-  targetSocket.on('error', () => socket.destroy());
-  socket.on('error', () => targetSocket.destroy());
-}
-
-function htmlEscape(value) {
-  return String(value ?? '')
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
-}
-
-function serveAuthHelper(_req, res) {
-  const payload = JSON.stringify(authHelper);
-  const title = `${config.project_key || 'project'} / ${config.profile_key || 'debug'} Auth Helper`;
-  const rows = (authHelper.items || [])
-    .filter((item) => item && item.enabled !== false)
-    .map((item) => `<li><code>${htmlEscape(item.storage || 'localStorage')}.${htmlEscape(item.key || '')}</code> ${htmlEscape(item.from_json_path || item.value || '')}</li>`)
-    .join('');
-  const html = `<!doctype html>
-<html>
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${htmlEscape(title)}</title>
-  <style>
-    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f7f7f5; color: #202124; }
-    main { max-width: 760px; margin: 40px auto; padding: 0 20px; }
-    textarea { box-sizing: border-box; width: 100%; min-height: 260px; padding: 12px; border: 1px solid #d7d7d2; border-radius: 8px; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; background: #fff; }
-    button { height: 36px; padding: 0 14px; border: 0; border-radius: 6px; background: #1a73e8; color: #fff; font-weight: 600; cursor: pointer; }
-    code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .row { display: flex; gap: 10px; align-items: center; margin: 12px 0; }
-    .status { min-height: 22px; color: #166534; }
-    .error { color: #b91c1c; }
-    ul { padding-left: 18px; color: #5f6368; }
-  </style>
-</head>
-<body>
-  <main>
-    <h2>${htmlEscape(title)}</h2>
-    <ul>${rows || '<li>未配置写入项</li>'}</ul>
-    <textarea id="payload" spellcheck="false" placeholder="粘贴登录返回 JSON；固定 value 的写入项可留空"></textarea>
-    <div class="row">
-      <button id="apply" type="button">写入并跳转</button>
-      <span id="status" class="status"></span>
-    </div>
-  </main>
-  <script>
-    const AUTH_HELPER = ${payload};
-    function getByPath(source, path) {
-      const text = String(path || '').trim().replace(/^\\$\\.?/, '');
-      if (!text) return source;
-      return text.split('.').filter(Boolean).reduce((value, key) => value == null ? undefined : value[key], source);
-    }
-    function stringifyValue(value) {
-      if (value == null) return '';
-      if (typeof value === 'string') return value;
-      return JSON.stringify(value);
-    }
-    function setCookie(item, value) {
-      let cookie = encodeURIComponent(item.key) + '=' + encodeURIComponent(value);
-      cookie += '; Path=' + (item.cookie_path || '/');
-      if (Number.isFinite(Number(item.cookie_max_age_seconds))) cookie += '; Max-Age=' + Number(item.cookie_max_age_seconds);
-      if (item.cookie_same_site) cookie += '; SameSite=' + item.cookie_same_site;
-      if (location.protocol === 'https:') cookie += '; Secure';
-      document.cookie = cookie;
-    }
-    document.getElementById('apply').addEventListener('click', () => {
-      const status = document.getElementById('status');
-      status.className = 'status';
-      try {
-        const text = document.getElementById('payload').value.trim();
-        const data = text ? JSON.parse(text) : {};
-        const misses = [];
-        for (const item of AUTH_HELPER.items || []) {
-          if (!item || item.enabled === false) continue;
-          const raw = item.value !== undefined && item.value !== '' ? item.value : getByPath(data, item.from_json_path);
-          if (raw === undefined || raw === null || raw === '') {
-            misses.push(item.key);
-            continue;
-          }
-          const value = stringifyValue(raw);
-          if (item.storage === 'sessionStorage') sessionStorage.setItem(item.key, value);
-          else if (item.storage === 'cookie') setCookie(item, value);
-          else localStorage.setItem(item.key, value);
-        }
-        if (misses.length) throw new Error('缺少字段: ' + misses.join(', '));
-        status.textContent = '写入完成，正在跳转...';
-        setTimeout(() => { location.href = AUTH_HELPER.redirect_path || '/#/'; }, 400);
-      } catch (error) {
-        status.className = 'status error';
-        status.textContent = error.message || String(error);
-      }
-    });
-  </script>
-</body>
-</html>`;
-  res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-  res.end(html);
-}
-
-const server = http.createServer((req, res) => {
-  const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  if (authHelper.enabled && requestUrl.pathname === helperPath) {
-    serveAuthHelper(req, res);
-    return;
-  }
-
-  const route = pickRoute(requestUrl.pathname);
-  if (route) {
-    proxyHttpRequest(req, res, routeTargetUrl(route, requestUrl), route.headers || {}, true);
-    return;
-  }
-
-  proxyHttpRequest(req, res, frontendTargetUrl(req.url || '/'), {}, false);
-});
-
-server.on('upgrade', (req, socket, head) => {
-  const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
-  const route = pickRoute(requestUrl.pathname);
-  const target = route ? routeTargetUrl(route, requestUrl) : frontendTargetUrl(req.url || '/');
-  proxyUpgrade(req, socket, head, target);
-});
-
-server.listen(listen.port, listen.host, () => {
-  console.log(`rdevtool local proxy listening on ${listen.host}:${listen.port}`);
-});
-"#;
 
 impl Drop for ProjectRuntimeRegistry {
     fn drop(&mut self) {
@@ -672,6 +295,7 @@ impl ProjectRuntimeState {
 
         let mut snapshots = Vec::new();
         for project_key in project_keys {
+            store.external_runtime_cache.remove(project_key);
             let project = config
                 .find_project(project_key)
                 .map_err(|error| error.to_string())?;
@@ -686,13 +310,24 @@ impl ProjectRuntimeState {
         project_key: &str,
         debug_profile_key: Option<&str>,
     ) -> Result<ProjectRuntimePreflightResponse, String> {
+        let options = ProjectRuntimeLaunchOptions {
+            debug_profile: optional_owned(debug_profile_key),
+            ..ProjectRuntimeLaunchOptions::default()
+        };
+        self.preflight_with_options(config, project_key, &options)
+    }
+
+    pub fn preflight_with_options(
+        &self,
+        config: &AppConfig,
+        project_key: &str,
+        options: &ProjectRuntimeLaunchOptions,
+    ) -> Result<ProjectRuntimePreflightResponse, String> {
         let project = config
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
-        Ok(project_runtime_preflight_for_project(
-            config,
-            project,
-            debug_profile_key,
+        Ok(project_runtime_preflight_for_project_with_options(
+            config, project, options,
         ))
     }
 
@@ -703,93 +338,89 @@ impl ProjectRuntimeState {
         debug_profile_key: Option<&str>,
         env_overrides: Option<&BTreeMap<String, String>>,
     ) -> Result<ProjectRuntimeSnapshot, String> {
+        let options = ProjectRuntimeLaunchOptions {
+            debug_profile: optional_owned(debug_profile_key),
+            env: env_overrides.cloned().unwrap_or_default(),
+            ..ProjectRuntimeLaunchOptions::default()
+        };
+        self.start_with_options(config, project_key, &options)
+    }
+
+    pub fn start_with_options(
+        &self,
+        config: &AppConfig,
+        project_key: &str,
+        options: &ProjectRuntimeLaunchOptions,
+    ) -> Result<ProjectRuntimeSnapshot, String> {
         log_project_runtime_event(format!("start requested key={}", project_key));
         let project = config
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
-        let debug_profile = selected_debug_profile(project, debug_profile_key)?;
-        let inherited_runtime_profile = debug_profile
-            .as_ref()
-            .map(|profile| selected_runtime_profile(config, profile))
-            .transpose()?
-            .flatten();
-        if let Some(profile) = debug_profile.as_ref() {
-            apply_debug_profile_local_files(project, profile)?;
-        }
-        let mut resolved = resolve_project_command(project, ProjectCommandKind::Dev)?;
-        if let Some(profile) = debug_profile.as_ref() {
-            for (key, value) in &profile.env {
-                resolved.env.insert(key.clone(), value.clone());
-            }
-            apply_network_proxy_env(&mut resolved, profile, inherited_runtime_profile.as_ref())?;
-        }
-        if let Some(env_overrides) = env_overrides {
-            for (key, value) in env_overrides {
-                resolved.env.insert(key.clone(), value.clone());
-            }
-        }
-        let launch_resolved = resolved.clone();
+        let response = core_start_project_runtime(config, project_key, options)?;
         log_project_runtime_event(format!(
-            "start resolved key={} cwd={} command={} debug_profile={} env_overrides={}",
+            "daemon start key={} pid={} cwd={} command={} debug_profile={} env_overrides={}",
             project.key,
-            resolved.cwd.display(),
-            resolved.command,
-            debug_profile
-                .as_ref()
-                .map(|profile| profile.key.as_str())
-                .unwrap_or("default"),
-            env_overrides.map(|values| values.len()).unwrap_or(0)
+            response
+                .pid
+                .map(|pid| pid.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            response.cwd,
+            response.command,
+            response.debug_profile_key.as_deref().unwrap_or("default"),
+            options.env.len()
         ));
+
+        if response.running && should_watch_project_ready(project) {
+            let debug_profile = selected_debug_profile(project, options.debug_profile.as_deref())?;
+            let runtime_profile = resolve_runtime_profile(
+                config,
+                debug_profile.as_ref(),
+                options.runtime_profile.as_deref(),
+            )?;
+            spawn_ready_focus_watcher(project.clone(), debug_profile, runtime_profile);
+        }
 
         let mut store = self
             .inner
             .state
             .lock()
             .map_err(|_| "project runtime lock poisoned".to_string())?;
-        let already_running = {
-            let (running, last_results) = store.dev_parts();
-            task_running_state(running, last_results, project, ProjectCommandKind::Dev)?.is_some()
-        };
-        if already_running {
-            return snapshot_for_project(&mut store, project);
-        }
-
-        let local_proxy = debug_profile
-            .as_ref()
-            .filter(|profile| profile.local_proxy.enabled)
-            .map(|profile| start_local_proxy(project, profile))
-            .transpose()?;
-
-        {
-            let (running, last_results) = store.dev_parts();
-            launch_project_command(
-                running,
-                last_results,
-                project,
-                launch_resolved,
-                ProjectCommandKind::Dev,
-                local_proxy,
-            )?;
-        }
-
-        if let Some(process) = store.running.get(&project.key) {
-            log_project_runtime_event(format!(
-                "start launched key={} pid={} cwd={} command={}",
-                project.key,
-                process.pid,
-                resolved.cwd.display(),
-                resolved.command
-            ));
-        }
-        let launched = store.running.contains_key(&project.key);
-        if launched && should_watch_project_ready(project) {
-            spawn_ready_focus_watcher(
-                project.clone(),
-                debug_profile.clone(),
-                inherited_runtime_profile.clone(),
+        if response.started_new && response.running {
+            let status_key = runtime_daemon::runtime_status_key(&project.key, &response.cwd);
+            store.app_started_runtimes.insert(
+                status_key.clone(),
+                AppStartedRuntimeSession {
+                    status_key,
+                    project_key: project.key.clone(),
+                    project_name: project.name.clone(),
+                    cwd: PathBuf::from(&response.cwd),
+                    run_id: response.run_id,
+                },
             );
         }
+        snapshot_for_project(&mut store, project)
+    }
 
+    pub fn adopt_with_options(
+        &self,
+        config: &AppConfig,
+        project_key: &str,
+        pid: u32,
+        options: &ProjectRuntimeLaunchOptions,
+    ) -> Result<ProjectRuntimeSnapshot, String> {
+        let project = config
+            .find_project(project_key)
+            .map_err(|error| error.to_string())?;
+        let response = core_adopt_project_runtime(config, project_key, pid, options)?;
+        log_project_runtime_event(format!(
+            "external runtime adopted key={} pid={} pgid={} cwd={}",
+            project.key, response.pid, response.pgid, response.canonical_cwd
+        ));
+        let mut store = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| "project runtime lock poisoned".to_string())?;
         snapshot_for_project(&mut store, project)
     }
 
@@ -818,7 +449,7 @@ impl ProjectRuntimeState {
             .map_err(|_| "project runtime lock poisoned".to_string())?;
         let already_running = {
             let (running, last_results) = store.build_parts();
-            task_running_state(running, last_results, project, ProjectCommandKind::Build)?.is_some()
+            build_running_state(running, last_results, project)?.is_some()
         };
         if already_running {
             return snapshot_for_project(&mut store, project);
@@ -826,14 +457,7 @@ impl ProjectRuntimeState {
 
         {
             let (running, last_results) = store.build_parts();
-            launch_project_command(
-                running,
-                last_results,
-                project,
-                launch_resolved,
-                ProjectCommandKind::Build,
-                None,
-            )?;
+            launch_build_command(running, last_results, project, launch_resolved)?;
         }
 
         if let Some(process) = store.running_builds.get(&project.key) {
@@ -891,7 +515,7 @@ impl ProjectRuntimeState {
             .map_err(|_| "project runtime lock poisoned".to_string())?;
         let already_running = {
             let (running, last_results) = store.build_parts();
-            task_running_state(running, last_results, project, ProjectCommandKind::Build)?.is_some()
+            build_running_state(running, last_results, project)?.is_some()
         };
         if already_running {
             return snapshot_for_project(&mut store, project);
@@ -899,14 +523,7 @@ impl ProjectRuntimeState {
 
         {
             let (running, last_results) = store.build_parts();
-            launch_project_command(
-                running,
-                last_results,
-                project,
-                launch_resolved,
-                ProjectCommandKind::Build,
-                None,
-            )?;
+            launch_build_command(running, last_results, project, launch_resolved)?;
         }
 
         if let Some(process) = store.running_builds.get(&project.key) {
@@ -930,34 +547,24 @@ impl ProjectRuntimeState {
         let project = config
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
+        let cwd = project_runtime_daemon_cwd(project)?;
+        let stopped =
+            runtime_daemon::stop(&project.key, &cwd).map_err(|error| error.to_string())?;
+        log_project_runtime_event(format!(
+            "daemon stop key={} cwd={} managed={} running={}",
+            project.key,
+            cwd.display(),
+            stopped.managed,
+            stopped.running
+        ));
 
         let mut store = self
             .inner
             .state
             .lock()
             .map_err(|_| "project runtime lock poisoned".to_string())?;
-        {
-            let (running, last_results) = store.dev_parts();
-            let _ = task_running_state(running, last_results, project, ProjectCommandKind::Dev)?;
-        }
-
-        if let Some(mut process) = store.running.remove(&project.key) {
-            log_project_runtime_event(format!(
-                "stop requested key={} pid={}",
-                project.key, process.pid
-            ));
-            terminate_running_project_process(&mut process)?;
-            store.last_results.insert(
-                project.key.clone(),
-                ProjectTaskLastState {
-                    status_key: "stopped".to_string(),
-                    status_label: "未启动".to_string(),
-                    detail: "已停止 dev 服务".to_string(),
-                    updated_at_ms: now_ms(),
-                },
-            );
-        }
-
+        store.app_started_runtimes.remove(&stopped.status_key);
+        store.external_runtime_cache.remove(&project.key);
         snapshot_for_project(&mut store, project)
     }
 
@@ -977,7 +584,7 @@ impl ProjectRuntimeState {
             .map_err(|_| "project runtime lock poisoned".to_string())?;
         {
             let (running, last_results) = store.build_parts();
-            let _ = task_running_state(running, last_results, project, ProjectCommandKind::Build)?;
+            let _ = build_running_state(running, last_results, project)?;
         }
 
         if let Some(mut process) = store.running_builds.remove(&project.key) {
@@ -1003,6 +610,91 @@ impl ProjectRuntimeState {
     pub fn shutdown_all(&self) {
         if let Ok(mut store) = self.inner.state.lock() {
             shutdown_runtime_store(&mut store);
+        }
+    }
+
+    pub fn app_started_runtime_summary(&self) -> AppStartedRuntimeSummary {
+        let sessions = self.app_started_runtime_sessions();
+        let mut active = Vec::new();
+        let mut stale_keys = Vec::new();
+        for session in sessions {
+            match runtime_daemon::status(&session.project_key, &session.cwd) {
+                Ok(status) if app_owns_runtime_status(&session, &status) => active.push(session),
+                Ok(_) => stale_keys.push(session.status_key),
+                Err(_) => active.push(session),
+            }
+        }
+        self.remove_app_started_runtime_sessions(&stale_keys);
+        let count = active.len();
+        let mut project_names = active
+            .into_iter()
+            .map(|session| session.project_name)
+            .collect::<Vec<_>>();
+        project_names.sort();
+        project_names.dedup();
+        AppStartedRuntimeSummary {
+            count,
+            project_names,
+        }
+    }
+
+    pub fn shutdown_app_started_runtimes(&self) -> AppStartedRuntimeShutdownReport {
+        let sessions = self.app_started_runtime_sessions();
+        let mut report = AppStartedRuntimeShutdownReport {
+            requested: sessions.len(),
+            stopped: 0,
+            skipped: 0,
+            failures: Vec::new(),
+        };
+        let mut completed_keys = Vec::new();
+
+        for session in sessions {
+            let current = match runtime_daemon::status(&session.project_key, &session.cwd) {
+                Ok(status) => status,
+                Err(error) => {
+                    report.failures.push(format!(
+                        "{}：读取运行状态失败（{}）",
+                        session.project_name, error
+                    ));
+                    continue;
+                }
+            };
+            if !app_owns_runtime_status(&session, &current) {
+                report.skipped += 1;
+                completed_keys.push(session.status_key);
+                continue;
+            }
+            match runtime_daemon::stop(&session.project_key, &session.cwd) {
+                Ok(_) => {
+                    report.stopped += 1;
+                    completed_keys.push(session.status_key);
+                }
+                Err(error) => report
+                    .failures
+                    .push(format!("{}：停止失败（{}）", session.project_name, error)),
+            }
+        }
+
+        self.remove_app_started_runtime_sessions(&completed_keys);
+        report
+    }
+
+    fn app_started_runtime_sessions(&self) -> Vec<AppStartedRuntimeSession> {
+        self.inner
+            .state
+            .lock()
+            .map(|store| store.app_started_runtimes.values().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn remove_app_started_runtime_sessions(&self, status_keys: &[String]) {
+        if status_keys.is_empty() {
+            return;
+        }
+        if let Ok(mut store) = self.inner.state.lock() {
+            for status_key in status_keys {
+                store.app_started_runtimes.remove(status_key);
+            }
         }
     }
 
@@ -1045,17 +737,24 @@ impl ProjectRuntimeState {
         project_key: &str,
         debug_profile_key: Option<&str>,
     ) -> Result<ProjectRuntimeSnapshot, String> {
+        self.focus_runtime_with_profile(config, project_key, debug_profile_key, None)
+    }
+
+    pub fn focus_runtime_with_profile(
+        &self,
+        config: &AppConfig,
+        project_key: &str,
+        debug_profile_key: Option<&str>,
+        runtime_profile_key: Option<&str>,
+    ) -> Result<ProjectRuntimeSnapshot, String> {
         let project = config
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
         let debug_profile = selected_debug_profile(project, debug_profile_key)?;
-        let inherited_runtime_profile = debug_profile
-            .as_ref()
-            .map(|profile| selected_runtime_profile(config, profile))
-            .transpose()?
-            .flatten();
+        let runtime_profile =
+            resolve_runtime_profile(config, debug_profile.as_ref(), runtime_profile_key)?;
 
-        match resolve_focus_target(project) {
+        match resolve_focus_target(project).or_else(|| ready_focus_target(project)) {
             Some(ProjectFocusTarget::AppBundle(bundle_id)) => {
                 log_project_runtime_event(format!(
                     "focus runtime key={} bundle_id={}",
@@ -1065,14 +764,10 @@ impl ProjectRuntimeState {
             }
             Some(ProjectFocusTarget::Url(url)) => {
                 log_project_runtime_event(format!("focus runtime key={} url={}", project.key, url));
-                open_focus_url(
-                    &url,
-                    debug_profile.as_ref(),
-                    inherited_runtime_profile.as_ref(),
-                )
-                .map_err(|error| format!("打开项目页面失败: {}", error))?;
+                open_focus_url(&url, debug_profile.as_ref(), runtime_profile.as_ref())
+                    .map_err(|error| format!("打开项目页面失败: {}", error))?;
             }
-            None => return Err("当前项目未配置可唤起目标".to_string()),
+            None => return Err("当前项目未配置可唤起目标，且未识别到启动地址".to_string()),
         }
 
         let mut store = self
@@ -1103,32 +798,33 @@ impl ProjectRuntimeState {
     }
 }
 
+fn app_owns_runtime_status(
+    session: &AppStartedRuntimeSession,
+    status: &RuntimeDaemonStatus,
+) -> bool {
+    status.running
+        && status.managed
+        && status.status_key == session.status_key
+        && status.state.as_ref().is_some_and(|state| {
+            state.run_id == session.run_id
+                && state.project_key == session.project_key
+                && Path::new(&state.canonical_cwd) == session.cwd
+        })
+}
+
 fn snapshot_for_project(
     store: &mut ProjectRuntimeStore,
     project: &ProjectConfig,
 ) -> Result<ProjectRuntimeSnapshot, String> {
     let display = runtime_display_config(project);
     let build_output_dir = resolve_build_output_dir(project);
-    let can_focus_runtime = resolve_focus_target(project).is_some();
-    let dev_state = {
-        let (running, last_results) = store.dev_parts();
-        task_state_for_project(
-            running,
-            last_results,
-            project,
-            &display.dev,
-            ProjectCommandKind::Dev,
-        )?
-    };
+    let dev_state =
+        runtime_daemon_task_state(project, &display.dev, &mut store.external_runtime_cache)?;
+    let can_focus_runtime = resolve_focus_target(project).is_some()
+        || focus_target_from_ready_url(&dev_state.ready_url).is_some();
     let build_state = {
         let (running, last_results) = store.build_parts();
-        task_state_for_project(
-            running,
-            last_results,
-            project,
-            &display.build,
-            ProjectCommandKind::Build,
-        )?
+        build_task_state_for_project(running, last_results, project, &display.build)?
     };
     let can_open_build_output = build_state.status_key == "succeeded"
         && build_output_dir
@@ -1186,9 +882,10 @@ fn snapshot_for_project(
         build_log_path,
         updated_at_ms: dev_state.updated_at_ms.max(build_state.updated_at_ms),
         can_start: dev_state.is_available && !dev_state.is_running,
-        can_stop: dev_state.is_running,
+        can_stop: dev_state.can_stop,
+        can_adopt: dev_state.can_adopt,
         can_build: build_state.is_available && !build_state.is_running,
-        can_stop_build: build_state.is_running,
+        can_stop_build: build_state.can_stop,
         can_open_build_output,
         can_focus_runtime,
         debug_profiles: project
@@ -1197,6 +894,8 @@ fn snapshot_for_project(
             .map(|profile| ProjectDebugProfileSummary {
                 key: profile.key.clone(),
                 label: profile.label.clone(),
+                command: profile.command.clone(),
+                expected_port: profile.expected_port,
                 runtime_profile: profile.runtime_profile.clone(),
                 env: profile.env.clone(),
                 env_count: profile.env.len(),
@@ -1278,16 +977,221 @@ fn map_to_editor_text(values: &BTreeMap<String, String>) -> String {
         .join("\n")
 }
 
-fn task_state_for_project(
+fn project_runtime_daemon_cwd(project: &ProjectConfig) -> Result<PathBuf, String> {
+    let command = project
+        .dev
+        .as_ref()
+        .ok_or_else(|| ProjectCommandKind::Dev.missing_config_message().to_string())?;
+    resolve_command_cwd(project, command, ProjectCommandKind::Dev)
+}
+
+fn runtime_daemon_task_state(
+    project: &ProjectConfig,
+    display: &TaskDisplayConfig,
+    external_runtime_cache: &mut HashMap<String, ExternalRuntimeCacheEntry>,
+) -> Result<TaskSnapshotState, String> {
+    let cwd = match project_runtime_daemon_cwd(project) {
+        Ok(cwd) => cwd,
+        Err(error) => return Ok(unavailable_task_state(display, error)),
+    };
+    let status = runtime_daemon::status(&project.key, &cwd).map_err(|error| error.to_string())?;
+    if !status.running {
+        let now = now_ms();
+        let cached = external_runtime_cache
+            .get(&project.key)
+            .filter(|entry| {
+                let ttl = if entry.detection.is_some() {
+                    600
+                } else {
+                    5_000
+                };
+                now.saturating_sub(entry.checked_at_ms) < ttl
+            })
+            .cloned();
+        let detection = match cached {
+            Some(entry) => entry.detection,
+            None => {
+                let options = ProjectRuntimeLaunchOptions::default();
+                let detection =
+                    detect_external_project_runtime_for_project_with_options(project, &options)
+                        .ok()
+                        .flatten();
+                external_runtime_cache.insert(
+                    project.key.clone(),
+                    ExternalRuntimeCacheEntry {
+                        checked_at_ms: now,
+                        detection: detection.clone(),
+                    },
+                );
+                detection
+            }
+        };
+        if let Some(external) = detection {
+            return Ok(external_dev_task_state(external));
+        }
+    }
+    if status.state.is_none() {
+        return match resolve_project_command(project, ProjectCommandKind::Dev) {
+            Ok(_) => Ok(idle_dev_task_state()),
+            Err(error) => Ok(unavailable_task_state(display, error)),
+        };
+    }
+    Ok(runtime_daemon_status_to_task_state(&status))
+}
+
+fn unavailable_task_state(display: &TaskDisplayConfig, detail: String) -> TaskSnapshotState {
+    TaskSnapshotState {
+        status_key: if display.configured {
+            "invalidConfig".to_string()
+        } else {
+            "notConfigured".to_string()
+        },
+        status_label: if display.configured {
+            "配置无效".to_string()
+        } else {
+            "未配置".to_string()
+        },
+        detail,
+        ready_url: None,
+        pid: None,
+        started_at_ms: None,
+        updated_at_ms: now_ms(),
+        is_running: false,
+        is_available: false,
+        can_stop: false,
+        can_adopt: false,
+    }
+}
+
+fn idle_dev_task_state() -> TaskSnapshotState {
+    TaskSnapshotState {
+        status_key: "idle".to_string(),
+        status_label: "未启动".to_string(),
+        detail: "dev 服务未启动".to_string(),
+        ready_url: None,
+        pid: None,
+        started_at_ms: None,
+        updated_at_ms: now_ms(),
+        is_running: false,
+        is_available: true,
+        can_stop: false,
+        can_adopt: false,
+    }
+}
+
+fn external_dev_task_state(
+    external: rdevtool_core::runtime::ProjectRuntimeExternalDetection,
+) -> TaskSnapshotState {
+    TaskSnapshotState {
+        status_key: "external".to_string(),
+        status_label: "运行中（外部）".to_string(),
+        detail: format!(
+            "检测到 PID {} 正在监听端口 {}，认领后可由 rDevTool 管理",
+            external.process.pid, external.expected_port
+        ),
+        ready_url: external.ready_url,
+        pid: Some(external.process.pid),
+        started_at_ms: None,
+        updated_at_ms: now_ms(),
+        is_running: true,
+        is_available: true,
+        can_stop: false,
+        can_adopt: true,
+    }
+}
+
+fn runtime_daemon_status_to_task_state(status: &RuntimeDaemonStatus) -> TaskSnapshotState {
+    let state = status
+        .state
+        .as_ref()
+        .expect("daemon status mapping requires persisted state");
+    let active_phase = matches!(
+        state.phase,
+        RuntimeDaemonPhase::Starting | RuntimeDaemonPhase::Running | RuntimeDaemonPhase::Stopping
+    );
+    let ownership_lost = !status.managed && (status.running || active_phase);
+    let is_running = status.running || (status.managed && active_phase);
+
+    let updated_at_ms = state
+        .exit
+        .as_ref()
+        .map(|exit| exit.exited_at_ms)
+        .unwrap_or(state.started_at_ms);
+    let (status_key, status_label, detail) = if ownership_lost {
+        (
+            "lost".to_string(),
+            "状态失联".to_string(),
+            if status.running {
+                "检测到 dev 进程仍在，但 Runtime Daemon 所有权校验失败；不可从 App 停止".to_string()
+            } else {
+                "Runtime Daemon 留有活动状态，但守护进程已失联；不可从 App 停止".to_string()
+            },
+        )
+    } else {
+        match &state.phase {
+            RuntimeDaemonPhase::Starting => (
+                "starting".to_string(),
+                "启动中".to_string(),
+                "正在启动受管 dev 服务".to_string(),
+            ),
+            RuntimeDaemonPhase::Running => (
+                "running".to_string(),
+                "运行中（受管）".to_string(),
+                state
+                    .ready_url
+                    .clone()
+                    .unwrap_or_else(|| "共享 Runtime Daemon 正在托管此进程组".to_string()),
+            ),
+            RuntimeDaemonPhase::Stopping => (
+                "stopping".to_string(),
+                "停止中".to_string(),
+                "正在停止项目及其子进程".to_string(),
+            ),
+            RuntimeDaemonPhase::Exited => (
+                "stopped".to_string(),
+                "未启动".to_string(),
+                state
+                    .exit
+                    .as_ref()
+                    .map(|exit| exit.reason.clone())
+                    .unwrap_or_else(|| "dev 服务已退出".to_string()),
+            ),
+            RuntimeDaemonPhase::Failed => (
+                "failed".to_string(),
+                "启动失败".to_string(),
+                state
+                    .exit
+                    .as_ref()
+                    .map(|exit| exit.reason.clone())
+                    .unwrap_or_else(|| status.detail.clone()),
+            ),
+        }
+    };
+
+    TaskSnapshotState {
+        status_key,
+        status_label,
+        detail,
+        ready_url: state.ready_url.clone(),
+        pid: is_running.then_some(state.worker_pid).flatten(),
+        started_at_ms: Some(state.started_at_ms),
+        updated_at_ms,
+        is_running,
+        is_available: true,
+        can_stop: is_running && status.managed,
+        can_adopt: false,
+    }
+}
+
+fn build_task_state_for_project(
     running: &mut HashMap<String, RunningProjectProcess>,
     last_results: &mut HashMap<String, ProjectTaskLastState>,
     project: &ProjectConfig,
     display: &TaskDisplayConfig,
-    kind: ProjectCommandKind,
 ) -> Result<TaskSnapshotState, String> {
     let mut updated_at_ms = now_ms();
 
-    if let Some(running_state) = task_running_state(running, last_results, project, kind)? {
+    if let Some(running_state) = build_running_state(running, last_results, project)? {
         return Ok(running_state);
     }
 
@@ -1296,7 +1200,7 @@ fn task_state_for_project(
         updated_at_ms = last.updated_at_ms;
     }
 
-    match resolve_project_command(project, kind) {
+    match resolve_project_command(project, ProjectCommandKind::Build) {
         Ok(_) => {
             if let Some(last) = last_state {
                 return Ok(TaskSnapshotState {
@@ -1309,20 +1213,23 @@ fn task_state_for_project(
                     updated_at_ms,
                     is_running: false,
                     is_available: true,
+                    can_stop: false,
+                    can_adopt: false,
                 });
             }
 
-            let (status_key, status_label, detail) = kind.idle_state();
             Ok(TaskSnapshotState {
-                status_key: status_key.to_string(),
-                status_label: status_label.to_string(),
-                detail: detail.to_string(),
+                status_key: "stopped".to_string(),
+                status_label: "待打包".to_string(),
+                detail: "配置已就绪，可执行打包任务".to_string(),
                 ready_url: None,
                 pid: None,
                 started_at_ms: None,
                 updated_at_ms,
                 is_running: false,
                 is_available: true,
+                can_stop: false,
+                can_adopt: false,
             })
         }
         Err(error) => Ok(TaskSnapshotState {
@@ -1343,15 +1250,16 @@ fn task_state_for_project(
             updated_at_ms,
             is_running: false,
             is_available: false,
+            can_stop: false,
+            can_adopt: false,
         }),
     }
 }
 
-fn task_running_state(
+fn build_running_state(
     running: &mut HashMap<String, RunningProjectProcess>,
     last_results: &mut HashMap<String, ProjectTaskLastState>,
     project: &ProjectConfig,
-    kind: ProjectCommandKind,
 ) -> Result<Option<TaskSnapshotState>, String> {
     let mut remove_exited = None;
 
@@ -1363,57 +1271,45 @@ fn task_running_state(
         {
             Some(status) => remove_exited = Some(status.code()),
             None => {
-                let (mut status_key, mut status_label, mut detail) = kind.running_state();
-                let ready_summary = runtime_ready_summary_from_file(project, kind)?;
-                let ready_url = ready_summary.url.clone();
-                if ready_summary.ready {
-                    status_key = "running";
-                    status_label = "已启动";
-                    detail = ready_summary
-                        .url
-                        .as_deref()
-                        .or(ready_summary.detail.as_deref())
-                        .unwrap_or("dev 服务已启动");
-                } else if ready_summary.failed {
-                    status_key = "failed";
-                    status_label = "启动异常";
-                    detail = ready_summary.detail.as_deref().unwrap_or("检测到启动异常");
-                }
-                return Ok(Some(TaskSnapshotState {
-                    status_key: status_key.to_string(),
-                    status_label: status_label.to_string(),
-                    detail: detail.to_string(),
-                    ready_url,
-                    pid: Some(process.pid),
-                    started_at_ms: Some(process.started_at_ms),
-                    updated_at_ms: now_ms(),
-                    is_running: true,
-                    is_available: true,
-                }));
+                return Ok(Some(running_build_task_state(
+                    process.pid,
+                    process.started_at_ms,
+                )));
             }
         }
     }
 
     if let Some(code) = remove_exited {
-        if let Some(mut process) = running.remove(&project.key) {
-            terminate_local_proxy(&mut process.local_proxy);
-        }
-        last_results.insert(project.key.clone(), kind.finished_state(code));
+        running.remove(&project.key);
+        last_results.insert(project.key.clone(), build_finished_state(code));
     }
 
     Ok(None)
 }
 
-fn launch_project_command(
+fn running_build_task_state(pid: u32, started_at_ms: u64) -> TaskSnapshotState {
+    TaskSnapshotState {
+        status_key: "running".to_string(),
+        status_label: "打包中".to_string(),
+        detail: "打包任务正在运行".to_string(),
+        ready_url: None,
+        pid: Some(pid),
+        started_at_ms: Some(started_at_ms),
+        updated_at_ms: now_ms(),
+        is_running: true,
+        is_available: true,
+        can_stop: true,
+        can_adopt: false,
+    }
+}
+
+fn launch_build_command(
     running: &mut HashMap<String, RunningProjectProcess>,
     last_results: &mut HashMap<String, ProjectTaskLastState>,
     project: &ProjectConfig,
     resolved: ResolvedProjectCommand,
-    kind: ProjectCommandKind,
-    local_proxy: Option<RunningLocalProxyProcess>,
 ) -> Result<(), String> {
-    let mut local_proxy = local_proxy;
-    let mut log_file = open_task_log(project, &resolved, kind)?;
+    let mut log_file = open_task_log(project, &resolved, ProjectCommandKind::Build)?;
     let stdout = log_file
         .try_clone()
         .map_err(|error| format!("创建日志输出失败: {}", error))?;
@@ -1441,18 +1337,9 @@ fn launch_project_command(
         command.process_group(0);
     }
 
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            terminate_local_proxy(&mut local_proxy);
-            return Err(format!(
-                "{} {} 失败: {}",
-                kind.action_label(),
-                project.name,
-                error
-            ));
-        }
-    };
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("执行打包 {} 失败: {}", project.name, error))?;
     let pid = child.id();
     let started_at_ms = now_ms();
 
@@ -1460,8 +1347,7 @@ fn launch_project_command(
     match child.try_wait().map_err(|error| error.to_string())? {
         Some(status) => {
             let _ = writeln!(log_file, "[{}] exited quickly status={}", now_ms(), status);
-            terminate_local_proxy(&mut local_proxy);
-            last_results.insert(project.key.clone(), kind.quick_exit_state(status.code()));
+            last_results.insert(project.key.clone(), build_quick_exit_state(status.code()));
         }
         None => {
             let _ = writeln!(log_file, "[{}] running pid={}", now_ms(), pid);
@@ -1471,7 +1357,6 @@ fn launch_project_command(
                     child,
                     pid,
                     started_at_ms,
-                    local_proxy,
                 },
             );
             last_results.remove(&project.key);
@@ -1479,137 +1364,6 @@ fn launch_project_command(
     }
 
     Ok(())
-}
-
-fn start_local_proxy(
-    project: &ProjectConfig,
-    profile: &ProjectDebugProfileConfig,
-) -> Result<RunningLocalProxyProcess, String> {
-    let proxy = &profile.local_proxy;
-    let script_path = ensure_local_proxy_script()?;
-    let config_path = write_local_proxy_config(project, profile)?;
-    let mut log_file = open_local_proxy_log(project, profile)?;
-    let stdout = log_file
-        .try_clone()
-        .map_err(|error| format!("创建本地代理日志失败: {}", error))?;
-    let stderr = log_file
-        .try_clone()
-        .map_err(|error| format!("创建本地代理日志失败: {}", error))?;
-    let mut command = Command::new("node");
-    command
-        .arg(&script_path)
-        .arg(&config_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-
-    scrub_launcher_env(&mut command);
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("启动本地 API 代理失败: {}", error))?;
-    let pid = child.id();
-    thread::sleep(Duration::from_millis(180));
-    match child.try_wait().map_err(|error| error.to_string())? {
-        Some(status) => {
-            let _ = writeln!(
-                log_file,
-                "[{}] local proxy exited quickly status={}",
-                now_ms(),
-                status
-            );
-            Err(format!("本地 API 代理启动后立即退出: {}", status))
-        }
-        None => {
-            let _ = writeln!(
-                log_file,
-                "[{}] local proxy running pid={} listen={}",
-                now_ms(),
-                pid,
-                proxy.listen
-            );
-            log_project_runtime_event(format!(
-                "local proxy launched key={} profile={} pid={} listen={}",
-                project.key, profile.key, pid, proxy.listen
-            ));
-            Ok(RunningLocalProxyProcess {
-                child,
-                pid,
-                listen: proxy.listen.clone(),
-            })
-        }
-    }
-}
-
-fn ensure_local_proxy_script() -> Result<PathBuf, String> {
-    let script_path = std::env::temp_dir().join(LOCAL_PROXY_SCRIPT_FILENAME);
-    let needs_write = fs::read_to_string(&script_path)
-        .map(|content| content != LOCAL_PROXY_SCRIPT)
-        .unwrap_or(true);
-    if needs_write {
-        fs::write(&script_path, LOCAL_PROXY_SCRIPT)
-            .map_err(|error| format!("写入本地 API 代理脚本失败: {}", error))?;
-    }
-    Ok(script_path)
-}
-
-fn write_local_proxy_config(
-    project: &ProjectConfig,
-    profile: &ProjectDebugProfileConfig,
-) -> Result<PathBuf, String> {
-    let dir = std::env::temp_dir().join("rdevtool-local-proxy");
-    fs::create_dir_all(&dir).map_err(|error| format!("创建本地代理配置目录失败: {}", error))?;
-    let config_path = dir.join(format!(
-        "{}-{}.json",
-        sanitize_log_name(&project.key),
-        sanitize_log_name(&profile.key)
-    ));
-    let payload = json!({
-        "project_key": &project.key,
-        "profile_key": &profile.key,
-        "proxy": &profile.local_proxy,
-    });
-    let content = serde_json::to_vec_pretty(&payload)
-        .map_err(|error| format!("生成本地代理配置失败: {}", error))?;
-    fs::write(&config_path, content).map_err(|error| format!("写入本地代理配置失败: {}", error))?;
-    Ok(config_path)
-}
-
-fn open_local_proxy_log(
-    project: &ProjectConfig,
-    profile: &ProjectDebugProfileConfig,
-) -> Result<File, String> {
-    let path = default_config_dir().join("runtime-logs").join(format!(
-        "{}-{}-local-proxy.log",
-        sanitize_log_name(&project.key),
-        sanitize_log_name(&profile.key)
-    ));
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|error| format!("创建日志目录失败: {}", error))?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| format!("打开本地代理日志失败: {}", error))?;
-    writeln!(
-        file,
-        "\n[{}] local proxy start key={} profile={} listen={} frontend={} upstream={}",
-        now_ms(),
-        project.key,
-        profile.key,
-        profile.local_proxy.listen,
-        profile.local_proxy.frontend_url,
-        profile.local_proxy.upstream_proxy
-    )
-    .map_err(|error| format!("写入本地代理日志失败: {}", error))?;
-    Ok(file)
 }
 
 fn open_task_log(
@@ -1962,9 +1716,6 @@ fn default_ready_failure_markers() -> Vec<String> {
 }
 
 fn shutdown_runtime_store(store: &mut ProjectRuntimeStore) {
-    for (_, mut process) in store.running.drain() {
-        let _ = terminate_running_project_process(&mut process);
-    }
     for (_, mut process) in store.running_builds.drain() {
         let _ = terminate_running_project_process(&mut process);
     }
@@ -2236,6 +1987,9 @@ fn project_ready_navigation_entry(
         bundle_id: None,
         app_name: None,
         script: None,
+        tool: None,
+        tool_key: None,
+        tool_action: None,
         path: None,
         cwd: project
             .repo_path
@@ -2329,16 +2083,15 @@ fn selected_debug_profile(
         .ok_or_else(|| format!("调试档案不存在: {}", profile_key))
 }
 
-fn selected_runtime_profile(
+fn resolve_runtime_profile(
     config: &AppConfig,
-    profile: &ProjectDebugProfileConfig,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    explicit_runtime_profile_key: Option<&str>,
 ) -> Result<Option<RuntimeProfileConfig>, String> {
-    let Some(runtime_profile_key) = profile
-        .runtime_profile
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let runtime_profile_key = optional_trimmed(explicit_runtime_profile_key).or_else(|| {
+        debug_profile.and_then(|profile| optional_trimmed(profile.runtime_profile.as_deref()))
+    });
+    let Some(runtime_profile_key) = runtime_profile_key else {
         return Ok(None);
     };
     config
@@ -2349,84 +2102,6 @@ fn selected_runtime_profile(
         .cloned()
         .map(Some)
         .ok_or_else(|| format!("运行配置不存在: {}", runtime_profile_key))
-}
-
-fn apply_network_proxy_env(
-    resolved: &mut ResolvedProjectCommand,
-    profile: &ProjectDebugProfileConfig,
-    runtime_profile: Option<&RuntimeProfileConfig>,
-) -> Result<(), String> {
-    let proxy = if profile.network_proxy.enabled {
-        &profile.network_proxy
-    } else if let Some(runtime_profile) = runtime_profile {
-        &runtime_profile.network_proxy
-    } else {
-        &profile.network_proxy
-    };
-    if !proxy.enabled {
-        return Ok(());
-    }
-
-    let proxy_url = proxy.proxy_url.trim();
-    if proxy_url.is_empty() {
-        return Err(format!("调试档案 {} 的代理地址为空", profile.key));
-    }
-
-    let no_proxy = normalize_network_proxy_no_proxy(&proxy.no_proxy);
-    if proxy.inject_env {
-        for key in [
-            "HTTP_PROXY",
-            "HTTPS_PROXY",
-            "ALL_PROXY",
-            "http_proxy",
-            "https_proxy",
-            "all_proxy",
-        ] {
-            resolved.env.insert(key.to_string(), proxy_url.to_string());
-        }
-        resolved
-            .env
-            .insert("NO_PROXY".to_string(), no_proxy.clone());
-        resolved
-            .env
-            .insert("no_proxy".to_string(), no_proxy.clone());
-    }
-
-    if proxy.node_hook {
-        if !proxy_url.to_lowercase().starts_with("http://") {
-            return Err(format!(
-                "调试档案 {} 的 Node Hook 当前只支持 http:// 代理",
-                profile.key
-            ));
-        }
-        let hook_path = ensure_node_proxy_hook()?;
-        let hook_path = hook_path.display().to_string();
-        resolved.env.insert(
-            "RDEVTOOL_NETWORK_PROXY_URL".to_string(),
-            proxy_url.to_string(),
-        );
-        resolved
-            .env
-            .insert("RDEVTOOL_NETWORK_PROXY_NO_PROXY".to_string(), no_proxy);
-        let node_options = merge_node_require_option(
-            resolved.env.get("NODE_OPTIONS").map(String::as_str),
-            &hook_path,
-        );
-        resolved
-            .env
-            .insert("NODE_OPTIONS".to_string(), node_options);
-    }
-
-    Ok(())
-}
-
-fn normalize_network_proxy_no_proxy(value: &str) -> String {
-    let value = value.trim();
-    if value.is_empty() {
-        "localhost,127.0.0.1,::1".to_string()
-    } else {
-        value.to_string()
-    }
 }
 
 fn open_focus_url(
@@ -2548,6 +2223,10 @@ fn normalize_browser_choice(value: &str) -> ProjectBrowserChoice<'_> {
 
 fn optional_trimmed(value: Option<&str>) -> Option<&str> {
     value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn optional_owned(value: Option<&str>) -> Option<String> {
+    optional_trimmed(value).map(ToString::to_string)
 }
 
 fn normalize_browser_arg(value: &str) -> Option<String> {
@@ -2681,193 +2360,6 @@ fn open_chromium_browser_instance(
     Ok(())
 }
 
-fn ensure_node_proxy_hook() -> Result<PathBuf, String> {
-    let hook_path = std::env::temp_dir().join(NODE_PROXY_HOOK_FILENAME);
-    let needs_write = fs::read_to_string(&hook_path)
-        .map(|content| content != NODE_PROXY_HOOK)
-        .unwrap_or(true);
-    if needs_write {
-        fs::write(&hook_path, NODE_PROXY_HOOK)
-            .map_err(|error| format!("写入 Node 代理 Hook 失败: {}", error))?;
-    }
-    Ok(hook_path)
-}
-
-fn merge_node_require_option(existing: Option<&str>, hook_path: &str) -> String {
-    let require_option = format!("--require={}", hook_path);
-    let existing = existing.map(str::trim).unwrap_or("");
-    if existing.is_empty() {
-        return require_option;
-    }
-    if existing.contains(hook_path) {
-        return existing.to_string();
-    }
-    format!("{} {}", require_option, existing)
-}
-
-fn apply_debug_profile_local_files(
-    project: &ProjectConfig,
-    profile: &ProjectDebugProfileConfig,
-) -> Result<(), String> {
-    if profile.local_files.is_empty() {
-        return Ok(());
-    }
-    let repo_path = project
-        .repo_path
-        .as_ref()
-        .ok_or_else(|| "调试档案写入本地文件需要项目配置 repo_path".to_string())?;
-    if !repo_path.exists() || !repo_path.is_dir() {
-        return Err(format!(
-            "项目目录不存在，无法应用调试档案: {}",
-            repo_path.display()
-        ));
-    }
-    let git_checked = repo_path.join(".git").exists();
-    for local_file in profile.local_files.iter().filter(|item| item.enabled) {
-        let (target_path, relative_path) =
-            resolve_debug_local_file_path(repo_path, &local_file.path)?;
-        if git_checked {
-            ensure_debug_local_file_git_safe(repo_path, &relative_path)?;
-        }
-        if let Some(parent) = target_path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("创建本地调试文件目录失败: {}", error))?;
-        }
-        match local_file.mode.trim() {
-            "" | "overwrite" => {
-                fs::write(&target_path, &local_file.content)
-                    .map_err(|error| format!("写入本地调试文件失败: {}", error))?;
-            }
-            "append_block" => {
-                write_debug_append_block(
-                    &target_path,
-                    &profile.key,
-                    &relative_path,
-                    &local_file.content,
-                )?;
-            }
-            other => {
-                return Err(format!(
-                    "本地调试文件 {} 使用了不支持的写入方式: {}",
-                    relative_path, other
-                ));
-            }
-        }
-        log_project_runtime_event(format!(
-            "debug profile applied project={} profile={} file={} mode={}",
-            project.key, profile.key, relative_path, local_file.mode
-        ));
-    }
-    Ok(())
-}
-
-fn resolve_debug_local_file_path(
-    repo_path: &Path,
-    file_path: &Path,
-) -> Result<(PathBuf, String), String> {
-    if file_path.as_os_str().is_empty() {
-        return Err("本地调试文件路径不能为空".to_string());
-    }
-    if file_path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir))
-    {
-        return Err(format!(
-            "本地调试文件路径不能包含 ..: {}",
-            file_path.display()
-        ));
-    }
-    let target_path = if file_path.is_absolute() {
-        if !file_path.starts_with(repo_path) {
-            return Err(format!(
-                "本地调试文件必须位于项目目录内: {}",
-                file_path.display()
-            ));
-        }
-        file_path.to_path_buf()
-    } else {
-        repo_path.join(file_path)
-    };
-    let relative_path = target_path
-        .strip_prefix(repo_path)
-        .map_err(|_| format!("本地调试文件必须位于项目目录内: {}", target_path.display()))?
-        .to_string_lossy()
-        .replace('\\', "/");
-    Ok((target_path, relative_path))
-}
-
-fn ensure_debug_local_file_git_safe(repo_path: &Path, relative_path: &str) -> Result<(), String> {
-    let tracked = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .arg("ls-files")
-        .arg("--error-unmatch")
-        .arg("--")
-        .arg(relative_path)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|error| format!("检查本地调试文件 Git 状态失败: {}", error))?
-        .success();
-    if tracked {
-        return Err(format!(
-            "{} 已被 git 跟踪，拒绝用调试档案覆盖；请改用被 .gitignore 忽略的本地配置文件",
-            relative_path
-        ));
-    }
-
-    let ignored_status = Command::new("git")
-        .arg("-C")
-        .arg(repo_path)
-        .arg("check-ignore")
-        .arg("-q")
-        .arg("--")
-        .arg(relative_path)
-        .status()
-        .map_err(|error| format!("检查本地调试文件 .gitignore 状态失败: {}", error))?;
-    if !ignored_status.success() {
-        return Err(format!(
-            "{} 当前没有被 .gitignore 忽略；为避免误提交，请先加入 .gitignore 后再应用调试档案",
-            relative_path
-        ));
-    }
-    Ok(())
-}
-
-fn write_debug_append_block(
-    target_path: &Path,
-    profile_key: &str,
-    relative_path: &str,
-    content: &str,
-) -> Result<(), String> {
-    let existing = match fs::read_to_string(target_path) {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(error) => return Err(format!("读取本地调试文件失败: {}", error)),
-    };
-    let start_marker = format!("# >>> rDevTool:{}:{}\n", profile_key, relative_path);
-    let end_marker = format!("# <<< rDevTool:{}:{}\n", profile_key, relative_path);
-    let block = format!(
-        "{}{}\n{}",
-        start_marker,
-        content.trim_end_matches('\n'),
-        end_marker
-    );
-    let next = if let (Some(start), Some(end)) = (
-        existing.find(&start_marker),
-        existing
-            .find(&end_marker)
-            .map(|index| index + end_marker.len()),
-    ) {
-        format!("{}{}{}", &existing[..start], block, &existing[end..])
-    } else if existing.trim().is_empty() {
-        block
-    } else {
-        format!("{}\n\n{}", existing.trim_end_matches('\n'), block)
-    };
-    fs::write(target_path, next).map_err(|error| format!("写入本地调试文件失败: {}", error))
-}
-
 fn resolve_command_cwd(
     project: &ProjectConfig,
     command_config: &ProjectCommandConfig,
@@ -2921,6 +2413,19 @@ fn resolve_focus_target(project: &ProjectConfig) -> Option<ProjectFocusTarget> {
     }
 
     None
+}
+
+fn ready_focus_target(project: &ProjectConfig) -> Option<ProjectFocusTarget> {
+    runtime_ready_summary_from_file(project, ProjectCommandKind::Dev)
+        .ok()
+        .and_then(|summary| focus_target_from_ready_url(&summary.url))
+}
+
+fn focus_target_from_ready_url(url: &Option<String>) -> Option<ProjectFocusTarget> {
+    url.as_deref()
+        .map(str::trim)
+        .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+        .map(|value| ProjectFocusTarget::Url(value.to_string()))
 }
 
 fn task_display_config(project: &ProjectConfig, kind: ProjectCommandKind) -> TaskDisplayConfig {
@@ -3003,13 +2508,6 @@ fn project_command_config(
 }
 
 impl ProjectCommandKind {
-    fn action_label(self) -> &'static str {
-        match self {
-            Self::Dev => "启动",
-            Self::Build => "执行打包",
-        }
-    }
-
     fn config_block(self) -> &'static str {
         match self {
             Self::Dev => "[projects.dev]",
@@ -3051,96 +2549,45 @@ impl ProjectCommandKind {
             Self::Build => "在 projects.toml 里为该项目添加可选的 [projects.build] 并配置 command",
         }
     }
-
-    fn idle_state(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            Self::Dev => ("stopped", "未启动", "配置已就绪，可启动 dev 服务"),
-            Self::Build => ("stopped", "待打包", "配置已就绪，可执行打包任务"),
-        }
-    }
-
-    fn running_state(self) -> (&'static str, &'static str, &'static str) {
-        match self {
-            Self::Dev => ("running", "运行中", "dev 服务正在运行"),
-            Self::Build => ("running", "打包中", "打包任务正在运行"),
-        }
-    }
-
-    fn quick_exit_state(self, code: Option<i32>) -> ProjectTaskLastState {
-        match self {
-            Self::Dev => dev_exit_state(code, true),
-            Self::Build => {
-                if code == Some(0) {
-                    ProjectTaskLastState {
-                        status_key: "succeeded".to_string(),
-                        status_label: "已打包".to_string(),
-                        detail: "打包任务已完成".to_string(),
-                        updated_at_ms: now_ms(),
-                    }
-                } else {
-                    ProjectTaskLastState {
-                        status_key: "failed".to_string(),
-                        status_label: "失败".to_string(),
-                        detail: match code {
-                            Some(value) => format!("打包命令已失败，退出码 {}", value),
-                            None => "打包命令已退出".to_string(),
-                        },
-                        updated_at_ms: now_ms(),
-                    }
-                }
-            }
-        }
-    }
-
-    fn finished_state(self, code: Option<i32>) -> ProjectTaskLastState {
-        match self {
-            Self::Dev => dev_exit_state(code, false),
-            Self::Build => {
-                if code == Some(0) {
-                    ProjectTaskLastState {
-                        status_key: "succeeded".to_string(),
-                        status_label: "已打包".to_string(),
-                        detail: "最近一次打包任务已完成".to_string(),
-                        updated_at_ms: now_ms(),
-                    }
-                } else {
-                    ProjectTaskLastState {
-                        status_key: "failed".to_string(),
-                        status_label: "失败".to_string(),
-                        detail: match code {
-                            Some(value) => format!("最近一次打包任务失败，退出码 {}", value),
-                            None => "最近一次打包任务已退出".to_string(),
-                        },
-                        updated_at_ms: now_ms(),
-                    }
-                }
-            }
-        }
-    }
 }
 
-fn dev_exit_state(code: Option<i32>, quick_exit: bool) -> ProjectTaskLastState {
+fn build_quick_exit_state(code: Option<i32>) -> ProjectTaskLastState {
     if code == Some(0) {
         return ProjectTaskLastState {
-            status_key: "stopped".to_string(),
-            status_label: "未启动".to_string(),
-            detail: if quick_exit {
-                "启动命令已正常退出".to_string()
-            } else {
-                "dev 服务已正常退出".to_string()
-            },
+            status_key: "succeeded".to_string(),
+            status_label: "已打包".to_string(),
+            detail: "打包任务已完成".to_string(),
             updated_at_ms: now_ms(),
         };
     }
 
     ProjectTaskLastState {
-        status_key: "exited".to_string(),
-        status_label: "已退出".to_string(),
-        detail: match (quick_exit, code) {
-            (true, Some(value)) => format!("启动命令很快退出，退出码 {}", value),
-            (true, None) => "启动命令已退出".to_string(),
-            (false, Some(value)) => format!("最近一次 dev 服务已退出，退出码 {}", value),
-            (false, None) => "最近一次 dev 服务已退出".to_string(),
+        status_key: "failed".to_string(),
+        status_label: "失败".to_string(),
+        detail: match code {
+            Some(value) => format!("打包命令已失败，退出码 {}", value),
+            None => "打包命令已退出".to_string(),
+        },
+        updated_at_ms: now_ms(),
+    }
+}
+
+fn build_finished_state(code: Option<i32>) -> ProjectTaskLastState {
+    if code == Some(0) {
+        return ProjectTaskLastState {
+            status_key: "succeeded".to_string(),
+            status_label: "已打包".to_string(),
+            detail: "最近一次打包任务已完成".to_string(),
+            updated_at_ms: now_ms(),
+        };
+    }
+
+    ProjectTaskLastState {
+        status_key: "failed".to_string(),
+        status_label: "失败".to_string(),
+        detail: match code {
+            Some(value) => format!("最近一次打包任务失败，退出码 {}", value),
+            None => "最近一次打包任务已退出".to_string(),
         },
         updated_at_ms: now_ms(),
     }
@@ -3236,19 +2683,7 @@ fn terminate_process(child: &mut Child, _pid: u32) -> Result<(), String> {
 }
 
 fn terminate_running_project_process(process: &mut RunningProjectProcess) -> Result<(), String> {
-    terminate_local_proxy(&mut process.local_proxy);
     terminate_process(&mut process.child, process.pid)
-}
-
-fn terminate_local_proxy(local_proxy: &mut Option<RunningLocalProxyProcess>) {
-    if let Some(proxy) = local_proxy.as_mut() {
-        log_project_runtime_event(format!(
-            "local proxy stopping pid={} listen={}",
-            proxy.pid, proxy.listen
-        ));
-        let _ = terminate_process(&mut proxy.child, proxy.pid);
-    }
-    *local_proxy = None;
 }
 
 fn now_ms() -> u64 {
@@ -3271,7 +2706,174 @@ fn log_project_runtime_event(message: String) {
 
 #[cfg(test)]
 mod tests {
-    use super::should_strip_inherited_env;
+    use super::{
+        AppStartedRuntimeSession, app_owns_runtime_status, external_dev_task_state,
+        running_build_task_state, runtime_daemon_status_to_task_state, should_strip_inherited_env,
+    };
+    use rdevtool_core::runtime::ProjectRuntimeExternalDetection;
+    use rdevtool_core::runtime_daemon::{
+        RuntimeDaemonExit, RuntimeDaemonPhase, RuntimeDaemonState, RuntimeDaemonStatus,
+        RuntimeProcessIdentity,
+    };
+    use std::path::PathBuf;
+
+    fn daemon_status(
+        phase: RuntimeDaemonPhase,
+        running: bool,
+        managed: bool,
+    ) -> RuntimeDaemonStatus {
+        let exit = matches!(
+            &phase,
+            RuntimeDaemonPhase::Exited | RuntimeDaemonPhase::Failed
+        )
+        .then(|| RuntimeDaemonExit {
+            code: Some(1),
+            signal: None,
+            reason: "test exit".to_string(),
+            exited_at_ms: 200,
+        });
+        RuntimeDaemonStatus {
+            status_key: "test-status".to_string(),
+            phase_key: match &phase {
+                RuntimeDaemonPhase::Starting => "starting",
+                RuntimeDaemonPhase::Running => "running",
+                RuntimeDaemonPhase::Stopping => "stopping",
+                RuntimeDaemonPhase::Exited => "stopped",
+                RuntimeDaemonPhase::Failed => "failed",
+            }
+            .to_string(),
+            project_key: "demo".to_string(),
+            canonical_cwd: "/tmp/demo".to_string(),
+            state_path: "/tmp/demo.state.json".to_string(),
+            running,
+            managed,
+            version_compatible: true,
+            daemon_alive: managed,
+            worker_group_alive: running,
+            local_proxy_group_alive: false,
+            detail: "test detail".to_string(),
+            state: Some(RuntimeDaemonState {
+                schema_version: 1,
+                protocol_version: 1,
+                app_version: "test".to_string(),
+                run_id: "run-1".to_string(),
+                status_key: "test-status".to_string(),
+                project_key: "demo".to_string(),
+                project_name: "Demo".to_string(),
+                canonical_cwd: "/tmp/demo".to_string(),
+                command: "npm run dev".to_string(),
+                debug_profile: None,
+                runtime_profile: None,
+                expected_port: Some(3000),
+                ready_url: Some("http://localhost:3000".to_string()),
+                daemon_pid: 10,
+                worker_pid: Some(11),
+                worker_pgid: Some(11),
+                adopted: false,
+                adopted_process: None,
+                local_proxy_pid: None,
+                local_proxy_pgid: None,
+                started_at: "test".to_string(),
+                started_at_ms: 100,
+                log_path: "/tmp/demo.log".to_string(),
+                phase,
+                exit,
+                executable: "/tmp/rdevtool".to_string(),
+                request_path: "/tmp/demo.request.json".to_string(),
+            }),
+        }
+    }
+
+    #[test]
+    fn maps_managed_daemon_phases_to_snapshot_states() {
+        for (phase, running, expected_key, expected_can_stop) in [
+            (RuntimeDaemonPhase::Starting, true, "starting", true),
+            (RuntimeDaemonPhase::Running, true, "running", true),
+            (RuntimeDaemonPhase::Stopping, true, "stopping", true),
+            (RuntimeDaemonPhase::Failed, false, "failed", false),
+        ] {
+            let state = runtime_daemon_status_to_task_state(&daemon_status(phase, running, true));
+            assert_eq!(state.status_key, expected_key);
+            assert_eq!(state.can_stop, expected_can_stop);
+        }
+    }
+
+    #[test]
+    fn maps_external_listener_to_adoptable_non_stoppable_state() {
+        let state = external_dev_task_state(ProjectRuntimeExternalDetection {
+            process: RuntimeProcessIdentity {
+                pid: 42,
+                ppid: 7,
+                pgid: 7,
+                canonical_cwd: "/tmp/demo".to_string(),
+                command: "node vite".to_string(),
+                started_at: "test".to_string(),
+            },
+            expected_port: 5173,
+            ready_url: Some("http://127.0.0.1:5173".to_string()),
+        });
+        assert_eq!(state.status_key, "external");
+        assert!(state.is_running);
+        assert!(state.can_adopt);
+        assert!(!state.can_stop);
+        assert_eq!(state.pid, Some(42));
+    }
+
+    #[test]
+    fn marks_unmanaged_runtime_as_lost_and_not_stoppable() {
+        let state = runtime_daemon_status_to_task_state(&daemon_status(
+            RuntimeDaemonPhase::Running,
+            true,
+            false,
+        ));
+
+        assert_eq!(state.status_key, "lost");
+        assert!(state.is_running);
+        assert!(!state.can_stop);
+    }
+
+    #[test]
+    fn marks_stale_active_daemon_state_as_lost_and_not_stoppable() {
+        let state = runtime_daemon_status_to_task_state(&daemon_status(
+            RuntimeDaemonPhase::Starting,
+            false,
+            false,
+        ));
+
+        assert_eq!(state.status_key, "lost");
+        assert!(!state.is_running);
+        assert!(!state.can_stop);
+    }
+
+    #[test]
+    fn running_build_remains_stoppable() {
+        let state = running_build_task_state(42, 100);
+
+        assert_eq!(state.status_key, "running");
+        assert_eq!(state.pid, Some(42));
+        assert!(state.is_running);
+        assert!(state.can_stop);
+    }
+
+    #[test]
+    fn app_exit_ownership_requires_the_same_managed_run() {
+        let session = AppStartedRuntimeSession {
+            status_key: "test-status".to_string(),
+            project_key: "demo".to_string(),
+            project_name: "Demo".to_string(),
+            cwd: PathBuf::from("/tmp/demo"),
+            run_id: "run-1".to_string(),
+        };
+        let current = daemon_status(RuntimeDaemonPhase::Running, true, true);
+        assert!(app_owns_runtime_status(&session, &current));
+
+        let mut replaced = current.clone();
+        replaced.state.as_mut().unwrap().run_id = "run-2".to_string();
+        assert!(!app_owns_runtime_status(&session, &replaced));
+
+        let unmanaged = daemon_status(RuntimeDaemonPhase::Running, true, false);
+        assert!(!app_owns_runtime_status(&session, &unmanaged));
+    }
 
     #[test]
     fn strips_tauri_and_manifest_metadata_from_launcher_env() {

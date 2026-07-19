@@ -13,6 +13,7 @@ use crate::config::{
     ProjectWorkspaceConfig, ProjectWorkspaceResourceCategoryConfig,
     ProjectWorkspaceResourceEntryConfig, RuntimeProfileConfig, default_config_dir,
 };
+use crate::config_store::write_config_text_atomic;
 
 const DEFAULT_NAVIGATION_TEMPLATE: &str = include_str!("../navigation.template.toml");
 const LEGACY_NAVIGATION_MARKDOWN_PATH: &str = "navigation.md";
@@ -38,6 +39,9 @@ pub struct NavigationEntry {
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub script: Option<String>,
+    pub tool: Option<String>,
+    pub tool_key: Option<String>,
+    pub tool_action: Option<String>,
     pub path: Option<String>,
     pub cwd: Option<String>,
     pub note: Option<String>,
@@ -71,6 +75,9 @@ pub struct NavigationEditorEntry {
     pub bundle_id: Option<String>,
     pub app_name: Option<String>,
     pub script: Option<String>,
+    pub tool: Option<String>,
+    pub tool_key: Option<String>,
+    pub tool_action: Option<String>,
     pub path: Option<String>,
     pub cwd: Option<String>,
     pub note: Option<String>,
@@ -147,6 +154,12 @@ struct NavigationEntryConfig {
     #[serde(default)]
     script: Option<String>,
     #[serde(default)]
+    tool: Option<String>,
+    #[serde(default, alias = "tool_key")]
+    tool_key: Option<String>,
+    #[serde(default, alias = "tool_action")]
+    tool_action: Option<String>,
+    #[serde(default)]
     path: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
@@ -159,6 +172,7 @@ enum NavigationEntryKind {
     Url,
     App,
     Script,
+    Tool,
     Directory,
 }
 
@@ -168,6 +182,7 @@ impl NavigationEntryKind {
             Self::Url => "url",
             Self::App => "app",
             Self::Script => "script",
+            Self::Tool => "tool",
             Self::Directory => "directory",
         }
     }
@@ -177,13 +192,18 @@ impl NavigationEntryKind {
             Self::Url => "网站",
             Self::App => "应用",
             Self::Script => "脚本",
+            Self::Tool => "工具",
             Self::Directory => "目录",
         }
     }
 }
 
 pub fn load_navigation_data() -> Result<NavigationData> {
-    let path = ensure_navigation_config()?;
+    load_navigation_data_from_path(&default_navigation_path())
+}
+
+pub fn load_navigation_data_from_path(path: &Path) -> Result<NavigationData> {
+    let path = ensure_navigation_config_at(path)?;
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read navigation config: {}", path.display()))?;
     let config: NavigationFileConfig = toml::from_str(&content)
@@ -203,6 +223,14 @@ pub fn load_navigation_data_for_workspace(
         filter_navigation_data_for_workspace(data, workspace),
         workspace,
     ))
+}
+
+pub fn load_navigation_source_data_for_workspace(
+    path: &Path,
+    workspace: &ProjectWorkspaceConfig,
+) -> Result<NavigationData> {
+    let data = load_navigation_data_from_path(path)?;
+    Ok(merge_workspace_resource_categories(data, workspace))
 }
 
 pub fn filter_navigation_data_for_workspace(
@@ -362,6 +390,9 @@ fn workspace_resource_entry_config(
         bundle_id: entry.bundle_id.clone(),
         app_name: entry.app_name.clone(),
         script: resolve_workspace_resource_path(entry.script.as_deref(), root_dir),
+        tool: entry.tool.clone(),
+        tool_key: entry.tool_key.clone(),
+        tool_action: entry.tool_action.clone(),
         path: resolve_workspace_resource_path(entry.path.as_deref(), root_dir),
         cwd: resolve_workspace_resource_path(entry.cwd.as_deref(), root_dir),
         note: entry.note.clone(),
@@ -378,7 +409,11 @@ fn resolve_workspace_resource_path(value: Option<&str>, root_dir: Option<&Path>)
 }
 
 pub fn load_navigation_editor_data() -> Result<NavigationEditorData> {
-    let path = ensure_navigation_config()?;
+    load_navigation_editor_data_from_path(&default_navigation_path())
+}
+
+pub fn load_navigation_editor_data_from_path(path: &Path) -> Result<NavigationEditorData> {
+    let path = ensure_navigation_config_at(path)?;
     let content = fs::read_to_string(&path)
         .with_context(|| format!("failed to read navigation config: {}", path.display()))?;
     let config: NavigationFileConfig = toml::from_str(&content)
@@ -398,17 +433,28 @@ pub fn load_navigation_editor_data() -> Result<NavigationEditorData> {
 }
 
 pub fn save_navigation_editor_data(data: NavigationEditorData) -> Result<NavigationData> {
-    let path = ensure_navigation_config()?;
+    save_navigation_editor_data_to_path(data, &default_navigation_path())
+}
+
+pub fn save_navigation_editor_data_to_path(
+    data: NavigationEditorData,
+    path: &Path,
+) -> Result<NavigationData> {
+    let path = ensure_navigation_config_at(path)?;
     let config = navigation_file_config_from_editor(data)?;
     let content =
         toml::to_string_pretty(&config).context("failed to serialize navigation config")?;
-    fs::write(&path, content)
+    write_config_text_atomic(&path, content)
         .with_context(|| format!("failed to write navigation config: {}", path.display()))?;
-    load_navigation_data()
+    load_navigation_data_from_path(&path)
 }
 
 fn ensure_navigation_config() -> Result<PathBuf> {
-    let path = default_navigation_path();
+    ensure_navigation_config_at(&default_navigation_path())
+}
+
+pub fn ensure_navigation_config_at(path: &Path) -> Result<PathBuf> {
+    let path = path.to_path_buf();
     if path.exists() {
         return Ok(path);
     }
@@ -423,7 +469,7 @@ fn ensure_navigation_config() -> Result<PathBuf> {
     }
 
     let legacy_path = PathBuf::from(LEGACY_NAVIGATION_MARKDOWN_PATH);
-    let content = if legacy_path.exists() {
+    let content = if path == default_navigation_path() && legacy_path.exists() {
         let markdown = fs::read_to_string(&legacy_path).with_context(|| {
             format!(
                 "failed to read legacy navigation file: {}",
@@ -441,7 +487,7 @@ fn ensure_navigation_config() -> Result<PathBuf> {
         DEFAULT_NAVIGATION_TEMPLATE.to_string()
     };
 
-    fs::write(&path, content)
+    write_config_text_atomic(&path, content)
         .with_context(|| format!("failed to write navigation config: {}", path.display()))?;
     Ok(path)
 }
@@ -515,6 +561,10 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
     let bundle_id = normalize_optional_text(entry.bundle_id);
     let app_name = normalize_optional_text(entry.app_name);
     let script = normalize_optional_text(entry.script);
+    let tool = normalize_optional_text(entry.tool)
+        .or_else(|| matches!(kind, NavigationEntryKind::Tool).then(|| "link".to_string()));
+    let tool_key = normalize_optional_text(entry.tool_key);
+    let tool_action = normalize_optional_text(entry.tool_action);
     let path = normalize_optional_text(entry.path);
     let cwd = normalize_optional_text(entry.cwd);
 
@@ -531,6 +581,10 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
             .or_else(|| app_name.clone())
             .filter(|value| !value.is_empty())?,
         NavigationEntryKind::Script => script.clone().filter(|value| !value.is_empty())?,
+        NavigationEntryKind::Tool => tool_key
+            .clone()
+            .or_else(|| tool.clone())
+            .unwrap_or_else(|| "tool".to_string()),
         NavigationEntryKind::Directory => path.clone().filter(|value| !value.is_empty())?,
     };
 
@@ -573,6 +627,21 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
         } else {
             None
         },
+        tool: if matches!(kind, NavigationEntryKind::Tool) {
+            tool
+        } else {
+            None
+        },
+        tool_key: if matches!(kind, NavigationEntryKind::Tool) {
+            tool_key
+        } else {
+            None
+        },
+        tool_action: if matches!(kind, NavigationEntryKind::Tool) {
+            tool_action
+        } else {
+            None
+        },
         path: if matches!(kind, NavigationEntryKind::Directory) {
             path
         } else {
@@ -598,6 +667,9 @@ fn navigation_entry_config_from_entry(entry: &NavigationEntry) -> NavigationEntr
         bundle_id: entry.bundle_id.clone(),
         app_name: entry.app_name.clone(),
         script: entry.script.clone(),
+        tool: entry.tool.clone(),
+        tool_key: entry.tool_key.clone(),
+        tool_action: entry.tool_action.clone(),
         path: entry.path.clone(),
         cwd: entry.cwd.clone(),
         note: entry.note.clone(),
@@ -642,6 +714,9 @@ fn navigation_editor_entry_from_config(entry: NavigationEntryConfig) -> Navigati
         bundle_id: normalize_optional_text(entry.bundle_id),
         app_name: normalize_optional_text(entry.app_name),
         script: normalize_optional_text(entry.script),
+        tool: normalize_optional_text(entry.tool),
+        tool_key: normalize_optional_text(entry.tool_key),
+        tool_action: normalize_optional_text(entry.tool_action),
         path: normalize_optional_text(entry.path),
         cwd: normalize_optional_text(entry.cwd),
         note: normalize_optional_text(entry.note),
@@ -693,6 +768,9 @@ fn navigation_editor_entry_is_blank(entry: &NavigationEditorEntry) -> bool {
         entry.bundle_id.as_deref().unwrap_or(""),
         entry.app_name.as_deref().unwrap_or(""),
         entry.script.as_deref().unwrap_or(""),
+        entry.tool.as_deref().unwrap_or(""),
+        entry.tool_key.as_deref().unwrap_or(""),
+        entry.tool_action.as_deref().unwrap_or(""),
         entry.path.as_deref().unwrap_or(""),
         entry.cwd.as_deref().unwrap_or(""),
         entry.note.as_deref().unwrap_or(""),
@@ -717,6 +795,9 @@ fn navigation_entry_config_from_editor_entry(
     let bundle_id = normalize_optional_text(entry.bundle_id);
     let app_name = normalize_optional_text(entry.app_name);
     let script = normalize_optional_text(entry.script);
+    let tool = normalize_optional_text(entry.tool);
+    let tool_key = normalize_optional_text(entry.tool_key);
+    let tool_action = normalize_optional_text(entry.tool_action);
     let path = normalize_optional_text(entry.path);
     let cwd = normalize_optional_text(entry.cwd);
     let note = normalize_optional_text(entry.note);
@@ -740,6 +821,7 @@ fn navigation_entry_config_from_editor_entry(
                 anyhow::bail!("脚本入口需要填写脚本路径");
             }
         }
+        "tool" => {}
         "directory" => {
             let Some(value) = path.as_deref() else {
                 anyhow::bail!("目录入口需要填写目录路径");
@@ -752,6 +834,7 @@ fn navigation_entry_config_from_editor_entry(
     }
 
     let is_url = kind == "url";
+    let is_tool = kind == "tool";
 
     Ok(NavigationEntryConfig {
         name,
@@ -763,6 +846,13 @@ fn navigation_entry_config_from_editor_entry(
         bundle_id,
         app_name,
         script,
+        tool: if is_tool {
+            Some(tool.unwrap_or_else(|| "link".to_string()))
+        } else {
+            None
+        },
+        tool_key: if is_tool { tool_key } else { None },
+        tool_action: if is_tool { tool_action } else { None },
         path,
         cwd,
         note,
@@ -868,8 +958,28 @@ pub fn open_navigation_entry_with_runtime_profiles(
         NavigationEntryKind::Url => open_navigation_url(entry, runtime_profiles),
         NavigationEntryKind::App => open_navigation_app(entry),
         NavigationEntryKind::Script => open_navigation_script(entry),
+        NavigationEntryKind::Tool => open_navigation_tool(entry),
         NavigationEntryKind::Directory => open_navigation_directory(entry),
     }
+}
+
+fn open_navigation_tool(entry: &NavigationEntry) -> Result<NavigationOpenResult> {
+    let tool = entry.tool.as_deref().unwrap_or("tool");
+    let action = entry
+        .tool_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("open");
+    let target = entry
+        .tool_key
+        .as_deref()
+        .or(Some(entry.target_label.as_str()))
+        .unwrap_or(tool);
+    Ok(NavigationOpenResult {
+        url: target.to_string(),
+        detail: format!("工具入口 {tool} 已配置动作 {action}，请在 App 中查看或执行"),
+    })
 }
 
 fn open_navigation_url(
@@ -1457,6 +1567,9 @@ fn parse_nav_entry(cells: &[String]) -> Option<NavigationEntry> {
         bundle_id: None,
         app_name: None,
         script: None,
+        tool: None,
+        tool_key: None,
+        tool_action: None,
         path: None,
         cwd: None,
         note: if note.is_empty() { None } else { Some(note) },
@@ -1514,6 +1627,7 @@ fn resolve_entry_kind(entry: &NavigationEntryConfig) -> Option<NavigationEntryKi
             "url" => Some(NavigationEntryKind::Url),
             "app" => Some(NavigationEntryKind::App),
             "script" => Some(NavigationEntryKind::Script),
+            "tool" => Some(NavigationEntryKind::Tool),
             "directory" | "dir" | "folder" => Some(NavigationEntryKind::Directory),
             _ => None,
         };
@@ -1530,6 +1644,11 @@ fn resolve_entry_kind(entry: &NavigationEntryConfig) -> Option<NavigationEntryKi
     if normalize_optional_text(entry.script.clone()).is_some() {
         return Some(NavigationEntryKind::Script);
     }
+    if normalize_optional_text(entry.tool.clone()).is_some()
+        || normalize_optional_text(entry.tool_key.clone()).is_some()
+    {
+        return Some(NavigationEntryKind::Tool);
+    }
     if normalize_optional_text(entry.path.clone()).is_some() {
         return Some(NavigationEntryKind::Directory);
     }
@@ -1541,6 +1660,7 @@ fn normalize_entry_kind(value: &str) -> Option<String> {
         "url" => Some(NavigationEntryKind::Url.key().to_string()),
         "app" => Some(NavigationEntryKind::App.key().to_string()),
         "script" => Some(NavigationEntryKind::Script.key().to_string()),
+        "tool" => Some(NavigationEntryKind::Tool.key().to_string()),
         "directory" | "dir" | "folder" => Some(NavigationEntryKind::Directory.key().to_string()),
         _ => None,
     }
@@ -1551,6 +1671,7 @@ fn entry_kind(entry: &NavigationEntry) -> Result<NavigationEntryKind> {
         "url" => Ok(NavigationEntryKind::Url),
         "app" => Ok(NavigationEntryKind::App),
         "script" => Ok(NavigationEntryKind::Script),
+        "tool" => Ok(NavigationEntryKind::Tool),
         "directory" | "dir" | "folder" => Ok(NavigationEntryKind::Directory),
         other => Err(anyhow!("unsupported navigation entry kind: {}", other)),
     }

@@ -4,18 +4,33 @@ export type PageKey = AppModuleKey;
 
 export const ALL_PAGE_KEYS: PageKey[] = [
   "overview",
-  "projects",
-  "merge",
+  "projectManagement",
+  "resources",
+  "proxy",
   "build",
+  "merge",
+];
+
+export const DEFAULT_VISIBLE_PAGE_KEYS: PageKey[] = [
+  "overview",
+  "projectManagement",
+  "resources",
   "proxy",
 ];
 
 export const NAV_ITEMS: Array<{ key: PageKey; label: string; shortLabel: string }> =
-  APP_MODULES.map(({ key, label, shortLabel }) => ({
-    key,
-    label,
-    shortLabel,
-  }));
+  ALL_PAGE_KEYS.flatMap((key) => {
+    const module = APP_MODULES.find((item) => item.key === key);
+    return module
+      ? [
+          {
+          key,
+          label: module.label,
+          shortLabel: module.shortLabel,
+        },
+        ]
+      : [];
+  });
 
 export const NAV_ITEM_MAP = Object.fromEntries(
   NAV_ITEMS.map((item) => [item.key, item]),
@@ -26,7 +41,10 @@ export function normalizePageKey(value: unknown): PageKey | null {
     return null;
   }
   if (value === "navigation") {
-    return "projects";
+    return "resources";
+  }
+  if (value === "projects") {
+    return "resources";
   }
   if (value === "deploy") {
     return "build";
@@ -45,5 +63,5 @@ export function normalizeEnabledPages(values: unknown): PageKey[] {
     }
   }
 
-  return pages.length > 0 ? pages : [...ALL_PAGE_KEYS];
+  return pages.length > 0 ? pages : [...DEFAULT_VISIBLE_PAGE_KEYS];
 }

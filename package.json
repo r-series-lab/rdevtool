@@ -12,6 +12,7 @@
     "web:install": "npm --prefix web install",
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build",
+    "web:test": "npm --prefix web test",
     "icons": "python3 ./scripts/generate-icons.py && cd src-tauri && ../web/node_modules/.bin/tauri icon icons/rdevtool-app-icon-source.png && cd .. && python3 ./scripts/generate-icons.py --post-export && cp src-tauri/icons/128x128.png web/public/rdevtool.png",
     "rust-check": "cargo check --manifest-path ./src-tauri/Cargo.toml",
     "size": "du -sh ./target ./web/node_modules ./web/dist 2>/dev/null || true",

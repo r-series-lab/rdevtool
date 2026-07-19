@@ -11,7 +11,8 @@ import {
 import type { BranchTaskHistoryEntry } from "../../app-types";
 import type { TrayPinnedAction } from "../../lib/trayPins";
 import { AppEmptyState } from "../AppEmptyState";
-import { HistoryCard } from "../AppCards";
+import { AppListEndState } from "../AppListEndState";
+import { HistoryCard, type HistoryAccent } from "../AppCards";
 import {
   WorkflowLinkButton,
   WorkflowLinkSummaryButton,
@@ -30,6 +31,13 @@ import { useTrayPinnedActions } from "../../hooks/useTrayPinnedActions";
 import { branchWorkflowModeLabel } from "./BranchModeTabs";
 
 const HISTORY_SCROLL_PAGE_SIZE = 8;
+
+function branchHistoryAccent(item: BranchTaskHistoryEntry): HistoryAccent {
+  if (!item.success || item.items.some((taskItem) => !taskItem.success)) {
+    return "danger";
+  }
+  return "info";
+}
 
 function branchHistorySignature(item: BranchTaskHistoryEntry) {
   if (item.replay) {
@@ -73,6 +81,10 @@ function branchLegacyTrayDedupeKeyFromHistory(item: BranchTaskHistoryEntry) {
   })}`;
 }
 
+function workspacePinnedKey(workspaceKey: string | null | undefined, dedupeKey: string) {
+  return `${workspaceKey?.trim() ?? ""}\n${dedupeKey}`;
+}
+
 function branchTrayActionFromHistory(item: BranchTaskHistoryEntry): TrayPinnedAction | null {
   if (!item.replay) {
     return null;
@@ -84,6 +96,7 @@ function branchTrayActionFromHistory(item: BranchTaskHistoryEntry): TrayPinnedAc
     kind: "branch.replay",
     label: `分支：${branchWorkflowModeLabel(item.taskKind)} / ${projectName}`,
     detail: item.summary,
+    workspaceKey: item.workspaceKey ?? null,
     projectKey: firstItem?.projectKey ?? null,
     entry: null,
     payload: {
@@ -160,7 +173,8 @@ export function BranchHistoryPanel({
   const branchLegacyHistoryByPinnedKey = useMemo(() => {
     const next = new Map<string, BranchTaskHistoryEntry>();
     for (const item of history) {
-      const key = branchLegacyTrayDedupeKeyFromHistory(item);
+      const legacyKey = branchLegacyTrayDedupeKeyFromHistory(item);
+      const key = legacyKey ? workspacePinnedKey(item.workspaceKey, legacyKey) : null;
       if (key && !next.has(key)) {
         next.set(key, item);
       }
@@ -172,8 +186,12 @@ export function BranchHistoryPanel({
     for (const action of pinnedBranchActions) {
       const item = branchHistoryByPinnedKey.get(action.dedupeKey);
       const legacyKey = item ? branchLegacyTrayDedupeKeyFromHistory(item) : null;
-      if (legacyKey) {
-        next.add(legacyKey);
+      if (
+        item &&
+        legacyKey &&
+        (action.workspaceKey ?? null) === (item.workspaceKey ?? null)
+      ) {
+        next.add(workspacePinnedKey(item.workspaceKey, legacyKey));
       }
     }
     return next;
@@ -182,9 +200,13 @@ export function BranchHistoryPanel({
     () =>
       pinnedBranchActions
         .filter(
-          (action) =>
-            branchLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
-            branchSpecificLegacyPinnedKeys.has(action.dedupeKey),
+          (action) => {
+            const key = workspacePinnedKey(action.workspaceKey, action.dedupeKey);
+            return (
+              branchLegacyHistoryByPinnedKey.has(key) &&
+              branchSpecificLegacyPinnedKeys.has(key)
+            );
+          },
         )
         .map((action) => action.dedupeKey)
         .sort(),
@@ -205,12 +227,17 @@ export function BranchHistoryPanel({
   const displayPinnedBranchActions = useMemo(
     () =>
       pinnedBranchActions.filter((action) => {
-        if (branchHistoryByPinnedKey.has(action.dedupeKey)) {
+        const exactItem = branchHistoryByPinnedKey.get(action.dedupeKey);
+        if (
+          exactItem &&
+          (action.workspaceKey ?? null) === (exactItem.workspaceKey ?? null)
+        ) {
           return true;
         }
+        const legacyKey = workspacePinnedKey(action.workspaceKey, action.dedupeKey);
         return (
-          branchLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
-          !branchSpecificLegacyPinnedKeys.has(action.dedupeKey)
+          branchLegacyHistoryByPinnedKey.has(legacyKey) &&
+          !branchSpecificLegacyPinnedKeys.has(legacyKey)
         );
       }),
     [
@@ -310,7 +337,11 @@ export function BranchHistoryPanel({
       return pinnedAction;
     }
     const legacyKey = branchLegacyTrayDedupeKeyFromHistory(group.latest);
-    return legacyKey ? pinnedActionByKey.get(legacyKey) ?? null : null;
+    const legacyAction = legacyKey ? pinnedActionByKey.get(legacyKey) : null;
+    return legacyAction &&
+      (legacyAction.workspaceKey ?? null) === (group.latest.workspaceKey ?? null)
+      ? legacyAction
+      : null;
   }
   const visibleUnpinnedHistoryGroups = useMemo(
     () =>
@@ -497,6 +528,7 @@ export function BranchHistoryPanel({
                       subtitle="执行中"
                       detail="等待任务完成"
                       meta={[]}
+                      accent="warning"
                       badge={
                         <Chip
                           size="small"
@@ -525,6 +557,7 @@ export function BranchHistoryPanel({
                         title={`${branchWorkflowModeLabel(item.taskKind)} · ${item.summary}`}
                         subtitle={formatRelativeTime(item.createdAt)}
                         pinned={pinned}
+                        accent={branchHistoryAccent(item)}
                         badge={
                           <Stack
                             direction="row"
@@ -534,7 +567,15 @@ export function BranchHistoryPanel({
                             rowGap={0.4}
                             justifyContent="flex-end"
                           >
-                            {isTaskAnchorGroup ? (
+                              {!item.workspaceKey ? (
+                                <Chip
+                                  size="small"
+                                  label="未归属"
+                                  color="default"
+                                  variant="outlined"
+                                />
+                              ) : null}
+                              {isTaskAnchorGroup ? (
                               <Chip
                                 size="small"
                                 label="最新任务"
@@ -707,9 +748,7 @@ export function BranchHistoryPanel({
                           下滑加载更多
                         </Button>
                       ) : (
-                        <Typography variant="caption" className="workflow-history-footer-text">
-                          没有更多了
-                        </Typography>
+                        <AppListEndState />
                       )}
                     </Box>
                   ) : null}

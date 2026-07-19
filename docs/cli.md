@@ -202,13 +202,34 @@ rdevtool --json navigation delete --category "办公平台" --name "Jenkins"
 入口列表和搜索结果受当前工作区过滤。
 `navigation add/update/delete` 会写入全局 `navigation.toml`；如果当前工作区不是全局并且没有包含该入口，需要再用 `workspace scope` 把入口纳入当前范围。
 
+## Config Source
+
+配置源命令对资源入口、链路、代理和运行配置通用，选择结果按当前工作区和能力分别保存。
+
+```bash
+rdevtool --json config-source list
+rdevtool --json config-source show default
+rdevtool --json config-source compare default team-local
+rdevtool --json config-source copy team-local --id team-local-copy --name "团队本地联调副本"
+rdevtool --json config-source use team-local --capability resource
+rdevtool --json config-source use team-local --capability proxy
+```
+
+`list` 会同时返回四种能力的当前偏好和全部可用来源。`compare` 只返回文件存在性、大小与一致性摘要，不返回配置内容。`copy` 会创建新的自建来源；可通过 `--base-dir <absolute-path>` 指定空目录，留空则自动创建独立目录。自建来源的目录、文件映射和能力范围也可以在桌面端“配置源管理”中维护。
+
 ## Proxy
 
-代理命令按当前工作区显示 profile；新增、更新、删除、导入、导出会写入 `proxy.toml`。
+代理命令默认使用当前工作区为 `proxy` 能力选择的配置源。`proxy source` 可查看或切换来源，后续 profile、规则、运行状态和诊断命令都会使用同一来源。
 
 ```bash
 rdevtool --json proxy path
+rdevtool --json proxy source
+rdevtool --json proxy source --set default
 rdevtool --json proxy list
+rdevtool --json proxy status
+rdevtool --json proxy start default
+rdevtool --json proxy restart default
+rdevtool --json proxy stop default
 rdevtool --json proxy show default
 rdevtool --json proxy add --name "本地代理" --listen-port 8787
 rdevtool --json proxy update default --listen-port 8788
@@ -221,13 +242,46 @@ rdevtool --json proxy rule-add --profile default --name "Mock 用户" --path-pre
 rdevtool --json proxy rule-add --profile default --name "阻断调试" --url-contains debug=true --action block --status 403
 rdevtool --json proxy rule-update "转发 API" --priority 10 --request-header x-devtool=true
 rdevtool --json proxy rule-delete "阻断调试"
+rdevtool --json proxy diagnose --profile default --method POST --url /api/user
+rdevtool --json proxy verify --profile default --url /api/user --expect-status 200
 ```
+
+App 与 CLI 共用同一个代理守护进程。`proxy status` 会区分 rDevTool 管理的进程和外部端口占用；旧版本守护进程会标记为待升级，并在下一次 `start` 或 `restart` 时受控替换。不要停止 `managed=false` 的外部监听器。
 
 代理配置问题优先看：
 
 ```bash
 rdevtool --json doctor
 ```
+
+`doctor` 同时报告配置源注册表、当前工作区实际选择的代理源、对应文件路径、运行时版本和端口状态。
+
+## Runtime
+
+Runtime 命令使用当前激活工作区覆盖后的项目配置。项目级生命周期命令优先取 `[projects.dev].cwd`；相对 `cwd` 基于 `repo_path` 解析，未配置 `cwd` 时回退到 `repo_path`，最终使用 canonical cwd 定位 daemon 状态。因此同一项目在不同工作区实例路径下拥有独立运行时身份。
+
+```bash
+rdevtool --json runtime profiles
+rdevtool --json runtime profile-show local-browser
+rdevtool --json runtime inspect --project demo-web
+rdevtool --json runtime preflight --project demo-web --runtime-profile local-browser --expect-port 4173
+rdevtool --json runtime start --project demo-web --runtime-profile local-browser --expect-port 4173 --env MODE=local
+rdevtool --json runtime status --project demo-web
+rdevtool --json runtime list
+rdevtool --json runtime list --running-only
+rdevtool --json runtime stop --project demo-web
+rdevtool --json runtime restart --project demo-web --runtime-profile local-browser --expect-port 4173 --env MODE=local
+rdevtool --json runtime diagnose --project demo-web
+rdevtool --json runtime adopt --project demo-web --pid 4242
+rdevtool --json runtime focus --project demo-web
+rdevtool --json runtime log --project demo-web --kind dev
+```
+
+`restart` 接受与 `start` 相同的启动参数，并显式停止当前项目/cwd 对应的受管 daemon 后，再以本次参数启动。`stop` 只操作经过 daemon 状态验证的项目进程组，不会按端口查找或终止进程。
+
+`diagnose` 返回 daemon diagnosis；需要更完整的启动条件与联调状态时，再配合 `runtime preflight` 和 `runtime inspect`。`adopt` 当前调用 core 后明确返回 `supported=false`；它不会把无法验证原始命令、环境、cwd 和进程组归属的现有 PID 伪装成受管运行时。
+
+生命周期命令的 JSON `command` 名固定为 `runtime.status`、`runtime.list`、`runtime.stop`、`runtime.restart`、`runtime.adopt` 和 `runtime.diagnose`。不带 `--json` 时会输出适合终端阅读的状态摘要。
 
 ## Notes
 

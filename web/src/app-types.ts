@@ -1,5 +1,7 @@
 import type { PageKey } from "./app-shell";
 
+export type ProjectManagementViewKey = "projects" | "build" | "git";
+
 export type CommitInfo = {
   shortHash: string;
   subject: string;
@@ -14,6 +16,8 @@ export type BranchOption = {
 
 export type BuildHistoryEntry = {
   historyKey: string;
+  workspaceKey?: string | null;
+  projectInstancePath?: string | null;
   projectKey: string;
   projectName: string;
   mode: string;
@@ -61,6 +65,18 @@ export type BranchPushStatus = {
   conflictedCount: number;
   files: BranchPushFileStatus[];
   latestCommit?: CommitInfo | null;
+};
+
+export type BranchFileDiffResponse = {
+  projectKey: string;
+  projectName: string;
+  repoPath: string;
+  path: string;
+  mode: string;
+  diff: string;
+  truncated: boolean;
+  binary: boolean;
+  warnings: string[];
 };
 
 export type BranchWorktreeSummary = {
@@ -124,6 +140,7 @@ export type BranchTaskReplayRequest = {
 export type BranchTaskHistoryEntry = BranchTaskResponse & {
   id: string;
   createdAt: string;
+  workspaceKey?: string | null;
   replay?: BranchTaskReplayRequest | null;
 };
 
@@ -133,6 +150,8 @@ export type WorkspaceAppPreferences = {
   enabledPages: PageKey[];
   activeWorkspace?: string | null;
 };
+
+export type AppExitRuntimePolicy = "ask" | "keep" | "stop";
 
 export type ProjectWorkspaceSummary = {
   key: string;
@@ -548,6 +567,8 @@ export type ProjectLocalProxyDraft = {
 export type ProjectDebugProfileDraft = {
   key: string;
   label: string;
+  command?: string | null;
+  expectedPort?: number | null;
   runtimeProfile?: string | null;
   envText: string;
   localFiles: ProjectDebugLocalFileDraft[];
@@ -598,6 +619,8 @@ export type ProjectConfigDraft = {
 
 export type ProjectConfigEditorState = {
   configPath: string;
+  runtimeConfigPath?: string | null;
+  runtimeProfileScope?: string;
   jenkinsProfiles: string[];
   defaultBranchRules: ProjectBranchRulesDraft;
   runtimeProfiles: RuntimeProfileDraft[];
@@ -607,6 +630,8 @@ export type ProjectConfigEditorState = {
 export type ProjectDebugProfileSummary = {
   key: string;
   label: string;
+  command?: string | null;
+  expectedPort?: number | null;
   runtimeProfile?: string | null;
   env: Record<string, string>;
   envCount: number;
@@ -650,6 +675,7 @@ export type ProjectRuntimeEntry = {
   updatedAtMs: number;
   canStart: boolean;
   canStop: boolean;
+  canAdopt: boolean;
   canBuild: boolean;
   canStopBuild: boolean;
   canOpenBuildOutput: boolean;
@@ -783,6 +809,9 @@ export type FinderEntry = {
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  tool?: string | null;
+  toolKey?: string | null;
+  toolAction?: string | null;
   path?: string | null;
   cwd?: string | null;
   note?: string | null;
@@ -830,6 +859,124 @@ export type WebActionListResponse = {
   actions: WebActionSummary[];
 };
 
+export type ConfigSourceFiles = {
+  navigation: string;
+  links: string;
+  proxy?: string | null;
+  runtimeOverrides?: string | null;
+};
+
+export type ConfigSource = {
+  id: string;
+  name: string;
+  kind: string;
+  baseDir: string;
+  files: ConfigSourceFiles;
+  uiProfile: string;
+  capabilities: string[];
+  isDefault: boolean;
+};
+
+export type ConfigSourceFileDefinition = {
+  navigation?: string | null;
+  links?: string | null;
+  proxy?: string | null;
+  runtimeOverrides?: string | null;
+};
+
+export type ConfigSourceDefinition = {
+  id: string;
+  name: string;
+  kind?: string | null;
+  baseDir?: string | null;
+  files: ConfigSourceFileDefinition;
+  uiProfile?: string | null;
+  capabilities: string[];
+};
+
+export type ConfigSourceFileInspection = {
+  key: string;
+  label: string;
+  capability: string;
+  path?: string | null;
+  supported: boolean;
+  exists: boolean;
+  status: "ready" | "missing" | "invalid" | "unsupported" | string;
+  message: string;
+};
+
+export type ConfigSourceInspection = {
+  source: ConfigSource;
+  definition?: ConfigSourceDefinition | null;
+  editable: boolean;
+  registryPath: string;
+  status: "ready" | "empty" | "invalid" | "unsupported" | string;
+  summary: string;
+  issues: string[];
+  files: ConfigSourceFileInspection[];
+  runtimeProfileScope: string;
+};
+
+export type ConfigSourceReference = {
+  id: string;
+  name: string;
+  kind: string;
+};
+
+export type ConfigSourceFileState = {
+  supported: boolean;
+  exists: boolean;
+  sizeBytes?: number | null;
+};
+
+export type ConfigSourceFileComparison = {
+  key: string;
+  capability: string;
+  left: ConfigSourceFileState;
+  right: ConfigSourceFileState;
+  sizeEqual?: boolean | null;
+  contentEqual?: boolean | null;
+  equivalent: boolean;
+  status: string;
+  summary: string;
+};
+
+export type ConfigSourceComparison = {
+  left: ConfigSourceReference;
+  right: ConfigSourceReference;
+  identical: boolean;
+  summary: {
+    total: number;
+    matching: number;
+    differing: number;
+    missingLeft: number;
+    missingRight: number;
+    missingBoth: number;
+    capabilityMismatches: number;
+  };
+  files: ConfigSourceFileComparison[];
+};
+
+export type ConfigSourceCopyRequest = {
+  sourceId: string;
+  id: string;
+  name: string;
+  baseDir?: string | null;
+};
+
+export type ConfigSourceCopyResult = {
+  source: ConfigSourceReference;
+  target: ConfigSource;
+  copiedCount: number;
+  missingCount: number;
+  files: Array<{
+    key: string;
+    capability: string;
+    status: string;
+    sizeBytes?: number | null;
+  }>;
+};
+
 export type WebActionTarget = {
   id: string;
   title: string;
@@ -849,7 +996,103 @@ export type WebActionRunResult = {
   error?: string | null;
 };
 
-export type NavigationEditorEntryKind = "url" | "directory" | "app" | "script";
+export type LinkSummary = {
+  key: string;
+  name: string;
+  kind?: string | null;
+  uiProfile: string;
+  schemaVersion: number;
+  workspaceKey?: string | null;
+  project?: string | null;
+  stepCount: number;
+  proxyProfiles: Array<{
+    id: string;
+    name: string;
+    listenUrl: string;
+  }>;
+  runtime?: LinkRuntimeSummary | null;
+  warnings: string[];
+};
+
+export type LinkRuntimeSummary = {
+  status: string;
+  label: string;
+  runningSteps: number;
+  controllableSteps: number;
+  blockedSteps: number;
+  canRun: boolean;
+  canStop: boolean;
+};
+
+export type LinkConfig = {
+  key: string;
+  name: string;
+  kind?: string | null;
+  uiProfile?: string | null;
+  schemaVersion?: number | null;
+  workspaceKey?: string | null;
+  project?: string | null;
+  steps: LinkStepConfig[];
+};
+
+export type LinkStepConfig = {
+  id: string;
+  type: string;
+  label?: string | null;
+  project?: string | null;
+  path?: string | null;
+  profile?: string | null;
+  debugProfile?: string | null;
+  runtimeProfile?: string | null;
+  command?: string | null;
+  expectedPort?: number | null;
+  env?: Record<string, string>;
+  action?: string | null;
+  note?: string | null;
+  [key: string]: unknown;
+};
+
+export type LinkPlan = {
+  key: string;
+  name: string;
+  kind?: string | null;
+  uiProfile: string;
+  schemaVersion: number;
+  workspaceKey?: string | null;
+  project?: string | null;
+  steps: LinkPlanStep[];
+  warnings: string[];
+};
+
+export type LinkPlanStep = {
+  id: string;
+  type: string;
+  label: string;
+  summary: string;
+  status: "planned" | "invalid" | string;
+  risks: string[];
+};
+
+export type LinkExecutionReport = {
+  key: string;
+  name: string;
+  mode: "check" | "run" | "stop" | string;
+  plan: LinkPlan;
+  steps: LinkExecutionStepReport[];
+  warnings: string[];
+};
+
+export type LinkExecutionStepReport = {
+  id: string;
+  type: string;
+  label: string;
+  status: "checked" | "started" | "stopped" | "skipped" | "failed" | string;
+  summary: string;
+  detail?: unknown;
+  risks: string[];
+};
+
+export type NavigationEditorEntryKind = "url" | "directory" | "app" | "script" | "tool";
 
 export type NavigationEditorEntry = {
   name: string;
@@ -861,6 +1104,9 @@ export type NavigationEditorEntry = {
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  tool?: string | null;
+  toolKey?: string | null;
+  toolAction?: string | null;
   path?: string | null;
   cwd?: string | null;
   note?: string | null;

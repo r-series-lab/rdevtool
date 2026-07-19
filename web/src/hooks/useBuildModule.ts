@@ -9,6 +9,7 @@ export type { BuildResult } from "./useBuildHistory";
 
 type UseBuildModuleOptions = {
   buildEnabled: boolean;
+  activeProjectWorkspaceKey: string;
   selectedProject: string;
   branchOptions: string[];
   setBusy: (value: string) => void;
@@ -20,6 +21,7 @@ type UseBuildModuleOptions = {
 
 export function useBuildModule({
   buildEnabled,
+  activeProjectWorkspaceKey,
   selectedProject,
   branchOptions,
   setBusy,
@@ -36,6 +38,7 @@ export function useBuildModule({
   });
   const buildHistoryState = useBuildHistory({
     enabled: buildEnabled,
+    activeProjectWorkspaceKey,
     selectedProject,
     target: buildContext.target,
     env: buildContext.env,

@@ -201,6 +201,7 @@ function activityProjectNameForRequest(
 
 type UseBuildHistoryOptions = {
   enabled: boolean;
+  activeProjectWorkspaceKey: string;
   selectedProject: string;
   target: string;
   env: string;
@@ -217,6 +218,7 @@ type UseBuildHistoryOptions = {
 
 export type BuildReplayOptions = {
   force?: boolean;
+  workspaceKey?: string | null;
   chainId?: string | null;
   parentId?: string | null;
   stepLabel?: string | null;
@@ -224,6 +226,7 @@ export type BuildReplayOptions = {
 
 export function useBuildHistoryState({
   enabled,
+  activeProjectWorkspaceKey,
   selectedProject,
   target,
   env,
@@ -248,8 +251,11 @@ export function useBuildHistoryState({
   const currentBuildActivityIdRef = useRef("");
 
   const buildViewScopeKey = useMemo(
-    () => (selectedProject ? `${selectedProject}:${target}` : ""),
-    [selectedProject, target],
+    () =>
+      selectedProject
+        ? `${activeProjectWorkspaceKey}:${selectedProject}:${target}`
+        : activeProjectWorkspaceKey,
+    [activeProjectWorkspaceKey, selectedProject, target],
   );
 
   const visibleBuildHistory = useMemo(
@@ -461,7 +467,11 @@ export function useBuildHistoryState({
     }
   }
 
-  async function persistBuildHistory(historyKey: string, result: BuildResult) {
+  async function persistBuildHistory(
+    historyKey: string,
+    result: BuildResult,
+    workspaceKey = activeProjectWorkspaceKey,
+  ) {
     const plan = result.plan ?? buildResult?.plan ?? currentPlan;
     if (!plan) {
       return;
@@ -469,6 +479,8 @@ export function useBuildHistoryState({
     const previousEntry = buildHistory.find((item) => item.historyKey === historyKey);
     const entry: BuildHistoryEntry = {
       historyKey,
+      workspaceKey,
+      projectInstancePath: previousEntry?.projectInstancePath ?? null,
       projectKey: plan.projectKey,
       projectName: plan.projectName,
       mode: plan.jobKind,
@@ -491,6 +503,8 @@ export function useBuildHistoryState({
   async function persistBuildHistoryFromEntry(item: BuildHistoryEntry, result: BuildResult) {
     const entry: BuildHistoryEntry = {
       historyKey: item.historyKey,
+      workspaceKey: item.workspaceKey ?? activeProjectWorkspaceKey,
+      projectInstancePath: item.projectInstancePath ?? null,
       projectKey: item.projectKey,
       projectName: item.projectName,
       mode: item.mode,
@@ -510,9 +524,13 @@ export function useBuildHistoryState({
     syncBuildActivityFromEntry(entry, result);
   }
 
-  async function triggerBuildRequest(request: BuildRequest, busyText: string) {
-    if (!enabled || !request.project) {
-      return;
+  async function triggerBuildRequest(
+    request: BuildRequest,
+    busyText: string,
+    options: BuildReplayOptions = {},
+  ) {
+    if ((!enabled && !options.force) || !request.project) {
+      return false;
     }
     const actionCopy = actionCopyForPlan(currentPlan);
     setBusy(busyText);
@@ -552,7 +570,11 @@ export function useBuildHistoryState({
         result.buildUrl ??
         `${request.project}:${request.target ?? target}:${Date.now()}`;
       setCurrentBuildHistoryKey(historyKey);
-      await persistBuildHistory(historyKey, result);
+      await persistBuildHistory(
+        historyKey,
+        result,
+        options.workspaceKey ?? activeProjectWorkspaceKey,
+      );
       if (activityId) {
         updateActivity?.(activityId, {
           status: activityStatusFromBuildResult(result.stateKey, result),
@@ -562,6 +584,7 @@ export function useBuildHistoryState({
           resource: buildRecordResource(result),
         });
       }
+      return true;
     } catch (reason) {
       if (activityId) {
         updateActivity?.(activityId, {
@@ -571,6 +594,7 @@ export function useBuildHistoryState({
         });
       }
       setError(String(reason));
+      return false;
     } finally {
       setBusy("");
     }
@@ -823,8 +847,11 @@ export function useBuildHistoryState({
     buildAutoRefreshTimedOut,
     visibleBuildHistory,
     handleTriggerBuild,
-    handleTriggerBuildRequest: (request: BuildRequest, busyText = "正在重播构建") =>
-      triggerBuildRequest(request, busyText),
+    handleTriggerBuildRequest: (
+      request: BuildRequest,
+      busyText = "正在重播构建",
+      options: BuildReplayOptions = {},
+    ) => triggerBuildRequest(request, busyText, options),
     handleRefreshBuild: () => refreshCurrentBuildStatus(),
     handleReplayBuildHistory,
     handleOpenBuildRecord: async () => {

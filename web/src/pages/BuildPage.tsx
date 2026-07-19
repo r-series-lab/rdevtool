@@ -35,8 +35,9 @@ import type {
   BuildHistoryEntry,
   ProjectRuntimeLogResponse,
 } from "../app-types";
-import { HistoryCard } from "../components/AppCards";
+import { HistoryCard, type HistoryAccent } from "../components/AppCards";
 import { AppEmptyState } from "../components/AppEmptyState";
+import { AppListEndState } from "../components/AppListEndState";
 import {
   WorkflowLinkButton,
   WorkflowLinkSummaryButton,
@@ -106,6 +107,30 @@ function isActiveBuildState(stateKey?: string | null) {
   return stateKey === "accepted" || stateKey === "queued" || stateKey === "running";
 }
 
+function buildHistoryAccent(item: BuildHistoryEntry): HistoryAccent {
+  const state = item.stateKey.toLowerCase();
+  if (isActiveBuildState(state)) {
+    return "warning";
+  }
+  if (
+    state.includes("success") ||
+    state.includes("succeed") ||
+    state.includes("done") ||
+    state.includes("complete")
+  ) {
+    return "success";
+  }
+  if (
+    state.includes("fail") ||
+    state.includes("error") ||
+    state.includes("abort") ||
+    state.includes("cancel")
+  ) {
+    return "danger";
+  }
+  return "info";
+}
+
 function buildActionCopy(actionKind?: string | null): BuildActionCopy {
   switch (actionKind) {
     case "build":
@@ -156,6 +181,10 @@ function buildLegacyTrayDedupeKeyFromHistory(item: BuildHistoryEntry) {
   })}`;
 }
 
+function workspacePinnedKey(workspaceKey: string | null | undefined, dedupeKey: string) {
+  return `${workspaceKey?.trim() ?? ""}\n${dedupeKey}`;
+}
+
 function buildTrayActionFromHistory(
   item: BuildHistoryEntry,
   targetLabel: string,
@@ -166,6 +195,7 @@ function buildTrayActionFromHistory(
     kind: "build.replay",
     label: `${actionLabel}：${item.projectName} / ${targetLabel || item.mode || "默认配置"}`,
     detail: [item.env, item.branch].filter(Boolean).join(" · ") || item.stateLabel,
+    workspaceKey: item.workspaceKey ?? null,
     projectKey: item.projectKey,
     entry: null,
     payload: {
@@ -465,6 +495,7 @@ function buildHistoryEntriesReferToSameRun(
 
 export type BuildPageProps = {
   projects: ProjectOption[];
+  activeWorkspaceKey: string;
   selectedProject: string;
   onProjectChange: (projectKey: string) => void;
   target: string;
@@ -510,6 +541,7 @@ export type BuildPageProps = {
 
 export function BuildPage({
   projects,
+  activeWorkspaceKey,
   selectedProject,
   onProjectChange,
   target,
@@ -598,6 +630,8 @@ export function BuildPage({
         matchedEntry?.historyKey ||
         resultKey ||
         `${plan?.projectKey || selectedProject}:${plan?.jobKind || target || "default"}:${updatedAt}`,
+      workspaceKey: matchedEntry?.workspaceKey ?? activeWorkspaceKey,
+      projectInstancePath: matchedEntry?.projectInstancePath ?? null,
       projectKey: matchedEntry?.projectKey || plan?.projectKey || selectedProject,
       projectName:
         matchedEntry?.projectName ||
@@ -631,6 +665,7 @@ export function BuildPage({
     buildResult,
     buildResultUpdatedAtMs,
     currentBuildHistoryKey,
+    activeWorkspaceKey,
     paramValues,
     plan,
     projects,
@@ -673,7 +708,10 @@ export function BuildPage({
   const buildLegacyHistoryByPinnedKey = useMemo(() => {
     const next = new Map<string, BuildHistoryEntry>();
     for (const item of displayBuildHistory) {
-      const key = buildLegacyTrayDedupeKeyFromHistory(item);
+      const key = workspacePinnedKey(
+        item.workspaceKey,
+        buildLegacyTrayDedupeKeyFromHistory(item),
+      );
       if (!next.has(key)) {
         next.set(key, item);
       }
@@ -684,8 +722,13 @@ export function BuildPage({
     const next = new Set<string>();
     for (const action of pinnedBuildActions) {
       const item = buildHistoryByPinnedKey.get(action.dedupeKey);
-      if (item) {
-        next.add(buildLegacyTrayDedupeKeyFromHistory(item));
+      if (item && (action.workspaceKey ?? null) === (item.workspaceKey ?? null)) {
+        next.add(
+          workspacePinnedKey(
+            item.workspaceKey,
+            buildLegacyTrayDedupeKeyFromHistory(item),
+          ),
+        );
       }
     }
     return next;
@@ -694,9 +737,13 @@ export function BuildPage({
     () =>
       pinnedBuildActions
         .filter(
-          (action) =>
-            buildLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
-            buildSpecificLegacyPinnedKeys.has(action.dedupeKey),
+          (action) => {
+            const key = workspacePinnedKey(action.workspaceKey, action.dedupeKey);
+            return (
+              buildLegacyHistoryByPinnedKey.has(key) &&
+              buildSpecificLegacyPinnedKeys.has(key)
+            );
+          },
         )
         .map((action) => action.dedupeKey)
         .sort(),
@@ -718,12 +765,17 @@ export function BuildPage({
   const displayPinnedBuildActions = useMemo(
     () =>
       pinnedBuildActions.filter((action) => {
-        if (buildHistoryByPinnedKey.has(action.dedupeKey)) {
+        const exactItem = buildHistoryByPinnedKey.get(action.dedupeKey);
+        if (
+          exactItem &&
+          (action.workspaceKey ?? null) === (exactItem.workspaceKey ?? null)
+        ) {
           return true;
         }
+        const legacyKey = workspacePinnedKey(action.workspaceKey, action.dedupeKey);
         return (
-          buildLegacyHistoryByPinnedKey.has(action.dedupeKey) &&
-          !buildSpecificLegacyPinnedKeys.has(action.dedupeKey)
+          buildLegacyHistoryByPinnedKey.has(legacyKey) &&
+          !buildSpecificLegacyPinnedKeys.has(legacyKey)
         );
       }),
     [
@@ -852,7 +904,11 @@ export function BuildPage({
       return pinnedAction;
     }
     const legacyKey = buildLegacyTrayDedupeKeyFromHistory(group.latest);
-    return pinnedActionByKey.get(legacyKey) ?? null;
+    const legacyAction = pinnedActionByKey.get(legacyKey);
+    return legacyAction &&
+      (legacyAction.workspaceKey ?? null) === (group.latest.workspaceKey ?? null)
+      ? legacyAction
+      : null;
   }
   const visibleUnpinnedBuildHistoryGroups = useMemo(
     () =>
@@ -1431,6 +1487,7 @@ export function BuildPage({
                           title={`${item.projectName} / ${targetLabel || "默认配置"}`}
                           subtitle={`${item.stateLabel} · ${formatRelativeTime(item.updatedAt)}`}
                           pinned={pinned}
+                          accent={buildHistoryAccent(item)}
                           badge={
                             <Stack
                               direction="row"
@@ -1440,6 +1497,14 @@ export function BuildPage({
                               rowGap={0.4}
                               justifyContent="flex-end"
                             >
+                              {!item.workspaceKey ? (
+                                <Chip
+                                  size="small"
+                                  label="未归属"
+                                  color="default"
+                                  variant="outlined"
+                                />
+                              ) : null}
                               {isTaskAnchorGroup ? (
                                 <Chip
                                   size="small"
@@ -1629,9 +1694,7 @@ export function BuildPage({
                           下滑加载更多
                         </Button>
                       ) : (
-                        <Typography variant="caption" className="workflow-history-footer-text">
-                          没有更多了
-                        </Typography>
+                        <AppListEndState />
                       )}
                     </Box>
                   </Stack>

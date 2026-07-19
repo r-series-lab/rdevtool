@@ -178,6 +178,8 @@ export function LocalWorkspaceStatusCard({
                 files={status.files}
                 expanded={filesExpanded}
                 dense
+                projectKey={status.projectKey}
+                repoPath={status.repoPath}
               />
             </Box>
           </Box>

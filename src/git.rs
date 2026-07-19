@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -97,6 +98,23 @@ pub struct GitWorktreeSummary {
     pub bare: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct GitWorktreeRepairResult {
+    pub path: PathBuf,
+    pub branch: String,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct FileDiffResult {
+    pub path: String,
+    pub mode: String,
+    pub diff: String,
+    pub truncated: bool,
+    pub binary: bool,
+    pub warnings: Vec<String>,
+}
+
 fn git_command() -> Command {
     let command = Command::new("git");
     #[cfg(target_os = "windows")]
@@ -137,6 +155,69 @@ pub fn working_tree_status(repo_path: &Path) -> Result<WorkingTreeStatus> {
         ],
     )?;
     parse_working_tree_status(&output)
+}
+
+pub fn changed_file_diff(
+    repo_path: &Path,
+    path: &str,
+    requested_mode: Option<&str>,
+    max_bytes: Option<usize>,
+    max_lines: Option<usize>,
+) -> Result<FileDiffResult> {
+    let path = sanitize_diff_path(path)?;
+    let max_bytes = max_bytes
+        .unwrap_or(300 * 1024)
+        .clamp(16 * 1024, 1024 * 1024);
+    let max_lines = max_lines.unwrap_or(3_000).clamp(200, 10_000);
+    let status = working_tree_status(repo_path)?;
+    let status_item = status.files.iter().find(|item| {
+        item.path == path
+            || sanitize_diff_path(&item.path)
+                .map(|candidate| candidate == path)
+                .unwrap_or(false)
+    });
+    let mut warnings = Vec::new();
+    if status_item.is_none() {
+        warnings.push("当前 Git 状态中未找到该文件，差异内容可能已过期。".to_string());
+    }
+
+    let mode = resolve_file_diff_mode(status_item, requested_mode);
+    let (diff, binary, read_truncated) = if mode == "untracked" {
+        untracked_file_diff(repo_path, &path, max_bytes)?
+    } else {
+        let args = if mode == "staged" {
+            vec!["diff", "--cached", "--", path.as_str()]
+        } else if mode == "combined" {
+            vec!["diff", "HEAD", "--", path.as_str()]
+        } else {
+            vec!["diff", "--", path.as_str()]
+        };
+        let diff = run_git_capture(repo_path, &args)?;
+        let binary = diff_contains_binary_marker(&diff);
+        (diff, binary, false)
+    };
+
+    let (diff, output_truncated) = truncate_diff_text(diff, max_bytes, max_lines);
+    let truncated = read_truncated || output_truncated;
+    if truncated {
+        warnings.push(format!(
+            "差异内容较大，已按 {} KB / {} 行截断。",
+            max_bytes / 1024,
+            max_lines
+        ));
+    }
+    if binary {
+        warnings.push("二进制文件不展示文本差异。".to_string());
+    }
+
+    Ok(FileDiffResult {
+        path,
+        mode,
+        diff,
+        truncated,
+        binary,
+        warnings,
+    })
 }
 
 pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeSummary>> {
@@ -183,10 +264,130 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeSummary>> {
     Ok(items)
 }
 
+pub fn stale_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeSummary>> {
+    Ok(list_worktrees(repo_path)?
+        .into_iter()
+        .filter(|item| !item.bare && !item.path.exists())
+        .collect())
+}
+
+pub fn prune_stale_worktrees(repo_path: &Path) -> Result<Vec<PathBuf>> {
+    let stale_paths = stale_worktrees(repo_path)?
+        .into_iter()
+        .map(|item| item.path)
+        .collect::<Vec<_>>();
+    if stale_paths.is_empty() {
+        return Ok(stale_paths);
+    }
+
+    run_git_capture(repo_path, &["worktree", "prune", "--verbose"])
+        .context("failed to prune stale Git worktrees")?;
+    Ok(stale_paths)
+}
+
+fn worktree_path_identity(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    let mut ancestor = path;
+    let mut suffix = Vec::new();
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            break;
+        };
+        suffix.push(name.to_os_string());
+        let Some(parent) = ancestor.parent() else {
+            break;
+        };
+        ancestor = parent;
+    }
+
+    let mut normalized = ancestor
+        .canonicalize()
+        .unwrap_or_else(|_| ancestor.to_path_buf());
+    for component in suffix.into_iter().rev() {
+        normalized.push(component);
+    }
+    normalized
+}
+
+fn same_worktree_path(left: &Path, right: &Path) -> bool {
+    worktree_path_identity(left) == worktree_path_identity(right)
+}
+
+pub fn repair_missing_worktree(
+    repo_path: &Path,
+    worktree_path: &Path,
+) -> Result<GitWorktreeRepairResult> {
+    if worktree_path.exists() {
+        anyhow::bail!(
+            "工作副本目录仍然存在，无需修复：{}",
+            worktree_path.display()
+        );
+    }
+
+    let worktree = list_worktrees(repo_path)?
+        .into_iter()
+        .find(|item| same_worktree_path(&item.path, worktree_path))
+        .with_context(|| {
+            format!(
+                "Git 未登记该失效工作副本，无法自动重建：{}",
+                worktree_path.display()
+            )
+        })?;
+    let branch = worktree.branch.with_context(|| {
+        format!(
+            "失效工作副本没有可恢复的本地分支：{}",
+            worktree_path.display()
+        )
+    })?;
+
+    let pruned_paths = prune_stale_worktrees(repo_path)?;
+    if !pruned_paths
+        .iter()
+        .any(|path| same_worktree_path(path, worktree_path))
+    {
+        anyhow::bail!(
+            "工作副本状态已变化，请刷新后重试：{}",
+            worktree_path.display()
+        );
+    }
+    if let Some(parent) = worktree_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create worktree parent {}", parent.display()))?;
+    }
+
+    let output = run_git_capture_owned(
+        repo_path,
+        vec![
+            "worktree".to_string(),
+            "add".to_string(),
+            worktree_path.display().to_string(),
+            branch.clone(),
+        ],
+    )?;
+    let detail = if output.trim().is_empty() {
+        format!("已清理失效登记并重建分支 {branch} 的工作副本")
+    } else {
+        format!(
+            "已清理失效登记并重建分支 {branch} 的工作副本\n\n{}",
+            output.trim()
+        )
+    };
+
+    Ok(GitWorktreeRepairResult {
+        path: worktree_path.to_path_buf(),
+        branch,
+        detail,
+    })
+}
+
 pub fn push_current_branch(
     repo_path: &Path,
     commit_before_push: bool,
     commit_message: Option<&str>,
+    selected_paths: &[String],
 ) -> Result<BranchPushResult> {
     let status_before_push = working_tree_status(repo_path)?;
     if status_before_push.detached || status_before_push.current_branch.is_empty() {
@@ -199,6 +400,7 @@ pub fn push_current_branch(
     let current_branch = status_before_push.current_branch.clone();
     let remote_name = preferred_remote_name(repo_path)?;
     let has_local_changes = !status_before_push.clean;
+    let selected_paths = normalize_selected_commit_paths(selected_paths)?;
     let mut detail_parts = Vec::new();
     let mut committed = false;
     let mut commit = None;
@@ -208,9 +410,21 @@ pub fn push_current_branch(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .context("提交说明不能为空")?;
-        let add_output = run_git_capture(repo_path, &["add", "-A"])?;
+        let add_output = if selected_paths.is_empty() {
+            run_git_capture(repo_path, &["add", "-A"])?
+        } else {
+            validate_selected_commit_paths(&status_before_push, &selected_paths)?;
+            let mut args = vec!["add".to_string(), "--".to_string()];
+            args.extend(selected_paths.iter().cloned());
+            run_git_capture_owned(repo_path, args)?
+        };
         if !add_output.trim().is_empty() {
-            detail_parts.push(format!("git add -A:\n{}", add_output.trim()));
+            let add_label = if selected_paths.is_empty() {
+                "git add -A".to_string()
+            } else {
+                format!("git add -- {}", selected_paths.join(" "))
+            };
+            detail_parts.push(format!("{add_label}:\n{}", add_output.trim()));
         }
 
         let commit_output = run_git_capture(repo_path, &["commit", "-m", commit_message])?;
@@ -468,6 +682,183 @@ fn parse_status_header(header: &str) -> (String, Option<String>, usize, usize, b
         behind,
         false,
     )
+}
+
+fn resolve_file_diff_mode(
+    status_item: Option<&WorkingTreeFileStatus>,
+    requested_mode: Option<&str>,
+) -> String {
+    let requested = requested_mode.unwrap_or("auto").trim();
+    if requested == "staged" || requested == "unstaged" || requested == "combined" {
+        return requested.to_string();
+    }
+
+    if let Some(item) = status_item {
+        if item.untracked {
+            return "untracked".to_string();
+        }
+        if item.staged && item.unstaged {
+            return "combined".to_string();
+        }
+        if item.staged {
+            return "staged".to_string();
+        }
+    }
+
+    "unstaged".to_string()
+}
+
+fn sanitize_diff_path(raw_path: &str) -> Result<String> {
+    let raw_path = raw_path
+        .rsplit_once(" -> ")
+        .map(|(_, next)| next)
+        .unwrap_or(raw_path)
+        .trim();
+    if raw_path.is_empty() {
+        anyhow::bail!("文件路径不能为空");
+    }
+    if raw_path.contains('\0') {
+        anyhow::bail!("文件路径包含非法字符");
+    }
+
+    let normalized = raw_path.replace('\\', "/");
+    if normalized.starts_with('/') || normalized.starts_with('~') {
+        anyhow::bail!("文件路径必须是仓库内相对路径");
+    }
+    if normalized
+        .split('/')
+        .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        anyhow::bail!("文件路径必须是仓库内相对路径");
+    }
+
+    Ok(normalized)
+}
+
+fn normalize_selected_commit_paths(paths: &[String]) -> Result<Vec<String>> {
+    let mut seen = BTreeSet::new();
+    let mut normalized = Vec::new();
+    for path in paths {
+        let path = sanitize_diff_path(path)?;
+        if seen.insert(path.clone()) {
+            normalized.push(path);
+        }
+    }
+    Ok(normalized)
+}
+
+fn validate_selected_commit_paths(
+    status: &WorkingTreeStatus,
+    selected_paths: &[String],
+) -> Result<()> {
+    if selected_paths.is_empty() {
+        return Ok(());
+    }
+
+    let selected = selected_paths.iter().cloned().collect::<BTreeSet<_>>();
+    let mut changed = BTreeSet::new();
+    let mut staged_unselected = Vec::new();
+    for item in &status.files {
+        let path = sanitize_diff_path(&item.path)?;
+        changed.insert(path.clone());
+        if item.staged && !selected.contains(&path) {
+            staged_unselected.push(path);
+        }
+    }
+
+    let unknown = selected
+        .iter()
+        .filter(|path| !changed.contains(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "所选文件不在当前变更列表中，请刷新后重试：{}",
+            unknown.join(", ")
+        );
+    }
+
+    if !staged_unselected.is_empty() {
+        anyhow::bail!(
+            "当前存在未选择但已暂存的文件，部分提交会把它们一起提交。请先处理暂存区或选中这些文件：{}",
+            staged_unselected.join(", ")
+        );
+    }
+
+    Ok(())
+}
+
+fn untracked_file_diff(
+    repo_path: &Path,
+    path: &str,
+    max_bytes: usize,
+) -> Result<(String, bool, bool)> {
+    let full_path = repo_path.join(path);
+    let mut file = fs::File::open(&full_path)
+        .with_context(|| format!("failed to read untracked file {}", full_path.display()))?;
+    let mut content = Vec::new();
+    file.by_ref()
+        .take(max_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut content)
+        .with_context(|| format!("failed to read untracked file {}", full_path.display()))?;
+    let truncated = content.len() > max_bytes;
+    if truncated {
+        content.truncate(max_bytes);
+    }
+    if content.iter().any(|byte| *byte == 0) {
+        return Ok((String::new(), true, truncated));
+    }
+
+    let text = String::from_utf8_lossy(&content);
+    let line_count = text.lines().count();
+    let mut diff = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{line_count} @@\n"
+    );
+    for line in text.lines() {
+        diff.push('+');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    if !text.is_empty() && !text.ends_with('\n') {
+        diff.push_str("\\ No newline at end of file\n");
+    }
+
+    Ok((diff, false, truncated))
+}
+
+fn diff_contains_binary_marker(diff: &str) -> bool {
+    diff.lines().any(|line| {
+        line.starts_with("Binary files ")
+            || line.starts_with("Binary file ")
+            || line == "GIT binary patch"
+    })
+}
+
+fn truncate_diff_text(diff: String, max_bytes: usize, max_lines: usize) -> (String, bool) {
+    let mut output = String::new();
+    let mut used_bytes = 0usize;
+    let mut used_lines = 0usize;
+    let mut truncated = false;
+
+    for line in diff.lines() {
+        let next_bytes = line.len() + 1;
+        if used_lines >= max_lines || used_bytes + next_bytes > max_bytes {
+            truncated = true;
+            break;
+        }
+        output.push_str(line);
+        output.push('\n');
+        used_bytes += next_bytes;
+        used_lines += 1;
+    }
+
+    if truncated {
+        output.push_str("\n... diff truncated ...\n");
+    } else if !diff.is_empty() && !diff.ends_with('\n') {
+        output.pop();
+    }
+
+    (output, truncated)
 }
 
 fn trim_remote_prefix(value: &str) -> &str {
@@ -754,6 +1145,7 @@ pub fn add_worktree_from_branch(
     let local_exists = verify_ref(repo_path, &local_ref)?;
     let remote_name = preferred_remote_name(repo_path)?;
     let remote_ref = resolve_remote_branch_ref(repo_path, branch).ok();
+    let pruned_paths = prune_stale_worktrees(repo_path)?;
     let branch_checked_out = list_worktrees(repo_path)
         .map(|items| {
             items
@@ -812,6 +1204,12 @@ pub fn add_worktree_from_branch(
     };
     if branch_checked_out {
         detail.push_str("\n\n源分支已被其他工作副本占用，本次以 detached HEAD 创建副本。");
+    }
+    if !pruned_paths.is_empty() {
+        detail.push_str(&format!(
+            "\n\n已自动清理 {} 个目录已不存在的 Git 工作副本登记。",
+            pruned_paths.len()
+        ));
     }
 
     Ok(BranchCheckoutResult {
@@ -987,12 +1385,19 @@ pub fn switch_branch(repo_path: &Path, target_branch: &str) -> Result<BranchSwit
         });
     }
 
+    let pruned_paths = prune_stale_worktrees(repo_path)?;
     let local_ref = format!("refs/heads/{target_branch}");
     let mut detail_parts = Vec::new();
+    if !pruned_paths.is_empty() {
+        detail_parts.push(format!(
+            "已自动清理 {} 个目录已不存在的 Git 工作副本登记。",
+            pruned_paths.len()
+        ));
+    }
     let created_tracking_branch = if verify_ref(repo_path, &local_ref)? {
-        let output = run_git_capture(repo_path, &["switch", target_branch])?;
+        let output = run_git_capture(repo_path, &["checkout", target_branch])?;
         if !output.trim().is_empty() {
-            detail_parts.push(format!("git switch:\n{}", output.trim()));
+            detail_parts.push(format!("git checkout:\n{}", output.trim()));
         }
         false
     } else {
@@ -1006,9 +1411,9 @@ pub fn switch_branch(repo_path: &Path, target_branch: &str) -> Result<BranchSwit
             anyhow::bail!("目标分支不存在：{target_branch}");
         }
         let remote_branch = format!("{remote_name}/{target_branch}");
-        let output = run_git_capture(repo_path, &["switch", "--track", &remote_branch])?;
+        let output = run_git_capture(repo_path, &["checkout", "--track", &remote_branch])?;
         if !output.trim().is_empty() {
-            detail_parts.push(format!("git switch --track:\n{}", output.trim()));
+            detail_parts.push(format!("git checkout --track:\n{}", output.trim()));
         }
         true
     };
@@ -1058,6 +1463,7 @@ fn cleanup_worktree(repo_path: &Path, worktree_path: &Path, temp_branch: &str) -
 }
 
 fn ensure_target_not_checked_out(repo_path: &Path, target_branch: &str) -> Result<()> {
+    prune_stale_worktrees(repo_path)?;
     let output = run_git_capture(repo_path, &["worktree", "list", "--porcelain"])
         .context("failed to inspect existing worktrees")?;
     let target_ref = format!("refs/heads/{target_branch}");
@@ -1220,4 +1626,119 @@ fn sanitize_branch_name(value: &str) -> String {
         out = out.replace("--", "-");
     }
     out.trim_matches('-').to_string()
+}
+
+#[cfg(test)]
+mod worktree_recovery_tests {
+    use super::*;
+
+    struct TestRepo {
+        root: PathBuf,
+        repo: PathBuf,
+        worktree: PathBuf,
+    }
+
+    impl TestRepo {
+        fn create() -> Self {
+            let suffix = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!(
+                "rdevtool-worktree-recovery-{}-{suffix}",
+                std::process::id()
+            ));
+            let repo = root.join("repo");
+            let worktree = root.join("worktrees").join("pre");
+            fs::create_dir_all(&repo).expect("create test repository directory");
+            run(&repo, &["init"]);
+            run(
+                &repo,
+                &["config", "user.email", "rdevtool-test@example.com"],
+            );
+            run(&repo, &["config", "user.name", "rDevTool Test"]);
+            fs::write(repo.join("README.md"), "worktree recovery\n").expect("write test file");
+            run(&repo, &["add", "README.md"]);
+            run(&repo, &["commit", "-m", "initial"]);
+            run(&repo, &["branch", "pre"]);
+            run(
+                &repo,
+                &[
+                    "worktree",
+                    "add",
+                    worktree.to_string_lossy().as_ref(),
+                    "pre",
+                ],
+            );
+            fs::remove_dir_all(&worktree).expect("remove worktree directory without pruning");
+
+            Self {
+                root,
+                repo,
+                worktree,
+            }
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = run_git_capture(
+                &self.repo,
+                &[
+                    "worktree",
+                    "remove",
+                    "--force",
+                    self.worktree.to_string_lossy().as_ref(),
+                ],
+            );
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn run(repo: &Path, args: &[&str]) {
+        let output = git_command()
+            .args(["-C"])
+            .arg(repo)
+            .args(args)
+            .output()
+            .expect("run git command");
+        assert!(
+            output.status.success(),
+            "git {} failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn switch_branch_prunes_stale_worktree_registration() {
+        let fixture = TestRepo::create();
+
+        let result = switch_branch(&fixture.repo, "pre").expect("switch after stale prune");
+
+        assert_eq!(result.current_branch, "pre");
+        assert!(result.detail.contains("已自动清理 1 个"));
+        assert!(
+            stale_worktrees(&fixture.repo)
+                .expect("list stale worktrees")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn repair_missing_worktree_recreates_original_branch_and_path() {
+        let fixture = TestRepo::create();
+
+        let result = repair_missing_worktree(&fixture.repo, &fixture.worktree)
+            .expect("repair missing worktree");
+
+        assert_eq!(result.branch, "pre");
+        assert_eq!(result.path, fixture.worktree);
+        assert!(result.detail.contains("已清理失效登记并重建"));
+        assert!(fixture.worktree.is_dir());
+        assert_eq!(
+            current_branch(&fixture.worktree).expect("read repaired branch"),
+            "pre"
+        );
+    }
 }

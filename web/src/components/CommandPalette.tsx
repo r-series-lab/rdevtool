@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import type { ProjectRuntimeEntry } from "../app-types";
+import type { ProjectManagementViewKey, ProjectRuntimeEntry } from "../app-types";
 import type { PageKey } from "../app-shell";
 import type { ProjectSummary } from "../hooks/useBranchContext";
 import type { FinderShortcutItem } from "../hooks/useProjectsModule";
@@ -11,6 +11,7 @@ import {
   StopIcon,
   TerminalIcon,
   WebsiteIcon,
+  WorkflowIcon,
 } from "./AppIcons";
 import { AppEmptyState } from "./AppEmptyState";
 
@@ -24,12 +25,14 @@ type CommandPaletteProps = {
   open: boolean;
   navItems: NavItem[];
   activePage: PageKey;
+  projectManagementView: ProjectManagementViewKey;
   projects: ProjectSummary[];
   selectedProjectKey: string;
   runtimeEntries: ProjectRuntimeEntry[];
   shortcutEntries: FinderShortcutItem[];
   onClose: () => void;
   onPageChange: (page: PageKey) => void;
+  onProjectManagementViewChange: (view: ProjectManagementViewKey) => void;
   onProjectChange: (projectKey: string) => void;
   onOpenFinderEntry: (entry: FinderShortcutItem["entry"]) => Promise<boolean> | boolean;
   onStartRuntime: (projectKey: string) => Promise<void> | void;
@@ -67,6 +70,8 @@ function shortcutKindLabel(kind: string) {
       return "应用";
     case "script":
       return "脚本";
+    case "tool":
+      return "工具";
     case "directory":
       return "目录";
     default:
@@ -82,6 +87,9 @@ function shortcutIcon(kind: string) {
     return <FolderIcon fontSize="small" />;
   }
   if (kind === "script") {
+    return <TerminalIcon fontSize="small" />;
+  }
+  if (kind === "tool") {
     return <TerminalIcon fontSize="small" />;
   }
   return <AppWindowIcon fontSize="small" />;
@@ -125,12 +133,14 @@ export function CommandPalette({
   open,
   navItems,
   activePage,
+  projectManagementView,
   projects,
   selectedProjectKey,
   runtimeEntries,
   shortcutEntries,
   onClose,
   onPageChange,
+  onProjectManagementViewChange,
   onProjectChange,
   onOpenFinderEntry,
   onStartRuntime,
@@ -163,8 +173,58 @@ export function CommandPalette({
         icon: <AppWindowIcon fontSize="small" />,
         keywords: `${item.key} ${item.label} ${item.shortLabel} 页面 tab`,
         priority: item.key === activePage ? 64 : 72,
-        run: () => onPageChange(item.key),
+        run: () => {
+          if (item.key === "projectManagement") {
+            onProjectManagementViewChange("projects");
+          }
+          onPageChange(item.key);
+        },
       });
+    }
+
+    if (navItems.some((item) => item.key === "projectManagement")) {
+      items.push(
+        {
+          id: "page:projectManagement:build",
+          title: "项目管理 / 构建",
+          subtitle:
+            activePage === "projectManagement" && projectManagementView === "build"
+              ? "当前页面"
+              : "切换到项目构建",
+          group: "页面",
+          badge: "构建",
+          icon: <PackageIcon fontSize="small" />,
+          keywords: "projectManagement build deploy package 构建 任务 部署 项目管理",
+          priority:
+            activePage === "projectManagement" && projectManagementView === "build"
+              ? 66
+              : 76,
+          run: () => {
+            onProjectManagementViewChange("build");
+            onPageChange("projectManagement");
+          },
+        },
+        {
+          id: "page:projectManagement:git",
+          title: "项目管理 / Git",
+          subtitle:
+            activePage === "projectManagement" && projectManagementView === "git"
+              ? "当前页面"
+              : "切换到 Git 工作流",
+          group: "页面",
+          badge: "Git",
+          icon: <WorkflowIcon fontSize="small" />,
+          keywords: "projectManagement git merge branch workflow 分支 工作流 项目管理",
+          priority:
+            activePage === "projectManagement" && projectManagementView === "git"
+              ? 66
+              : 76,
+          run: () => {
+            onProjectManagementViewChange("git");
+            onPageChange("projectManagement");
+          },
+        },
+      );
     }
 
     for (const project of projects) {
@@ -181,7 +241,11 @@ export function CommandPalette({
         icon: <AppWindowIcon fontSize="small" />,
         keywords: `${projectKeywords} 选择项目 select project`,
         priority: projectPriority,
-        run: () => onProjectChange(project.key),
+        run: () => {
+          onProjectChange(project.key);
+          onProjectManagementViewChange("projects");
+          onPageChange("projectManagement");
+        },
       });
 
       if (runtime?.repoPath || runtime?.cwd || project.repoPath) {
@@ -324,12 +388,14 @@ export function CommandPalette({
     onOpenFinderEntry,
     onOpenProjectDirectory,
     onPageChange,
+    onProjectManagementViewChange,
     onProjectChange,
     onRunBuild,
     onStartRuntime,
     onStopBuild,
     onStopRuntime,
     projects,
+    projectManagementView,
     runtimeByProject,
     selectedProjectKey,
     shortcutEntries,

@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use tungstenite::{Message, connect};
 
 use crate::config::{RuntimeProfileConfig, default_config_dir};
+use crate::config_store::write_config_text_atomic;
 use crate::navigation::{NavigationEntry, runtime_profile_browser_args};
 
 const DEFAULT_CDP_PORT: u16 = 9223;
@@ -640,7 +641,7 @@ fn ensure_web_actions_config() -> Result<PathBuf> {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create config dir: {}", parent.display()))?;
     }
-    fs::write(&path, DEFAULT_WEB_ACTIONS_TEMPLATE)
+    write_config_text_atomic(&path, DEFAULT_WEB_ACTIONS_TEMPLATE)
         .with_context(|| format!("failed to write web actions config: {}", path.display()))?;
     Ok(path)
 }

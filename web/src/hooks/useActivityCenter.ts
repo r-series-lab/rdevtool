@@ -1,6 +1,22 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import type { ConfigSource } from "../app-types";
 import { deleteStoredJson, getStoredJson, setStoredJson } from "../lib/storage";
+import {
+  configSourcesChangedActivities,
+  workspaceStateChangedActivities,
+  type ConfigChangeAppInfo,
+} from "../lib/configChangeActivities";
+import {
+  CONFIG_SOURCES_CHANGED_EVENT,
+  type ConfigSourcesChangedPayload,
+} from "../lib/configSources";
+import {
+  WORKSPACE_STATE_CHANGED_EVENT,
+  type WorkspaceStateChangedPayload,
+} from "../lib/workspaceSync";
+import { disposeTauriListener } from "../lib/tauriEvents";
 import {
   BUILD_STATUS_SYNC_MAX_FAILURES,
   createActivityEntry,
@@ -310,7 +326,7 @@ function activityMatchesScope(
   projectKeys: Set<string>,
   includeAllProjects: boolean,
 ) {
-  if (includeAllProjects) {
+  if (includeAllProjects || item.kind === "config") {
     return true;
   }
   const projectKey = activityProjectKey(item);
@@ -323,6 +339,10 @@ function sameActivityResource(left: ActivityEntry["resource"], right: ActivityEn
     (left?.label ?? null) === (right?.label ?? null) &&
     (left?.value ?? null) === (right?.value ?? null)
   );
+}
+
+function sameActivityAction(left: ActivityEntry["action"], right: ActivityEntry["action"]) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
 function shouldApplyActivityPatch(item: ActivityEntry, patch: ActivityPatch) {
@@ -350,6 +370,9 @@ function shouldApplyActivityPatch(item: ActivityEntry, patch: ActivityPatch) {
   if (patch.resource !== undefined && !sameActivityResource(patch.resource, item.resource)) {
     return true;
   }
+  if (patch.action !== undefined && !sameActivityAction(patch.action, item.action)) {
+    return true;
+  }
   return false;
 }
 
@@ -366,7 +389,9 @@ export function useActivityCenter({
   includeAllProjects = true,
 }: UseActivityCenterOptions) {
   const [allItems, setAllItems] = useState<ActivityEntry[]>([]);
+  const [activityStorageHydrated, setActivityStorageHydrated] = useState(false);
   const itemsRef = useRef<ActivityEntry[]>([]);
+  const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
   const projectKeySet = useMemo(() => new Set(projectKeys), [projectKeys]);
 
   const scopedItems = useMemo(
@@ -400,18 +425,28 @@ export function useActivityCenter({
     [scopedItems],
   );
 
+  const enqueueStorageOperation = useCallback((operation: () => Promise<void>) => {
+    const next = persistenceQueueRef.current
+      .catch(() => undefined)
+      .then(operation);
+    persistenceQueueRef.current = next.catch((reason) => {
+      setError(String(reason));
+    });
+    return next;
+  }, [setError]);
+
   const persist = useCallback((nextItems: ActivityEntry[]) => {
     const normalized = normalizeActivityList(nextItems);
     itemsRef.current = normalized;
     setAllItems(normalized);
-    void setStoredJson(
-      ACTIVITY_STORAGE_NAMESPACE,
-      ACTIVITY_STORAGE_KEY,
-      normalized,
-    ).catch((reason) => {
-      setError(String(reason));
-    });
-  }, [setError]);
+    void enqueueStorageOperation(() =>
+      setStoredJson(
+        ACTIVITY_STORAGE_NAMESPACE,
+        ACTIVITY_STORAGE_KEY,
+        normalized,
+      ),
+    );
+  }, [enqueueStorageOperation]);
 
   const patchStoredActivity = useCallback((id: string, patch: ActivityPatch) => {
     if (!id) {
@@ -494,33 +529,143 @@ export function useActivityCenter({
         const normalized = normalizeActivityList(stored, { expireStaleRunning: true });
         itemsRef.current = normalized;
         setAllItems(normalized);
-        void setStoredJson(
-          ACTIVITY_STORAGE_NAMESPACE,
-          ACTIVITY_STORAGE_KEY,
-          normalized,
-        ).catch((reason) => {
-          if (!cancelled) {
-            setError(String(reason));
-          }
-        });
+        void enqueueStorageOperation(() =>
+          setStoredJson(
+            ACTIVITY_STORAGE_NAMESPACE,
+            ACTIVITY_STORAGE_KEY,
+            normalized,
+          ),
+        );
         void syncStoredBuildStatuses(normalized);
+        setActivityStorageHydrated(true);
       })
       .catch((reason) => {
         if (!cancelled) {
           setError(String(reason));
+          setActivityStorageHydrated(true);
         }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [setError, syncStoredBuildStatuses]);
+  }, [enqueueStorageOperation, setError, syncStoredBuildStatuses]);
 
   const recordActivity = useCallback((draft: ActivityDraft) => {
     const entry = createActivityEntry(draft);
     persist([entry, ...itemsRef.current.filter((item) => item.id !== entry.id)]);
     return entry.id;
   }, [persist]);
+
+  useEffect(() => {
+    if (!activityStorageHydrated) {
+      return;
+    }
+    let disposed = false;
+    const unlisteners: Array<() => void> = [];
+    const seenEvents = new Set<string>();
+    const projectWorkspaceRevisions = new Set<number>();
+
+    function rememberEvent(key: string) {
+      if (seenEvents.has(key)) {
+        return false;
+      }
+      seenEvents.add(key);
+      if (seenEvents.size > 120) {
+        const oldest = seenEvents.values().next().value;
+        if (oldest) seenEvents.delete(oldest);
+      }
+      return true;
+    }
+
+    function recordDrafts(drafts: ActivityDraft[]) {
+      for (const draft of drafts) {
+        recordActivity(draft);
+      }
+    }
+
+    void listen<WorkspaceStateChangedPayload>(WORKSPACE_STATE_CHANGED_EVENT, (event) => {
+      const payload = event.payload;
+      if (
+        disposed ||
+        payload.origin === "internal" ||
+        !rememberEvent(`workspace:${payload.revision}`)
+      ) {
+        return;
+      }
+      if (payload.scopes.includes("projectWorkspaces")) {
+        projectWorkspaceRevisions.add(payload.revision);
+      }
+      void invoke<ConfigChangeAppInfo>("app_info")
+        .then((appInfo) => {
+          if (!disposed) {
+            recordDrafts(workspaceStateChangedActivities(payload, appInfo));
+          }
+        })
+        .catch((reason) => {
+          if (!disposed) {
+            setError(`记录工作区配置变化失败：${String(reason)}`);
+          }
+        });
+    })
+      .then((unlisten) => {
+        if (disposed) disposeTauriListener(unlisten);
+        else unlisteners.push(unlisten);
+      })
+      .catch((reason) => {
+        if (!disposed) setError(`监听工作区配置活动失败：${String(reason)}`);
+      });
+
+    void listen<ConfigSourcesChangedPayload>(CONFIG_SOURCES_CHANGED_EVENT, (event) => {
+      const payload = event.payload;
+      if (
+        disposed ||
+        payload.origin === "internal" ||
+        !rememberEvent(`config-source:${payload.revision}`)
+      ) {
+        return;
+      }
+      window.setTimeout(() => {
+        if (disposed) {
+          return;
+        }
+        const workspaceCatalogChange = projectWorkspaceRevisions.delete(payload.revision);
+        const activityPayload = workspaceCatalogChange
+          ? { ...payload, catalogChanged: false }
+          : payload;
+        void Promise.all([
+          invoke<ConfigSource[]>("list_config_sources"),
+          invoke<ConfigChangeAppInfo>("app_info"),
+        ])
+          .then(([sources, appInfo]) => {
+            if (!disposed) {
+              recordDrafts(
+                configSourcesChangedActivities(activityPayload, sources, appInfo),
+              );
+            }
+          })
+          .catch((reason) => {
+            if (!disposed) {
+              setError(`记录配置源变化失败：${String(reason)}`);
+            }
+          });
+      }, 80);
+    })
+      .then((unlisten) => {
+        if (disposed) disposeTauriListener(unlisten);
+        else unlisteners.push(unlisten);
+      })
+      .catch((reason) => {
+        if (!disposed) setError(`监听配置源活动失败：${String(reason)}`);
+      });
+
+    return () => {
+      disposed = true;
+      for (const unlisten of unlisteners) {
+        disposeTauriListener(unlisten);
+      }
+    };
+  }, [activityStorageHydrated, recordActivity, setError]);
 
   const updateActivity = useCallback((id: string, patch: ActivityPatch) => {
     if (!id) {
@@ -599,14 +744,16 @@ export function useActivityCenter({
     if (includeAllProjects) {
       itemsRef.current = [];
       setAllItems([]);
-      await deleteStoredJson(ACTIVITY_STORAGE_NAMESPACE, ACTIVITY_STORAGE_KEY);
+      await enqueueStorageOperation(() =>
+        deleteStoredJson(ACTIVITY_STORAGE_NAMESPACE, ACTIVITY_STORAGE_KEY),
+      );
       return;
     }
     const remaining = itemsRef.current.filter(
       (item) => !activityMatchesScope(item, projectKeySet, includeAllProjects),
     );
     persist(remaining);
-  }, [includeAllProjects, persist, projectKeySet]);
+  }, [enqueueStorageOperation, includeAllProjects, persist, projectKeySet]);
 
   return {
     items: scopedItems,

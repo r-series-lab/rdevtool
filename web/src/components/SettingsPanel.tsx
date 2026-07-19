@@ -21,9 +21,10 @@ import {
 } from "@mui/material";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { ALL_PAGE_KEYS, NAV_ITEM_MAP, type PageKey } from "../app-shell";
 import { useWorkspaceTypeOptions } from "../hooks/useWorkspaceTypeOptions";
+import { useConfigSource } from "../hooks/useConfigSource";
 import type {
+  AppExitRuntimePolicy,
   CreateProjectWorkspacePayload,
   DeployParamConfigKind,
   DeployParamConfigSummary,
@@ -54,6 +55,7 @@ import {
   workspaceTypeLabel,
   workspaceTypeOptionsWithValues,
 } from "../lib/workspaceTypes";
+import { configSourceIdForWorkspace } from "../lib/configSources";
 import {
   CheckIcon,
   ClearIcon,
@@ -65,19 +67,55 @@ import {
 } from "./AppIcons";
 import { AppEmptyState } from "./AppEmptyState";
 import { AppToast } from "./AppToast";
+import { ConfigSourceBar } from "./ConfigSourceBar";
+import { ConfigSourceManagerDialog } from "./ConfigSourceManagerDialog";
 import { WorkspaceTypeSelect } from "./WorkspaceTypeSelect";
 
 export type SettingsSection =
   | "general"
+  | "menu"
+  | "appearance"
+  | "access"
   | "workspace"
   | "projects"
+  | "projectBasics"
+  | "projectLocal"
+  | "projectRuntime"
+  | "projectBuild"
+  | "projectBranch"
   | "finder"
   | "branch"
   | "build";
+type PageKey =
+  | "overview"
+  | "projectManagement"
+  | "resources"
+  | "merge"
+  | "build"
+  | "proxy";
 
-type SettingsPanelProps = {
+const SETTINGS_ALL_PAGE_KEYS: PageKey[] = [
+  "overview",
+  "projectManagement",
+  "resources",
+  "proxy",
+];
+
+const SETTINGS_NAV_ITEM_MAP: Record<PageKey, { label: string; shortLabel: string }> = {
+  overview: { label: "工作区", shortLabel: "工作区" },
+  projectManagement: { label: "项目管理", shortLabel: "项目管理" },
+  resources: { label: "资源入口", shortLabel: "资源入口" },
+  proxy: { label: "本地代理", shortLabel: "本地代理" },
+  build: { label: "构建任务", shortLabel: "构建任务" },
+  merge: { label: "Git工作流", shortLabel: "Git工作流" },
+};
+
+export type SettingsPanelProps = {
+  surface?: "settings" | "projectManagement";
   styleMode: AppStyleMode;
   onStyleModeChange: (mode: AppStyleMode) => void;
+  exitRuntimePolicy: AppExitRuntimePolicy;
+  onExitRuntimePolicyChange: (policy: AppExitRuntimePolicy) => void;
   selectedProjectKey: string;
   onOpenConfigDir: () => void;
   onOpenConfigFile: () => void;
@@ -93,6 +131,7 @@ type SettingsPanelProps = {
   defaultPage: PageKey;
   onDefaultPageChange: (page: PageKey) => void;
   onProjectConfigSaved: () => Promise<void> | void;
+  onOpenProjectManagement?: () => void;
   onClose: () => void;
 };
 
@@ -105,12 +144,9 @@ type SettingsConfirmState = {
 };
 
 const SECTION_ITEMS: Array<{ key: SettingsSection; label: string }> = [
-  { key: "general", label: "全局" },
-  { key: "workspace", label: "工作区" },
-  { key: "projects", label: "项目" },
-  { key: "branch", label: "Git工作流" },
-  { key: "build", label: "构建任务" },
-  { key: "finder", label: "资源入口" },
+  { key: "menu", label: "菜单" },
+  { key: "appearance", label: "外观" },
+  { key: "access", label: "快捷入口" },
 ];
 
 const DEPLOY_PARAM_KIND_OPTIONS: Array<{ value: DeployParamConfigKind; label: string }> = [
@@ -211,6 +247,7 @@ const NAVIGATION_ENTRY_KIND_OPTIONS: Array<{
   { value: "directory", label: "目录" },
   { value: "app", label: "应用" },
   { value: "script", label: "脚本" },
+  { value: "tool", label: "工具" },
 ];
 
 const NAVIGATION_ENTRY_CREATE_OPTIONS: Array<{
@@ -219,7 +256,9 @@ const NAVIGATION_ENTRY_CREATE_OPTIONS: Array<{
 }> = [
   { value: "url", label: "网站" },
   { value: "directory", label: "目录" },
-  { value: "app", label: "工具" },
+  { value: "app", label: "应用" },
+  { value: "script", label: "脚本" },
+  { value: "tool", label: "工具" },
 ];
 
 function navigationEntryKindLabel(kind: string) {
@@ -344,6 +383,8 @@ function emptyDebugProfile(existingKeys: string[]): ProjectDebugProfileDraft {
   return {
     key,
     label: "项目运行配置",
+    command: null,
+    expectedPort: null,
     runtimeProfile: null,
     envText: "",
     localFiles: [],
@@ -500,6 +541,9 @@ function emptyNavigationEntry(kind: NavigationEditorEntryKind = "url"): Navigati
     bundleId: null,
     appName: null,
     script: null,
+    tool: kind === "tool" ? "link" : null,
+    toolKey: null,
+    toolAction: kind === "tool" ? "plan" : null,
     path: null,
     cwd: null,
     note: null,
@@ -518,21 +562,16 @@ function uniqueNavigationCategoryTitle(categories: NavigationEditorCategory[]) {
 }
 
 function sectionForPage(page: PageKey): SettingsSection {
-  if (page === "build") {
-    return "build";
-  }
-  if (page === "merge") {
-    return "branch";
-  }
-  if (page === "projects") {
-    return "finder";
-  }
+  void page;
   return "general";
 }
 
 export function SettingsPanel({
+  surface = "settings",
   styleMode,
   onStyleModeChange,
+  exitRuntimePolicy,
+  onExitRuntimePolicyChange,
   selectedProjectKey,
   onOpenConfigDir,
   onOpenConfigFile,
@@ -548,10 +587,42 @@ export function SettingsPanel({
   defaultPage,
   onDefaultPageChange,
   onProjectConfigSaved,
+  onOpenProjectManagement,
   onClose,
 }: SettingsPanelProps) {
+  const normalizeProjectManagementSection = (section?: SettingsSection): SettingsSection => {
+    switch (section) {
+      case "build":
+      case "projectBuild":
+        return "projectBuild";
+      case "branch":
+      case "projectBranch":
+        return "projectBranch";
+      case "projectLocal":
+        return "projectLocal";
+      case "projectRuntime":
+        return "projectRuntime";
+      case "projects":
+      case "projectBasics":
+      default:
+        return "projectBasics";
+    }
+  };
+  const normalizeSettingsSection = (section?: SettingsSection): SettingsSection => {
+    switch (section) {
+      case "menu":
+      case "appearance":
+      case "access":
+        return section;
+      case "general":
+      default:
+        return "menu";
+    }
+  };
   const [activeSection, setActiveSection] = useState<SettingsSection>(() =>
-    initialSection ?? sectionForPage(activePage),
+    surface === "projectManagement"
+      ? normalizeProjectManagementSection(initialSection)
+      : normalizeSettingsSection(initialSection ?? sectionForPage(activePage)),
   );
   const [editorState, setEditorState] = useState<ProjectConfigEditorState | null>(null);
   const [navigationEditor, setNavigationEditor] = useState<NavigationEditorState | null>(null);
@@ -580,6 +651,25 @@ export function SettingsPanel({
   const [workspaceEditorKey, setWorkspaceEditorKey] = useState(
     activeProjectWorkspaceKey || "system",
   );
+  const navigationConfigSourceId = useMemo(
+    () => configSourceIdForWorkspace(activeProjectWorkspaceKey),
+    [activeProjectWorkspaceKey],
+  );
+  const {
+    sources: runtimeConfigSources,
+    selectedSource: selectedRuntimeConfigSource,
+    selectedSourceId: selectedRuntimeConfigSourceId,
+    preferredSourceId: preferredRuntimeConfigSourceId,
+    sourceBusy: runtimeConfigSourceBusy,
+    sourceError: runtimeConfigSourceError,
+    sourceStatus: runtimeConfigSourceStatus,
+    refreshSources: refreshRuntimeConfigSources,
+    adoptSources: adoptRuntimeConfigSources,
+    selectSource: selectRuntimeConfigSource,
+  } = useConfigSource({
+    workspaceKey: activeProjectWorkspaceKey,
+    requiredCapability: "runtime",
+  });
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceSaving, setWorkspaceSaving] = useState(false);
   const [workspaceDirectoryBusy, setWorkspaceDirectoryBusy] = useState("");
@@ -590,6 +680,7 @@ export function SettingsPanel({
   const [error, setErrorValue] = useState("");
   const [toastNonce, setToastNonce] = useState(0);
   const [confirmState, setConfirmState] = useState<SettingsConfirmState | null>(null);
+  const [runtimeConfigSourceManagerOpen, setRuntimeConfigSourceManagerOpen] = useState(false);
   const [keywordDrafts, setKeywordDrafts] = useState<Record<string, string>>({});
   const [deployParamOptionsDrafts, setDeployParamOptionsDrafts] = useState<Record<string, string>>({});
   const {
@@ -618,6 +709,16 @@ export function SettingsPanel({
     () => editorState?.projects.find((project) => project.key === selectedKey) ?? null,
     [editorState, selectedKey],
   );
+  const visibleSectionItems =
+    surface === "projectManagement"
+      ? [
+          { key: "projectBasics" as const, label: "基础信息" },
+          { key: "projectLocal" as const, label: "本地运行" },
+          { key: "projectRuntime" as const, label: "运行配置" },
+          { key: "projectBuild" as const, label: "构建目标" },
+          { key: "projectBranch" as const, label: "分支规则" },
+        ]
+      : SECTION_ITEMS;
   const jenkinsProfileOptions = editorState?.jenkinsProfiles ?? [];
   const runtimeProfiles = editorState?.runtimeProfiles ?? [];
   const defaultBranchRules = editorState?.defaultBranchRules ?? {
@@ -666,12 +767,17 @@ export function SettingsPanel({
     navigationDirty ||
     workspaceDirty;
 
-  async function loadProjectConfig(preferredKey = selectedKey || selectedProjectKey) {
+  async function loadProjectConfig(
+    preferredKey = selectedKey || selectedProjectKey,
+    sourceId = selectedRuntimeConfigSourceId,
+  ) {
     setLoading(true);
     setError("");
     setStatus("");
     try {
-      const nextState = await invoke<ProjectConfigEditorState>("get_project_config_editor");
+      const nextState = await invoke<ProjectConfigEditorState>("get_project_config_editor", {
+        sourceId,
+      });
       setEditorState(nextState);
       setDirtyKeys(new Set());
       setDirtyDeployProjectKeys(new Set());
@@ -694,7 +800,9 @@ export function SettingsPanel({
     setNavigationLoading(true);
     setError("");
     try {
-      const nextState = await invoke<NavigationEditorState>("get_navigation_editor");
+      const nextState = await invoke<NavigationEditorState>("get_navigation_editor", {
+        sourceId: navigationConfigSourceId,
+      });
       setNavigationEditor(nextState);
       setNavigationDirty(false);
       const preferredIndex = nextState.preferredCategory
@@ -707,6 +815,19 @@ export function SettingsPanel({
       setError(String(reason));
     } finally {
       setNavigationLoading(false);
+    }
+  }
+
+  async function openNavigationEditorFile() {
+    const path = navigationEditor?.filePath;
+    if (!path) {
+      onOpenNavigationConfigFile();
+      return;
+    }
+    try {
+      await invoke("open_local_path", { path });
+    } catch (reason) {
+      setError(String(reason));
     }
   }
 
@@ -978,16 +1099,29 @@ export function SettingsPanel({
   }
 
   useEffect(() => {
-    void loadProjectConfig();
-    void loadNavigationEditor();
-    void loadProjectWorkspaceEditor();
-  }, []);
+    if (surface !== "projectManagement") {
+      return;
+    }
+    void (async () => {
+      try {
+        const result = await refreshRuntimeConfigSources();
+        await loadProjectConfig(selectedKey || selectedProjectKey, result?.sourceId ?? "default");
+      } catch (reason) {
+        setError(String(reason));
+        await loadProjectConfig(selectedKey || selectedProjectKey, "default");
+      }
+    })();
+  }, [preferredRuntimeConfigSourceId, surface]);
 
   useEffect(() => {
     if (initialSection) {
-      setActiveSection(initialSection);
+      setActiveSection(
+        surface === "projectManagement"
+          ? normalizeProjectManagementSection(initialSection)
+          : normalizeSettingsSection(initialSection),
+      );
     }
-  }, [initialSection]);
+  }, [initialSection, surface]);
 
   useEffect(() => {
     document.documentElement.classList.add("settings-scroll-lock");
@@ -1046,6 +1180,9 @@ export function SettingsPanel({
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (runtimeConfigSourceManagerOpen) {
+          return;
+        }
         if (confirmState) {
           setConfirmState(null);
           return;
@@ -1056,7 +1193,7 @@ export function SettingsPanel({
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [confirmState, hasUnsavedChanges, onClose]);
+  }, [confirmState, hasUnsavedChanges, onClose, runtimeConfigSourceManagerOpen]);
 
   function requestClose() {
     if (hasUnsavedChanges) {
@@ -1103,11 +1240,32 @@ export function SettingsPanel({
       }
       return {
         ...nextState,
+        runtimeProfiles: current.runtimeProfiles,
+        runtimeConfigPath: current.runtimeConfigPath,
+        runtimeProfileScope: current.runtimeProfileScope,
         defaultBranchRules: defaultBranchRulesDirty
           ? current.defaultBranchRules
           : nextState.defaultBranchRules,
       };
     });
+  }
+
+  async function handleRuntimeConfigSourceChange(nextSourceId: string) {
+    if (nextSourceId === selectedRuntimeConfigSourceId || runtimeConfigSourceBusy) {
+      return;
+    }
+    if (hasUnsavedChanges) {
+      setError("请先保存或取消当前项目改动，再切换运行配置源。");
+      return;
+    }
+    setError("");
+    try {
+      const source = await selectRuntimeConfigSource(nextSourceId);
+      if (!source) return;
+      await loadProjectConfig(selectedKey, source.id);
+    } catch (reason) {
+      setError(String(reason));
+    }
   }
 
   function updateSelectedProject(updater: (project: ProjectConfigDraft) => ProjectConfigDraft) {
@@ -2031,9 +2189,12 @@ export function SettingsPanel({
     setStatus("");
     try {
       await invoke("save_navigation_editor", {
+        sourceId: navigationConfigSourceId,
         data: navigationEditor,
       });
-      const nextState = await invoke<NavigationEditorState>("get_navigation_editor");
+      const nextState = await invoke<NavigationEditorState>("get_navigation_editor", {
+        sourceId: navigationConfigSourceId,
+      });
       setNavigationEditor(nextState);
       setNavigationDirty(false);
       await onProjectConfigSaved();
@@ -2046,7 +2207,7 @@ export function SettingsPanel({
   }
 
   function handleMenuEnabledChange(page: PageKey, enabled: boolean) {
-    const nextEnabledPages = ALL_PAGE_KEYS.filter((item) =>
+    const nextEnabledPages = SETTINGS_ALL_PAGE_KEYS.filter((item) =>
       item === page ? enabled : enabledPages.includes(item),
     );
     if (nextEnabledPages.length === 0) {
@@ -2689,20 +2850,24 @@ export function SettingsPanel({
     return (
       <Stack className="settings-overview" spacing={1.15}>
         <section
-          className="settings-list-section settings-list-section--menu"
-          aria-labelledby="settings-menu-title"
+          className="settings-list-section settings-list-section--global-combined"
+          aria-labelledby="settings-global-title"
         >
           <header className="settings-list-head">
-            <Typography id="settings-menu-title" variant="subtitle2">
-              菜单
+            <Typography id="settings-global-title" variant="subtitle2">
+              应用设置
             </Typography>
-            <Typography variant="caption">未启用的菜单不会展示</Typography>
+            <Typography variant="caption">菜单、外观与快捷入口</Typography>
           </header>
-          <div className="settings-list">
+          <div className="settings-list settings-global-combined-list">
+            <div className="settings-list-group-head">
+              <Typography variant="caption">菜单</Typography>
+              <Typography variant="caption">未启用的菜单不会展示</Typography>
+            </div>
             <div className="settings-list-row settings-list-row--split">
               <div className="settings-overview-copy">
                 <Typography variant="subtitle2">展示菜单</Typography>
-                <Typography variant="caption">至少保留一个工作台菜单。</Typography>
+                <Typography variant="caption">至少保留一个工作区菜单。</Typography>
               </div>
               <Stack
                 className="settings-menu-choice"
@@ -2712,7 +2877,7 @@ export function SettingsPanel({
                 flexWrap="wrap"
                 justifyContent="flex-end"
               >
-                {ALL_PAGE_KEYS.map((page) => {
+                {SETTINGS_ALL_PAGE_KEYS.map((page) => {
                   const checked = enabledPages.includes(page);
                   return (
                     <FormControlLabel
@@ -2728,7 +2893,7 @@ export function SettingsPanel({
                           }
                         />
                       }
-                      label={NAV_ITEM_MAP[page].shortLabel}
+                      label={SETTINGS_NAV_ITEM_MAP[page].shortLabel}
                       sx={{ m: 0 }}
                     />
                   );
@@ -2752,77 +2917,103 @@ export function SettingsPanel({
               >
                 {enabledPages.map((page) => (
                   <MenuItem key={page} value={page}>
-                    {NAV_ITEM_MAP[page].label}
+                    {SETTINGS_NAV_ITEM_MAP[page].label}
                   </MenuItem>
                 ))}
               </TextField>
             </div>
-          </div>
-        </section>
 
-        <section
-          className="settings-list-section settings-list-section--appearance"
-          aria-labelledby="settings-appearance-title"
-        >
-          <header className="settings-list-head">
-            <Typography id="settings-appearance-title" variant="subtitle2">
-              外观
-            </Typography>
-            <Typography variant="caption">当前窗口偏好</Typography>
-          </header>
-          <div className="settings-list-row settings-list-row--split">
-            <div className="settings-overview-copy">
-              <Typography variant="subtitle2">换肤</Typography>
-              <Typography variant="caption">选择当前窗口的视觉风格。</Typography>
+            <div className="settings-list-group-head">
+              <Typography variant="caption">运行</Typography>
+              <Typography variant="caption">退出行为</Typography>
             </div>
-            <div className="settings-style-choice" role="group" aria-label="换肤">
-              <button
-                type="button"
-                className={`settings-style-card settings-style-card--light${
-                  styleMode === "light" ? " is-active" : ""
-                }`}
-                aria-pressed={styleMode === "light"}
-                onClick={() => onStyleModeChange("light")}
+            <div className="settings-list-row settings-list-row--split">
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">退出时项目</Typography>
+              </div>
+              <TextField
+                select
+                size="small"
+                value={exitRuntimePolicy}
+                onChange={(event) =>
+                  onExitRuntimePolicyChange(
+                    event.target.value as AppExitRuntimePolicy,
+                  )
+                }
+                sx={{ width: "min(240px, 100%)", flexShrink: 0 }}
+                inputProps={{ "aria-label": "退出时项目" }}
               >
-                <span className="settings-style-card-icon" aria-hidden="true">
-                  <span className="settings-style-sun" />
-                </span>
-                <span className="settings-style-card-copy">
-                  <span>亮色</span>
-                  <small>使用明亮、通透的窗口界面。</small>
-                </span>
-              </button>
-              <button
-                type="button"
-                className={`settings-style-card settings-style-card--mono${
-                  styleMode === "mono" ? " is-active" : ""
-                }`}
-                aria-pressed={styleMode === "mono"}
-                onClick={() => onStyleModeChange("mono")}
-              >
-                <span className="settings-style-card-icon" aria-hidden="true">
-                  <span className="settings-style-moon" />
-                </span>
-                <span className="settings-style-card-copy">
-                  <span>暗色</span>
-                  <small>使用低亮度、高对比的工作界面。</small>
-                </span>
-              </button>
+                <MenuItem value="ask">每次询问</MenuItem>
+                <MenuItem value="keep">保持项目运行</MenuItem>
+                <MenuItem value="stop">停止本次启动项目</MenuItem>
+              </TextField>
             </div>
-          </div>
-        </section>
 
-        <section
-          className="settings-list-section settings-list-section--access"
-          aria-labelledby="settings-access-title"
-        >
-          <header className="settings-list-head">
-            <Typography id="settings-access-title" variant="subtitle2">
-              快捷入口
-            </Typography>
-            <Typography variant="caption">命令与配置文件</Typography>
-          </header>
-          <div className="settings-list settings-access-list module-list-scroll">
+            <div className="settings-list-group-head">
+              <Typography variant="caption">外观</Typography>
+              <Typography variant="caption">当前窗口偏好</Typography>
+            </div>
+            <div className="settings-list-row settings-list-row--split">
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">换肤</Typography>
+                <Typography variant="caption">选择当前窗口的视觉风格。</Typography>
+              </div>
+              <div className="settings-style-choice" role="group" aria-label="换肤">
+                <button
+                  type="button"
+                  className={`settings-style-card settings-style-card--system${
+                    styleMode === "system" ? " is-active" : ""
+                  }`}
+                  aria-pressed={styleMode === "system"}
+                  onClick={() => onStyleModeChange("system")}
+                >
+                  <span className="settings-style-card-icon" aria-hidden="true">
+                    <span className="settings-style-system" />
+                  </span>
+                  <span className="settings-style-card-copy">
+                    <span>系统默认</span>
+                    <small>跟随系统亮暗色。</small>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`settings-style-card settings-style-card--light${
+                    styleMode === "light" ? " is-active" : ""
+                  }`}
+                  aria-pressed={styleMode === "light"}
+                  onClick={() => onStyleModeChange("light")}
+                >
+                  <span className="settings-style-card-icon" aria-hidden="true">
+                    <span className="settings-style-sun" />
+                  </span>
+                  <span className="settings-style-card-copy">
+                    <span>亮色</span>
+                    <small>使用明亮、通透的窗口界面。</small>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={`settings-style-card settings-style-card--mono${
+                    styleMode === "mono" ? " is-active" : ""
+                  }`}
+                  aria-pressed={styleMode === "mono"}
+                  onClick={() => onStyleModeChange("mono")}
+                >
+                  <span className="settings-style-card-icon" aria-hidden="true">
+                    <span className="settings-style-moon" />
+                  </span>
+                  <span className="settings-style-card-copy">
+                    <span>暗色</span>
+                    <small>使用低亮度、高对比的工作界面。</small>
+                  </span>
+                </button>
+              </div>
+            </div>
+
+            <div className="settings-list-group-head">
+              <Typography variant="caption">快捷入口</Typography>
+              <Typography variant="caption">命令与配置文件</Typography>
+            </div>
             <div className="settings-list-row">
               <div className="settings-list-icon">
                 <span>⌘</span>
@@ -2833,7 +3024,6 @@ export function SettingsPanel({
               </div>
               <kbd>Cmd/Ctrl&nbsp;K</kbd>
             </div>
-
             <Button
               className="settings-list-row settings-list-button"
               variant="outlined"
@@ -2912,6 +3102,41 @@ export function SettingsPanel({
           刷新
         </Button>
       </div>
+    );
+  }
+
+  function renderProjectManagementRedirectSection() {
+    return (
+      <Stack spacing={1.2}>
+        <section className="settings-list-section">
+          <header className="settings-list-head">
+            <Typography variant="subtitle2">项目配置已迁移</Typography>
+            <Typography variant="caption">项目、构建与分支规则统一在项目管理中维护</Typography>
+          </header>
+          <div className="settings-list">
+            <Button
+              className="settings-list-row settings-list-button"
+              variant="outlined"
+              color="inherit"
+              onClick={onOpenProjectManagement}
+              disabled={!onOpenProjectManagement}
+            >
+              <span className="settings-list-icon">
+                <OpenExternalIcon fontSize="small" />
+              </span>
+              <span className="settings-overview-copy">
+                <Typography component="span" variant="subtitle2">
+                  打开项目管理
+                </Typography>
+                <Typography component="span" variant="caption">
+                  管理项目身份、运行配置、构建目标和 Git 分支规则
+                </Typography>
+              </span>
+              <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
+            </Button>
+          </div>
+        </section>
+      </Stack>
     );
   }
 
@@ -3060,6 +3285,34 @@ export function SettingsPanel({
                   </MenuItem>
                 ))}
               </TextField>
+              <TextField
+                className="settings-form-grid-wide"
+                size="small"
+                label="启动命令覆盖"
+                value={selectedDebugProfile.command ?? ""}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    command: event.target.value || null,
+                  })
+                }
+                placeholder="留空时使用项目默认 dev 命令"
+                helperText="仅对该调试档案生效，不修改项目默认启动命令。"
+              />
+              <TextField
+                size="small"
+                type="number"
+                label="预期端口"
+                value={selectedDebugProfile.expectedPort ?? ""}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    expectedPort: event.target.value
+                      ? Number(event.target.value)
+                      : null,
+                  })
+                }
+                inputProps={{ min: 1, max: 65535 }}
+                helperText="被占用时直接阻止启动。"
+              />
               <TextField
                 size="small"
                 label="浏览器"
@@ -3838,247 +4091,326 @@ export function SettingsPanel({
     );
   }
 
-  function renderProjectsSection() {
+  function renderNoProjectSection(description: string) {
     if (loading && !editorState) {
       return <Alert severity="info">正在读取项目配置</Alert>;
     }
     if (!selectedProject) {
       return (
         <Stack spacing={1.3}>
-          <AppEmptyState compact title="暂无项目配置" description="新增项目后可配置分支、运行和构建。" />
+          <AppEmptyState compact title="暂无项目配置" description={description} />
           {renderNewProjectBlock()}
         </Stack>
       );
     }
+    return null;
+  }
 
+  function renderProjectIdentityBlock() {
+    if (!selectedProject) {
+      return null;
+    }
+    return (
+      renderProjectSectionBlock(
+        "项目身份",
+        "分支、构建和本地运行共用这组项目基础信息",
+        <div className="settings-form-grid">
+          <TextField size="small" label="Key" value={selectedProject.key} disabled />
+          <TextField
+            size="small"
+            label="名称"
+            value={selectedProject.name}
+            onChange={(event) =>
+              updateSelectedProject((project) => ({ ...project, name: event.target.value }))
+            }
+          />
+          <TextField
+            size="small"
+            label="分类"
+            value={selectedProject.category}
+            onChange={(event) =>
+              updateSelectedProject((project) => ({ ...project, category: event.target.value }))
+            }
+          />
+          <TextField
+            size="small"
+            label="Git URL"
+            value={selectedProject.gitUrl}
+            onChange={(event) =>
+              updateSelectedProject((project) => ({ ...project, gitUrl: event.target.value }))
+            }
+          />
+          <TextField
+            size="small"
+            label="仓库路径"
+            value={selectedProject.repoPath ?? ""}
+            onChange={(event) =>
+              updateSelectedProject((project) => ({ ...project, repoPath: event.target.value }))
+            }
+          />
+        </div>,
+      )
+    );
+  }
+
+  function renderProjectLocalCommandsBlock() {
+    return renderProjectSectionBlock(
+      "本地运行",
+      "项目页启动 dev 服务和本地构建时使用",
+      <Stack spacing={1}>
+        {renderCommandFields("dev", "dev 服务")}
+        {renderCommandFields("build", "本地构建")}
+      </Stack>,
+    );
+  }
+
+  function renderProjectFocusBlock() {
+    if (!selectedProject) {
+      return null;
+    }
+    return renderProjectSectionBlock(
+      "聚焦",
+      "项目页唤起运行中的项目时使用",
+      <div className="settings-form-grid">
+        <TextField
+          size="small"
+          label="URL"
+          value={selectedProject.focus.url ?? ""}
+          onChange={(event) =>
+            updateSelectedProject((project) => ({
+              ...project,
+              focus: { ...project.focus, url: event.target.value },
+            }))
+          }
+        />
+        <TextField
+          size="small"
+          label="Bundle ID"
+          value={selectedProject.focus.bundleId ?? ""}
+          onChange={(event) =>
+            updateSelectedProject((project) => ({
+              ...project,
+              focus: { ...project.focus, bundleId: event.target.value },
+            }))
+          }
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={Boolean(selectedProject.focus.autoOnStart)}
+              onChange={(event) =>
+                updateSelectedProject((project) => ({
+                  ...project,
+                  focus: {
+                    ...project.focus,
+                    autoOnStart: event.target.checked,
+                  },
+                }))
+              }
+            />
+          }
+          label="启动成功后自动唤起"
+          sx={{ alignSelf: "center" }}
+        />
+        <TextField
+          size="small"
+          select
+          label="自动打开"
+          value={selectedProject.focus.autoOpenMode ?? "ready"}
+          onChange={(event) =>
+            updateSelectedProject((project) => ({
+              ...project,
+              focus: {
+                ...project.focus,
+                autoOpenMode: event.target.value,
+              },
+            }))
+          }
+        >
+          <MenuItem value="ready">识别成功后打开</MenuItem>
+          <MenuItem value="started">进程启动后打开</MenuItem>
+          <MenuItem value="manual">手动打开</MenuItem>
+        </TextField>
+        <TextField
+          size="small"
+          label="识别超时 ms"
+          type="number"
+          value={selectedProject.focus.readyTimeoutMs ?? 180000}
+          onChange={(event) =>
+            updateSelectedProject((project) => ({
+              ...project,
+              focus: {
+                ...project.focus,
+                readyTimeoutMs: Number(event.target.value) || 180000,
+              },
+            }))
+          }
+        />
+        <FormControlLabel
+          control={
+            <Checkbox
+              checked={selectedProject.focus.readyEnabled ?? true}
+              onChange={(event) =>
+                updateSelectedProject((project) => ({
+                  ...project,
+                  focus: {
+                    ...project.focus,
+                    readyEnabled: event.target.checked,
+                  },
+                }))
+              }
+            />
+          }
+          label="启用启动识别"
+          sx={{ alignSelf: "center" }}
+        />
+        <TextField
+          size="small"
+          className="settings-form-grid-wide"
+          label="启动后动作"
+          helperText="一行一个网页动作 key，在项目 ready 后按顺序执行"
+          value={selectedProject.focus.afterReadyActionsText ?? ""}
+          onChange={(event) =>
+            updateSelectedProject((project) => ({
+              ...project,
+              focus: {
+                ...project.focus,
+                afterReadyActionsText: event.target.value,
+              },
+            }))
+          }
+          multiline
+          minRows={2}
+        />
+        <TextField
+          size="small"
+          className="settings-form-grid-wide"
+          label="URL 提取模板"
+          value={
+            selectedProject.focus.readyUrlPatternsText ??
+            "- Local: {url}\nLocal: {url}\n- Network: {url}\nNetwork: {url}\nready - {url}"
+          }
+          onChange={(event) =>
+            updateSelectedProject((project) => ({
+              ...project,
+              focus: {
+                ...project.focus,
+                readyUrlPatternsText: event.target.value,
+              },
+            }))
+          }
+          multiline
+          minRows={2}
+        />
+        <TextField
+          size="small"
+          className="settings-form-grid-wide"
+          label="成功标记（可选）"
+          value={selectedProject.focus.readySuccessMarkersText ?? ""}
+          onChange={(event) =>
+            updateSelectedProject((project) => ({
+              ...project,
+              focus: {
+                ...project.focus,
+                readySuccessMarkersText: event.target.value,
+              },
+            }))
+          }
+          multiline
+          minRows={2}
+        />
+        <TextField
+          size="small"
+          className="settings-form-grid-wide"
+          label="失败标记"
+          value={
+            selectedProject.focus.readyFailureMarkersText ??
+            "Failed to compile\nCompilation failed\nEADDRINUSE"
+          }
+          onChange={(event) =>
+            updateSelectedProject((project) => ({
+              ...project,
+              focus: {
+                ...project.focus,
+                readyFailureMarkersText: event.target.value,
+              },
+            }))
+          }
+          multiline
+          minRows={2}
+        />
+      </div>,
+    );
+  }
+
+  function renderProjectBasicsSection() {
+    const empty = renderNoProjectSection("新增项目后可维护基础信息。");
+    if (empty) {
+      return empty;
+    }
     return (
       <Stack spacing={1.3}>
         {renderProjectSelector()}
         {renderNewProjectBlock()}
-        {renderProjectSectionBlock(
-          "项目身份",
-          "分支、构建和本地运行共用这组项目基础信息",
-          <div className="settings-form-grid">
-            <TextField size="small" label="Key" value={selectedProject.key} disabled />
-            <TextField
-              size="small"
-              label="名称"
-              value={selectedProject.name}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({ ...project, name: event.target.value }))
-              }
-            />
-            <TextField
-              size="small"
-              label="分类"
-              value={selectedProject.category}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({ ...project, category: event.target.value }))
-              }
-            />
-            <TextField
-              size="small"
-              label="Git URL"
-              value={selectedProject.gitUrl}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({ ...project, gitUrl: event.target.value }))
-              }
-            />
-            <TextField
-              size="small"
-              label="仓库路径"
-              value={selectedProject.repoPath ?? ""}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({ ...project, repoPath: event.target.value }))
-              }
-            />
-          </div>,
-        )}
-        {renderProjectSectionBlock(
-          "本地运行",
-          "项目页启动 dev 服务和本地构建时使用",
-          <Stack spacing={1}>
-            {renderCommandFields("dev", "dev 服务")}
-            {renderCommandFields("build", "本地构建")}
-          </Stack>,
-        )}
-        {renderDebugProfilesBlock()}
-        {renderProjectSectionBlock(
-          "聚焦",
-          "项目页唤起运行中的项目时使用",
-          <div className="settings-form-grid">
-            <TextField
-              size="small"
-              label="URL"
-              value={selectedProject.focus.url ?? ""}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  focus: { ...project.focus, url: event.target.value },
-                }))
-              }
-            />
-            <TextField
-              size="small"
-              label="Bundle ID"
-              value={selectedProject.focus.bundleId ?? ""}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  focus: { ...project.focus, bundleId: event.target.value },
-                }))
-              }
-            />
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={Boolean(selectedProject.focus.autoOnStart)}
-                  onChange={(event) =>
-                    updateSelectedProject((project) => ({
-                      ...project,
-                      focus: {
-                        ...project.focus,
-                        autoOnStart: event.target.checked,
-                      },
-                    }))
-                  }
-                />
-              }
-              label="启动成功后自动唤起"
-              sx={{ alignSelf: "center" }}
-            />
-            <TextField
-              size="small"
-              select
-              label="自动打开"
-              value={selectedProject.focus.autoOpenMode ?? "ready"}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  focus: {
-                    ...project.focus,
-                    autoOpenMode: event.target.value,
-                  },
-                }))
-              }
-            >
-              <MenuItem value="ready">识别成功后打开</MenuItem>
-              <MenuItem value="started">进程启动后打开</MenuItem>
-              <MenuItem value="manual">手动打开</MenuItem>
-            </TextField>
-            <TextField
-              size="small"
-              label="识别超时 ms"
-              type="number"
-              value={selectedProject.focus.readyTimeoutMs ?? 180000}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  focus: {
-                    ...project.focus,
-                    readyTimeoutMs: Number(event.target.value) || 180000,
-                  },
-                }))
-              }
-            />
-            <FormControlLabel
-              control={
-                <Checkbox
-                  checked={selectedProject.focus.readyEnabled ?? true}
-                  onChange={(event) =>
-                    updateSelectedProject((project) => ({
-                      ...project,
-                      focus: {
-                        ...project.focus,
-                        readyEnabled: event.target.checked,
-                      },
-                    }))
-                  }
-                />
-              }
-              label="启用启动识别"
-              sx={{ alignSelf: "center" }}
-            />
-            <TextField
-              size="small"
-              className="settings-form-grid-wide"
-              label="启动后动作"
-              helperText="一行一个网页动作 key，在项目 ready 后按顺序执行"
-              value={selectedProject.focus.afterReadyActionsText ?? ""}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  focus: {
-                    ...project.focus,
-                    afterReadyActionsText: event.target.value,
-                  },
-                }))
-              }
-              multiline
-              minRows={2}
-            />
-            <TextField
-              size="small"
-              className="settings-form-grid-wide"
-              label="URL 提取模板"
-              value={
-                selectedProject.focus.readyUrlPatternsText ??
-                "- Local: {url}\nLocal: {url}\n- Network: {url}\nNetwork: {url}\nready - {url}"
-              }
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  focus: {
-                    ...project.focus,
-                    readyUrlPatternsText: event.target.value,
-                  },
-                }))
-              }
-              multiline
-              minRows={2}
-            />
-            <TextField
-              size="small"
-              className="settings-form-grid-wide"
-              label="成功标记（可选）"
-              value={selectedProject.focus.readySuccessMarkersText ?? ""}
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  focus: {
-                    ...project.focus,
-                    readySuccessMarkersText: event.target.value,
-                  },
-                }))
-              }
-              multiline
-              minRows={2}
-            />
-            <TextField
-              size="small"
-              className="settings-form-grid-wide"
-              label="失败标记"
-              value={
-                selectedProject.focus.readyFailureMarkersText ??
-                "Failed to compile\nCompilation failed\nEADDRINUSE"
-              }
-              onChange={(event) =>
-                updateSelectedProject((project) => ({
-                  ...project,
-                  focus: {
-                    ...project.focus,
-                    readyFailureMarkersText: event.target.value,
-                  },
-                }))
-              }
-              multiline
-              minRows={2}
-            />
-          </div>,
-        )}
+        {renderProjectIdentityBlock()}
         {renderProjectSaveRow(true)}
       </Stack>
     );
+  }
+
+  function renderProjectLocalSection() {
+    const empty = renderNoProjectSection("新增项目后可配置本地运行和聚焦。");
+    if (empty) {
+      return empty;
+    }
+    return (
+      <Stack spacing={1.3}>
+        {renderProjectSelector()}
+        {renderProjectLocalCommandsBlock()}
+        {renderProjectFocusBlock()}
+        {renderProjectSaveRow()}
+      </Stack>
+    );
+  }
+
+  function renderProjectRuntimeSection() {
+    const empty = renderNoProjectSection("新增项目后可配置运行配置。");
+    if (empty) {
+      return empty;
+    }
+    const runtimeConfigPath =
+      editorState?.runtimeProfileScope === "global"
+        ? editorState.configPath
+        : editorState?.runtimeConfigPath || selectedRuntimeConfigSource?.files.runtimeOverrides;
+    return (
+      <Stack spacing={1.3}>
+        {runtimeConfigSources.length > 0 ? (
+          <ConfigSourceBar
+            sources={runtimeConfigSources}
+            selectedSourceId={selectedRuntimeConfigSourceId}
+            selectedSource={selectedRuntimeConfigSource}
+            path={runtimeConfigPath}
+            requiredCapability="runtime"
+            profileFallback="runtime"
+            disabled={loading || saving || runtimeConfigSourceBusy}
+            status={runtimeConfigSourceStatus}
+            error={runtimeConfigSourceError}
+            showReadyStatus
+            manageDisabled={hasUnsavedChanges}
+            manageDisabledReason="请先保存或取消当前项目改动"
+            onSourceChange={(sourceId) => void handleRuntimeConfigSourceChange(sourceId)}
+            onManage={() => setRuntimeConfigSourceManagerOpen(true)}
+          />
+        ) : null}
+        {renderProjectSelector()}
+        {renderDebugProfilesBlock()}
+        {renderProjectSaveRow()}
+      </Stack>
+    );
+  }
+
+  function renderProjectsSection() {
+    return renderProjectBasicsSection();
   }
 
   function renderNavigationEntryTargetFields(
@@ -4136,6 +4468,50 @@ export function SettingsPanel({
               })
             }
           />
+        </>
+      );
+    }
+
+    if (entry.kind === "tool") {
+      return (
+        <>
+          <TextField
+            select
+            size="small"
+            label="工具类型"
+            value={entry.tool ?? "link"}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                tool: event.target.value,
+                toolAction: event.target.value === "link" ? "plan" : entry.toolAction,
+              })
+            }
+          >
+            <MenuItem value="link">Link</MenuItem>
+          </TextField>
+          <TextField
+            size="small"
+            label="Link Key"
+            value={entry.toolKey ?? ""}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                toolKey: event.target.value,
+              })
+            }
+          />
+          <TextField
+            select
+            size="small"
+            label="动作"
+            value={entry.toolAction ?? "plan"}
+            onChange={(event) =>
+              updateNavigationEntryAt(categoryIndex, entryIndex, {
+                toolAction: event.target.value,
+              })
+            }
+          >
+            <MenuItem value="plan">查看计划</MenuItem>
+          </TextField>
         </>
       );
     }
@@ -4376,7 +4752,7 @@ export function SettingsPanel({
               variant="outlined"
               color="inherit"
               startIcon={<OpenExternalIcon fontSize="small" />}
-              onClick={onOpenNavigationConfigFile}
+              onClick={() => void openNavigationEditorFile()}
             >
               navigation.toml
             </Button>
@@ -4556,7 +4932,7 @@ export function SettingsPanel({
               variant="outlined"
               color="inherit"
               startIcon={<OpenExternalIcon fontSize="small" />}
-              onClick={onOpenNavigationConfigFile}
+              onClick={() => void openNavigationEditorFile()}
             >
               打开文件
             </Button>
@@ -5245,7 +5621,7 @@ export function SettingsPanel({
 
   return (
     <div
-      className="settings-overlay"
+      className={`settings-overlay${surface === "projectManagement" ? " settings-overlay--drawer" : ""}`}
       role="presentation"
       onMouseDown={(event) => {
         if (event.target === event.currentTarget) {
@@ -5254,16 +5630,22 @@ export function SettingsPanel({
       }}
     >
       <div
-        className="settings-panel settings-panel-wide"
+        className={`settings-panel settings-panel-wide${
+          surface === "projectManagement" ? " settings-panel--project-config" : " settings-panel--global"
+        }`}
         role="dialog"
         aria-modal="true"
-        aria-label="设置"
+        aria-label={surface === "projectManagement" ? "项目配置" : "设置"}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="settings-panel-head">
           <div>
-            <Typography variant="subtitle2">设置</Typography>
-            <Typography variant="caption">工作台与项目配置</Typography>
+            <Typography variant="subtitle2">
+              {surface === "projectManagement" ? "项目配置" : "设置"}
+            </Typography>
+            <Typography variant="caption">
+              {surface === "projectManagement" ? "项目管理" : "菜单、外观与快捷入口"}
+            </Typography>
           </div>
           <button
             type="button"
@@ -5275,19 +5657,25 @@ export function SettingsPanel({
           </button>
         </div>
 
-        <div className="settings-panel-body">
-          <div className="settings-section-nav" role="tablist" aria-label="设置分类">
-            {SECTION_ITEMS.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                className={activeSection === item.key ? "is-active" : ""}
-                onClick={() => setActiveSection(item.key)}
-              >
-                {item.label}
-              </button>
-            ))}
-          </div>
+        <div
+          className={`settings-panel-body${
+            surface === "projectManagement" ? "" : " settings-panel-body--single"
+          }`}
+        >
+          {surface === "projectManagement" ? (
+            <div className="settings-section-nav" role="tablist" aria-label="设置分类">
+              {visibleSectionItems.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={activeSection === item.key ? "is-active" : ""}
+                  onClick={() => setActiveSection(item.key)}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+          ) : null}
 
           <div className="settings-section-content">
             <AppToast
@@ -5296,15 +5684,51 @@ export function SettingsPanel({
               autoHideDuration={error ? 5200 : 2800}
               nonce={toastNonce}
             />
-            {activeSection === "general" ? renderGeneralSection() : null}
-            {activeSection === "workspace" ? renderWorkspaceSection() : null}
-            {activeSection === "projects" ? renderProjectsSection() : null}
-            {activeSection === "finder" ? renderFinderSection() : null}
-            {activeSection === "branch" ? renderBranchSection() : null}
-            {activeSection === "build" ? renderDeploySection() : null}
+            {surface === "projectManagement" ? (
+              <>
+                {activeSection === "workspace" ? renderWorkspaceSection() : null}
+                {activeSection === "projects"
+                  ? renderProjectsSection()
+                  : null}
+                {activeSection === "projectBasics"
+                  ? renderProjectBasicsSection()
+                  : null}
+                {activeSection === "projectLocal"
+                  ? renderProjectLocalSection()
+                  : null}
+                {activeSection === "projectRuntime"
+                  ? renderProjectRuntimeSection()
+                  : null}
+                {activeSection === "finder" ? renderFinderSection() : null}
+                {activeSection === "branch" || activeSection === "projectBranch"
+                  ? renderBranchSection()
+                  : null}
+                {activeSection === "build" || activeSection === "projectBuild"
+                  ? renderDeploySection()
+                  : null}
+              </>
+            ) : (
+              renderGeneralSection()
+            )}
           </div>
         </div>
       </div>
+      <ConfigSourceManagerDialog
+        open={runtimeConfigSourceManagerOpen}
+        initialSourceId={selectedRuntimeConfigSourceId}
+        onClose={() => setRuntimeConfigSourceManagerOpen(false)}
+        onChanged={async (sources) => {
+          try {
+            const result = adoptRuntimeConfigSources(
+              sources,
+              selectedRuntimeConfigSourceId,
+            );
+            await loadProjectConfig(selectedKey, result.sourceId);
+          } catch (reason) {
+            setError(String(reason));
+          }
+        }}
+      />
       {confirmState ? (
         <div
           className="settings-confirm-layer"

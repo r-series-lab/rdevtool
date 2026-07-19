@@ -21,19 +21,27 @@ import {
   BUILD_STATUS_SYNC_MAX_FAILURES,
   activityExecutionKey,
   isBuildActivityKind,
+  latestActivityExecutionStatus,
   type ActivityEntry,
   type ActivityKind,
   type ActivityStatus,
 } from "../lib/activityCenter";
 import {
+  ActivityIcon,
   AppWindowIcon,
   CheckIcon,
   ClockIcon,
+  CollapseIcon,
   ClearIcon,
-  LocateIcon,
+  ExpandIcon,
   OpenExternalIcon,
+  PackageIcon,
+  PanelSideIcon,
+  PlayIcon,
   RefreshIcon,
+  SettingsIcon,
   TrashIcon,
+  WorkflowIcon,
 } from "./AppIcons";
 import { AppEmptyState } from "./AppEmptyState";
 import type { Theme } from "@mui/material/styles";
@@ -52,6 +60,7 @@ type ActivityQueueGroup = {
   runningItems: ActivityEntry[];
   resourceItem: ActivityEntry | null;
   targetItem: ActivityEntry | null;
+  actionItem: ActivityEntry | null;
   failedCount: number;
   runningCount: number;
   total: number;
@@ -95,6 +104,7 @@ type ActivityCenterProps = {
   onClear: () => void;
   onOpenEntry: (entry: ActivityEntry) => void;
   onOpenResource: (entry: ActivityEntry) => void;
+  onRunAction: (entry: ActivityEntry) => Promise<void> | void;
   onRefresh: (options?: { force?: boolean }) => Promise<void> | void;
   onAcknowledgeEntry: (entry: ActivityEntry) => void;
   onAcknowledgeEntries: (entries: ActivityEntry[]) => void;
@@ -110,6 +120,7 @@ const KIND_LABELS: Record<ActivityKind, string> = {
   branch: "Git工作流",
   deploy: "构建任务",
   shortcut: "资源入口",
+  config: "配置变更",
 };
 
 const STATUS_LABELS: Record<ActivityStatus, string> = {
@@ -122,18 +133,21 @@ const STATUS_LABELS: Record<ActivityStatus, string> = {
 const activityActionIconSx = (theme: Theme) => {
   const dark = theme.palette.mode === "dark";
   return {
-    width: 28,
-    height: 28,
-    borderRadius: "8px",
-    border: dark ? "1px solid rgba(143,184,234,0.12)" : "1px solid rgba(52,76,96,0.09)",
-    bgcolor: dark ? "rgba(13,18,25,0.48)" : "rgba(255,255,255,0.34)",
-    color: "var(--accent)",
+    width: 24,
+    height: 24,
+    borderRadius: "6px",
+    border: dark ? "1px solid rgba(143,184,234,0.14)" : "1px solid rgba(71,96,123,0.14)",
+    bgcolor: dark ? "rgba(13,18,25,0.56)" : "rgba(255,255,255,0.82)",
+    color: "color-mix(in srgb, var(--text) 82%, var(--accent))",
     flexShrink: 0,
     boxShadow: dark
-      ? "inset 0 1px 0 rgba(255,255,255,0.025)"
-      : "inset 0 1px 0 rgba(255,255,255,0.38)",
+      ? "inset 0 1px 0 rgba(255,255,255,0.035), 0 4px 12px rgba(0,0,0,0.1)"
+      : "inset 0 1px 0 rgba(255,255,255,0.8), 0 4px 12px rgba(38,61,85,0.07)",
+    "& .MuiSvgIcon-root": {
+      fontSize: "0.9rem",
+    },
     "&:hover": {
-      bgcolor: dark ? "rgba(20,29,40,0.62)" : "rgba(255,255,255,0.48)",
+      bgcolor: dark ? "rgba(20,29,40,0.72)" : "#ffffff",
       borderColor: "var(--accent-border)",
       color: "var(--accent-hover)",
     },
@@ -143,18 +157,23 @@ const activityActionIconSx = (theme: Theme) => {
 const activityHeaderIconSx = (theme: Theme) => {
   const dark = theme.palette.mode === "dark";
   return {
-    width: 28,
-    height: 28,
-    borderRadius: "8px",
-    border: "1px solid transparent",
-    bgcolor: "transparent",
-    color: "color-mix(in srgb, var(--muted) 78%, var(--text))",
+    width: 32,
+    height: 32,
+    borderRadius: "9px",
+    border: dark ? "1px solid rgba(143,184,234,0.14)" : "1px solid rgba(71,96,123,0.14)",
+    bgcolor: dark ? "rgba(13,18,25,0.5)" : "rgba(255,255,255,0.76)",
+    color: "color-mix(in srgb, var(--text) 82%, var(--muted))",
     flexShrink: 0,
-    boxShadow: "none",
+    boxShadow: dark
+      ? "inset 0 1px 0 rgba(255,255,255,0.03)"
+      : "inset 0 1px 0 rgba(255,255,255,0.82), 0 4px 12px rgba(38,61,85,0.05)",
+    "& .MuiSvgIcon-root": {
+      fontSize: "1rem",
+    },
     "&:hover": {
       color: "var(--text)",
-      bgcolor: dark ? "rgba(255,255,255,0.052)" : "rgba(255,255,255,0.5)",
-      borderColor: dark ? "rgba(143,184,234,0.08)" : "rgba(84,111,140,0.12)",
+      bgcolor: dark ? "rgba(255,255,255,0.07)" : "#ffffff",
+      borderColor: dark ? "rgba(143,184,234,0.2)" : "rgba(84,111,140,0.22)",
     },
     "&.Mui-disabled": {
       opacity: 0.34,
@@ -166,13 +185,13 @@ const activityChipSx = (theme: Theme) => {
   const dark = theme.palette.mode === "dark";
   return {
     height: 20,
-    borderRadius: "7px",
-    borderColor: dark ? "rgba(143,184,234,0.09)" : "rgba(52,76,96,0.09)",
-    bgcolor: dark ? "rgba(13,18,25,0.38)" : "rgba(255,255,255,0.38)",
+    borderRadius: "6px",
+    borderColor: dark ? "rgba(143,184,234,0.12)" : "rgba(52,76,96,0.12)",
+    bgcolor: dark ? "rgba(13,18,25,0.42)" : "rgba(255,255,255,0.72)",
     "& .MuiChip-label": {
-      px: 0.62,
-      fontSize: "0.63rem",
-      fontWeight: 780,
+      px: 0.58,
+      fontSize: "0.61rem",
+      fontWeight: 760,
     },
   };
 };
@@ -181,29 +200,24 @@ const activityRecordCardSx = (theme: Theme) => {
   const dark = theme.palette.mode === "dark";
   return {
     border: "1px solid",
-    borderRadius: "12px",
-    px: 1.12,
-    py: 1.16,
-    bgcolor: dark ? "rgba(11,16,22,0.52)" : "rgba(255,255,255,0.52)",
+    borderRadius: "8px",
+    px: 1.05,
+    py: 1,
+    bgcolor: dark ? "rgba(11,16,22,0.66)" : "rgba(255,255,255,0.86)",
     background: dark
-      ? "linear-gradient(180deg, rgba(255,255,255,0.032), rgba(255,255,255,0.006) 68%), rgba(11,16,22,0.5)"
-      : "linear-gradient(180deg, rgba(255,255,255,0.42), rgba(255,255,255,0.1) 74%), rgba(255,255,255,0.5)",
-    borderColor: dark ? "rgba(143,184,234,0.1)" : "rgba(52,76,96,0.13)",
+      ? "linear-gradient(180deg, rgba(255,255,255,0.045), rgba(255,255,255,0.008) 68%), rgba(11,16,22,0.64)"
+      : "linear-gradient(180deg, rgba(255,255,255,0.98), rgba(250,252,254,0.88))",
+    borderColor: dark ? "rgba(143,184,234,0.13)" : "rgba(71,96,123,0.14)",
     boxShadow: dark
-      ? "inset 0 1px 0 rgba(255,255,255,0.038), 0 4px 14px rgba(0,0,0,0.12)"
-      : "inset 0 1px 0 rgba(255,255,255,0.56), 0 4px 14px rgba(24,48,62,0.03)",
-    backdropFilter: "blur(22px) saturate(1.18)",
-    WebkitBackdropFilter: "blur(22px) saturate(1.18)",
-    transition: "border-color 120ms ease, background-color 120ms ease, box-shadow 120ms ease",
+      ? "inset 0 1px 0 rgba(255,255,255,0.045), 0 8px 22px rgba(0,0,0,0.14)"
+      : "inset 0 1px 0 rgba(255,255,255,0.9), 0 8px 24px rgba(34,62,88,0.07)",
+    transition: "transform 140ms ease, border-color 140ms ease, box-shadow 140ms ease",
     "&:hover": {
-      borderColor: dark ? "rgba(143,184,234,0.13)" : "rgba(92,112,133,0.18)",
-      bgcolor: dark ? "rgba(14,20,28,0.62)" : "rgba(255,255,255,0.64)",
-      background: dark
-        ? "linear-gradient(180deg, rgba(255,255,255,0.044), rgba(255,255,255,0.008) 68%), rgba(14,20,28,0.58)"
-        : "linear-gradient(180deg, rgba(255,255,255,0.5), rgba(255,255,255,0.12) 74%), rgba(255,255,255,0.6)",
+      transform: "translateY(-1px)",
+      borderColor: dark ? "rgba(143,184,234,0.2)" : "rgba(76,111,145,0.24)",
       boxShadow: dark
-        ? "inset 0 1px 0 rgba(255,255,255,0.042), 0 6px 18px rgba(0,0,0,0.15)"
-        : "inset 0 1px 0 rgba(255,255,255,0.6), 0 6px 18px rgba(24,48,62,0.04)",
+        ? "inset 0 1px 0 rgba(255,255,255,0.05), 0 10px 28px rgba(0,0,0,0.18)"
+        : "inset 0 1px 0 rgba(255,255,255,0.95), 0 12px 30px rgba(34,62,88,0.1)",
     },
   };
 };
@@ -274,14 +288,14 @@ function ActivityStatusPill({ item }: { item: ActivityEntry }) {
         sx={{
           display: "inline-flex",
           alignItems: "center",
-          height: 21,
-          px: 0.68,
+          height: 20,
+          px: 0.58,
           border: "1px solid var(--line-soft)",
-          borderRadius: "7px",
-          bgcolor: "var(--glass)",
+          borderRadius: "8px",
+          bgcolor: "color-mix(in srgb, var(--glass) 82%, transparent)",
           color: "var(--muted)",
-          fontSize: "0.62rem",
-          fontWeight: 760,
+          fontSize: "0.61rem",
+          fontWeight: 720,
           lineHeight: 1,
           whiteSpace: "nowrap",
         }}
@@ -293,14 +307,14 @@ function ActivityStatusPill({ item }: { item: ActivityEntry }) {
         sx={{
           display: "inline-flex",
           alignItems: "center",
-          height: 21,
-          px: 0.7,
+          height: 20,
+          px: 0.62,
           border: "1px solid var(--line-soft)",
-          borderRadius: "7px",
+          borderRadius: "8px",
           color: statusTextColor,
           bgcolor: statusBg,
-          fontSize: "0.62rem",
-          fontWeight: 820,
+          fontSize: "0.61rem",
+          fontWeight: 780,
           lineHeight: 1,
           whiteSpace: "nowrap",
         }}
@@ -323,60 +337,35 @@ function ActivityTitleCluster({
   return (
     <Stack
       className="activity-title-cluster"
-      spacing={0.72}
+      spacing={0.42}
       alignItems="stretch"
       minWidth={0}
       flex={1}
     >
-      <Stack className="activity-title-line" direction="row" spacing={0.58} alignItems="center" minWidth={0}>
-        <Box
-          aria-hidden
-          sx={{
-            width: 7,
-            height: 7,
-            borderRadius: "50%",
-            bgcolor: item.acknowledgedAt ? "var(--muted)" : statusColor(item.status),
-            boxShadow: item.status === "running" ? "0 0 0 3px var(--activity-running-soft)" : "none",
-            flex: "0 0 auto",
-          }}
-        />
+      <Stack
+        className="activity-title-line"
+        direction="row"
+        spacing={0.7}
+        alignItems="center"
+        justifyContent="space-between"
+        minWidth={0}
+      >
         <Typography
           variant="body2"
-          fontWeight={760}
           noWrap
           title={item.title}
           sx={{
             minWidth: 0,
             flex: "1 1 auto",
-            color: "color-mix(in srgb, var(--text) 88%, var(--muted))",
-            fontSize: "0.83rem",
-            lineHeight: 1.3,
+            color: "var(--text)",
+            fontSize: "0.84rem",
+            lineHeight: 1.35,
             letterSpacing: 0,
-            fontWeight: 760,
+            fontWeight: 800,
           }}
         >
           {item.title}
         </Typography>
-      </Stack>
-      <Stack
-        className="activity-title-details"
-        direction="row"
-        alignItems="center"
-        justifyContent="space-between"
-        spacing={0.7}
-        minWidth={0}
-      >
-        <Stack
-          className="activity-title-tags"
-          direction="row"
-          spacing={0.4}
-          alignItems="center"
-          flexWrap="wrap"
-          useFlexGap
-        >
-          <ActivityStatusPill item={item} />
-          {extraTags}
-        </Stack>
         {meta ? (
           <Typography
             className="activity-card-meta"
@@ -389,7 +378,62 @@ function ActivityTitleCluster({
           </Typography>
         ) : null}
       </Stack>
+      <Stack
+        className="activity-title-details"
+        direction="row"
+        alignItems="center"
+        spacing={0.45}
+        minWidth={0}
+      >
+        <Stack
+          className="activity-title-tags"
+          direction="row"
+          spacing={0.24}
+          alignItems="center"
+          flexWrap="wrap"
+          useFlexGap
+        >
+          <ActivityStatusPill item={item} />
+          {extraTags}
+        </Stack>
+      </Stack>
     </Stack>
+  );
+}
+
+function ActivityKindGlyph({ item }: { item: ActivityEntry }) {
+  const icon = item.kind === "branch"
+    ? <WorkflowIcon fontSize="small" />
+    : isBuildActivityKind(item.kind)
+      ? <PackageIcon fontSize="small" />
+      : item.kind === "runtime"
+        ? <PlayIcon fontSize="small" />
+        : item.kind === "config"
+          ? <SettingsIcon fontSize="small" />
+        : <AppWindowIcon fontSize="small" />;
+  const color = item.acknowledgedAt ? "var(--muted)" : statusColor(item.status);
+  const tint = item.acknowledgedAt ? "var(--glass)" : statusTint(item.status);
+
+  return (
+    <Box className="activity-kind-glyph" aria-hidden>
+      <Box
+        className="activity-kind-dot"
+        sx={{
+          bgcolor: color,
+          boxShadow: item.status === "running" ? `0 0 0 4px ${tint}` : "none",
+        }}
+      />
+      <Box
+        className="activity-kind-avatar"
+        sx={{
+          color,
+          bgcolor: tint,
+          borderColor: `color-mix(in srgb, ${color} 18%, transparent)`,
+        }}
+      >
+        {icon}
+      </Box>
+    </Box>
   );
 }
 
@@ -474,7 +518,11 @@ function compareActivityCreated(left: ActivityEntry, right: ActivityEntry) {
 }
 
 function compareActivityUpdatedDesc(left: ActivityEntry, right: ActivityEntry) {
-  return right.updatedAt.localeCompare(left.updatedAt);
+  return (
+    right.updatedAt.localeCompare(left.updatedAt) ||
+    right.createdAt.localeCompare(left.createdAt) ||
+    right.id.localeCompare(left.id)
+  );
 }
 
 function activityStepLabel(item: ActivityEntry) {
@@ -556,7 +604,6 @@ function buildActivityExecutionGroup(
   groupItems: ActivityEntry[],
 ): ActivityExecutionGroup {
   const items = [...groupItems].sort(compareActivityUpdatedDesc);
-  const prioritized = [...groupItems].sort(compareActivityPriority);
   const failedItems = groupItems.filter(isFailureActivity);
   const runningItems = groupItems.filter(isVisibleRunningActivity);
   const latest = items[0];
@@ -565,17 +612,11 @@ function buildActivityExecutionGroup(
     items,
     title: executionGroupTitle(id, groupItems),
     latest,
-    status: aggregateChainStatus(groupItems),
+    status: latestActivityExecutionStatus(groupItems),
     failedItems,
     runningItems,
-    resourceItem:
-      prioritized.find((item) => isUnhandledFailure(item) && item.resource) ??
-      prioritized.find((item) => item.resource) ??
-      null,
-    targetItem:
-      failedItems.find((item) => item.target) ??
-      prioritized.find((item) => item.target) ??
-      null,
+    resourceItem: items.find((item) => item.resource) ?? null,
+    targetItem: items.find((item) => item.target) ?? null,
     executionCount: groupItems.length,
   };
 }
@@ -723,14 +764,17 @@ export function ActivityCenter({
   onClear,
   onOpenEntry,
   onOpenResource,
+  onRunAction,
   onRefresh,
   onAcknowledgeEntry,
   onAcknowledgeEntries,
 }: ActivityCenterProps) {
   const [filter, setFilter] = useState<ActivityFilter>("all");
   const [listPage, setListPage] = useState(1);
+  const [toggledGroupIds, setToggledGroupIds] = useState<Set<string>>(() => new Set());
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
   const [manualRefreshing, setManualRefreshing] = useState(false);
+  const [actionRunningId, setActionRunningId] = useState("");
   const refreshingRef = useRef(false);
   const onRefreshRef = useRef(onRefresh);
   const autoRefreshableRef = useRef(false);
@@ -808,7 +852,6 @@ export function ActivityCenter({
     () => ({
       attention: attentionItems.length,
       all: items.length,
-      running: items.filter(isVisibleRunningActivity).length,
       success: successItems.length,
       failed: failedItems.length,
     }),
@@ -861,30 +904,17 @@ export function ActivityCenter({
             sorted.find((item) => isUnhandledFailure(item) && item.target) ??
             sorted.find((item) => item.target) ??
             null,
+          actionItem:
+            sorted.find((item) => isUnhandledFailure(item) && item.action) ??
+            sorted.find((item) => item.action) ??
+            null,
           failedCount: groupFailedItems.length,
-          runningCount: groupItems.filter(isVisibleRunningActivity).length,
+          runningCount: groupRunningItems.length,
           total: groupItems.length,
         };
       })
-      .sort((left, right) => {
-        if (left.failedCount !== right.failedCount) {
-          return right.failedCount - left.failedCount;
-        }
-        if (left.runningCount !== right.runningCount) {
-          return right.runningCount - left.runningCount;
-        }
-        return right.latest.updatedAt.localeCompare(left.latest.updatedAt);
-      });
+      .sort((left, right) => right.latest.updatedAt.localeCompare(left.latest.updatedAt));
   }, [attentionItems]);
-  const attentionSummary = useMemo(() => {
-    const summary = [
-      counts.running ? `${counts.running} 个进行中` : "",
-      counts.failed ? `${counts.failed} 个失败` : "",
-    ]
-      .filter(Boolean)
-      .join(" · ");
-    return summary ? `共 ${summary}` : "没有待处理活动";
-  }, [counts.failed, counts.running]);
   const visibleItems = useMemo(() => {
     if (filter === "attention") {
       return attentionItems;
@@ -934,6 +964,17 @@ export function ActivityCenter({
   );
   const visibleQueueGroups = queueGroups.slice(0, 4);
   const hiddenQueueCount = Math.max(0, queueGroups.length - visibleQueueGroups.length);
+  const toggleGroup = useCallback((groupId: string) => {
+    setToggledGroupIds((current) => {
+      const next = new Set(current);
+      if (next.has(groupId)) {
+        next.delete(groupId);
+      } else {
+        next.add(groupId);
+      }
+      return next;
+    });
+  }, []);
   const handleAcknowledgeAllFailed = () => {
     if (unhandledFailedItems.length === 0) {
       return;
@@ -944,16 +985,53 @@ export function ActivityCenter({
     onClear();
     setClearConfirmOpen(false);
   };
+  const runActivityAction = useCallback(async (item: ActivityEntry) => {
+    if (!item.action || actionRunningId) {
+      return;
+    }
+    setActionRunningId(item.id);
+    try {
+      await onRunAction(item);
+    } finally {
+      setActionRunningId("");
+    }
+  }, [actionRunningId, onRunAction]);
+
+  const renderActivityAction = (item: ActivityEntry) => {
+    if (!item.action) {
+      return null;
+    }
+    const comparing = item.action.kind === "compareConfigSource";
+    return (
+      <Tooltip title={item.action.label}>
+        <span>
+          <IconButton
+            size="small"
+            onClick={() => void runActivityAction(item)}
+            disabled={Boolean(actionRunningId)}
+            aria-label={item.action.label}
+            sx={activityActionIconSx}
+          >
+            {comparing ? (
+              <WorkflowIcon fontSize="small" />
+            ) : (
+              <RefreshIcon fontSize="small" />
+            )}
+          </IconButton>
+        </span>
+      </Tooltip>
+    );
+  };
 
   const content = (
     <>
       <Box
         className="activity-center-surface"
         sx={{
-          py: { xs: 1.15, sm: 1.3 },
-          pl: { xs: 1.05, sm: 1.15 },
-          pr: { xs: 0.62, sm: 0.72 },
-          pt: variant === "panel" ? "calc(var(--window-drag-height) + 18px)" : undefined,
+          pb: { xs: 1, sm: 1.35 },
+          pl: { xs: 1, sm: 1.6 },
+          pr: { xs: 0.55, sm: 1.05 },
+          pt: variant === "panel" ? 0 : undefined,
           display: "flex",
           flexDirection: "column",
           height: "100%",
@@ -967,28 +1045,32 @@ export function ActivityCenter({
             direction="row"
             justifyContent="space-between"
             alignItems="center"
-            spacing={1.15}
+            spacing={0}
           >
-            <Box className="activity-header-copy" minWidth={0}>
-              <Typography
-                variant="subtitle1"
-                sx={{
-                  fontSize: "0.98rem",
-                  fontWeight: 800,
-                  lineHeight: 1.12,
-                  textWrap: "balance",
-                }}
-              >
-                活动
-              </Typography>
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                sx={{ display: "block", mt: 0.08, fontSize: "0.66rem", lineHeight: 1.22 }}
-              >
-                {attentionSummary}
-              </Typography>
-            </Box>
+            <Stack
+              className="activity-header-copy"
+              direction="row"
+              alignItems="center"
+              spacing={0}
+              minWidth={0}
+            >
+              <Box className="activity-header-mark" aria-hidden="true">
+                <ActivityIcon fontSize="small" />
+              </Box>
+              <Box className="activity-header-text" minWidth={0}>
+                <Typography className="activity-header-title" variant="subtitle1">
+                  活动
+                </Typography>
+                <Typography
+                  className="activity-header-subtitle"
+                  variant="caption"
+                  color="text.secondary"
+                  noWrap
+                >
+                  管理和跟踪所有活动
+                </Typography>
+              </Box>
+            </Stack>
             <Stack
               className="activity-header-actions"
               direction="row"
@@ -998,6 +1080,7 @@ export function ActivityCenter({
               <Tooltip title="处理全部失败">
                 <span>
                   <IconButton
+                    className="activity-header-action activity-header-action--primary"
                     size="small"
                     onClick={handleAcknowledgeAllFailed}
                     disabled={unhandledFailedItems.length === 0}
@@ -1011,6 +1094,7 @@ export function ActivityCenter({
               <Tooltip title="刷新活动状态">
                 <span>
                   <IconButton
+                    className="activity-header-action"
                     size="small"
                     onClick={() => void runRefresh({ force: true })}
                     disabled={!hasManualRefreshableBuildActivity || manualRefreshing}
@@ -1024,6 +1108,7 @@ export function ActivityCenter({
               <Tooltip title="清空活动">
                 <span>
                   <IconButton
+                    className="activity-header-action"
                     size="small"
                     onClick={() => setClearConfirmOpen(true)}
                     disabled={items.length === 0}
@@ -1034,14 +1119,15 @@ export function ActivityCenter({
                   </IconButton>
                 </span>
               </Tooltip>
-              <Tooltip title="关闭">
+              <Tooltip title="收起活动中心">
                 <IconButton
+                  className="activity-header-action"
                   size="small"
                   onClick={onClose}
-                  aria-label="关闭活动中心"
+                  aria-label="收起活动中心"
                   sx={activityHeaderIconSx}
                 >
-                  <ClearIcon fontSize="small" />
+                  <PanelSideIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
             </Stack>
@@ -1207,8 +1293,9 @@ export function ActivityCenter({
                             ) : null}
                           </Stack>
                         </Stack>
-                        {group.resourceItem || group.targetItem || group.failedItems.length > 0 || group.runningItems.length > 0 ? (
-                          <Stack className="activity-card-actions" direction="row" spacing={0.42} flexShrink={0}>
+                        {group.actionItem || group.resourceItem || group.targetItem || group.failedItems.length > 0 || group.runningItems.length > 0 ? (
+                          <Stack className="activity-card-actions" direction="row" spacing={0.25} flexShrink={0}>
+                            {group.actionItem ? renderActivityAction(group.actionItem) : null}
                             {group.resourceItem ? (
                               <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
                                 <IconButton
@@ -1229,7 +1316,7 @@ export function ActivityCenter({
                                   aria-label="定位活动"
                                   sx={activityActionIconSx}
                                 >
-                                  <LocateIcon fontSize="small" />
+                                  <SettingsIcon fontSize="small" />
                                 </IconButton>
                               </Tooltip>
                             ) : null}
@@ -1301,11 +1388,11 @@ export function ActivityCenter({
 
         <Stack
           className="activity-list-scroll"
-          spacing={0.9}
+          spacing={1}
           sx={{
-            mt: 0.72,
-            mb: 0.52,
-            p: 0.15,
+            mt: 0.9,
+            mb: 0.7,
+            p: 0.2,
             flex: 1,
             minHeight: 0,
             overflowY: "auto",
@@ -1360,6 +1447,7 @@ export function ActivityCenter({
             paginatedUnits.map((unit) => {
               if (unit.type === "chain") {
                 const { group } = unit;
+                const groupExpanded = toggledGroupIds.has(group.id);
                 const unhandledGroupFailures = group.failedItems.filter(isUnhandledFailure);
                 const actionableGroupItems = [
                   ...unhandledGroupFailures,
@@ -1380,22 +1468,12 @@ export function ActivityCenter({
                 };
                 return (
                   <Box
-                    className="activity-record-card"
+                    className={`activity-record-card activity-record-card--${group.status}${groupExpanded ? " is-expanded" : ""}`}
                     key={group.id}
                     sx={activityRecordCardSx}
                   >
-                    <Stack direction="row" alignItems="flex-start" spacing={0.78}>
-                      <Box
-                        sx={{
-                          width: 2,
-                          alignSelf: "stretch",
-                          minHeight: 58,
-                          borderRadius: 999,
-                          bgcolor: statusColor(group.status),
-                          opacity: 0.7,
-                          flexShrink: 0,
-                        }}
-                      />
+                    <Stack direction="row" alignItems="flex-start" spacing={0.65}>
+                      <ActivityKindGlyph item={headlineItem} />
                       <Box minWidth={0} flex={1}>
                         <Stack
                           className="activity-record-heading"
@@ -1406,15 +1484,10 @@ export function ActivityCenter({
                         >
                           <ActivityTitleCluster
                             item={headlineItem}
-                            meta={[
-                              group.primary.projectName || group.primary.projectKey,
-                              formatActivityTime(group.latest.updatedAt),
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")}
+                            meta={formatActivityTime(group.latest.updatedAt)}
                           />
-                          {group.targetItem || group.resourceItem || actionableGroupItems.length > 0 ? (
-                            <Stack className="activity-card-actions" direction="row" spacing={0.4} flexShrink={0}>
+                          {group.targetItem || group.resourceItem || actionableGroupItems.length > 0 || group.items.length > 1 ? (
+                            <Stack className="activity-card-actions" direction="row" spacing={0.25} flexShrink={0}>
                               {group.resourceItem ? (
                                 <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
                                   <IconButton
@@ -1435,7 +1508,7 @@ export function ActivityCenter({
                                     aria-label="定位活动"
                                     sx={activityActionIconSx}
                                   >
-                                    <LocateIcon fontSize="small" />
+                                    <SettingsIcon fontSize="small" />
                                   </IconButton>
                                 </Tooltip>
                               ) : null}
@@ -1451,26 +1524,37 @@ export function ActivityCenter({
                                   </IconButton>
                                 </Tooltip>
                               ) : null}
+                              <Tooltip title={groupExpanded ? "收起执行详情" : "展开执行详情"}>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => toggleGroup(group.id)}
+                                  aria-label={groupExpanded ? "收起执行详情" : "展开执行详情"}
+                                  aria-expanded={groupExpanded}
+                                  sx={activityActionIconSx}
+                                >
+                                  {groupExpanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
+                                </IconButton>
+                              </Tooltip>
                             </Stack>
                           ) : null}
                         </Stack>
-                        <ActivityChainTrail items={group.items} />
-                        <Stack
-                          className="activity-detail-stack"
-                          spacing={0.52}
-                          sx={{
-                            mt: 0.86,
-                            pl: 0.9,
-                          }}
-                        >
-                          {group.items.map((item) => (
+                        {groupExpanded ? (
+                          <>
+                            <ActivityChainTrail items={group.items} />
+                            <Stack
+                              className="activity-detail-stack"
+                              spacing={0}
+                              sx={{ mt: 1.05 }}
+                            >
+                              {group.items.map((item) => (
                             <Box
                               key={item.id}
+                              className="activity-timeline-row activity-timeline-row--chain"
                               sx={{
                                 display: "grid",
-                                gridTemplateColumns: "62px minmax(0, 1fr)",
-                                gap: 0.65,
-                                alignItems: "baseline",
+                                gridTemplateColumns: "68px 18px minmax(0, 1fr)",
+                                gap: 0.72,
+                                alignItems: "start",
                               }}
                             >
                               <Typography
@@ -1478,26 +1562,42 @@ export function ActivityCenter({
                                 noWrap
                                 sx={{
                                   color: statusColor(item.status),
-                                  fontSize: "0.63rem",
+                                  pt: 0,
+                                  fontSize: "0.62rem",
                                   fontWeight: 800,
+                                  lineHeight: 1.55,
                                 }}
                               >
                                 {activityStepLabel(item)}
                               </Typography>
-                              <Typography
-                                variant="caption"
-                                sx={{
-                                  color: "var(--muted)",
-                                  overflowWrap: "anywhere",
-                                  fontSize: "0.65rem",
-                                  lineHeight: 1.52,
-                                }}
-                              >
-                                {displayActivitySummary(item) || item.detail || STATUS_LABELS[item.status]}
-                              </Typography>
+                              <Box className="activity-timeline-marker" sx={{ color: statusColor(item.status) }}>
+                                <CheckIcon fontSize="small" />
+                              </Box>
+                              <Box minWidth={0}>
+                                <Typography
+                                  variant="caption"
+                                  sx={{
+                                    display: "block",
+                                    color: "color-mix(in srgb, var(--text) 68%, var(--muted))",
+                                    overflowWrap: "anywhere",
+                                    fontSize: "0.63rem",
+                                    lineHeight: 1.55,
+                                  }}
+                                >
+                                  {[
+                                    displayActivitySummary(item) || STATUS_LABELS[item.status],
+                                    formatActivityTime(item.updatedAt),
+                                  ].filter(Boolean).join(" · ")}
+                                </Typography>
+                                {item.detail ? (
+                                  <Box className="activity-timeline-detail">{item.detail}</Box>
+                                ) : null}
+                              </Box>
                             </Box>
-                          ))}
-                        </Stack>
+                              ))}
+                            </Stack>
+                          </>
+                        ) : null}
                       </Box>
                     </Stack>
                   </Box>
@@ -1505,6 +1605,9 @@ export function ActivityCenter({
               }
               if (unit.type === "execution") {
                 const { group } = unit;
+                const defaultExpanded = group.items.every((item) => isBuildActivityKind(item.kind));
+                const groupExpanded = toggledGroupIds.has(group.id) ? !defaultExpanded : defaultExpanded;
+                const groupSuccessCount = group.items.filter((item) => item.status === "success").length;
                 const unhandledGroupFailures = group.failedItems.filter(isUnhandledFailure);
                 const actionableGroupItems = [
                   ...unhandledGroupFailures,
@@ -1524,22 +1627,12 @@ export function ActivityCenter({
                 };
                 return (
                   <Box
-                    className="activity-record-card"
+                    className={`activity-record-card activity-record-card--${group.status}${groupExpanded ? " is-expanded" : ""}`}
                     key={group.id}
                     sx={activityRecordCardSx}
                   >
-                    <Stack direction="row" alignItems="flex-start" spacing={0.78}>
-                      <Box
-                        sx={{
-                          width: 2,
-                          alignSelf: "stretch",
-                          minHeight: 58,
-                          borderRadius: 999,
-                          bgcolor: statusColor(group.status),
-                          opacity: 0.7,
-                          flexShrink: 0,
-                        }}
-                      />
+                    <Stack direction="row" alignItems="flex-start" spacing={0.65}>
+                      <ActivityKindGlyph item={headlineItem} />
                       <Box minWidth={0} flex={1}>
                         <Stack
                           className="activity-record-heading"
@@ -1550,23 +1643,28 @@ export function ActivityCenter({
                         >
                           <ActivityTitleCluster
                             item={headlineItem}
-                            meta={[
-                              group.latest.projectName || group.latest.projectKey,
-                              formatActivityTime(group.latest.updatedAt),
-                            ]
-                              .filter(Boolean)
-                              .join(" · ")}
+                            meta={formatActivityTime(group.latest.updatedAt)}
                             extraTags={(
-                              <Chip
-                                size="small"
-                                label={`执行 ${group.executionCount} 次`}
-                                variant="outlined"
-                                sx={activityChipSx}
-                              />
+                              <>
+                                <Chip
+                                  size="small"
+                                  label={`执行 ${group.executionCount} 次`}
+                                  variant="outlined"
+                                  sx={activityChipSx}
+                                />
+                                {group.failedItems.length > 0 && group.status !== "failed" ? (
+                                  <Chip
+                                    size="small"
+                                    label={`历史失败 ${group.failedItems.length}`}
+                                    variant="outlined"
+                                    sx={activityChipSx}
+                                  />
+                                ) : null}
+                              </>
                             )}
                           />
-                          {group.resourceItem || group.targetItem || actionableGroupItems.length > 0 ? (
-                            <Stack className="activity-card-actions" direction="row" spacing={0.4} flexShrink={0}>
+                          {group.resourceItem || group.targetItem || actionableGroupItems.length > 0 || group.items.length > 1 ? (
+                            <Stack className="activity-card-actions" direction="row" spacing={0.25} flexShrink={0}>
                               {group.resourceItem ? (
                                 <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
                                   <IconButton
@@ -1587,7 +1685,7 @@ export function ActivityCenter({
                                     aria-label="定位活动"
                                     sx={activityActionIconSx}
                                   >
-                                    <LocateIcon fontSize="small" />
+                                    <SettingsIcon fontSize="small" />
                                   </IconButton>
                                 </Tooltip>
                               ) : null}
@@ -1603,27 +1701,47 @@ export function ActivityCenter({
                                   </IconButton>
                                 </Tooltip>
                               ) : null}
+                              <Tooltip title={groupExpanded ? "收起执行详情" : "展开执行详情"}>
+                                <IconButton
+                                  size="small"
+                                  onClick={() => toggleGroup(group.id)}
+                                  aria-label={groupExpanded ? "收起执行详情" : "展开执行详情"}
+                                  aria-expanded={groupExpanded}
+                                  sx={activityActionIconSx}
+                                >
+                                  {groupExpanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
+                                </IconButton>
+                              </Tooltip>
                             </Stack>
                           ) : null}
                         </Stack>
-                        <Stack
-                          className="activity-detail-stack"
-                          spacing={0.52}
-                          sx={{
-                            mt: 0.86,
-                            pl: 0.9,
-                          }}
-                        >
+                        {!groupExpanded ? (
+                          <Box className="activity-collapsed-summary">
+                            <Typography variant="caption" className="activity-collapsed-counts">
+                              成功 {groupSuccessCount} / 失败 {group.failedItems.length}
+                            </Typography>
+                            <Typography variant="caption" className="activity-collapsed-copy">
+                              {displayActivitySummary(group.latest) || group.latest.detail || "执行详情已收起"}
+                            </Typography>
+                          </Box>
+                        ) : null}
+                        {groupExpanded ? (
+                          <Stack
+                            className="activity-detail-stack"
+                            spacing={0}
+                            sx={{ mt: 1.05 }}
+                          >
                           {group.items
                             .slice(0, ACTIVITY_EXECUTION_PREVIEW_LIMIT)
                             .map((item, index) => (
                             <Box
                               key={item.id}
+                              className="activity-timeline-row activity-timeline-row--execution"
                               sx={{
                                 display: "grid",
-                                gridTemplateColumns: "58px minmax(0, 1fr)",
-                                gap: 0.65,
-                                alignItems: "baseline",
+                                gridTemplateColumns: "58px 18px minmax(0, 1fr)",
+                                gap: 0.72,
+                                alignItems: "start",
                               }}
                             >
                               <Typography
@@ -1631,48 +1749,56 @@ export function ActivityCenter({
                                 noWrap
                                 sx={{
                                   color: statusColor(item.status),
-                                  fontSize: "0.63rem",
+                                  pt: 0,
+                                  fontSize: "0.62rem",
                                   fontWeight: 800,
+                                  lineHeight: 1.55,
                                 }}
                               >
                                 第{group.executionCount - index}次
                               </Typography>
-                              <Typography
-                                variant="caption"
-                                sx={{
-                                  color: "var(--muted)",
-                                  overflowWrap: "anywhere",
-                                  fontSize: "0.65rem",
-                                  lineHeight: 1.52,
-                                }}
-                              >
-                                {[
-                                  executionItemTitle(item, group.title),
-                                  activityStatusLabel(item),
-                                  formatActivityTime(item.updatedAt),
-                                  displayActivitySummary(item) ||
-                                    item.detail ||
-                                    STATUS_LABELS[item.status],
-                                ]
-                                  .filter(Boolean)
-                                  .join(" · ")}
-                              </Typography>
+                              <Box className="activity-timeline-marker" sx={{ color: statusColor(item.status) }}>
+                                <CheckIcon fontSize="small" />
+                              </Box>
+                              <Box minWidth={0}>
+                                <Typography
+                                  variant="caption"
+                                  sx={{
+                                    display: "block",
+                                    color: "color-mix(in srgb, var(--text) 68%, var(--muted))",
+                                    overflowWrap: "anywhere",
+                                    fontSize: "0.63rem",
+                                    lineHeight: 1.55,
+                                  }}
+                                >
+                                  {[
+                                    executionItemTitle(item, group.title),
+                                    activityStatusLabel(item),
+                                    formatActivityTime(item.updatedAt),
+                                    displayActivitySummary(item) || STATUS_LABELS[item.status],
+                                  ].filter(Boolean).join(" · ")}
+                                </Typography>
+                                {item.detail ? (
+                                  <Box className="activity-timeline-detail">{item.detail}</Box>
+                                ) : null}
+                              </Box>
                             </Box>
                           ))}
                           {group.items.length > ACTIVITY_EXECUTION_PREVIEW_LIMIT ? (
                             <Typography
                               variant="caption"
+                              className="activity-timeline-more"
                               sx={{
                                 color: "var(--muted)",
-                                fontSize: "0.65rem",
+                                fontSize: "0.61rem",
                                 fontWeight: 760,
-                                pl: "58px",
                               }}
                             >
                               还有 {group.items.length - ACTIVITY_EXECUTION_PREVIEW_LIMIT} 次记录
                             </Typography>
                           ) : null}
-                        </Stack>
+                          </Stack>
+                        ) : null}
                       </Box>
                     </Stack>
                   </Box>
@@ -1681,11 +1807,12 @@ export function ActivityCenter({
               const item = unit.item;
               return (
                 <Box
-                  className="activity-record-card"
+                  className={`activity-record-card activity-record-card--${item.status}`}
                   key={item.id}
                   sx={activityRecordCardSx}
                 >
-                <Stack direction="row" alignItems="flex-start" spacing={0.72}>
+                <Stack direction="row" alignItems="flex-start" spacing={0.65}>
+                  <ActivityKindGlyph item={item} />
                   <Box minWidth={0} flex={1}>
                     <Stack
                       className="activity-record-heading"
@@ -1696,15 +1823,11 @@ export function ActivityCenter({
                     >
                       <ActivityTitleCluster
                         item={item}
-                        meta={[
-                          item.projectName || item.projectKey,
-                          formatActivityTime(item.updatedAt),
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
+                        meta={formatActivityTime(item.updatedAt)}
                       />
-                      {item.target || item.resource || isUnhandledFailure(item) || isVisibleRunningActivity(item) ? (
-                        <Stack className="activity-card-actions" direction="row" spacing={0.4} flexShrink={0}>
+                      {item.action || item.target || item.resource || isUnhandledFailure(item) || isVisibleRunningActivity(item) ? (
+                        <Stack className="activity-card-actions" direction="row" spacing={0.25} flexShrink={0}>
+                          {renderActivityAction(item)}
                           {item.resource ? (
                             <Tooltip title={item.resource.label}>
                               <IconButton
@@ -1725,7 +1848,7 @@ export function ActivityCenter({
                                 aria-label="定位活动"
                                 sx={activityActionIconSx}
                               >
-                                <LocateIcon fontSize="small" />
+                                <SettingsIcon fontSize="small" />
                               </IconButton>
                             </Tooltip>
                           ) : null}
@@ -1760,7 +1883,10 @@ export function ActivityCenter({
                           lineHeight: 1.5,
                         }}
                       >
-                        {displayActivitySummary(item)}
+                        {[
+                          item.projectName || item.projectKey,
+                          displayActivitySummary(item),
+                        ].filter(Boolean).join("：")}
                       </Typography>
                     ) : null}
                     {item.detail ? (
@@ -1774,7 +1900,7 @@ export function ActivityCenter({
                           overflowWrap: "anywhere",
                           WebkitBoxOrient: "vertical",
                           WebkitLineClamp: 2,
-                          fontSize: "0.66rem",
+                          fontSize: "0.62rem",
                           lineHeight: 1.46,
                         }}
                         title={item.detail ?? undefined}
@@ -1805,7 +1931,7 @@ export function ActivityCenter({
             <Typography
               variant="caption"
               color="text.secondary"
-              sx={{ fontSize: "0.66rem", fontWeight: 720, whiteSpace: "nowrap" }}
+              sx={{ fontSize: "0.61rem", fontWeight: 720, whiteSpace: "nowrap" }}
             >
               {listStartIndex}-{listEndIndex} / {visibleUnits.length}
             </Typography>
@@ -1819,10 +1945,10 @@ export function ActivityCenter({
                 onChange={(_, nextPage) => setListPage(nextPage)}
                 sx={{
                   "& .MuiPaginationItem-root": {
-                    minWidth: 26,
-                    height: 26,
-                    borderRadius: "9px",
-                    fontSize: "0.7rem",
+                    minWidth: 22,
+                    height: 22,
+                    borderRadius: "7px",
+                    fontSize: "0.64rem",
                     fontWeight: 820,
                     backgroundColor: "var(--side-pane-control)",
                     border: "1px solid var(--side-pane-line)",
@@ -1839,7 +1965,7 @@ export function ActivityCenter({
               <Typography
                 variant="caption"
                 color="text.secondary"
-                sx={{ fontSize: "0.66rem", fontWeight: 720, whiteSpace: "nowrap" }}
+                sx={{ fontSize: "0.61rem", fontWeight: 720, whiteSpace: "nowrap" }}
               >
                 本页已全部显示
               </Typography>
@@ -1886,8 +2012,9 @@ export function ActivityCenter({
         aria-label="活动中心"
         className="activity-side-panel"
         sx={{
-          height: "100%",
-          maxHeight: "100%",
+          height: "auto",
+          maxHeight:
+            "calc(100dvh - var(--activity-panel-top-offset) - var(--activity-panel-bottom-offset))",
           overflow: "hidden",
           bgcolor: "transparent",
           color: "var(--text)",
@@ -1922,7 +2049,7 @@ export function ActivityCenter({
       PaperProps={{
         className: "activity-drawer-paper",
         sx: {
-          width: { xs: "min(334px, 100vw)", sm: "clamp(306px, 33vw, 334px)" },
+          width: { xs: "100vw", sm: "min(360px, calc(100vw - 28px))" },
           maxWidth: "100vw",
           top: drawerTopOffset,
           right: 0,

@@ -30,13 +30,19 @@ import {
   useTheme,
 } from "@mui/material";
 import { invoke } from "@tauri-apps/api/core";
+import { createPortal } from "react-dom";
 import type {
+  AppExitRuntimePolicy,
+  CreateProjectWorkspacePayload,
   FinderEntry,
   FinderShortcutItem,
+  LinkExecutionReport,
+  LinkSummary,
+  LinkPlan,
   NavigationEditorEntry,
   NavigationEditorState,
-  ProjectConfigEditorState,
   ProjectDebugProfileSummary,
+  ProjectWorkspaceSummary,
   ProjectWorkflowAction,
   ProjectRuntimeEntry,
   ProjectRuntimeLogKind,
@@ -45,10 +51,10 @@ import type {
   ProjectRuntimePreflightCheck,
   ProjectRuntimePreflightResponse,
   ProjectRuntimeReadySummary,
-  ProxyDashboard,
   ProxyProfile,
   RuntimeProfileDraft,
 } from "../app-types";
+import type { AppStyleMode } from "../theme";
 import {
   AppWindowIcon,
   CheckIcon,
@@ -62,6 +68,7 @@ import {
   PlayIcon,
   PlusIcon,
   RefreshIcon,
+  ReplayIcon,
   SettingsIcon,
   StarIcon,
   StopIcon,
@@ -71,7 +78,22 @@ import {
   WorkflowIcon,
 } from "../components/AppIcons";
 import { AppEmptyState } from "../components/AppEmptyState";
+import { useAppConfirmDialog } from "../components/AppConfirmDialog";
+import { AppListEndState } from "../components/AppListEndState";
+import {
+  LinkPlanDialog,
+  type LinkPlanDialogAction,
+  type LinkPlanDialogState,
+} from "../components/LinkPlanDialog";
+import { SettingsPanel } from "../components/SettingsPanel";
+import { ConfigSourceBar } from "../components/ConfigSourceBar";
+import { ConfigSourceManagerDialog } from "../components/ConfigSourceManagerDialog";
 import { WorkflowLinkSummaryButton } from "../components/WorkflowLinkButton";
+import {
+  WorkspacePageToolbar,
+  WorkspacePageToolbarAction,
+  type WorkspacePageMetric,
+} from "../components/WorkspacePageToolbar";
 import {
   WorkflowLinksDialog,
   type WorkflowLinkListItem,
@@ -89,10 +111,40 @@ import {
   type WorkflowBroadcastRule,
   type WorkflowReceiveRule,
 } from "../lib/workflowSignals";
+import { useConfigSource } from "../hooks/useConfigSource";
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
+import { useRuntimeProfiles } from "../hooks/useRuntimeProfiles";
 
 type FinderType = "项目" | "网站" | "目录" | "工具";
+type ProjectsPageMode = "projectManagement" | "resources";
 type RuntimePanelTab = "overview" | "config" | "logs" | "webActions";
+type ProjectConfigPanelPageKey =
+  | "overview"
+  | "projectManagement"
+  | "resources"
+  | "merge"
+  | "build"
+  | "proxy";
+type ProjectConfigPanelProps = {
+  styleMode: AppStyleMode;
+  onStyleModeChange: (mode: AppStyleMode) => void;
+  exitRuntimePolicy: AppExitRuntimePolicy;
+  onExitRuntimePolicyChange: (policy: AppExitRuntimePolicy) => void;
+  selectedProjectKey: string;
+  onOpenConfigDir: () => void;
+  onOpenConfigFile: () => void;
+  onOpenProjectWorkspacesDir: () => void;
+  onOpenNavigationConfigFile: () => void;
+  onCreateProjectWorkspace: (payload: CreateProjectWorkspacePayload) => Promise<void> | void;
+  projectWorkspaces: ProjectWorkspaceSummary[];
+  activeProjectWorkspaceKey: string;
+  activePage: ProjectConfigPanelPageKey;
+  enabledPages: ProjectConfigPanelPageKey[];
+  onEnabledPagesChange: (pages: ProjectConfigPanelPageKey[]) => void;
+  defaultPage: ProjectConfigPanelPageKey;
+  onDefaultPageChange: (page: ProjectConfigPanelPageKey) => void;
+  onProjectConfigSaved: () => Promise<void> | void;
+};
 
 const FINDER_LOAD_BATCH_SIZE = 20;
 
@@ -142,6 +194,7 @@ const EMPTY_RUNTIME_SESSION_SUMMARY: ProjectRuntimeLogSessionSummary = {
 };
 
 export type ProjectsPageProps = {
+  mode: ProjectsPageMode;
   finderTypeOptions: readonly FinderType[];
   finderType: FinderType;
   finderTypeCounts: Record<FinderType, number>;
@@ -199,9 +252,13 @@ export type ProjectsPageProps = {
     envOverrides?: Record<string, string>,
   ) => void;
   onStopRuntime: (projectKey: string) => void;
+  onAdoptRuntime: (projectKey: string, debugProfileKey?: string) => void;
   onOpenBuildOutput: (projectKey: string) => void;
   onFocusRuntime: (projectKey: string, debugProfileKey?: string) => void;
   onOpenProjectDirectory: (projectKey: string) => void;
+  onOpenResourceConfig?: () => void;
+  configWorkspaceKey?: string;
+  projectConfigPanel?: ProjectConfigPanelProps;
 };
 
 const SHORTCUT_CONFIRM_MS = 1100;
@@ -473,6 +530,13 @@ function buildStatusPalette(statusKey: string, mono: boolean) {
           pillBorder: "rgba(63, 107, 79, 0.18)",
           pillColor: "#2f5a3d",
         };
+      case "external":
+        return {
+          dot: "#4f72a8",
+          pillBg: "rgba(79, 114, 168, 0.1)",
+          pillBorder: "rgba(79, 114, 168, 0.2)",
+          pillColor: "#345d96",
+        };
       case "notConfigured":
         return {
           dot: "#b78334",
@@ -513,6 +577,13 @@ function buildStatusPalette(statusKey: string, mono: boolean) {
         pillBg: "rgba(95, 128, 104, 0.14)",
         pillBorder: "rgba(95, 128, 104, 0.24)",
         pillColor: "#c6d8c9",
+      };
+    case "external":
+      return {
+        dot: "#7fa7e4",
+        pillBg: "rgba(88, 137, 214, 0.14)",
+        pillBorder: "rgba(107, 157, 232, 0.24)",
+        pillColor: "#c8dbf8",
       };
     case "notConfigured":
       return {
@@ -776,10 +847,33 @@ function finderPlaceholder(type: FinderType): string {
     case "目录":
       return "搜索目录、路径或备注";
     case "工具":
-      return "搜索应用、脚本、路径或备注";
+      return "搜索应用、脚本、Link 或备注";
     default:
       return "搜索项目、路径、命令";
   }
+}
+
+function compareMarkedFirst(leftMarked: boolean, rightMarked: boolean) {
+  return Number(rightMarked) - Number(leftMarked);
+}
+
+function buildRuntimeHaystack(item: ProjectRuntimeEntry): string {
+  return [
+    item.name,
+    item.key,
+    item.category,
+    item.repoPath ?? "",
+    item.command ?? "",
+    item.cwd ?? "",
+    item.buildCommand ?? "",
+    item.buildCwd ?? "",
+    item.statusLabel,
+    item.detail,
+    item.buildStatusLabel,
+    item.buildDetail,
+  ]
+    .join(" ")
+    .toLowerCase();
 }
 
 function finderEntryKindLabel(kind: string): string {
@@ -788,6 +882,8 @@ function finderEntryKindLabel(kind: string): string {
       return "应用";
     case "script":
       return "脚本";
+    case "tool":
+      return "工具";
     case "directory":
       return "目录";
     default:
@@ -795,16 +891,62 @@ function finderEntryKindLabel(kind: string): string {
   }
 }
 
-function FinderEntryIcon({ kind }: { kind: string }) {
-  switch (kind) {
+function finderEntryIconVariant(entry: FinderEntry): string {
+  const kind = (entry.kind || "website").toLowerCase();
+  if (kind === "tool") {
+    const tool = (entry.tool || "link").toLowerCase();
+    const action = (entry.toolAction || "").toLowerCase();
+    if (tool === "link") {
+      return "link";
+    }
+    if (tool.includes("build") || tool.includes("package") || action.includes("build")) {
+      return "package";
+    }
+    if (tool.includes("script") || tool.includes("command") || action.includes("run")) {
+      return "script";
+    }
+    return "tool";
+  }
+  if (kind === "directory") {
+    return "directory";
+  }
+  if (kind === "app") {
+    return "app";
+  }
+  if (kind === "script") {
+    return "script";
+  }
+  return "website";
+}
+
+function FinderEntryIcon({ kind, entry }: { kind: string; entry?: FinderEntry }) {
+  const variant = entry ? finderEntryIconVariant(entry) : kind;
+  switch (variant) {
     case "app":
       return <AppWindowIcon fontSize="inherit" />;
     case "script":
       return <TerminalIcon fontSize="inherit" />;
+    case "link":
+      return <WorkflowIcon fontSize="inherit" />;
+    case "package":
+      return <PackageIcon fontSize="inherit" />;
+    case "tool":
+      return <SettingsIcon fontSize="inherit" />;
     case "directory":
       return <FolderIcon fontSize="inherit" />;
     default:
       return <WebsiteIcon fontSize="inherit" />;
+  }
+}
+
+function finderEntryActionIcon(kind: string) {
+  switch (kind) {
+    case "app":
+    case "script":
+    case "tool":
+      return <PlayIcon fontSize="small" />;
+    default:
+      return <OpenExternalIcon fontSize="small" />;
   }
 }
 
@@ -848,10 +990,77 @@ function buildFinderEntryDetails(item: FinderShortcutItem): string[] {
   addDetail("Bundle ID", entry.bundleId);
   addDetail("应用", entry.appName);
   addDetail("脚本", entry.script);
+  addDetail("工具", entry.tool);
+  addDetail("Link Key", entry.toolKey);
+  addDetail("动作", entry.toolAction);
   addDetail("路径", entry.path);
   addDetail("工作目录", entry.cwd);
 
   return detailLines;
+}
+
+function isLinkToolEntry(entry: FinderEntry): boolean {
+  return entry.kind === "tool" && (entry.tool ?? "link").toLowerCase() === "link";
+}
+
+function linkToolKey(entry: FinderEntry): string {
+  return (entry.toolKey || entry.targetLabel || "").trim();
+}
+
+function linkSummaryForEntry(
+  entry: FinderEntry,
+  summaries: Map<string, LinkSummary>,
+): LinkSummary | null {
+  const key = linkToolKey(entry);
+  return key ? summaries.get(key) ?? null : null;
+}
+
+function linkEntrySubtitle(entry: FinderEntry, summary: LinkSummary | null): string {
+  if (summary) {
+    const parts = [`${summary.stepCount} 步骤`];
+    const proxyPorts = summary.proxyProfiles
+      .map((profile) => {
+        const match = profile.listenUrl.match(/:(\d+)(?:\/)?$/);
+        return match?.[1] ? `代理 ${match[1]}` : profile.name;
+      })
+      .filter(Boolean);
+    if (proxyPorts.length > 0) {
+      parts.push(proxyPorts.join(" / "));
+    }
+    if (summary.project) {
+      parts.push(`运行 ${summary.project}`);
+    }
+    if (summary.runtime?.label && summary.runtime.status !== "planned") {
+      parts.push(summary.runtime.label);
+    }
+    if (summary.warnings.length > 0) {
+      parts.push(`${summary.warnings.length} 条提示`);
+    }
+    return parts.join(" · ");
+  }
+  return entry.note?.trim() || linkToolKey(entry) || entry.targetLabel;
+}
+
+function linkEntryStatusLabel(summary: LinkSummary | null): string {
+  if (!summary) {
+    return "计划";
+  }
+  if (summary.runtime?.status === "running") {
+    return "运行中";
+  }
+  if (summary.runtime?.status === "partial") {
+    return "部分运行";
+  }
+  if (summary.runtime?.status === "warning") {
+    return "有风险";
+  }
+  if (summary.runtime?.status === "invalid") {
+    return "配置异常";
+  }
+  if (summary.warnings.length > 0) {
+    return `${summary.warnings.length} 提示`;
+  }
+  return "可执行";
 }
 
 function navigationEditorEntryMatchesShortcut(
@@ -872,6 +1081,12 @@ function navigationEditorEntryMatchesShortcut(
   }
   if (item.entry.kind === "directory") {
     return (entry.path ?? "").trim() === (item.entry.path ?? "").trim();
+  }
+  if (item.entry.kind === "tool") {
+    return (
+      (entry.tool ?? "").trim() === (item.entry.tool ?? "").trim() &&
+      (entry.toolKey ?? "").trim() === (item.entry.toolKey ?? "").trim()
+    );
   }
   return (entry.script ?? "").trim() === (item.entry.script ?? "").trim();
 }
@@ -912,6 +1127,32 @@ function runtimeProfileLabel(profile: RuntimeProfileDraft | null | undefined) {
   return profile?.label?.trim() || profile?.key || "";
 }
 
+function runtimeProfileScopeLabel(scope?: string | null) {
+  switch (scope) {
+    case "override":
+      return "工作区覆盖";
+    case "inherited":
+      return "继承全局";
+    case "unsupported":
+      return "不支持覆盖";
+    default:
+      return "全局定义";
+  }
+}
+
+function runtimeProfileScopeDescription(scope?: string | null) {
+  switch (scope) {
+    case "override":
+      return "当前工作区使用独立运行配置。";
+    case "inherited":
+      return "当前继承全局配置，保存后会创建工作区覆盖。";
+    case "unsupported":
+      return "当前配置源未声明运行配置能力。";
+    default:
+      return "运行配置保存在全局项目配置中。";
+  }
+}
+
 function runtimeProfileHasCdp(profile: RuntimeProfileDraft | null | undefined) {
   return Boolean(profile?.webActionsEnabled);
 }
@@ -923,6 +1164,8 @@ function buildFinderShortcutKey(item: FinderShortcutItem): string {
     item.entry.kind,
     item.entry.name,
     item.entry.targetLabel,
+    item.entry.tool ?? "",
+    item.entry.toolKey ?? "",
   ].join("\u0000");
 }
 
@@ -1000,6 +1243,53 @@ function formatElapsedTime(startedAtMs?: number | null, nowMs = Date.now()): str
   return `${seconds}s`;
 }
 
+function projectDisplayPath(item: ProjectRuntimeEntry): string {
+  const rawPath = (item.cwd || item.repoPath || "").trim();
+  if (!rawPath) {
+    return "未配置目录";
+  }
+  const homeCompact = rawPath.replace(/^\/Users\/[^/]+/, "~");
+  const parts = homeCompact.split("/").filter(Boolean);
+  if (parts.length <= 3) {
+    return homeCompact;
+  }
+  return `${parts[0]}/.../${parts.slice(-2).join("/")}`;
+}
+
+function projectDisplayCommand(item: ProjectRuntimeEntry): string {
+  const command = (item.command || item.buildCommand || "").trim();
+  if (!command) {
+    return "未配置启动命令";
+  }
+  return command.replace(/\s+/g, " ");
+}
+
+function projectMonogram(item: ProjectRuntimeEntry): string {
+  const source = (item.name || item.key || "P").trim();
+  const firstChinese = source.match(/[\u4e00-\u9fa5]/)?.[0];
+  if (firstChinese) {
+    return firstChinese;
+  }
+  const firstAlpha = source.match(/[a-zA-Z0-9]/)?.[0];
+  return (firstAlpha || "P").toUpperCase();
+}
+
+function projectAccentColor(item: ProjectRuntimeEntry): string {
+  const accents = [
+    "#5f8fd9",
+    "#42b883",
+    "#8b7cf6",
+    "#f59e52",
+    "#4bb7c9",
+    "#6f8aa7",
+  ];
+  const seed = [...(item.key || item.name)].reduce(
+    (total, char) => total + char.charCodeAt(0),
+    0,
+  );
+  return accents[seed % accents.length];
+}
+
 function isTextEditingTarget(target: EventTarget | null) {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -1025,6 +1315,7 @@ function isInteractiveClickTarget(target: EventTarget | null) {
 }
 
 export function ProjectsPage({
+  mode,
   finderTypeOptions,
   finderType,
   finderTypeCounts,
@@ -1042,7 +1333,6 @@ export function ProjectsPage({
   favoriteProjectKeys,
   recentProjectKeys,
   favoriteShortcutKeys,
-  recentShortcutKeys,
   selectedDebugProfileKeys,
   workflowReceiveRules,
   workflowBroadcastRules,
@@ -1065,9 +1355,13 @@ export function ProjectsPage({
   onOpenFinderEntry,
   onStartRuntime,
   onStopRuntime,
+  onAdoptRuntime,
   onOpenBuildOutput,
   onFocusRuntime,
   onOpenProjectDirectory,
+  onOpenResourceConfig,
+  configWorkspaceKey,
+  projectConfigPanel,
 }: ProjectsPageProps) {
   const theme = useTheme();
   const mono = theme.palette.mode === "dark";
@@ -1119,6 +1413,8 @@ export function ProjectsPage({
   const [workflowProjectKey, setWorkflowProjectKey] = useState("");
   const [workflowAction, setWorkflowAction] =
     useState<ProjectWorkflowAction>("project.runtime.start");
+  const [projectConfigOpen, setProjectConfigOpen] = useState(false);
+  const [projectConfigKey, setProjectConfigKey] = useState("");
   const [copiedProjectAction, setCopiedProjectAction] = useState("");
   const [runtimeLogKind, setRuntimeLogKind] =
     useState<ProjectRuntimeLogKind>("dev");
@@ -1147,16 +1443,54 @@ export function ProjectsPage({
   const [pageVisible, setPageVisible] = useState(
     () => document.visibilityState === "visible",
   );
-  const [runtimeProfileDrafts, setRuntimeProfileDrafts] = useState<RuntimeProfileDraft[]>([]);
-  const [runtimeProxyProfiles, setRuntimeProxyProfiles] = useState<ProxyProfile[]>([]);
-  const [runtimeProfileIndex, setRuntimeProfileIndex] = useState(0);
-  const [runtimeProfilesLoaded, setRuntimeProfilesLoaded] = useState(false);
-  const [runtimeProfilesLoading, setRuntimeProfilesLoading] = useState(false);
-  const [runtimeProfilesSaving, setRuntimeProfilesSaving] = useState(false);
-  const [runtimeProfilesError, setRuntimeProfilesError] = useState("");
   const [runtimeProfileDialog, setRuntimeProfileDialog] =
     useState<RuntimeProfileDialogState | null>(null);
-  const runtimeProfilesLoadingRef = useRef(false);
+  const [confirm, confirmDialog] = useAppConfirmDialog();
+  const [linkPlanDialog, setLinkPlanDialog] = useState<LinkPlanDialogState | null>(null);
+  const [linkSummaries, setLinkSummaries] = useState<LinkSummary[]>([]);
+  const resolvedConfigWorkspaceKey =
+    configWorkspaceKey ?? projectConfigPanel?.activeProjectWorkspaceKey ?? "system";
+  const {
+    selectedSourceId: linkConfigSourceId,
+    preferredSourceId: preferredLinkConfigSourceId,
+    refreshSources: refreshLinkConfigSources,
+  } = useConfigSource({
+    workspaceKey: resolvedConfigWorkspaceKey,
+    requiredCapability: "link",
+  });
+  const {
+    sources: runtimeConfigSources,
+    selectedSource: selectedRuntimeConfigSource,
+    selectedSourceId: runtimeConfigSourceId,
+    preferredSourceId: preferredRuntimeConfigSourceId,
+    sourceBusy: runtimeConfigSourceBusy,
+    sourceError: runtimeConfigSourceError,
+    sourceStatus: runtimeConfigSourceStatus,
+    refreshSources: refreshRuntimeConfigSources,
+    adoptSources: adoptRuntimeConfigSources,
+    selectSource: selectRuntimeConfigSource,
+  } = useConfigSource({
+    workspaceKey: resolvedConfigWorkspaceKey,
+    requiredCapability: "runtime",
+  });
+  const [runtimeConfigSourceManagerOpen, setRuntimeConfigSourceManagerOpen] = useState(false);
+  const {
+    profiles: runtimeProfileDrafts,
+    proxyProfiles: runtimeProxyProfiles,
+    profileIndex: runtimeProfileIndex,
+    setProfileIndex: setRuntimeProfileIndex,
+    loaded: runtimeProfilesLoaded,
+    loading: runtimeProfilesLoading,
+    saving: runtimeProfilesSaving,
+    error: runtimeProfilesError,
+    setError: setRuntimeProfilesError,
+    scope: runtimeProfileScope,
+    configPath: runtimeProfileConfigPath,
+    readOnly: runtimeProfilesReadOnly,
+    loadProfiles: loadRuntimeProfiles,
+    persistProfiles: persistRuntimePanelProfiles,
+    restoreInheritance: restoreRuntimeProfilesInheritance,
+  } = useRuntimeProfiles({ sourceId: runtimeConfigSourceId, onRefresh });
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [finderVisibleCount, setFinderVisibleCount] = useState(
     FINDER_LOAD_BATCH_SIZE,
@@ -1166,23 +1500,150 @@ export function ProjectsPage({
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const confirmTimerRef = useRef<number | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
-  const finderIsProjects = finderType === "项目";
+  const finderIsProjects = mode === "projectManagement";
+  useEffect(() => {
+    setRuntimeProfileDialog(null);
+  }, [runtimeConfigSourceId]);
+
+  useEffect(() => {
+    void refreshLinkConfigSources().catch(() => setLinkSummaries([]));
+  }, [preferredLinkConfigSourceId, refreshLinkConfigSources]);
+
+  useEffect(() => {
+    void refreshRuntimeConfigSources().catch((reason) =>
+      setRuntimeProfilesError(String(reason)),
+    );
+  }, [preferredRuntimeConfigSourceId, refreshRuntimeConfigSources, setRuntimeProfilesError]);
+
+  useEffect(() => {
+    if (mode === "projectManagement") {
+      if (finderType !== "项目") {
+        onFinderTypeChange("项目");
+      }
+      return;
+    }
+    if (finderType === "项目") {
+      const nextType = finderTypeOptions.find((type) => type !== "项目") ?? "网站";
+      onFinderTypeChange(nextType);
+    }
+  }, [finderType, finderTypeOptions, mode, onFinderTypeChange]);
   const runningCount = runtimeEntries.filter(
-    (item) => item.statusKey === "running",
+    (item) => item.statusKey === "running" || item.statusKey === "external",
   ).length;
   const configurableCount = runtimeEntries.filter(
     (item) => item.command,
   ).length;
-  const activeShortcutCount = filteredShortcutEntries.length;
   const totalShortcutCount = shortcutEntries.length;
+  const currentResourceTypeCount = finderTypeCounts[finderType] ?? totalShortcutCount;
+  const pageToolbarMetrics: WorkspacePageMetric[] = finderIsProjects
+    ? [
+        {
+          key: "projects",
+          label: "项目",
+          value: runtimeEntries.length,
+          icon: <PackageIcon fontSize="small" />,
+          tone: "blue",
+        },
+        {
+          key: "running",
+          label: "运行中",
+          value: runningCount,
+          tone: "green",
+        },
+        {
+          key: "configurable",
+          label: "可启动",
+          value: configurableCount,
+          icon: <PlayIcon fontSize="small" />,
+          tone: "violet",
+        },
+      ]
+    : [
+        {
+          key: "entries",
+          label: "入口",
+          value: totalShortcutCount,
+          icon: <AppWindowIcon fontSize="small" />,
+          tone: "blue",
+        },
+        ...(["网站", "目录", "工具"] as FinderType[])
+          .filter((type) => finderTypeOptions.includes(type))
+          .map((type) => ({
+            key: type,
+            label: type,
+            value: finderTypeCounts[type] ?? 0,
+            icon:
+              type === "网站" ? (
+                <WebsiteIcon fontSize="small" />
+              ) : type === "目录" ? (
+                <FolderIcon fontSize="small" />
+              ) : (
+                <TerminalIcon fontSize="small" />
+              ),
+            tone:
+              type === "网站"
+                ? ("cyan" as const)
+                : type === "目录"
+                  ? ("green" as const)
+                  : ("violet" as const),
+          })),
+      ];
+  const resourceEmptyCopy = useMemo(() => {
+    switch (finderType) {
+      case "网站":
+        return {
+          title: "暂无网站入口",
+          description: "当前工作区还没有可打开的网站入口。",
+        };
+      case "目录":
+        return {
+          title: "暂无目录入口",
+          description: "当前工作区还没有本地目录入口。",
+        };
+      case "工具":
+        return {
+          title: "暂无工具入口",
+          description: "当前工作区还没有脚本、应用或链路类工具入口。",
+        };
+      default:
+        return {
+          title: "暂无入口",
+          description: "当前工作区还没有快捷入口。",
+        };
+    }
+  }, [finderType]);
+  const favoriteProjectKeySet = new Set(favoriteProjectKeys);
+  const recentProjectKeySet = new Set(recentProjectKeys);
+  const projectRuntimeEntries = useMemo(() => {
+    const keyword = finderQuery.trim().toLowerCase();
+    const filtered = runtimeEntries.filter((item) => {
+      if (!keyword) {
+        return true;
+      }
+      return buildRuntimeHaystack(item).includes(keyword);
+    });
+    return [...filtered].sort((left, right) => {
+      const favoriteOrder = compareMarkedFirst(
+        favoriteProjectKeySet.has(left.key),
+        favoriteProjectKeySet.has(right.key),
+      );
+      if (favoriteOrder !== 0) {
+        return favoriteOrder;
+      }
+      return compareMarkedFirst(
+        recentProjectKeySet.has(left.key),
+        recentProjectKeySet.has(right.key),
+      );
+    });
+  }, [favoriteProjectKeySet, finderQuery, recentProjectKeySet, runtimeEntries]);
   const filteredFinderEntryCount = finderIsProjects
-    ? filteredRuntimeEntries.length
+    ? projectRuntimeEntries.length
     : filteredShortcutEntries.length;
   const visibleFinderEntryCount = Math.min(
     finderVisibleCount,
     filteredFinderEntryCount,
   );
-  const visibleRuntimeEntries = filteredRuntimeEntries.slice(
+  const visibleRuntimeEntries = projectRuntimeEntries.slice(
     0,
     visibleFinderEntryCount,
   );
@@ -1191,12 +1652,23 @@ export function ProjectsPage({
     visibleFinderEntryCount,
   );
   const hasMoreFinderEntries = finderVisibleCount < filteredFinderEntryCount;
+  const linkToolKeysSignature = useMemo(
+    () =>
+      filteredShortcutEntries
+        .filter((item) => isLinkToolEntry(item.entry))
+        .map((item) => linkToolKey(item.entry))
+        .filter(Boolean)
+        .sort()
+        .join("|"),
+    [filteredShortcutEntries],
+  );
+  const linkSummaryMap = useMemo(
+    () => new Map(linkSummaries.map((summary) => [summary.key, summary])),
+    [linkSummaries],
+  );
   const showFinderCategories =
-    !finderIsProjects && finderCategories.length > 1;
-  const favoriteProjectKeySet = new Set(favoriteProjectKeys);
-  const recentProjectKeySet = new Set(recentProjectKeys);
+    mode === "resources" && finderCategories.length > 1;
   const favoriteShortcutKeySet = new Set(favoriteShortcutKeys);
-  const recentShortcutKeySet = new Set(recentShortcutKeys);
   const projectMenuEntry =
     runtimeEntries.find((item) => item.key === projectMenuKey) ?? null;
   const shortcutMenuItem =
@@ -1216,6 +1688,28 @@ export function ProjectsPage({
   const workflowReplay = workflowProjectEntry
     ? workflowReplayFromProjectRuntime(workflowProjectEntry, workflowAction)
     : null;
+
+  useEffect(() => {
+    if (finderIsProjects || !linkToolKeysSignature) {
+      setLinkSummaries([]);
+      return;
+    }
+    let active = true;
+    void invoke<LinkSummary[]>("list_links", { sourceId: linkConfigSourceId })
+      .then((summaries) => {
+        if (active) {
+          setLinkSummaries(summaries);
+        }
+      })
+      .catch(() => {
+        if (active) {
+          setLinkSummaries([]);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, [finderIsProjects, linkConfigSourceId, linkToolKeysSignature]);
   const projectMenuFavorite = projectMenuEntry
     ? favoriteProjectKeySet.has(projectMenuEntry.key)
     : false;
@@ -1504,6 +1998,7 @@ export function ProjectsPage({
   }, [
     detailsPanelTab,
     detailsProjectEntry?.key,
+    linkConfigSourceId,
     runtimeOptionsSelectedProfile?.runtimeProfile,
     runtimeProfilesLoaded,
     runtimeProfilesLoading,
@@ -1520,6 +2015,7 @@ export function ProjectsPage({
     }
     void loadRuntimeProfiles(shortcutRuntimePanelCurrentItem.entry.runtimeProfile);
   }, [
+    linkConfigSourceId,
     shortcutPanelTab,
     shortcutRuntimePanelCurrentItem,
     runtimeProfilesLoaded,
@@ -1810,35 +2306,56 @@ export function ProjectsPage({
     setDetailsPanelTab("overview");
   }
 
-  async function loadRuntimeProfiles(preferredKey?: string | null) {
-    if (runtimeProfilesLoadingRef.current) {
+  async function handleRuntimeConfigSourceChange(nextSourceId: string) {
+    if (nextSourceId === runtimeConfigSourceId || runtimeConfigSourceBusy) {
       return;
     }
-    runtimeProfilesLoadingRef.current = true;
-    setRuntimeProfilesLoading(true);
+    if (runtimeProfileDialog) {
+      setRuntimeProfilesError("请先保存或取消当前运行配置改动，再切换配置源。");
+      return;
+    }
     setRuntimeProfilesError("");
     try {
-      const [state, proxyDashboard] = await Promise.all([
-        invoke<ProjectConfigEditorState>("get_project_config_editor"),
-        invoke<ProxyDashboard>("get_proxy_dashboard").catch(() => null),
-      ]);
-      const profiles = state.runtimeProfiles ?? [];
-      setRuntimeProfileDrafts(profiles);
-      setRuntimeProxyProfiles(proxyDashboard?.config.profiles ?? []);
-      const preferredIndex = preferredKey
-        ? profiles.findIndex((profile) => profile.key === preferredKey)
-        : -1;
-      setRuntimeProfileIndex(preferredIndex >= 0 ? preferredIndex : 0);
+      await selectRuntimeConfigSource(nextSourceId);
     } catch (reason) {
       setRuntimeProfilesError(String(reason));
-    } finally {
-      setRuntimeProfilesLoaded(true);
-      runtimeProfilesLoadingRef.current = false;
-      setRuntimeProfilesLoading(false);
     }
   }
 
+  function renderRuntimeConfigSourceBar() {
+    if (runtimeConfigSources.length === 0) {
+      return null;
+    }
+    return (
+      <ConfigSourceBar
+        sources={runtimeConfigSources}
+        selectedSourceId={runtimeConfigSourceId}
+        selectedSource={selectedRuntimeConfigSource}
+        path={runtimeProfileConfigPath || selectedRuntimeConfigSource?.files.runtimeOverrides}
+        requiredCapability="runtime"
+        profileFallback="runtime"
+        disabled={
+          runtimeConfigSourceBusy ||
+          runtimeProfilesLoading ||
+          runtimeProfilesSaving ||
+          shortcutRuntimeSaving
+        }
+        status={runtimeProfilesLoading ? "loading" : runtimeConfigSourceStatus}
+        error={runtimeConfigSourceError}
+        showReadyStatus
+        manageDisabled={Boolean(runtimeProfileDialog)}
+        manageDisabledReason="请先保存或取消当前运行配置改动"
+        onSourceChange={(sourceId) => void handleRuntimeConfigSourceChange(sourceId)}
+        onManage={() => setRuntimeConfigSourceManagerOpen(true)}
+      />
+    );
+  }
+
   function addRuntimePanelProfile() {
+    if (runtimeProfilesReadOnly) {
+      setRuntimeProfilesError("当前配置源不支持运行配置覆盖。");
+      return;
+    }
     setRuntimeProfileDialog({
       mode: "create",
       index: -1,
@@ -1848,7 +2365,7 @@ export function ProjectsPage({
   }
 
   function editRuntimePanelProfile() {
-    if (!runtimePanelProfile) {
+    if (!runtimePanelProfile || runtimeProfilesReadOnly) {
       return;
     }
     setRuntimeProfileDialog({
@@ -1863,6 +2380,10 @@ export function ProjectsPage({
   }
 
   function editRuntimePanelProfileByKey(profileKey?: string | null) {
+    if (runtimeProfilesReadOnly) {
+      setRuntimeProfilesError("当前配置源不支持运行配置覆盖。");
+      return;
+    }
     const key = profileKey?.trim();
     if (!key) {
       return;
@@ -1898,34 +2419,18 @@ export function ProjectsPage({
     );
   }
 
-  async function persistRuntimePanelProfiles(
-    profiles: RuntimeProfileDraft[],
-    selectedKey?: string,
-  ) {
-    setRuntimeProfilesSaving(true);
-    setRuntimeProfilesError("");
-    try {
-      const state = await invoke<ProjectConfigEditorState>("save_runtime_profiles", {
-        request: {
-          runtimeProfiles: profiles,
-        },
-      });
-      const savedProfiles = state.runtimeProfiles ?? [];
-      const nextIndex = selectedKey
-        ? savedProfiles.findIndex((profile) => profile.key === selectedKey)
-        : -1;
-      const fallbackIndex = savedProfiles.length
-        ? Math.min(runtimeProfileIndex, savedProfiles.length - 1)
-        : 0;
-      setRuntimeProfileDrafts(savedProfiles);
-      setRuntimeProfileIndex(nextIndex >= 0 ? nextIndex : fallbackIndex);
-      await onRefresh();
-      return true;
-    } catch (reason) {
-      setRuntimeProfilesError(String(reason));
-      return false;
-    } finally {
-      setRuntimeProfilesSaving(false);
+  async function restoreRuntimeProfileInheritance() {
+    if (runtimeProfileScope !== "override") return;
+    const accepted = await confirm({
+      title: "恢复继承全局运行配置？",
+      description: "当前工作区的 runtime_overrides.toml 会被删除，并立即改用全局运行配置。",
+      confirmLabel: "恢复继承",
+      tone: "danger",
+    });
+    if (!accepted) return;
+    const restored = await restoreRuntimeProfilesInheritance();
+    if (restored) {
+      setRuntimeProfileDialog(null);
     }
   }
 
@@ -2045,8 +2550,130 @@ export function ProjectsPage({
     }
   }
 
+  async function openLinkPlan(entry: FinderEntry) {
+    const key = linkToolKey(entry);
+    const summary = key ? linkSummaryMap.get(key) ?? null : null;
+    if (!key) {
+      setLinkPlanDialog({
+        entryName: entry.name,
+        key: "",
+        sourceId: linkConfigSourceId,
+        plan: null,
+        report: null,
+        runtime: null,
+        loading: false,
+        action: null,
+        error: "缺少 Link Key",
+      });
+      return false;
+    }
+    setLinkPlanDialog({
+      entryName: entry.name,
+      key,
+      sourceId: linkConfigSourceId,
+      plan: null,
+      report: null,
+      runtime: summary?.runtime ?? null,
+      loading: true,
+      action: null,
+      error: "",
+    });
+    try {
+      const plan = await invoke<LinkPlan>("plan_link", { sourceId: linkConfigSourceId, key });
+      setLinkPlanDialog({
+        entryName: entry.name,
+        key,
+        sourceId: linkConfigSourceId,
+        plan,
+        report: null,
+        runtime: summary?.runtime ?? null,
+        loading: false,
+        action: null,
+        error: "",
+      });
+      return true;
+    } catch (reason) {
+      setLinkPlanDialog({
+        entryName: entry.name,
+        key,
+        sourceId: linkConfigSourceId,
+        plan: null,
+        report: null,
+        runtime: summary?.runtime ?? null,
+        loading: false,
+        action: null,
+        error: String(reason),
+      });
+      return false;
+    }
+  }
+
+  async function runLinkDialogAction(action: LinkPlanDialogAction) {
+    const key = linkPlanDialog?.key.trim();
+    if (!key || linkPlanDialog?.loading || linkPlanDialog?.action) {
+      return;
+    }
+    const command =
+      action === "check" ? "check_link" : action === "run" ? "run_link" : "stop_link";
+    const sourceId = linkPlanDialog?.sourceId ?? linkConfigSourceId;
+    setLinkPlanDialog((current) =>
+      current
+        ? {
+            ...current,
+            action,
+            error: "",
+          }
+        : current,
+    );
+    try {
+      const report = await invoke<LinkExecutionReport>(command, {
+        sourceId,
+        key,
+      });
+      setLinkPlanDialog((current) =>
+        current
+          ? {
+              ...current,
+              report,
+              action: null,
+              error: "",
+            }
+          : current,
+      );
+      if (action === "run" || action === "stop") {
+        try {
+          const summaries = await invoke<LinkSummary[]>("list_links", {
+            sourceId,
+          });
+          setLinkSummaries(summaries);
+        } catch {
+          setLinkSummaries([]);
+        }
+      }
+    } catch (reason) {
+      setLinkPlanDialog((current) =>
+        current
+          ? {
+              ...current,
+              action: null,
+              error: String(reason),
+            }
+          : current,
+      );
+    }
+  }
+
   async function handleOpenShortcut(item: FinderShortcutItem, shortcutKey: string) {
     try {
+      if (isLinkToolEntry(item.entry)) {
+        const opened = await openLinkPlan(item.entry);
+        if (!opened) {
+          return;
+        }
+        onMarkShortcutUsed(item);
+        setConfirmedShortcutKey(shortcutKey);
+        return;
+      }
       const succeeded = await onOpenFinderEntry(item.entry);
       if (!succeeded) {
         return;
@@ -2105,9 +2732,17 @@ export function ProjectsPage({
     setWorkflowOpen(true);
   }
 
+  function openProjectConfig(projectKey = "") {
+    if (!projectConfigPanel) {
+      return;
+    }
+    setProjectConfigKey(projectKey);
+    setProjectConfigOpen(true);
+  }
+
   return (
     <Box
-      className="workspace workspace--finder"
+      className={`workspace workspace--finder workspace--finder-${mode}`}
       sx={{
         height: "100%",
         minHeight: 0,
@@ -2158,101 +2793,37 @@ export function ProjectsPage({
             p: 0,
           }}
         >
-          <Stack
-            direction="row"
-            alignItems="center"
-            justifyContent="flex-end"
-            spacing={0.8}
-            mb={0.52}
-            sx={{
-              px: 0.2,
-              pb: 0.48,
-              borderBottom: `1px solid ${tone.topDivider}`,
-            }}
-          >
-            <Stack
-              direction="row"
-              spacing={0.8}
-              alignItems="center"
-              flexWrap="wrap"
-              useFlexGap
-            >
-              <Chip
-                size="small"
-                label={
-                  finderIsProjects
-                    ? `运行中 ${runningCount}`
-                    : `${finderType} ${totalShortcutCount}`
-                }
-                sx={{
-                  height: 19,
-                  px: 0.15,
-                  bgcolor: tone.statChipPrimaryBg,
-                  color: tone.statChipPrimaryColor,
-                  border: `1px solid ${tone.statChipPrimaryBorder}`,
-                  boxShadow: "none",
-                  "& .MuiChip-label": {
-                    px: 0.8,
-                    fontSize: "0.62rem",
-                    fontWeight: 600,
-                    letterSpacing: "0.03em",
-                  },
-                }}
-              />
-              <Chip
-                size="small"
-                label={
-                  finderIsProjects
-                    ? `可启动 ${configurableCount}`
-                    : showFinderCategories
-                      ? `分类 ${finderCategories.length}`
-                      : `当前 ${activeShortcutCount}`
-                }
-                sx={{
-                  height: 19,
-                  px: 0.15,
-                  bgcolor: tone.statChipSecondaryBg,
-                  color: tone.statChipSecondaryColor,
-                  border: `1px solid ${tone.statChipSecondaryBorder}`,
-                  boxShadow: "none",
-                  "& .MuiChip-label": {
-                    px: 0.8,
-                    fontSize: "0.62rem",
-                    fontWeight: 600,
-                    letterSpacing: "0.03em",
-                  },
-                }}
-              />
-              <WorkflowLinkSummaryButton
-                count={workflowGroups.length}
-                onClick={() => setWorkflowListOpen(true)}
-              />
-              <Tooltip title="刷新项目状态">
-                <span>
-                  <IconButton
-                    aria-label="刷新项目状态"
-                    onClick={onRefresh}
-                    sx={{
-                      width: 24,
-                      height: 24,
-                      borderRadius: "10px",
-                      color: tone.toolButtonColor,
-                      border: `1px solid ${tone.toolButtonBorder}`,
-                      backgroundColor: tone.toolButtonBg,
-                      backdropFilter: "blur(8px)",
-                      "&:hover": {
-                        color: tone.toolButtonHoverColor,
-                        backgroundColor: tone.toolButtonHoverBg,
-                        borderColor: tone.toolButtonHoverBorder,
-                      },
-                    }}
-                  >
-                    <RefreshIcon sx={{ fontSize: 14 }} />
-                  </IconButton>
-                </span>
-              </Tooltip>
-            </Stack>
-          </Stack>
+          <WorkspacePageToolbar
+            className={`finder-toolbar finder-toolbar--${mode}`}
+            ariaLabel={finderIsProjects ? "项目概览与配置" : "资源入口概览与配置"}
+            metrics={pageToolbarMetrics}
+            actions={
+              <>
+              {finderIsProjects ? (
+                <WorkflowLinkSummaryButton
+                  count={workflowGroups.length}
+                  onClick={() => setWorkflowListOpen(true)}
+                />
+              ) : null}
+              {finderIsProjects && projectConfigPanel ? (
+                <WorkspacePageToolbarAction
+                  startIcon={<SettingsIcon sx={{ fontSize: 14 }} />}
+                  onClick={() => openProjectConfig()}
+                >
+                  项目配置
+                </WorkspacePageToolbarAction>
+              ) : null}
+              {!finderIsProjects && onOpenResourceConfig ? (
+                <WorkspacePageToolbarAction
+                  startIcon={<SettingsIcon sx={{ fontSize: 14 }} />}
+                  onClick={onOpenResourceConfig}
+                >
+                  入口配置
+                </WorkspacePageToolbarAction>
+              ) : null}
+              </>
+            }
+          />
 
           <Box
             sx={{
@@ -2302,7 +2873,7 @@ export function ProjectsPage({
                     onChange={(event) =>
                       onFinderQueryChange(event.target.value)
                     }
-                    placeholder={finderPlaceholder(finderType)}
+                    placeholder={finderIsProjects ? finderPlaceholder("项目") : finderPlaceholder(finderType)}
                     sx={{
                       "& .MuiOutlinedInput-root": {
                         minHeight: 40,
@@ -2334,7 +2905,7 @@ export function ProjectsPage({
                       <IconButton
                         onClick={() => onFinderQueryChange("")}
                         disabled={!finderQuery}
-                        aria-label="清空项目搜索"
+                        aria-label={finderIsProjects ? "清空项目搜索" : "清空入口搜索"}
                         sx={{
                           width: 30,
                           height: 30,
@@ -2352,44 +2923,69 @@ export function ProjectsPage({
                       </IconButton>
                     </span>
                   </Tooltip>
+                  <Tooltip title={finderIsProjects ? "刷新项目状态" : "刷新入口"}>
+                    <span>
+                      <IconButton
+                        aria-label={finderIsProjects ? "刷新项目状态" : "刷新入口"}
+                        onClick={onRefresh}
+                        sx={{
+                          width: 30,
+                          height: 30,
+                          borderRadius: "11px",
+                          color: tone.clearButtonColor,
+                          border: `1px solid ${tone.clearButtonBorder}`,
+                          backgroundColor: tone.clearButtonBg,
+                          "&:hover": {
+                            color: tone.toolButtonHoverColor,
+                            backgroundColor: tone.clearButtonHoverBg,
+                            borderColor: tone.clearButtonHoverBorder,
+                          },
+                        }}
+                      >
+                        <RefreshIcon sx={{ fontSize: 15 }} />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
                 </Stack>
               </Box>
 
-              <Tabs
-                className="finder-type-tabs-shell"
-                value={finderType}
-                onChange={(_, value) => onFinderTypeChange(value as FinderType)}
-                variant="fullWidth"
-                aria-label="入口类型筛选"
-                sx={{
-                  mb: 0.52,
-                  minHeight: 40,
-                  p: 0.5,
-                  borderRadius: "14px",
-                  border: `1px solid ${tone.searchWrapBorder}`,
-                  backgroundColor: tone.searchWrapBg,
-                  boxShadow: tone.searchWrapShadow,
-                  backdropFilter: "blur(12px)",
-                }}
-              >
-                {finderTypeOptions.map((type) => (
-                  <Tab
-                    key={type}
-                    value={type}
-                    icon={finderTypeIcon(type)}
-                    iconPosition="start"
-                    label={(
-                      <Box component="span" className="finder-type-tab-label">
-                        <Box component="span">{type}</Box>
-                        <Box component="span" className="finder-type-tab-count">
-                          {finderTypeCounts[type] ?? 0}
+              {mode === "resources" ? (
+                <Tabs
+                  className="finder-type-tabs-shell"
+                  value={finderType}
+                  onChange={(_, value) => onFinderTypeChange(value as FinderType)}
+                  variant="fullWidth"
+                  aria-label="入口类型筛选"
+                  sx={{
+                    mb: 0.52,
+                    minHeight: 40,
+                    p: 0.5,
+                    borderRadius: "14px",
+                    border: `1px solid ${tone.searchWrapBorder}`,
+                    backgroundColor: tone.searchWrapBg,
+                    boxShadow: tone.searchWrapShadow,
+                    backdropFilter: "blur(12px)",
+                  }}
+                >
+                  {finderTypeOptions.map((type) => (
+                    <Tab
+                      key={type}
+                      value={type}
+                      icon={finderTypeIcon(type)}
+                      iconPosition="start"
+                      label={(
+                        <Box component="span" className="finder-type-tab-label">
+                          <Box component="span">{type}</Box>
+                          <Box component="span" className="finder-type-tab-count">
+                            {finderTypeCounts[type] ?? 0}
+                          </Box>
                         </Box>
-                      </Box>
-                    )}
-                    aria-label={`${type} ${finderTypeCounts[type] ?? 0}`}
-                  />
-                ))}
-              </Tabs>
+                      )}
+                      aria-label={`${type} ${finderTypeCounts[type] ?? 0}`}
+                    />
+                  ))}
+                </Tabs>
+              ) : null}
 
               {showFinderCategories ? (
                 <Box
@@ -2404,16 +3000,6 @@ export function ProjectsPage({
                   }}
                 >
                   <Stack spacing={0.42}>
-                    <Typography
-                      variant="caption"
-                      sx={{
-                        fontWeight: 700,
-                        letterSpacing: "0.07em",
-                        color: tone.rowHint,
-                      }}
-                    >
-                      分类
-                    </Typography>
                     <Box
                       sx={{
                         display: "flex",
@@ -2473,13 +3059,13 @@ export function ProjectsPage({
 
               {finderIsProjects &&
               runtimeEntries.length > 0 &&
-              filteredRuntimeEntries.length === 0 ? (
+              projectRuntimeEntries.length === 0 ? (
                 <AppEmptyState compact title="没有匹配项目" description="调整搜索词再试。" />
               ) : null}
 
               {finderIsProjects &&
               runtimeEntries.length > 0 &&
-              filteredRuntimeEntries.length > 0 ? (
+              projectRuntimeEntries.length > 0 ? (
                 <Stack
                   spacing={0.4}
                   minWidth={0}
@@ -2492,20 +3078,28 @@ export function ProjectsPage({
                     className="module-list-scroll finder-list-scroll"
                     onScroll={handleFinderListScroll}
                     sx={{
-                      display: "grid",
-                      alignContent: "start",
-                      gap: 0.32,
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 0.46,
                       flex: "1 1 auto",
                       minHeight: 0,
                     }}
                   >
                     {visibleRuntimeEntries.map((item, index) => {
-                    const runtimeRunning = item.canStop;
-                    const runtimeAvailable = item.canStart || item.canStop;
-                    const runtimeTooltip = runtimeRunning
+                    const runtimeRunning =
+                      item.statusKey === "running" ||
+                      item.statusKey === "external" ||
+                      item.canStop;
+                    const runtimeAvailable =
+                      item.canStart || item.canStop || item.canAdopt;
+                    const runtimeTooltip = item.canAdopt
+                      ? "认领外部项目"
+                      : runtimeRunning
                       ? "停止项目"
                       : "启动项目";
-                    const runtimeAriaLabel = runtimeRunning
+                    const runtimeAriaLabel = item.canAdopt
+                      ? `认领 ${item.name}`
+                      : runtimeRunning
                       ? `停止 ${item.name}`
                       : `启动 ${item.name}`;
                     const statusPalette = buildStatusPalette(
@@ -2514,7 +3108,6 @@ export function ProjectsPage({
                     );
                     const debugProfiles = item.debugProfiles ?? [];
                     const projectFavorite = favoriteProjectKeySet.has(item.key);
-                    const projectRecent = recentProjectKeySet.has(item.key);
                     const selectedDebugProfileKey = projectSelectedProfileKey(
                       item,
                       selectedDebugProfileKeys,
@@ -2522,18 +3115,39 @@ export function ProjectsPage({
                     const selectedDebugProfile =
                       debugProfiles.find((profile) => profile.key === selectedDebugProfileKey) ??
                       null;
+                    const selectedRuntimeProfileKey =
+                      selectedDebugProfile?.runtimeProfile?.trim() ?? "";
+                    const selectedRuntimeProfile =
+                      runtimeProfileDrafts.find(
+                        (profile) => profile.key === selectedRuntimeProfileKey,
+                      ) ?? null;
+                    const commonRuntimeProfileLabel =
+                      runtimeProfileLabel(selectedRuntimeProfile) ||
+                      selectedRuntimeProfileKey ||
+                      "默认";
+                    const projectDebugProfileLabel =
+                      selectedDebugProfile?.label?.trim() || "默认";
+                    const commonRuntimeChipLabel = `通用 ${commonRuntimeProfileLabel}`;
+                    const projectDebugChipLabel = `项目 ${projectDebugProfileLabel}`;
                     const runtimeStartTooltip =
                       !runtimeRunning && selectedDebugProfile
                         ? `启动项目 · ${selectedDebugProfile.label}`
                         : runtimeTooltip;
                     const focusableRuntimeRow =
                       runtimeRunning && item.canFocusRuntime;
+                    const runtimeFocusTooltip = item.canFocusRuntime
+                      ? "打开运行中的项目"
+                      : "未配置打开地址，且未识别到启动 URL";
                     const runtimeFocusGlow = mono
                       ? "rgba(117, 151, 255, 0.2)"
                       : "rgba(77, 123, 214, 0.16)";
+                    const projectAccent = projectAccentColor(item);
+                    const projectPath = projectDisplayPath(item);
+                    const projectCommand = projectDisplayCommand(item);
                     return (
                       <Box
                         key={item.key}
+                        className={`project-runtime-row${runtimeRunning ? " is-running" : ""}${focusableRuntimeRow ? " is-focusable" : ""}${projectFavorite ? " is-favorite" : ""}`}
                         title={focusableRuntimeRow ? "点击唤起项目" : undefined}
                         onClick={(event) => {
                           if (
@@ -2548,21 +3162,11 @@ export function ProjectsPage({
                           );
                         }}
                         sx={{
-                          position: "relative",
-                          display: "grid",
-                          gridTemplateColumns: {
-                            xs: "minmax(0,1fr)",
-                            md: "minmax(0, 1fr) max-content",
-                          },
-                          columnGap: { xs: 0.94, md: 0.9 },
-                          rowGap: 0.5,
-                          alignItems: "center",
-                          px: 1,
-                          py: { xs: 0.82, md: 0.7 },
-                          pr: { xs: 13.4, md: 1 },
-                          minHeight: { xs: 60, md: 56 },
-                          borderRadius: "15px",
-                          border: "1px solid",
+                          "--project-accent": projectAccent,
+                          "--project-status-dot": statusPalette.dot,
+                          "--project-status-bg": statusPalette.pillBg,
+                          "--project-status-border": statusPalette.pillBorder,
+                          "--project-status-color": statusPalette.pillColor,
                           borderColor:
                             projectFavorite
                               ? tone.categoryChipActiveBorder
@@ -2576,7 +3180,6 @@ export function ProjectsPage({
                           boxShadow: focusableRuntimeRow
                             ? `${tone.rowShadow}, 0 0 0 1px ${tone.startButtonBorder}, 0 0 22px ${runtimeFocusGlow}`
                             : tone.rowShadow,
-                          backdropFilter: "blur(16px)",
                           cursor: focusableRuntimeRow ? "pointer" : "default",
                           animation:
                             item.statusKey === "running"
@@ -2616,150 +3219,113 @@ export function ProjectsPage({
                           },
                         }}
                       >
-                        <Stack
-                          direction="row"
-                          alignItems="center"
-                          spacing={0.72}
-                          minWidth={0}
-                          sx={{
-                            pr: { xs: 0.75, md: 0 },
-                            maxWidth: "100%",
-                          }}
-                        >
-                          <Box
-                            aria-hidden="true"
-                            sx={{
-                              width: 26,
-                              height: 26,
-                              display: "grid",
-                              placeItems: "center",
-                              flexShrink: 0,
-                              borderRadius: "9px",
-                              border: "1px solid",
-                              borderColor:
-                                item.statusKey === "running"
-                                  ? statusPalette.pillBorder
-                                  : tone.actionGroupBorder,
-                              bgcolor:
-                                item.statusKey === "running"
-                                  ? statusPalette.pillBg
-                                  : tone.actionGroupBg,
-                              boxShadow: tone.actionGroupShadow,
-                            }}
+                        <span className="project-runtime-avatar" aria-hidden="true">
+                          {projectMonogram(item)}
+                        </span>
+
+                        <Box className="project-runtime-title-block">
+                          <Stack
+                            direction="row"
+                            alignItems="center"
+                            spacing={0.45}
+                            minWidth={0}
+                            className="project-runtime-title-line"
                           >
-                            <Box
-                              sx={{
-                                width: 8,
-                                height: 8,
-                                borderRadius: "50%",
-                                bgcolor: statusPalette.dot,
-                                boxShadow:
-                                  item.statusKey === "running"
-                                    ? tone.runningDotHalo
-                                    : "none",
-                              }}
-                            />
-                          </Box>
-                          <Box minWidth={0}>
-                            <Stack
-                              direction="row"
-                              alignItems="center"
-                              spacing={0.45}
-                              minWidth={0}
-                            >
-                              <Typography
-                                variant="body2"
-                                noWrap
-                                sx={{
-                                  minWidth: 0,
-                                  fontWeight: 740,
-                                  fontSize: "0.86rem",
-                                  lineHeight: 1.24,
-                                  color: tone.rowTitle,
-                                }}
-                              >
-                                {item.name}
-                              </Typography>
-                              {projectFavorite ? (
-                                <StarIcon
-                                  sx={{
-                                    width: 13,
-                                    height: 13,
-                                    flexShrink: 0,
-                                    color: tone.categoryChipActiveColor,
-                                    opacity: 0.82,
-                                  }}
-                                />
-                              ) : null}
-                              {projectRecent ? (
-                                <Chip
-                                  size="small"
-                                  label="最近"
-                                  sx={{
-                                    height: 18,
-                                    flexShrink: 0,
-                                    borderRadius: "6px",
-                                    border: `1px solid ${tone.categoryChipBorder}`,
-                                    bgcolor: tone.categoryChipBg,
-                                    color: tone.categoryChipColor,
-                                    fontSize: "0.62rem",
-                                    fontWeight: 700,
-                                    "& .MuiChip-label": {
-                                      px: 0.7,
-                                      lineHeight: "18px",
-                                    },
-                                  }}
-                                />
-                              ) : null}
-                            </Stack>
                             <Typography
-                              variant="caption"
+                              className="project-runtime-title"
                               noWrap
-                              sx={{
-                                display: "block",
-                                mt: 0.16,
-                                overflow: "hidden",
-                                textOverflow: "ellipsis",
-                                letterSpacing: 0,
-                                color: tone.rowKey,
-                              }}
+                              title={item.name}
                             >
-                              {item.key}
+                              {item.name}
                             </Typography>
-                          </Box>
-                        </Stack>
+                            {projectFavorite ? (
+                              <StarIcon className="project-runtime-star" />
+                            ) : null}
+                          </Stack>
+                          <Typography
+                            className="project-runtime-key"
+                            noWrap
+                            title={item.key}
+                          >
+                            {item.key}
+                          </Typography>
+                        </Box>
+
+                        <Box className="project-runtime-meta">
+                          <span title={item.cwd || item.repoPath || projectPath}>
+                            <FolderIcon fontSize="inherit" />
+                            <span className="project-runtime-meta-text">
+                              {projectPath}
+                            </span>
+                          </span>
+                          <span title={item.command || item.buildCommand || projectCommand}>
+                            <TerminalIcon fontSize="inherit" />
+                            <span className="project-runtime-meta-text">
+                              {projectCommand}
+                            </span>
+                          </span>
+                        </Box>
+
+                        <Box className="project-runtime-tags">
+                          <Chip
+                            size="small"
+                            className="project-runtime-common-chip"
+                            label={commonRuntimeChipLabel}
+                            title={`通用运行配置：${commonRuntimeProfileLabel}`}
+                          />
+                          <Chip
+                            size="small"
+                            className="project-runtime-profile-chip"
+                            label={projectDebugChipLabel}
+                            title={`项目运行配置：${projectDebugProfileLabel}`}
+                          />
+                        </Box>
 
                         <Stack
                           direction="row"
                           spacing={0.38}
-                          justifyContent={{ xs: "flex-start", md: "flex-end" }}
+                          justifyContent="flex-end"
                           data-project-row-action="true"
-                          sx={{
-                            gridColumn: { md: 2 },
-                            width: "fit-content",
-                            minWidth: "max-content",
-                            flexShrink: 0,
-                            justifySelf: { md: "end" },
-                            alignSelf: "center",
-                            px: 0.42,
-                            py: 0.24,
-                            borderRadius: "999px",
-                            border: `1px solid ${tone.actionGroupBorder}`,
-                            backgroundColor: tone.actionGroupBg,
-                            boxShadow: tone.actionGroupShadow,
-                            position: { xs: "absolute", md: "static" },
-                            top: { xs: 10, md: "auto" },
-                            right: { xs: 10, md: "auto" },
-                            zIndex: 1,
-                          }}
+                          className="project-runtime-actions"
                         >
+                          {runtimeRunning ? (
+                            <Tooltip title={runtimeFocusTooltip}>
+                              <span>
+                                <IconButton
+                                  className="project-runtime-action is-focus"
+                                  aria-label={`打开 ${item.name}`}
+                                  disabled={!item.canFocusRuntime}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    if (!item.canFocusRuntime) {
+                                      return;
+                                    }
+                                    onFocusRuntime(
+                                      item.key,
+                                      selectedDebugProfileKey || undefined,
+                                    );
+                                  }}
+                                >
+                                  <OpenExternalIcon fontSize="small" />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                          ) : null}
                           <Tooltip title={runtimeStartTooltip}>
                             <span>
                               <IconButton
+                                className={`project-runtime-action ${item.canAdopt ? "is-focus" : runtimeRunning ? "is-stop" : "is-run"}`}
                                 aria-label={runtimeAriaLabel}
                                 disabled={!runtimeAvailable}
                                 onClick={(event) => {
                                   event.stopPropagation();
+                                  if (item.canAdopt && item.pid) {
+                                    onAdoptRuntime(
+                                      item.key,
+                                      selectedDebugProfileKey || undefined,
+                                    );
+                                    return;
+                                  }
                                   if (runtimeRunning) {
                                     onStopRuntime(item.key);
                                     return;
@@ -2769,37 +3335,10 @@ export function ProjectsPage({
                                     selectedDebugProfileKey || undefined,
                                   );
                                 }}
-                                sx={{
-                                  width: 28,
-                                  height: 28,
-                                  borderRadius: "999px",
-                                  bgcolor: runtimeRunning
-                                    ? tone.stopButtonBg
-                                    : item.canStart
-                                      ? tone.startButtonBg
-                                      : "transparent",
-                                  color: runtimeRunning
-                                    ? tone.stopButtonColor
-                                    : item.canStart
-                                      ? tone.startButtonColor
-                                      : tone.startButtonDisabledColor,
-                                  border: runtimeAvailable
-                                    ? `1px solid ${
-                                        runtimeRunning
-                                          ? tone.stopButtonBorder
-                                          : tone.startButtonBorder
-                                      }`
-                                    : "1px solid transparent",
-                                  "&:hover": {
-                                    bgcolor: runtimeRunning
-                                      ? tone.stopButtonHoverBg
-                                      : item.canStart
-                                        ? tone.startButtonHoverBg
-                                        : "transparent",
-                                  },
-                                }}
                               >
-                                {runtimeRunning ? (
+                                {item.canAdopt ? (
+                                  <WorkflowIcon fontSize="small" />
+                                ) : runtimeRunning ? (
                                   <StopIcon fontSize="small" />
                                 ) : (
                                   <PlayIcon fontSize="small" />
@@ -2810,24 +3349,12 @@ export function ProjectsPage({
                           <Tooltip title={item.cwd || item.repoPath ? "打开项目目录" : "未配置项目目录"}>
                             <span>
                               <IconButton
+                                className="project-runtime-action is-muted"
                                 aria-label={`打开 ${item.name} 的项目目录`}
                                 disabled={!item.cwd && !item.repoPath}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   onOpenProjectDirectory(item.key);
-                                }}
-                                sx={{
-                                  width: 28,
-                                  height: 28,
-                                  borderRadius: "999px",
-                                  bgcolor: tone.stopButtonBg,
-                                  color: item.cwd || item.repoPath
-                                    ? tone.stopButtonColor
-                                    : tone.stopButtonDisabledColor,
-                                  border: `1px solid ${tone.stopButtonBorder}`,
-                                  "&:hover": {
-                                    bgcolor: tone.stopButtonHoverBg,
-                                  },
                                 }}
                               >
                                 <FolderIcon fontSize="small" />
@@ -2837,22 +3364,12 @@ export function ProjectsPage({
                           <Tooltip title="更多操作">
                             <span>
                               <IconButton
+                                className="project-runtime-action is-muted"
                                 aria-label={`${item.name} 更多操作`}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   setProjectMenuAnchor(event.currentTarget);
                                   setProjectMenuKey(item.key);
-                                }}
-                                sx={{
-                                  width: 28,
-                                  height: 28,
-                                  borderRadius: "999px",
-                                  bgcolor: tone.stopButtonBg,
-                                  color: tone.stopButtonColor,
-                                  border: `1px solid ${tone.stopButtonBorder}`,
-                                  "&:hover": {
-                                    bgcolor: tone.stopButtonHoverBg,
-                                  },
                                 }}
                               >
                                 <MoreIcon fontSize="small" />
@@ -2881,9 +3398,7 @@ export function ProjectsPage({
                           下滑加载更多
                         </Button>
                       ) : (
-                        <Typography variant="caption" className="workflow-history-footer-text">
-                          没有更多了
-                        </Typography>
+                        <AppListEndState />
                       )}
                     </Stack>
                   </Box>
@@ -2936,6 +3451,27 @@ export function ProjectsPage({
                   </ListItemIcon>
                   <ListItemText
                     primary="运行面板"
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  disabled={!projectMenuEntry || !projectConfigPanel}
+                  onClick={() => {
+                    if (!projectMenuEntry) {
+                      return;
+                    }
+                    openProjectConfig(projectMenuEntry.key);
+                    closeProjectMenu();
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                    <SettingsIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary="项目配置"
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -2998,7 +3534,6 @@ export function ProjectsPage({
                   open
                   onClose={closeRuntimePanel}
                   title={detailsProjectEntry.name}
-                  subtitle={detailsProjectEntry.key}
                   statusDotColor={
                     buildStatusPalette(detailsProjectEntry.statusKey, mono).dot
                   }
@@ -3008,33 +3543,61 @@ export function ProjectsPage({
                       : "none"
                   }
                   headerActions={
-                    <Tooltip
-                      title={
-                        detailsProjectPath ? "打开项目目录" : "未配置项目目录"
-                      }
-                    >
-                      <span>
-                        <IconButton
-                          aria-label="打开项目目录"
-                          disabled={!detailsProjectPath}
-                          onClick={() =>
-                            onOpenProjectDirectory(detailsProjectEntry.key)
-                          }
-                          sx={{
-                            width: 30,
-                            height: 30,
-                            borderRadius: "999px",
-                            bgcolor: tone.stopButtonBg,
-                            color: detailsProjectPath
-                              ? tone.stopButtonColor
-                              : tone.stopButtonDisabledColor,
-                            border: `1px solid ${tone.stopButtonBorder}`,
-                          }}
-                        >
-                          <FolderIcon fontSize="small" />
-                        </IconButton>
-                      </span>
-                    </Tooltip>
+                    <Stack direction="row" spacing={0.5}>
+                      {detailsProjectEntry.canAdopt && detailsProjectEntry.pid ? (
+                        <Tooltip title="认领外部项目">
+                          <IconButton
+                            aria-label={`认领 ${detailsProjectEntry.name}`}
+                            onClick={() =>
+                              onAdoptRuntime(
+                                detailsProjectEntry.key,
+                                projectSelectedProfileKey(
+                                  detailsProjectEntry,
+                                  selectedDebugProfileKeys,
+                                ) || undefined,
+                              )
+                            }
+                            sx={{
+                              width: 30,
+                              height: 30,
+                              borderRadius: "999px",
+                              bgcolor: tone.startButtonBg,
+                              color: tone.startButtonColor,
+                              border: `1px solid ${tone.startButtonBorder}`,
+                            }}
+                          >
+                            <WorkflowIcon fontSize="small" />
+                          </IconButton>
+                        </Tooltip>
+                      ) : null}
+                      <Tooltip
+                        title={
+                          detailsProjectPath ? "打开项目目录" : "未配置项目目录"
+                        }
+                      >
+                        <span>
+                          <IconButton
+                            aria-label="打开项目目录"
+                            disabled={!detailsProjectPath}
+                            onClick={() =>
+                              onOpenProjectDirectory(detailsProjectEntry.key)
+                            }
+                            sx={{
+                              width: 30,
+                              height: 30,
+                              borderRadius: "999px",
+                              bgcolor: tone.stopButtonBg,
+                              color: detailsProjectPath
+                                ? tone.stopButtonColor
+                                : tone.stopButtonDisabledColor,
+                              border: `1px solid ${tone.stopButtonBorder}`,
+                            }}
+                          >
+                            <FolderIcon fontSize="small" />
+                          </IconButton>
+                        </span>
+                      </Tooltip>
+                    </Stack>
                   }
                   chips={
                     <>
@@ -3519,6 +4082,7 @@ export function ProjectsPage({
                           }}
                         >
                           <Stack spacing={1}>
+                            {renderRuntimeConfigSourceBar()}
                             <Stack
                               direction={{ xs: "column", sm: "row" }}
                               alignItems={{ xs: "stretch", sm: "flex-start" }}
@@ -3526,12 +4090,26 @@ export function ProjectsPage({
                               spacing={0.8}
                             >
                               <Box sx={{ minWidth: 0 }}>
-                                <Typography
-                                  variant="caption"
-                                  sx={{ color: tone.rowMeta, fontWeight: 750 }}
+                                <Stack
+                                  direction="row"
+                                  spacing={0.65}
+                                  alignItems="center"
+                                  flexWrap="wrap"
+                                  useFlexGap
                                 >
-                                  通用运行配置
-                                </Typography>
+                                  <Typography
+                                    variant="caption"
+                                    sx={{ color: tone.rowMeta, fontWeight: 750 }}
+                                  >
+                                    通用运行配置
+                                  </Typography>
+                                  <Chip
+                                    size="small"
+                                    variant="outlined"
+                                    label={runtimeProfileScopeLabel(runtimeProfileScope)}
+                                    sx={{ height: 22 }}
+                                  />
+                                </Stack>
                                 <Typography
                                   variant="caption"
                                   sx={{
@@ -3541,7 +4119,8 @@ export function ProjectsPage({
                                     overflowWrap: "anywhere",
                                   }}
                                 >
-                                  浏览器、代理和域名映射，可被项目和访达复用。
+                                  浏览器、代理和域名映射。
+                                  {runtimeProfileScopeDescription(runtimeProfileScope)}
                                 </Typography>
                               </Box>
                               <Stack
@@ -3551,6 +4130,22 @@ export function ProjectsPage({
                                 useFlexGap
                                 justifyContent={{ xs: "flex-start", sm: "flex-end" }}
                               >
+                                {runtimeProfileScope === "override" ? (
+                                  <Tooltip title="恢复继承全局运行配置">
+                                    <span>
+                                      <IconButton
+                                        aria-label="恢复继承全局运行配置"
+                                        disableRipple
+                                        disableFocusRipple
+                                        disabled={runtimeProfilesSaving}
+                                        onClick={() => void restoreRuntimeProfileInheritance()}
+                                        sx={runtimePanelActionButtonSx}
+                                      >
+                                        <ReplayIcon fontSize="small" />
+                                      </IconButton>
+                                    </span>
+                                  </Tooltip>
+                                ) : null}
                                 <Tooltip title="刷新运行配置">
                                   <span>
                                     <IconButton
@@ -3575,7 +4170,7 @@ export function ProjectsPage({
                                       aria-label="新增运行配置"
                                       disableRipple
                                       disableFocusRipple
-                                      disabled={runtimeProfilesSaving}
+                                      disabled={runtimeProfilesSaving || runtimeProfilesReadOnly}
                                       onClick={addRuntimePanelProfile}
                                       sx={runtimePanelActionButtonSx}
                                     >
@@ -3591,7 +4186,8 @@ export function ProjectsPage({
                                       disableFocusRipple
                                       disabled={
                                         !runtimePanelProfile ||
-                                        runtimeProfilesSaving
+                                        runtimeProfilesSaving ||
+                                        runtimeProfilesReadOnly
                                       }
                                       onClick={editRuntimePanelProfile}
                                       sx={runtimePanelActionButtonSx}
@@ -4589,6 +5185,7 @@ export function ProjectsPage({
 	                      }}
 	                    >
 	                      <Stack spacing={1}>
+	                        {renderRuntimeConfigSourceBar()}
 	                        <Stack
 	                          direction={{ xs: "column", sm: "row" }}
 	                          alignItems={{ xs: "stretch", sm: "flex-start" }}
@@ -4772,15 +5369,25 @@ export function ProjectsPage({
 	                          <Button
 	                            size="small"
 	                            variant="contained"
-	                            startIcon={<OpenExternalIcon fontSize="small" />}
+	                            startIcon={
+                              isLinkToolEntry(shortcutRuntimePanelCurrentItem.entry) ? (
+                                <WorkflowIcon fontSize="small" />
+                              ) : (
+                                <OpenExternalIcon fontSize="small" />
+                              )
+                            }
 	                            disabled={shortcutRuntimeSaving}
 	                            onClick={() =>
-	                              void onOpenFinderEntry(
-	                                shortcutRuntimePanelCurrentItem.entry,
-	                              )
+                              isLinkToolEntry(shortcutRuntimePanelCurrentItem.entry)
+                                ? void openLinkPlan(shortcutRuntimePanelCurrentItem.entry)
+                                : void onOpenFinderEntry(
+                                    shortcutRuntimePanelCurrentItem.entry,
+                                  )
 	                            }
 	                          >
-	                            打开入口
+	                            {isLinkToolEntry(shortcutRuntimePanelCurrentItem.entry)
+                              ? "查看计划"
+                              : "打开入口"}
 	                          </Button>
 	                        </Stack>
 	                      </Stack>
@@ -4814,10 +5421,30 @@ export function ProjectsPage({
                   },
                 }}
               >
-                <DialogTitle sx={{ pb: 0.5 }}>
-                  {runtimeProfileDialog?.mode === "create"
-                    ? "新增运行配置"
-                    : "编辑运行配置"}
+                <DialogTitle className="runtime-profile-dialog-title">
+                  <Stack spacing={0.15} minWidth={0}>
+                    <Stack direction="row" spacing={0.65} alignItems="center" minWidth={0}>
+                      <Typography variant="subtitle1" noWrap>
+                        {runtimeProfileDialog?.mode === "create"
+                          ? "新增运行配置"
+                          : "编辑运行配置"}
+                      </Typography>
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        label={runtimeProfileScopeLabel(runtimeProfileScope)}
+                      />
+                    </Stack>
+                    <Typography
+                      variant="caption"
+                      color="text.secondary"
+                      noWrap
+                      title={runtimeProfileConfigPath || undefined}
+                    >
+                      {runtimeProfileScopeDescription(runtimeProfileScope)}
+                      {runtimeProfileConfigPath ? ` · ${runtimeProfileConfigPath}` : ""}
+                    </Typography>
+                  </Stack>
                 </DialogTitle>
                 <DialogContent sx={{ pt: 1 }}>
                   {runtimeProfileDialog ? (
@@ -5094,7 +5721,7 @@ export function ProjectsPage({
                     </Stack>
                   ) : null}
                 </DialogContent>
-                <DialogActions sx={{ px: 3, pb: 2 }}>
+                <DialogActions className="runtime-profile-dialog-actions">
                   <Button
                     color="inherit"
                     onClick={() => setRuntimeProfileDialog(null)}
@@ -5106,23 +5733,38 @@ export function ProjectsPage({
                     variant="contained"
                     startIcon={<CheckIcon fontSize="small" />}
                     onClick={() => void saveRuntimeProfileDialog()}
-                    disabled={runtimeProfilesSaving || !runtimeProfileDialog?.draft.key.trim()}
+                    disabled={
+                      runtimeProfilesSaving ||
+                      runtimeProfilesReadOnly ||
+                      !runtimeProfileDialog?.draft.key.trim()
+                    }
                   >
                     保存运行配置
                   </Button>
                 </DialogActions>
               </Dialog>
 
-              {!finderIsProjects && totalShortcutCount === 0 ? (
-                <AppEmptyState
-                  compact
-                  title="暂无入口"
-                  description="检查 navigation.toml 或继续补充快捷入口。"
-                />
+              {confirmDialog}
+
+              <LinkPlanDialog
+                state={linkPlanDialog}
+                onClose={() => setLinkPlanDialog(null)}
+                onAction={(action) => void runLinkDialogAction(action)}
+              />
+
+              {!finderIsProjects && currentResourceTypeCount === 0 ? (
+                <Stack className="finder-empty-fill" spacing={0.9}>
+                  <AppEmptyState
+                    compact
+                    className="finder-empty-state"
+                    title={resourceEmptyCopy.title}
+                    description={resourceEmptyCopy.description}
+                  />
+                </Stack>
               ) : null}
 
               {!finderIsProjects &&
-              totalShortcutCount > 0 &&
+              currentResourceTypeCount > 0 &&
               filteredShortcutEntries.length === 0 ? (
                 <AppEmptyState compact title="没有匹配入口" description="切换分类或调整搜索词。" />
               ) : null}
@@ -5140,9 +5782,9 @@ export function ProjectsPage({
                     className="module-list-scroll finder-list-scroll"
                     onScroll={handleFinderListScroll}
                     sx={{
-                      display: "grid",
+                      display: "flex",
+                      flexDirection: "column",
                       gap: 0.32,
-                      alignContent: "start",
                       flex: "1 1 auto",
                       minHeight: 0,
                     }}
@@ -5150,11 +5792,23 @@ export function ProjectsPage({
                     {visibleShortcutEntries.map((item, index) => {
                     const detailLines = buildFinderEntryDetails(item);
                     const shortcutKey = buildFinderShortcutKey(item);
+                    const linkShortcut = isLinkToolEntry(item.entry);
+                    const shortcutLinkSummary = linkShortcut
+                      ? linkSummaryForEntry(item.entry, linkSummaryMap)
+                      : null;
+                    const shortcutSubtitle = linkShortcut
+                      ? linkEntrySubtitle(item.entry, shortcutLinkSummary)
+                      : item.entry.targetLabel;
                     const shortcutConfirmed =
                       confirmedShortcutKey === shortcutKey;
                     const shortcutFavorite =
                       favoriteShortcutKeySet.has(shortcutKey);
-                    const shortcutRecent = recentShortcutKeySet.has(shortcutKey);
+                    const shortcutKindLabel = finderEntryKindLabel(item.entry.kind);
+                    const shortcutCategoryLabel =
+                      item.categoryTitle && item.categoryTitle !== shortcutKindLabel
+                        ? item.categoryTitle
+                        : "";
+                    const shortcutIconVariant = finderEntryIconVariant(item.entry);
                     return (
                       <Tooltip
                         key={`${item.categoryTitle}-${item.entry.kind}-${item.entry.name}`}
@@ -5179,11 +5833,14 @@ export function ProjectsPage({
                             ))}
                           </Stack>
                         }
-                      >
+                        >
                         <Box
                           component="div"
                           role="button"
                           tabIndex={0}
+                          className={`finder-entry-row${linkShortcut ? " is-link-tool" : ""}${
+                            shortcutConfirmed ? " is-confirmed" : ""
+                          }`}
                           aria-label={`打开 ${item.entry.name}`}
                           onClick={() =>
                             void handleOpenShortcut(item, shortcutKey)
@@ -5202,18 +5859,19 @@ export function ProjectsPage({
                             position: "relative",
                             display: "grid",
                             gridTemplateColumns: {
-                              xs: "minmax(0,1fr)",
-                              md: "minmax(0, 1fr) max-content",
+                              xs: "36px minmax(0, 1fr)",
+                              md: "38px minmax(220px, 0.98fr) minmax(104px, 0.24fr) max-content",
                             },
-                            columnGap: { xs: 0.94, md: 0.9 },
-                            rowGap: 0.5,
+                            columnGap: { xs: 0.9, md: 1 },
+                            rowGap: { xs: 0.8, md: 0 },
                             alignItems: "center",
+                            alignContent: "center",
                             width: "100%",
                             minWidth: 0,
-                            minHeight: { xs: 62, md: 54 },
+                            minHeight: { xs: 64, md: 64 },
                             px: 1.05,
-                            py: { xs: 0.9, md: 0.76 },
-                            pr: { xs: 10.8, md: 1.05 },
+                            py: { xs: 0.68, md: 0.68 },
+                            pr: { xs: 1.05, md: 1.05 },
                             borderRadius: "15px",
                             cursor: "pointer",
                             textAlign: "left",
@@ -5246,178 +5904,99 @@ export function ProjectsPage({
                             },
                           }}
                         >
-                          <Stack
-                            direction="row"
-                            alignItems="center"
-                            spacing={0.85}
-                            minWidth={0}
-                            sx={{
-                              pr: { xs: 0.75, md: 0 },
-                              maxWidth: "100%",
-                            }}
+                          <Box
+                            aria-hidden="true"
+                            className={`finder-entry-mark is-${shortcutIconVariant}`}
                           >
-                            <Box
-                              aria-hidden="true"
-                              sx={{
-                                width: 28,
-                                height: 28,
-                                display: "grid",
-                                placeItems: "center",
-                                flexShrink: 0,
-                                borderRadius: "10px",
-                                border: `1px solid ${tone.actionGroupBorder}`,
-                                backgroundColor: shortcutConfirmed
-                                  ? mono
-                                    ? "rgba(150, 215, 170, 0.14)"
-                                    : "rgba(76, 122, 85, 0.12)"
-                                  : tone.actionGroupBg,
-                                color: shortcutConfirmed
-                                  ? mono
-                                    ? "#bfe9cb"
-                                    : "#416a4a"
-                                  : tone.rowMeta,
-                                boxShadow: tone.actionGroupShadow,
-                                fontSize: 14,
-                              }}
-                            >
-                              {shortcutConfirmed ? (
-                                <CheckIcon fontSize="inherit" />
-                              ) : (
-                                <FinderEntryIcon kind={item.entry.kind} />
-                              )}
-                            </Box>
-                            <Box minWidth={0}>
+                            {shortcutConfirmed ? (
+                              <CheckIcon fontSize="inherit" />
+                            ) : (
+                              <FinderEntryIcon kind={item.entry.kind} entry={item.entry} />
+                            )}
+                          </Box>
+
+                          <Box className="finder-entry-body">
                               <Stack
                                 direction="row"
                                 alignItems="center"
                                 spacing={0.55}
                                 minWidth={0}
+                                className="finder-entry-title-line"
                               >
                                 <Typography
                                   variant="body2"
                                   noWrap
-                                  sx={{
-                                    minWidth: 0,
-                                    fontWeight: 760,
-                                    fontSize: "0.92rem",
-                                    lineHeight: 1.18,
-                                    color: tone.rowTitle,
-                                  }}
+                                  className="finder-entry-title"
                                 >
                                   {item.entry.name}
                                 </Typography>
                                 {shortcutFavorite ? (
                                   <StarIcon
-                                    sx={{
-                                      width: 13,
-                                      height: 13,
-                                      flexShrink: 0,
-                                      color: tone.categoryChipActiveColor,
-                                      opacity: 0.82,
-                                    }}
+                                    className="finder-entry-star"
                                   />
                                 ) : null}
-                                {shortcutRecent ? (
+                                {linkShortcut ? (
                                   <Chip
                                     size="small"
-                                    label="最近"
-                                    sx={{
-                                      height: 18,
-                                      flexShrink: 0,
-                                      borderRadius: "6px",
-                                      border: `1px solid ${tone.categoryChipBorder}`,
-                                      bgcolor: tone.categoryChipBg,
-                                      color: tone.categoryChipColor,
-                                      fontSize: "0.62rem",
-                                      fontWeight: 700,
-                                      "& .MuiChip-label": {
-                                        px: 0.7,
-                                        lineHeight: "18px",
-                                      },
-                                    }}
+                                    className={`finder-link-state-chip ${
+                                      shortcutLinkSummary?.warnings.length ? "is-warning" : "is-ready"
+                                    }`}
+                                    label={linkEntryStatusLabel(shortcutLinkSummary)}
                                   />
                                 ) : null}
                               </Stack>
                               <Typography
                                 variant="caption"
                                 noWrap
-                                sx={{
-                                  display: "block",
-                                  mt: 0.22,
-                                  overflow: "hidden",
-                                  textOverflow: "ellipsis",
-                                  letterSpacing: 0,
-                                  color: tone.rowKey,
-                                }}
+                                className="finder-entry-subtitle"
                               >
-                                {item.entry.targetLabel}
+                                {shortcutSubtitle}
                               </Typography>
-                            </Box>
-                          </Stack>
+                          </Box>
+
+                          <Box className="finder-entry-sidecar">
+                            {shortcutCategoryLabel ? (
+                              <span className="finder-entry-category-label">
+                                {shortcutCategoryLabel}
+                              </span>
+                            ) : null}
+                          </Box>
 
                           <Stack
                             direction="row"
                             spacing={0.38}
                             justifyContent={{ xs: "flex-start", md: "flex-end" }}
+                            className="finder-entry-actions"
                             sx={{
-                              gridColumn: { md: 2 },
+                              gridColumn: { xs: "2 / 3", md: 4 },
                               width: "fit-content",
                               minWidth: "max-content",
                               flexShrink: 0,
-                              justifySelf: { md: "end" },
+                              justifySelf: { xs: "start", md: "end" },
                               alignSelf: "center",
-                              px: 0.42,
-                              py: 0.24,
-                              borderRadius: "999px",
-                              border: `1px solid ${tone.actionGroupBorder}`,
-                              backgroundColor: tone.actionGroupBg,
-                              boxShadow: tone.actionGroupShadow,
-                              position: { xs: "absolute", md: "static" },
-                              top: { xs: 10, md: "auto" },
-                              right: { xs: 10, md: "auto" },
                               zIndex: 1,
                             }}
                           >
                             <Tooltip title={`打开${finderEntryKindLabel(item.entry.kind)}`}>
                               <IconButton
+                                className="finder-entry-action is-primary"
                                 aria-label={`打开 ${item.entry.name}`}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   void handleOpenShortcut(item, shortcutKey);
                                 }}
-                                sx={{
-                                  width: 28,
-                                  height: 28,
-                                  borderRadius: "999px",
-                                  bgcolor: tone.startButtonBg,
-                                  color: tone.startButtonColor,
-                                  border: `1px solid ${tone.startButtonBorder}`,
-                                  "&:hover": {
-                                    bgcolor: tone.startButtonHoverBg,
-                                  },
-                                }}
                               >
-                                <PlayIcon fontSize="small" />
+                                {finderEntryActionIcon(item.entry.kind)}
                               </IconButton>
                             </Tooltip>
                             <Tooltip title="更多操作">
                               <IconButton
+                                className="finder-entry-action is-muted"
                                 aria-label={`${item.entry.name} 更多操作`}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   setShortcutMenuAnchor(event.currentTarget);
                                   setShortcutMenuKey(shortcutKey);
-                                }}
-                                sx={{
-                                  width: 28,
-                                  height: 28,
-                                  borderRadius: "999px",
-                                  bgcolor: tone.stopButtonBg,
-                                  color: tone.stopButtonColor,
-                                  border: `1px solid ${tone.stopButtonBorder}`,
-                                  "&:hover": {
-                                    bgcolor: tone.stopButtonHoverBg,
-                                  },
                                 }}
                               >
                                 <MoreIcon fontSize="small" />
@@ -5445,9 +6024,7 @@ export function ProjectsPage({
                           下滑加载更多
                         </Button>
                       ) : (
-                        <Typography variant="caption" className="workflow-history-footer-text">
-                          没有更多了
-                        </Typography>
+                        <AppListEndState />
                       )}
                     </Stack>
                   </Box>
@@ -5496,10 +6073,18 @@ export function ProjectsPage({
                   }}
                 >
                   <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    <OpenExternalIcon fontSize="small" />
+                    {shortcutMenuItem && isLinkToolEntry(shortcutMenuItem.entry) ? (
+                      <WorkflowIcon fontSize="small" />
+                    ) : (
+                      <OpenExternalIcon fontSize="small" />
+                    )}
                   </ListItemIcon>
                   <ListItemText
-                    primary="打开入口"
+                    primary={
+                      shortcutMenuItem && isLinkToolEntry(shortcutMenuItem.entry)
+                        ? "查看计划"
+                        : "打开入口"
+                    }
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -5654,6 +6239,41 @@ export function ProjectsPage({
                   }
                 }}
               />
+              <ConfigSourceManagerDialog
+                open={runtimeConfigSourceManagerOpen}
+                initialSourceId={runtimeConfigSourceId}
+                onClose={() => setRuntimeConfigSourceManagerOpen(false)}
+                onChanged={async (sources) => {
+                  try {
+                    const result = adoptRuntimeConfigSources(
+                      sources,
+                      runtimeConfigSourceId,
+                    );
+                    if (result.sourceId === runtimeConfigSourceId) {
+                      await loadRuntimeProfiles(runtimePanelProfile?.key);
+                    }
+                  } catch (reason) {
+                    setRuntimeProfilesError(String(reason));
+                  }
+                }}
+              />
+              {projectConfigOpen && projectConfigPanel
+                ? createPortal(
+                    <SettingsPanel
+                      {...projectConfigPanel}
+                      surface="projectManagement"
+                      initialSection="projectBasics"
+                      selectedProjectKey={
+                        projectConfigKey || projectConfigPanel.selectedProjectKey
+                      }
+                      onClose={() => {
+                        setProjectConfigOpen(false);
+                        setProjectConfigKey("");
+                      }}
+                    />,
+                    document.body,
+                  )
+                : null}
             </Box>
           </Box>
         </Box>

@@ -1,6 +1,7 @@
 import { createTheme } from "@mui/material";
 
-export type AppStyleMode = "light" | "mono";
+export type AppResolvedStyleMode = "light" | "mono";
+export type AppStyleMode = AppResolvedStyleMode | "system";
 
 const lightTokens = {
   bg: "rgba(243,246,250,0.58)",
@@ -42,7 +43,7 @@ const monoTokens = {
   shadow: "0 30px 72px rgba(0,0,0,0.42)",
 };
 
-export function createAppTheme(styleMode: AppStyleMode) {
+export function createAppTheme(styleMode: AppResolvedStyleMode) {
   const mono = styleMode === "mono";
   const tokens = mono ? monoTokens : lightTokens;
   const menuPaperBg = mono ? "rgba(17,21,27,0.96)" : "rgba(248,251,255,0.96)";

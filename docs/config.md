@@ -27,8 +27,10 @@ Linux:
 | 文件 | 职责 |
 | --- | --- |
 | `projects.toml` | 项目事实源：仓库、Jenkins、部署、分支、dev/build、debug profile |
-| `workspace.toml` | App 偏好：主题、启用页面、当前激活工作区 |
-| `workspaces/*.toml` | 工作区范围：项目、导航分类、导航入口、代理 profile 引用 |
+| `workspace.toml` | App 偏好：主题、启用页面、当前激活工作区、系统范围配置源偏好 |
+| `workspaces/*.toml` | 工作区范围：项目、导航分类、导航入口、配置源偏好、代理 profile 引用 |
+| `config_sources.toml` | 自建配置源注册表：目录、文件映射、界面配置和能力范围 |
+| `sources/workspaces/<key>/` | 工作区自动生成的独立配置目录 |
 | `navigation.toml` | 入口事实源：网站、目录、应用、脚本 |
 | `proxy.toml` | 代理事实源：profile、规则、工作区归属 |
 | `web_actions.toml` | Chrome CDP 网页动作 |
@@ -52,7 +54,48 @@ style_mode = "mono"
 default_page = "projects"
 enabled_pages = ["projects", "merge", "build", "proxy"]
 active_workspace = "r-series"
+
+[app.config_source_preferences]
+"configSource.proxy" = "default"
 ```
+
+`system` 工作区的配置源偏好保存在 `workspace.toml`；普通工作区的偏好保存在各自 `workspaces/<key>.toml` 的 `metadata` 中。App 会自动维护这些字段，通常不需要手改。
+
+## Config Sources
+
+配置源把资源入口、链路、代理和运行配置映射到一组可独立迁移的文件。内置来源包括默认配置和每个普通工作区的自动来源，也可以在 App 的“配置源管理”中添加团队目录或个人目录。
+
+```toml
+[[sources]]
+id = "team-local"
+name = "团队本地联调"
+kind = "custom"
+baseDir = "/absolute/path/to/team-local"
+uiProfile = "resource-basic"
+capabilities = ["resource", "link", "proxy", "runtime"]
+
+[sources.files]
+navigation = "navigation.toml"
+links = "links.toml"
+proxy = "proxy.toml"
+runtimeOverrides = "runtime_overrides.toml"
+```
+
+文件映射可以是绝对路径，也可以相对 `baseDir`。切换配置源时，App 会先确认偏好写入成功，再加载目标数据；快速切换工作区时只应用最新请求，避免旧结果覆盖当前页面。
+
+CLI 可以查看来源并为当前工作区切换任意能力：
+
+```bash
+rdevtool --json config-source list
+rdevtool --json config-source show team-local
+rdevtool --json config-source compare default team-local
+rdevtool --json config-source copy team-local --id team-local-copy --name "团队本地联调副本"
+rdevtool --json config-source use team-local --capability proxy
+```
+
+桌面端“配置源管理”可以直接比较任意两个来源，并把默认、工作区或自建来源复制为新的自建来源。比较结果覆盖资源入口、链路、代理和运行配置，只展示状态摘要；复制时缺失文件保持缺失，不会修改原来源。
+
+桌面端会监听工作区、项目工作区、项目列表和配置源文件的外部变化。变化会先增量刷新当前界面，并在活动中心保留一条可确认记录；工作区与项目配置可以直接重新加载，配置源变化可以直接打开比较结果。应用自身的保存操作会标记为内部写入，不会生成重复提醒。
 
 ## Project Workspace
 
@@ -270,7 +313,7 @@ workspace_key = "r-series"
 rdevtool --json doctor
 ```
 
-它会提示重复端口、无效 URL、无效规则和缺失工作区引用。
+它会提示配置源解析、当前启用源、重复端口、守护进程版本、无效 URL、无效规则和缺失工作区引用。
 
 CLI 可管理 profile 级配置：
 

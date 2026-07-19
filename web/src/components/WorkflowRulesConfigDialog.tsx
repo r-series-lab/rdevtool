@@ -451,6 +451,7 @@ export function WorkflowRulesConfigDialog({
       onClose={onClose}
       fullWidth
       maxWidth={signalManagerOpen ? "md" : "sm"}
+      className="workflow-rules-config-dialog"
       PaperProps={{
         sx: {
           overflow: "hidden",
@@ -589,7 +590,7 @@ export function WorkflowRulesConfigDialog({
               ) : null}
             </Stack>
           </DialogContent>
-          <DialogActions>
+          <DialogActions className="workflow-rules-config-dialog-actions">
             <Button onClick={onClose}>取消</Button>
             <Button
               variant="contained"

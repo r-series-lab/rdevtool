@@ -31,6 +31,9 @@ type NavigationEntry = {
   bundleId?: string | null;
   appName?: string | null;
   script?: string | null;
+  tool?: string | null;
+  toolKey?: string | null;
+  toolAction?: string | null;
   path?: string | null;
   cwd?: string | null;
   note?: string | null;
@@ -68,6 +71,8 @@ function navigationKindLabel(kind: string) {
       return "应用";
     case "script":
       return "脚本";
+    case "tool":
+      return "工具";
     case "directory":
       return "目录";
     default:
@@ -80,6 +85,8 @@ function NavigationKindIcon({ kind }: { kind: string }) {
     case "app":
       return <AppWindowIcon fontSize="inherit" />;
     case "script":
+      return <TerminalIcon fontSize="inherit" />;
+    case "tool":
       return <TerminalIcon fontSize="inherit" />;
     case "directory":
       return <FolderIcon fontSize="inherit" />;
@@ -768,7 +775,9 @@ export function NavigationPage({
                                         '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
                                     }}
                                   >
-                                    {item.entry.targetLabel}
+                                    {item.entry.kind === "tool"
+                                      ? item.entry.toolKey || item.entry.targetLabel
+                                      : item.entry.targetLabel}
                                   </Typography>
                                 </Box>
                               </Stack>

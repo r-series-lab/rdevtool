@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 use crate::config::default_config_dir;
+use crate::config_store::write_config_text_atomic;
 
 const MAX_PROXY_EVENTS: usize = 500;
 const DEFAULT_PROXY_PORT: u16 = 8787;
@@ -256,7 +257,7 @@ pub struct ProxyProfileRuntimeStatus {
     pub started_at: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyEvent {
     pub id: String,
@@ -379,14 +380,36 @@ pub struct ProxyRuntimeState {
 
 #[derive(Default)]
 struct ProxyRuntimeInner {
-    servers: HashMap<String, ProxyServerHandle>,
-    events: VecDeque<ProxyEvent>,
+    servers: HashMap<ProxyRuntimeKey, ProxyServerHandle>,
+    events: VecDeque<ScopedProxyEvent>,
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+struct ProxyRuntimeKey {
+    config_path: PathBuf,
+    profile_id: String,
+}
+
+struct ScopedProxyEvent {
+    config_path: PathBuf,
+    event: ProxyEvent,
 }
 
 struct ProxyServerHandle {
     stop: Arc<AtomicBool>,
     listen_url: String,
     started_at: String,
+}
+
+fn proxy_runtime_key(path: &Path, profile_id: &str) -> ProxyRuntimeKey {
+    ProxyRuntimeKey {
+        config_path: proxy_runtime_config_path(path),
+        profile_id: profile_id.to_string(),
+    }
+}
+
+fn proxy_runtime_config_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub fn default_proxy_path() -> PathBuf {
@@ -422,7 +445,7 @@ pub fn save_proxy_config(path: &Path, config: &ProxyConfig) -> Result<()> {
     normalize_proxy_config(&mut normalized);
     let content = toml::to_string_pretty(&normalized)
         .with_context(|| format!("failed to serialize proxy config: {}", path.display()))?;
-    fs::write(path, content)
+    write_config_text_atomic(path, content)
         .with_context(|| format!("failed to write proxy config: {}", path.display()))?;
     Ok(())
 }
@@ -768,8 +791,8 @@ impl ProxyRuntimeState {
         let config = load_proxy_config(path)?;
         Ok(ProxyDashboard {
             config_path: path.display().to_string(),
-            statuses: self.statuses_for_profiles(&config.profiles),
-            events: self.events(None),
+            statuses: self.statuses_for_profiles(path, &config.profiles),
+            events: self.events(path, None),
             config,
         })
     }
@@ -792,15 +815,16 @@ impl ProxyRuntimeState {
             .set_nonblocking(true)
             .context("failed to configure proxy listener")?;
 
-        self.stop_profile(&profile.id);
+        self.stop_profile(&path, &profile.id);
 
         let stop = Arc::new(AtomicBool::new(false));
         let started_at = Utc::now().to_rfc3339();
         let listen_url = profile.listen_url();
+        let runtime_key = proxy_runtime_key(&path, &profile.id);
         {
             let mut inner = self.inner.lock().expect("proxy runtime poisoned");
             inner.servers.insert(
-                profile.id.clone(),
+                runtime_key,
                 ProxyServerHandle {
                     stop: stop.clone(),
                     listen_url: listen_url.clone(),
@@ -859,7 +883,7 @@ impl ProxyRuntimeState {
             .ok_or_else(|| anyhow!("proxy profile not found: {}", profile_id))?;
         {
             let inner = self.inner.lock().expect("proxy runtime poisoned");
-            if let Some(handle) = inner.servers.get(&profile.id) {
+            if let Some(handle) = inner.servers.get(&proxy_runtime_key(&path, &profile.id)) {
                 return Ok(ProxyProfileRuntimeStatus {
                     profile_id: profile.id,
                     running: true,
@@ -871,10 +895,10 @@ impl ProxyRuntimeState {
         self.start_profile(path, profile.id)
     }
 
-    pub fn stop_profile(&self, profile_id: &str) -> bool {
+    pub fn stop_profile(&self, path: &Path, profile_id: &str) -> bool {
         let handle = {
             let mut inner = self.inner.lock().expect("proxy runtime poisoned");
-            inner.servers.remove(profile_id)
+            inner.servers.remove(&proxy_runtime_key(path, profile_id))
         };
         if let Some(handle) = handle {
             handle.stop.store(true, Ordering::Relaxed);
@@ -886,13 +910,14 @@ impl ProxyRuntimeState {
 
     pub fn statuses_for_profiles(
         &self,
+        path: &Path,
         profiles: &[ProxyProfile],
     ) -> Vec<ProxyProfileRuntimeStatus> {
         let inner = self.inner.lock().expect("proxy runtime poisoned");
         profiles
             .iter()
             .map(|profile| {
-                if let Some(handle) = inner.servers.get(&profile.id) {
+                if let Some(handle) = inner.servers.get(&proxy_runtime_key(path, &profile.id)) {
                     ProxyProfileRuntimeStatus {
                         profile_id: profile.id.clone(),
                         running: true,
@@ -911,29 +936,41 @@ impl ProxyRuntimeState {
             .collect()
     }
 
-    pub fn events(&self, profile_id: Option<&str>) -> Vec<ProxyEvent> {
+    pub fn events(&self, path: &Path, profile_id: Option<&str>) -> Vec<ProxyEvent> {
+        let config_path = proxy_runtime_config_path(path);
         let inner = self.inner.lock().expect("proxy runtime poisoned");
         inner
             .events
             .iter()
             .rev()
-            .filter(|event| profile_id.is_none_or(|value| event.profile_id == value))
-            .cloned()
+            .filter(|item| {
+                item.config_path == config_path
+                    && profile_id.is_none_or(|value| item.event.profile_id == value)
+            })
+            .map(|item| item.event.clone())
             .collect()
     }
 
-    pub fn clear_events(&self, profile_id: Option<&str>) {
+    pub fn clear_events(&self, path: &Path, profile_id: Option<&str>) {
+        let config_path = proxy_runtime_config_path(path);
         let mut inner = self.inner.lock().expect("proxy runtime poisoned");
         if let Some(profile_id) = profile_id {
-            inner.events.retain(|event| event.profile_id != profile_id);
+            inner.events.retain(|item| {
+                item.config_path != config_path || item.event.profile_id != profile_id
+            });
         } else {
-            inner.events.clear();
+            inner.events.retain(|item| item.config_path != config_path);
         }
+        let _ = crate::proxy_daemon::clear_persisted_proxy_events(path, profile_id);
     }
 
-    fn push_event(&self, event: ProxyEvent) {
+    fn push_event(&self, path: &Path, event: ProxyEvent) {
+        let _ = crate::proxy_daemon::append_persisted_proxy_event(path, &event);
         let mut inner = self.inner.lock().expect("proxy runtime poisoned");
-        inner.events.push_back(event);
+        inner.events.push_back(ScopedProxyEvent {
+            config_path: proxy_runtime_config_path(path),
+            event,
+        });
         while inner.events.len() > MAX_PROXY_EVENTS {
             inner.events.pop_front();
         }
@@ -985,7 +1022,15 @@ fn handle_proxy_connection(
     let target = parts[1].to_string();
     let headers = read_headers(&mut reader)?;
     if method == "CONNECT" {
-        return handle_connect_tunnel(stream, profile, profile_rules, target, headers, runtime);
+        return handle_connect_tunnel(
+            stream,
+            profile,
+            profile_rules,
+            target,
+            headers,
+            config_path,
+            runtime,
+        );
     }
 
     let content_length = header_value(&headers, "content-length")
@@ -1009,24 +1054,27 @@ fn handle_proxy_connection(
                 response_body.as_bytes(),
                 &BTreeMap::new(),
             )?;
-            runtime.push_event(build_event(ProxyEventInput {
-                profile: &profile,
-                started_at,
-                duration_ms: started.elapsed().as_millis(),
-                method,
-                url: target,
-                path: String::new(),
-                status: Some(502),
-                action: "error".to_string(),
-                matched_rule: None,
-                request_bytes: body.len(),
-                response_bytes: response_body.len(),
-                request_headers: headers_to_map(&headers),
-                response_headers: BTreeMap::new(),
-                request_body: &body,
-                response_body: response_body.as_bytes(),
-                error: Some(error.to_string()),
-            }));
+            runtime.push_event(
+                &config_path,
+                build_event(ProxyEventInput {
+                    profile: &profile,
+                    started_at,
+                    duration_ms: started.elapsed().as_millis(),
+                    method,
+                    url: target,
+                    path: String::new(),
+                    status: Some(502),
+                    action: "error".to_string(),
+                    matched_rule: None,
+                    request_bytes: body.len(),
+                    response_bytes: response_body.len(),
+                    request_headers: headers_to_map(&headers),
+                    response_headers: BTreeMap::new(),
+                    request_body: &body,
+                    response_body: response_body.as_bytes(),
+                    error: Some(error.to_string()),
+                }),
+            );
             return Ok(());
         }
     };
@@ -1060,24 +1108,27 @@ fn handle_proxy_connection(
                     response_body.as_bytes(),
                     response_headers,
                 )?;
-                runtime.push_event(build_event(ProxyEventInput {
-                    profile: &profile,
-                    started_at,
-                    duration_ms: started.elapsed().as_millis(),
-                    method,
-                    url: target_url.to_string(),
-                    path,
-                    status: Some(status),
-                    action: rule.action.label().to_string(),
-                    matched_rule: Some(rule),
-                    request_bytes: body.len(),
-                    response_bytes: response_body.len(),
-                    request_headers: headers_to_map(&headers),
-                    response_headers: response_headers.clone(),
-                    request_body: &body,
-                    response_body: response_body.as_bytes(),
-                    error: None,
-                }));
+                runtime.push_event(
+                    &config_path,
+                    build_event(ProxyEventInput {
+                        profile: &profile,
+                        started_at,
+                        duration_ms: started.elapsed().as_millis(),
+                        method,
+                        url: target_url.to_string(),
+                        path,
+                        status: Some(status),
+                        action: rule.action.label().to_string(),
+                        matched_rule: Some(rule),
+                        request_bytes: body.len(),
+                        response_bytes: response_body.len(),
+                        request_headers: headers_to_map(&headers),
+                        response_headers: response_headers.clone(),
+                        request_body: &body,
+                        response_body: response_body.as_bytes(),
+                        error: None,
+                    }),
+                );
                 return Ok(());
             }
             ProxyRuleAction::Block {
@@ -1093,24 +1144,27 @@ fn handle_proxy_connection(
                     response_body.as_bytes(),
                     &BTreeMap::new(),
                 )?;
-                runtime.push_event(build_event(ProxyEventInput {
-                    profile: &profile,
-                    started_at,
-                    duration_ms: started.elapsed().as_millis(),
-                    method,
-                    url: target_url.to_string(),
-                    path,
-                    status: Some(status),
-                    action: rule.action.label().to_string(),
-                    matched_rule: Some(rule),
-                    request_bytes: body.len(),
-                    response_bytes: response_body.len(),
-                    request_headers: headers_to_map(&headers),
-                    response_headers: BTreeMap::new(),
-                    request_body: &body,
-                    response_body: response_body.as_bytes(),
-                    error: None,
-                }));
+                runtime.push_event(
+                    &config_path,
+                    build_event(ProxyEventInput {
+                        profile: &profile,
+                        started_at,
+                        duration_ms: started.elapsed().as_millis(),
+                        method,
+                        url: target_url.to_string(),
+                        path,
+                        status: Some(status),
+                        action: rule.action.label().to_string(),
+                        matched_rule: Some(rule),
+                        request_bytes: body.len(),
+                        response_bytes: response_body.len(),
+                        request_headers: headers_to_map(&headers),
+                        response_headers: BTreeMap::new(),
+                        request_body: &body,
+                        response_body: response_body.as_bytes(),
+                        error: None,
+                    }),
+                );
                 return Ok(());
             }
             ProxyRuleAction::Forward { .. } => {}
@@ -1128,27 +1182,30 @@ fn handle_proxy_connection(
     ) {
         Ok(response) => {
             write_forward_response(&mut stream, &response)?;
-            runtime.push_event(build_event(ProxyEventInput {
-                profile: &profile,
-                started_at,
-                duration_ms: started.elapsed().as_millis(),
-                method,
-                url: response.url,
-                path,
-                status: Some(response.status),
-                action: forward_rule
-                    .as_ref()
-                    .map(|rule| rule.action.label().to_string())
-                    .unwrap_or_else(|| "forward".to_string()),
-                matched_rule: forward_rule.as_ref(),
-                request_bytes: body.len(),
-                response_bytes: response.body.len(),
-                request_headers: headers_to_map(&headers),
-                response_headers: response.headers.clone(),
-                request_body: &body,
-                response_body: &response.body,
-                error: None,
-            }));
+            runtime.push_event(
+                &config_path,
+                build_event(ProxyEventInput {
+                    profile: &profile,
+                    started_at,
+                    duration_ms: started.elapsed().as_millis(),
+                    method,
+                    url: response.url,
+                    path,
+                    status: Some(response.status),
+                    action: forward_rule
+                        .as_ref()
+                        .map(|rule| rule.action.label().to_string())
+                        .unwrap_or_else(|| "forward".to_string()),
+                    matched_rule: forward_rule.as_ref(),
+                    request_bytes: body.len(),
+                    response_bytes: response.body.len(),
+                    request_headers: headers_to_map(&headers),
+                    response_headers: response.headers.clone(),
+                    request_body: &body,
+                    response_body: &response.body,
+                    error: None,
+                }),
+            );
         }
         Err(error) => {
             let response_body = format!("Proxy request failed: {error}");
@@ -1159,24 +1216,27 @@ fn handle_proxy_connection(
                 response_body.as_bytes(),
                 &BTreeMap::new(),
             )?;
-            runtime.push_event(build_event(ProxyEventInput {
-                profile: &profile,
-                started_at,
-                duration_ms: started.elapsed().as_millis(),
-                method,
-                url: target_url.to_string(),
-                path,
-                status: Some(502),
-                action: "error".to_string(),
-                matched_rule: forward_rule.as_ref(),
-                request_bytes: body.len(),
-                response_bytes: response_body.len(),
-                request_headers: headers_to_map(&headers),
-                response_headers: BTreeMap::new(),
-                request_body: &body,
-                response_body: response_body.as_bytes(),
-                error: Some(error.to_string()),
-            }));
+            runtime.push_event(
+                &config_path,
+                build_event(ProxyEventInput {
+                    profile: &profile,
+                    started_at,
+                    duration_ms: started.elapsed().as_millis(),
+                    method,
+                    url: target_url.to_string(),
+                    path,
+                    status: Some(502),
+                    action: "error".to_string(),
+                    matched_rule: forward_rule.as_ref(),
+                    request_bytes: body.len(),
+                    response_bytes: response_body.len(),
+                    request_headers: headers_to_map(&headers),
+                    response_headers: BTreeMap::new(),
+                    request_body: &body,
+                    response_body: response_body.as_bytes(),
+                    error: Some(error.to_string()),
+                }),
+            );
         }
     }
 
@@ -1190,6 +1250,7 @@ fn handle_connect_tunnel(
     profile_rules: Vec<ProxyRule>,
     target: String,
     headers: Vec<(String, String)>,
+    config_path: PathBuf,
     runtime: ProxyRuntimeState,
 ) -> Result<()> {
     let started_at = Utc::now().to_rfc3339();
@@ -1225,29 +1286,32 @@ fn handle_connect_tunnel(
                     body.as_bytes(),
                     response_headers,
                 )?;
-                runtime.push_event(ProxyEvent {
-                    id: Uuid::new_v4().to_string(),
-                    profile_id: profile.id,
-                    profile_name: profile.name,
-                    started_at,
-                    duration_ms: started.elapsed().as_millis(),
-                    method: "CONNECT".to_string(),
-                    url: target.clone(),
-                    path: target,
-                    status: Some(status),
-                    action: rule.action.label().to_string(),
-                    matched_rule_id: Some(rule.id.clone()),
-                    matched_rule_name: Some(rule.name.clone()),
-                    request_bytes: 0,
-                    response_bytes: body.len(),
-                    request_headers,
-                    response_headers: response_headers.clone(),
-                    request_body_preview: String::new(),
-                    response_body_preview: body.clone(),
-                    request_body_truncated: false,
-                    response_body_truncated: false,
-                    error: None,
-                });
+                runtime.push_event(
+                    &config_path,
+                    ProxyEvent {
+                        id: Uuid::new_v4().to_string(),
+                        profile_id: profile.id,
+                        profile_name: profile.name,
+                        started_at,
+                        duration_ms: started.elapsed().as_millis(),
+                        method: "CONNECT".to_string(),
+                        url: target.clone(),
+                        path: target,
+                        status: Some(status),
+                        action: rule.action.label().to_string(),
+                        matched_rule_id: Some(rule.id.clone()),
+                        matched_rule_name: Some(rule.name.clone()),
+                        request_bytes: 0,
+                        response_bytes: body.len(),
+                        request_headers,
+                        response_headers: response_headers.clone(),
+                        request_body_preview: String::new(),
+                        response_body_preview: body.clone(),
+                        request_body_truncated: false,
+                        response_body_truncated: false,
+                        error: None,
+                    },
+                );
                 return Ok(());
             }
             ProxyRuleAction::Block { status, body, .. } => {
@@ -1259,29 +1323,32 @@ fn handle_connect_tunnel(
                     body.as_bytes(),
                     &BTreeMap::new(),
                 )?;
-                runtime.push_event(ProxyEvent {
-                    id: Uuid::new_v4().to_string(),
-                    profile_id: profile.id,
-                    profile_name: profile.name,
-                    started_at,
-                    duration_ms: started.elapsed().as_millis(),
-                    method: "CONNECT".to_string(),
-                    url: target.clone(),
-                    path: target,
-                    status: Some(status),
-                    action: rule.action.label().to_string(),
-                    matched_rule_id: Some(rule.id.clone()),
-                    matched_rule_name: Some(rule.name.clone()),
-                    request_bytes: 0,
-                    response_bytes: body.len(),
-                    request_headers,
-                    response_headers: BTreeMap::new(),
-                    request_body_preview: String::new(),
-                    response_body_preview: body.clone(),
-                    request_body_truncated: false,
-                    response_body_truncated: false,
-                    error: None,
-                });
+                runtime.push_event(
+                    &config_path,
+                    ProxyEvent {
+                        id: Uuid::new_v4().to_string(),
+                        profile_id: profile.id,
+                        profile_name: profile.name,
+                        started_at,
+                        duration_ms: started.elapsed().as_millis(),
+                        method: "CONNECT".to_string(),
+                        url: target.clone(),
+                        path: target,
+                        status: Some(status),
+                        action: rule.action.label().to_string(),
+                        matched_rule_id: Some(rule.id.clone()),
+                        matched_rule_name: Some(rule.name.clone()),
+                        request_bytes: 0,
+                        response_bytes: body.len(),
+                        request_headers,
+                        response_headers: BTreeMap::new(),
+                        request_body_preview: String::new(),
+                        response_body_preview: body.clone(),
+                        request_body_truncated: false,
+                        response_body_truncated: false,
+                        error: None,
+                    },
+                );
                 return Ok(());
             }
             ProxyRuleAction::Forward { .. } => {}
@@ -1308,29 +1375,32 @@ fn handle_connect_tunnel(
             });
             copy_tunnel(&mut upstream, &mut stream, &response_bytes);
             let _ = upstream_thread.join();
-            runtime.push_event(ProxyEvent {
-                id: Uuid::new_v4().to_string(),
-                profile_id: profile.id,
-                profile_name: profile.name,
-                started_at,
-                duration_ms: started.elapsed().as_millis(),
-                method: "CONNECT".to_string(),
-                url: target.clone(),
-                path: target,
-                status: Some(200),
-                action: "tunnel".to_string(),
-                matched_rule_id: matched_rule.map(|rule| rule.id.clone()),
-                matched_rule_name: matched_rule.map(|rule| rule.name.clone()),
-                request_bytes: request_bytes.load(Ordering::Relaxed) as usize,
-                response_bytes: response_bytes.load(Ordering::Relaxed) as usize,
-                request_headers,
-                response_headers: BTreeMap::new(),
-                request_body_preview: String::new(),
-                response_body_preview: String::new(),
-                request_body_truncated: false,
-                response_body_truncated: false,
-                error: None,
-            });
+            runtime.push_event(
+                &config_path,
+                ProxyEvent {
+                    id: Uuid::new_v4().to_string(),
+                    profile_id: profile.id,
+                    profile_name: profile.name,
+                    started_at,
+                    duration_ms: started.elapsed().as_millis(),
+                    method: "CONNECT".to_string(),
+                    url: target.clone(),
+                    path: target,
+                    status: Some(200),
+                    action: "tunnel".to_string(),
+                    matched_rule_id: matched_rule.map(|rule| rule.id.clone()),
+                    matched_rule_name: matched_rule.map(|rule| rule.name.clone()),
+                    request_bytes: request_bytes.load(Ordering::Relaxed) as usize,
+                    response_bytes: response_bytes.load(Ordering::Relaxed) as usize,
+                    request_headers,
+                    response_headers: BTreeMap::new(),
+                    request_body_preview: String::new(),
+                    response_body_preview: String::new(),
+                    request_body_truncated: false,
+                    response_body_truncated: false,
+                    error: None,
+                },
+            );
         }
         Err(error) => {
             let body = format!("CONNECT failed: {error}");
@@ -1341,29 +1411,32 @@ fn handle_connect_tunnel(
                 body.as_bytes(),
                 &BTreeMap::new(),
             )?;
-            runtime.push_event(ProxyEvent {
-                id: Uuid::new_v4().to_string(),
-                profile_id: profile.id,
-                profile_name: profile.name,
-                started_at,
-                duration_ms: started.elapsed().as_millis(),
-                method: "CONNECT".to_string(),
-                url: target.clone(),
-                path: target,
-                status: Some(502),
-                action: "tunnel".to_string(),
-                matched_rule_id: matched_rule.map(|rule| rule.id.clone()),
-                matched_rule_name: matched_rule.map(|rule| rule.name.clone()),
-                request_bytes: 0,
-                response_bytes: body.len(),
-                request_headers,
-                response_headers: BTreeMap::new(),
-                request_body_preview: String::new(),
-                response_body_preview: body,
-                request_body_truncated: false,
-                response_body_truncated: false,
-                error: Some(error.to_string()),
-            });
+            runtime.push_event(
+                &config_path,
+                ProxyEvent {
+                    id: Uuid::new_v4().to_string(),
+                    profile_id: profile.id,
+                    profile_name: profile.name,
+                    started_at,
+                    duration_ms: started.elapsed().as_millis(),
+                    method: "CONNECT".to_string(),
+                    url: target.clone(),
+                    path: target,
+                    status: Some(502),
+                    action: "tunnel".to_string(),
+                    matched_rule_id: matched_rule.map(|rule| rule.id.clone()),
+                    matched_rule_name: matched_rule.map(|rule| rule.name.clone()),
+                    request_bytes: 0,
+                    response_bytes: body.len(),
+                    request_headers,
+                    response_headers: BTreeMap::new(),
+                    request_body_preview: String::new(),
+                    response_body_preview: body,
+                    request_body_truncated: false,
+                    response_body_truncated: false,
+                    error: Some(error.to_string()),
+                },
+            );
         }
     }
 
@@ -2226,4 +2299,38 @@ pub fn validate_proxy_rule(rule: &ProxyRule) -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_status_is_scoped_by_config_path() {
+        let runtime = ProxyRuntimeState::default();
+        let profile = ProxyProfile::default();
+        let first_path = PathBuf::from("/tmp/rdevtool-proxy-first.toml");
+        let second_path = PathBuf::from("/tmp/rdevtool-proxy-second.toml");
+        runtime
+            .inner
+            .lock()
+            .expect("proxy runtime poisoned")
+            .servers
+            .insert(
+                proxy_runtime_key(&first_path, &profile.id),
+                ProxyServerHandle {
+                    stop: Arc::new(AtomicBool::new(false)),
+                    listen_url: profile.listen_url(),
+                    started_at: "2026-01-01T00:00:00Z".to_string(),
+                },
+            );
+
+        let first_status =
+            runtime.statuses_for_profiles(&first_path, std::slice::from_ref(&profile));
+        let second_status =
+            runtime.statuses_for_profiles(&second_path, std::slice::from_ref(&profile));
+
+        assert!(first_status[0].running);
+        assert!(!second_status[0].running);
+    }
 }

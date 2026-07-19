@@ -7,17 +7,21 @@ use crate::navigation::{
     NavigationEntry, NavigationOpenResult, open_navigation_entry_with_runtime_profiles,
 };
 use crate::proxy::{ProxyConfig, ProxyProfile};
+use crate::runtime_daemon::{
+    RuntimeDaemonAdoptRequest, RuntimeDaemonAdoptResponse, RuntimeDaemonPhase,
+    RuntimeDaemonReadyConfig, RuntimeDaemonStartRequest, RuntimeProcessIdentity,
+    adopt as adopt_runtime_daemon, listening_process, start_with_result as start_runtime_daemon,
+};
+use crate::runtime_local_proxy::local_proxy_spec;
 use crate::web_actions::list_web_actions;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::io::{BufRead, BufReader};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const NODE_PROXY_HOOK_FILENAME: &str = "rdevtool-node-proxy-hook.cjs";
 const NODE_PROXY_HOOK: &str = r#"'use strict';
@@ -341,6 +345,8 @@ pub struct ProjectRuntimeStartResponse {
     pub log_path: String,
     pub detached: bool,
     pub running: bool,
+    pub run_id: String,
+    pub started_new: bool,
     pub exit_code: Option<i32>,
     pub status_key: String,
     pub status_label: String,
@@ -349,6 +355,23 @@ pub struct ProjectRuntimeStartResponse {
     pub local_files_applied: usize,
     pub network_proxy_enabled: bool,
     pub node_hook_enabled: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProjectRuntimeLaunchOptions {
+    pub debug_profile: Option<String>,
+    pub runtime_profile: Option<String>,
+    pub command: Option<String>,
+    pub expected_port: Option<u16>,
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeExternalDetection {
+    pub process: RuntimeProcessIdentity,
+    pub expected_port: u16,
+    pub ready_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -453,13 +476,23 @@ pub fn project_runtime_preflight(
     project_key: &str,
     debug_profile_key: Option<&str>,
 ) -> Result<ProjectRuntimePreflightResponse, String> {
+    let options = ProjectRuntimeLaunchOptions {
+        debug_profile: optional_owned(debug_profile_key),
+        ..ProjectRuntimeLaunchOptions::default()
+    };
+    project_runtime_preflight_with_options(config, project_key, &options)
+}
+
+pub fn project_runtime_preflight_with_options(
+    config: &AppConfig,
+    project_key: &str,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<ProjectRuntimePreflightResponse, String> {
     let project = config
         .find_project(project_key)
         .map_err(|error| error.to_string())?;
-    Ok(project_runtime_preflight_for_project(
-        config,
-        project,
-        debug_profile_key,
+    Ok(project_runtime_preflight_for_project_with_options(
+        config, project, options,
     ))
 }
 
@@ -468,9 +501,19 @@ pub fn project_runtime_preflight_for_project(
     project: &ProjectConfig,
     debug_profile_key: Option<&str>,
 ) -> ProjectRuntimePreflightResponse {
-    let requested_debug_profile_key = debug_profile_key
-        .map(str::trim)
-        .filter(|value| !value.is_empty());
+    let options = ProjectRuntimeLaunchOptions {
+        debug_profile: optional_owned(debug_profile_key),
+        ..ProjectRuntimeLaunchOptions::default()
+    };
+    project_runtime_preflight_for_project_with_options(config, project, &options)
+}
+
+pub fn project_runtime_preflight_for_project_with_options(
+    config: &AppConfig,
+    project: &ProjectConfig,
+    options: &ProjectRuntimeLaunchOptions,
+) -> ProjectRuntimePreflightResponse {
+    let requested_debug_profile_key = optional_trimmed(options.debug_profile.as_deref());
     let debug_profile = requested_debug_profile_key.and_then(|key| {
         project
             .debug_profiles
@@ -478,9 +521,12 @@ pub fn project_runtime_preflight_for_project(
             .find(|profile| profile.key == key)
             .cloned()
     });
-    let runtime_profile_key = debug_profile
-        .as_ref()
-        .and_then(|profile| optional_trimmed(profile.runtime_profile.as_deref()))
+    let runtime_profile_key = optional_trimmed(options.runtime_profile.as_deref())
+        .or_else(|| {
+            debug_profile
+                .as_ref()
+                .and_then(|profile| optional_trimmed(profile.runtime_profile.as_deref()))
+        })
         .map(ToString::to_string);
     let runtime_profile = runtime_profile_key.as_ref().and_then(|key| {
         config
@@ -522,10 +568,11 @@ pub fn project_runtime_preflight_for_project(
         ));
     }
 
-    preflight_command_checks(project, debug_profile.as_ref(), &mut checks);
+    preflight_command_checks(project, debug_profile.as_ref(), options, &mut checks);
     preflight_local_file_checks(project, debug_profile.as_ref(), &mut checks);
     preflight_proxy_checks(debug_profile.as_ref(), runtime_profile, &mut checks);
     preflight_runtime_profile_checks(runtime_profile_key.as_deref(), runtime_profile, &mut checks);
+    preflight_expected_port_check(project, debug_profile.as_ref(), options, &mut checks);
     preflight_focus_checks(project, &mut checks);
 
     let (status_key, status_label, summary) = summarize_preflight(&checks);
@@ -549,23 +596,33 @@ pub fn inspect_project_runtime(
     project_key: &str,
     debug_profile_key: Option<&str>,
 ) -> Result<ProjectRuntimeInspectResponse, String> {
+    let options = ProjectRuntimeLaunchOptions {
+        debug_profile: optional_owned(debug_profile_key),
+        ..ProjectRuntimeLaunchOptions::default()
+    };
+    inspect_project_runtime_with_options(config, proxy_config, project_key, &options)
+}
+
+pub fn inspect_project_runtime_with_options(
+    config: &AppConfig,
+    proxy_config: &ProxyConfig,
+    project_key: &str,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<ProjectRuntimeInspectResponse, String> {
     let project = config
         .find_project(project_key)
         .map_err(|error| error.to_string())?;
-    let debug_profile = selected_debug_profile(project, debug_profile_key)?;
-    let runtime_profile = debug_profile
-        .as_ref()
-        .map(|profile| selected_runtime_profile(config, profile))
-        .transpose()?
-        .flatten();
-    let mut checks = project_runtime_preflight_for_project(
+    let debug_profile = selected_debug_profile(project, options.debug_profile.as_deref())?;
+    let runtime_profile = resolve_runtime_profile(
         config,
-        project,
-        debug_profile.as_ref().map(|profile| profile.key.as_str()),
-    )
-    .checks;
-    let env_preview =
+        debug_profile.as_ref(),
+        options.runtime_profile.as_deref(),
+    )?;
+    let mut checks =
+        project_runtime_preflight_for_project_with_options(config, project, options).checks;
+    let mut env_preview =
         inspect_runtime_env(project, debug_profile.as_ref(), runtime_profile.as_ref());
+    apply_env_preview_overrides(&mut env_preview, &options.env, "launch override");
     let local_files = inspect_runtime_local_files(project, debug_profile.as_ref());
     let proxies = inspect_runtime_proxies(
         debug_profile.as_ref(),
@@ -579,12 +636,12 @@ pub fn inspect_project_runtime(
         .is_some_and(|profile| profile.local_proxy.enabled)
     {
         checks.push(preflight_check(
-            "debugLocalProxy.cli",
+            "debugLocalProxy.daemon",
             "本地 API 代理",
             "proxy",
-            "info",
-            "CLI runtime start 不接管 debug profile localProxy；App 启动可接管，CLI 建议使用 rDevTool proxy profile",
-            Some("需要 CLI 可复现时，使用 proxy profile + proxy bind-runtime。"),
+            "ok",
+            "debug profile localProxy 将由共享 runtime daemon 启动并监督",
+            None,
         ));
     }
     let (status_key, status_label, summary) = summarize_preflight(&checks);
@@ -627,30 +684,34 @@ pub fn start_project_runtime_detached(
     debug_profile_key: Option<&str>,
     env_overrides: &BTreeMap<String, String>,
 ) -> Result<ProjectRuntimeStartResponse, String> {
+    let options = ProjectRuntimeLaunchOptions {
+        debug_profile: optional_owned(debug_profile_key),
+        env: env_overrides.clone(),
+        ..ProjectRuntimeLaunchOptions::default()
+    };
+    start_project_runtime_detached_with_options(config, project_key, &options)
+}
+
+pub fn start_project_runtime_detached_with_options(
+    config: &AppConfig,
+    project_key: &str,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<ProjectRuntimeStartResponse, String> {
     let project = config
         .find_project(project_key)
         .map_err(|error| error.to_string())?;
-    let debug_profile = selected_debug_profile(project, debug_profile_key)?;
-    if debug_profile
-        .as_ref()
-        .is_some_and(|profile| profile.local_proxy.enabled)
-    {
-        return Err(
-            "runtime start CLI does not yet manage debug-profile localProxy processes; use an rDevTool proxy profile or start from the App"
-                .to_string(),
-        );
-    }
-    let runtime_profile = debug_profile
-        .as_ref()
-        .map(|profile| selected_runtime_profile(config, profile))
-        .transpose()?
-        .flatten();
-    let local_files_applied = debug_profile
-        .as_ref()
-        .map(|profile| apply_debug_profile_local_files(project, profile))
-        .transpose()?
-        .unwrap_or(0);
+    let debug_profile = selected_debug_profile(project, options.debug_profile.as_deref())?;
+    let runtime_profile = resolve_runtime_profile(
+        config,
+        debug_profile.as_ref(),
+        options.runtime_profile.as_deref(),
+    )?;
     let mut resolved = resolve_project_command(project, RuntimeTaskKind::Dev)?;
+    apply_command_override(
+        &mut resolved,
+        debug_profile.as_ref(),
+        options.command.as_deref(),
+    );
     if let Some(profile) = debug_profile.as_ref() {
         for (key, value) in &profile.env {
             resolved.env.insert(key.clone(), value.clone());
@@ -661,92 +722,211 @@ pub fn start_project_runtime_detached(
         debug_profile.as_ref(),
         runtime_profile.as_ref(),
     )?;
-    for (key, value) in env_overrides {
+    for (key, value) in &options.env {
         let key = key.trim();
         if !key.is_empty() {
             resolved.env.insert(key.to_string(), value.clone());
         }
     }
+    let expected_port = resolve_expected_port(project, debug_profile.as_ref(), options, &resolved);
+    let (vite_command, vite_strict_port) =
+        resolved_vite_command_info(&resolved.command, &resolved.cwd);
+    resolved.command = apply_vite_strict_port(
+        &resolved.command,
+        expected_port,
+        vite_command,
+        vite_strict_port,
+    );
+    ensure_runtime_expected_port_available(expected_port)?;
+    let local_files_applied = debug_profile
+        .as_ref()
+        .map(|profile| apply_debug_profile_local_files(project, profile))
+        .transpose()?
+        .unwrap_or(0);
 
     let log_path = task_log_path(project, RuntimeTaskKind::Dev);
-    let mut log_file = open_task_log(project, &resolved, RuntimeTaskKind::Dev)?;
-    let stdout = log_file
-        .try_clone()
-        .map_err(|error| format!("创建日志输出失败: {}", error))?;
-    let stderr = log_file
-        .try_clone()
-        .map_err(|error| format!("创建日志输出失败: {}", error))?;
-    let mut command = Command::new("/bin/zsh");
-    command
-        .arg("-lc")
-        .arg(&resolved.command)
-        .current_dir(&resolved.cwd)
-        .stdin(Stdio::null())
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr));
-    scrub_launcher_env(&mut command);
-    for (key, value) in &resolved.env {
-        command.env(key, value);
-    }
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        command.process_group(0);
-    }
-
-    let mut child = command
-        .spawn()
-        .map_err(|error| format!("启动 {} 失败: {}", project.name, error))?;
-    let pid = child.id();
-    let started_at_ms = now_ms();
-    thread::sleep(Duration::from_millis(240));
-    let exit_status = child.try_wait().map_err(|error| error.to_string())?;
-    let (running, exit_code, status_key, status_label, detail) = if let Some(status) = exit_status {
-        let _ = writeln!(log_file, "[{}] exited quickly status={}", now_ms(), status);
-        (
-            false,
-            status.code(),
-            "exited".to_string(),
-            "已退出".to_string(),
-            match status.code() {
-                Some(code) => format!("启动命令很快退出，退出码 {}", code),
-                None => "启动命令已退出".to_string(),
-            },
-        )
-    } else {
-        let _ = writeln!(log_file, "[{}] running pid={}", now_ms(), pid);
-        (
-            true,
-            None,
-            "running".to_string(),
-            "运行中".to_string(),
-            "dev 服务已 detached 启动".to_string(),
-        )
-    };
     let mut env_keys = resolved.env.keys().cloned().collect::<Vec<_>>();
     env_keys.sort();
-
-    Ok(ProjectRuntimeStartResponse {
+    let daemon_result = start_runtime_daemon(RuntimeDaemonStartRequest {
         project_key: project.key.clone(),
         project_name: project.name.clone(),
-        debug_profile_key: debug_profile.as_ref().map(|profile| profile.key.clone()),
-        runtime_profile_key: runtime_profile.as_ref().map(|profile| profile.key.clone()),
-        command: resolved.command,
-        cwd: resolved.cwd.display().to_string(),
-        pid: running.then_some(pid),
-        started_at_ms,
-        log_path: log_path.display().to_string(),
+        cwd: resolved.cwd.clone(),
+        command: resolved.command.clone(),
+        env: resolved.env,
+        debug_profile: debug_profile.as_ref().map(|profile| profile.key.clone()),
+        runtime_profile: runtime_profile.as_ref().map(|profile| profile.key.clone()),
+        expected_port,
+        ready: RuntimeDaemonReadyConfig {
+            enabled: project.focus.ready.enabled,
+            url_patterns: project.focus.ready.url_patterns.clone(),
+            success_markers: project.focus.ready.success_markers.clone(),
+            fallback_url: project
+                .focus
+                .url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+        },
+        log_path: log_path.clone(),
+        local_proxy: debug_profile
+            .as_ref()
+            .and_then(|profile| local_proxy_spec(&project.key, profile)),
+    })
+    .map_err(|error| error.to_string())?;
+    let daemon_status = daemon_result.status;
+    let state = daemon_status
+        .state
+        .ok_or_else(|| "runtime daemon started without persisted state".to_string())?;
+    let (status_key, status_label) = match state.phase {
+        RuntimeDaemonPhase::Starting => ("starting", "启动中"),
+        RuntimeDaemonPhase::Running => ("running", "运行中"),
+        RuntimeDaemonPhase::Stopping => ("stopping", "停止中"),
+        RuntimeDaemonPhase::Exited => ("exited", "已退出"),
+        RuntimeDaemonPhase::Failed => ("failed", "启动失败"),
+    };
+    let detail = state
+        .exit
+        .as_ref()
+        .map(|exit| exit.reason.clone())
+        .unwrap_or_else(|| "dev 服务已由共享 runtime daemon 托管".to_string());
+
+    Ok(ProjectRuntimeStartResponse {
+        project_key: state.project_key,
+        project_name: state.project_name,
+        debug_profile_key: state.debug_profile,
+        runtime_profile_key: state.runtime_profile,
+        command: state.command,
+        cwd: state.canonical_cwd,
+        pid: daemon_status.running.then_some(state.worker_pid).flatten(),
+        started_at_ms: state.started_at_ms,
+        log_path: state.log_path,
         detached: true,
-        running,
-        exit_code,
-        status_key,
-        status_label,
+        running: daemon_status.running,
+        run_id: state.run_id,
+        started_new: daemon_result.started_new,
+        exit_code: state.exit.as_ref().and_then(|exit| exit.code),
+        status_key: status_key.to_string(),
+        status_label: status_label.to_string(),
         detail,
         env_keys,
         local_files_applied,
         network_proxy_enabled: proxy_applied.enabled,
         node_hook_enabled: proxy_applied.node_hook,
+    })
+}
+
+pub fn detect_external_project_runtime_with_options(
+    config: &AppConfig,
+    project_key: &str,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<Option<ProjectRuntimeExternalDetection>, String> {
+    let project = config
+        .find_project(project_key)
+        .map_err(|error| error.to_string())?;
+    detect_external_project_runtime_for_project_with_options(project, options)
+}
+
+pub fn detect_external_project_runtime_for_project_with_options(
+    project: &ProjectConfig,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<Option<ProjectRuntimeExternalDetection>, String> {
+    let resolved = resolve_runtime_adoption_context_for_project(project, options)?;
+    let Some(expected_port) = resolved.expected_port else {
+        return Ok(None);
+    };
+    let Some(process) = listening_process(expected_port).map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    let canonical_cwd = resolved
+        .cwd
+        .canonicalize()
+        .map_err(|error| format!("解析项目运行目录失败: {error}"))?;
+    if Path::new(&process.canonical_cwd) != canonical_cwd {
+        return Ok(None);
+    }
+    Ok(Some(ProjectRuntimeExternalDetection {
+        process,
+        expected_port,
+        ready_url: resolved.ready_url,
+    }))
+}
+
+pub fn adopt_project_runtime_with_options(
+    config: &AppConfig,
+    project_key: &str,
+    pid: u32,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<RuntimeDaemonAdoptResponse, String> {
+    let resolved = resolve_runtime_adoption_context(config, project_key, options)?;
+    adopt_runtime_daemon(RuntimeDaemonAdoptRequest {
+        project_key: resolved.project_key,
+        project_name: resolved.project_name,
+        cwd: resolved.cwd,
+        pid,
+        expected_command: resolved.command,
+        expected_port: resolved.expected_port,
+        ready_url: resolved.ready_url,
+        log_path: resolved.log_path,
+    })
+    .map_err(|error| error.to_string())
+}
+
+struct ResolvedRuntimeAdoptionContext {
+    project_key: String,
+    project_name: String,
+    cwd: PathBuf,
+    command: String,
+    expected_port: Option<u16>,
+    ready_url: Option<String>,
+    log_path: PathBuf,
+}
+
+fn resolve_runtime_adoption_context(
+    config: &AppConfig,
+    project_key: &str,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<ResolvedRuntimeAdoptionContext, String> {
+    let project = config
+        .find_project(project_key)
+        .map_err(|error| error.to_string())?;
+    resolve_runtime_adoption_context_for_project(project, options)
+}
+
+fn resolve_runtime_adoption_context_for_project(
+    project: &ProjectConfig,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<ResolvedRuntimeAdoptionContext, String> {
+    let debug_profile = selected_debug_profile(project, options.debug_profile.as_deref())?;
+    let mut resolved = resolve_project_command(project, RuntimeTaskKind::Dev)?;
+    apply_command_override(
+        &mut resolved,
+        debug_profile.as_ref(),
+        options.command.as_deref(),
+    );
+    let expected_port = resolve_expected_port(project, debug_profile.as_ref(), options, &resolved);
+    let (vite_command, vite_strict_port) =
+        resolved_vite_command_info(&resolved.command, &resolved.cwd);
+    resolved.command = apply_vite_strict_port(
+        &resolved.command,
+        expected_port,
+        vite_command,
+        vite_strict_port,
+    );
+    Ok(ResolvedRuntimeAdoptionContext {
+        project_key: project.key.clone(),
+        project_name: project.name.clone(),
+        cwd: resolved.cwd,
+        command: resolved.command,
+        expected_port,
+        ready_url: project
+            .focus
+            .url
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        log_path: task_log_path(project, RuntimeTaskKind::Dev),
     })
 }
 
@@ -756,15 +936,22 @@ pub fn focus_project_runtime(
     debug_profile_key: Option<&str>,
     url_override: Option<&str>,
 ) -> Result<ProjectRuntimeFocusResponse, String> {
+    focus_project_runtime_with_profile(config, project_key, debug_profile_key, None, url_override)
+}
+
+pub fn focus_project_runtime_with_profile(
+    config: &AppConfig,
+    project_key: &str,
+    debug_profile_key: Option<&str>,
+    runtime_profile_key: Option<&str>,
+    url_override: Option<&str>,
+) -> Result<ProjectRuntimeFocusResponse, String> {
     let project = config
         .find_project(project_key)
         .map_err(|error| error.to_string())?;
     let debug_profile = selected_debug_profile(project, debug_profile_key)?;
-    let runtime_profile = debug_profile
-        .as_ref()
-        .map(|profile| selected_runtime_profile(config, profile))
-        .transpose()?
-        .flatten();
+    let runtime_profile =
+        resolve_runtime_profile(config, debug_profile.as_ref(), runtime_profile_key)?;
     let ready_summary =
         project_runtime_ready_summary_from_file(project, ProjectRuntimeLogKind::Dev)?;
     let url = url_override
@@ -979,6 +1166,24 @@ fn inspect_runtime_env(
             .then_with(|| left.source.cmp(&right.source))
     });
     preview
+}
+
+fn apply_env_preview_overrides(
+    preview: &mut Vec<ProjectRuntimeEnvPreview>,
+    overrides: &BTreeMap<String, String>,
+    source: &str,
+) {
+    for (key, value) in overrides {
+        let key = key.trim();
+        if !key.is_empty() {
+            preview.push(env_preview_item(key, value, source));
+        }
+    }
+    preview.sort_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then_with(|| left.source.cmp(&right.source))
+    });
 }
 
 fn env_preview_item(key: &str, value: &str, source: &str) -> ProjectRuntimeEnvPreview {
@@ -1457,16 +1662,15 @@ fn selected_debug_profile(
         .ok_or_else(|| format!("调试档案不存在: {}", profile_key))
 }
 
-fn selected_runtime_profile(
+fn resolve_runtime_profile(
     config: &AppConfig,
-    profile: &ProjectDebugProfileConfig,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    explicit_runtime_profile_key: Option<&str>,
 ) -> Result<Option<RuntimeProfileConfig>, String> {
-    let Some(runtime_profile_key) = profile
-        .runtime_profile
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+    let runtime_profile_key = optional_trimmed(explicit_runtime_profile_key).or_else(|| {
+        debug_profile.and_then(|profile| optional_trimmed(profile.runtime_profile.as_deref()))
+    });
+    let Some(runtime_profile_key) = runtime_profile_key else {
         return Ok(None);
     };
     config
@@ -1508,53 +1712,254 @@ fn resolve_project_command(
     })
 }
 
-fn open_task_log(
-    project: &ProjectConfig,
-    resolved: &ResolvedProjectCommand,
-    kind: RuntimeTaskKind,
-) -> Result<File, String> {
-    let path = task_log_path(project, kind);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| format!("创建日志目录失败: {}", error))?;
+fn apply_command_override(
+    resolved: &mut ResolvedProjectCommand,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    launch_override: Option<&str>,
+) {
+    if let Some(command) = optional_trimmed(launch_override)
+        .or_else(|| debug_profile.and_then(|profile| optional_trimmed(profile.command.as_deref())))
+    {
+        resolved.command = command.to_string();
     }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .map_err(|error| format!("打开运行日志失败: {}", error))?;
-    let started_at_ms = now_ms();
-    let run_id = format!(
-        "{}-{}-{}",
-        sanitize_log_name(&project.key),
-        kind.log_file_suffix(),
-        started_at_ms
-    );
-    writeln!(
-        file,
-        "\n[{}] {} key={} cwd={} command={}",
-        started_at_ms,
-        kind.log_label(),
-        project.key,
-        resolved.cwd.display(),
-        resolved.command
-    )
-    .map_err(|error| format!("写入运行日志失败: {}", error))?;
-    writeln!(
-        file,
-        "{}",
-        json!({
-            "rdevtool": "runtimeSession",
-            "version": 1,
-            "runId": run_id,
-            "projectKey": &project.key,
-            "kind": kind.log_file_suffix(),
-            "startedAtMs": started_at_ms,
-            "cwd": resolved.cwd.display().to_string(),
-            "command": &resolved.command,
+}
+
+fn resolve_expected_port(
+    project: &ProjectConfig,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    options: &ProjectRuntimeLaunchOptions,
+    resolved: &ResolvedProjectCommand,
+) -> Option<u16> {
+    options
+        .expected_port
+        .or_else(|| debug_profile.and_then(|profile| profile.expected_port))
+        .or_else(|| command_port(&resolved.command))
+        .or_else(|| {
+            resolved
+                .env
+                .get("PORT")
+                .and_then(|value| value.parse().ok())
         })
+        .or_else(|| project_local_focus_url_port(project))
+}
+
+fn command_port(command: &str) -> Option<u16> {
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    for (index, part) in parts.iter().enumerate() {
+        if let Some(value) = part.strip_prefix("--port=") {
+            if let Ok(port) = value.trim_matches(['\'', '"']).parse() {
+                return Some(port);
+            }
+        }
+        if *part == "--port" {
+            if let Some(value) = parts.get(index + 1) {
+                if let Ok(port) = value.trim_matches(['\'', '"']).parse() {
+                    return Some(port);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn apply_vite_strict_port(
+    command: &str,
+    expected_port: Option<u16>,
+    is_vite: bool,
+    strict_port_already_set: bool,
+) -> String {
+    let command = command.trim();
+    if expected_port.is_none()
+        || !is_vite
+        || strict_port_already_set
+        || command_has_strict_port(command)
+    {
+        return command.to_string();
+    }
+    if command.contains(" -- ") {
+        return format!("{command} --strictPort");
+    }
+    match package_script_runner(command) {
+        Some("npm" | "pnpm") => format!("{command} -- --strictPort"),
+        Some(_) => format!("{command} --strictPort"),
+        None => format!("{command} --strictPort"),
+    }
+}
+
+fn resolved_vite_command_info(command: &str, cwd: &Path) -> (bool, bool) {
+    if shell_command_contains_vite(command) {
+        return (true, command_has_strict_port(command));
+    }
+    let Some(script_name) = package_script_name(command) else {
+        return (false, false);
+    };
+    let Ok(content) = fs::read_to_string(cwd.join("package.json")) else {
+        return (false, false);
+    };
+    serde_json::from_str::<serde_json::Value>(&content)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("scripts")?
+                .get(&script_name)?
+                .as_str()
+                .map(vite_script_info)
+        })
+        .unwrap_or((false, false))
+}
+
+fn vite_script_info(script: &str) -> (bool, bool) {
+    (
+        shell_command_contains_vite(script),
+        command_has_strict_port(script),
     )
-    .map_err(|error| format!("写入运行日志失败: {}", error))?;
-    Ok(file)
+}
+
+fn command_has_strict_port(command: &str) -> bool {
+    command.split_whitespace().any(|part| {
+        let part = part
+            .trim_matches(['\'', '"'])
+            .split_once('=')
+            .map(|(key, _)| key)
+            .unwrap_or(part)
+            .to_ascii_lowercase();
+        part == "--strictport" || part == "--strict-port"
+    })
+}
+
+fn shell_command_contains_vite(command: &str) -> bool {
+    command.split_whitespace().any(|part| {
+        let token = part
+            .trim_matches(|ch: char| matches!(ch, '\'' | '"' | '(' | ')' | ';' | '&' | '|'))
+            .rsplit('/')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(".cmd")
+            .to_ascii_lowercase();
+        token == "vite"
+    })
+}
+
+fn package_script_runner(command: &str) -> Option<&'static str> {
+    command.split_whitespace().find_map(|part| {
+        let executable = part
+            .trim_matches(|ch: char| matches!(ch, '\'' | '"' | '(' | ')' | ';' | '&' | '|'))
+            .rsplit('/')
+            .next()?
+            .trim_end_matches(".cmd");
+        if executable.eq_ignore_ascii_case("npm") {
+            Some("npm")
+        } else if executable.eq_ignore_ascii_case("pnpm") {
+            Some("pnpm")
+        } else if executable.eq_ignore_ascii_case("yarn") {
+            Some("yarn")
+        } else if executable.eq_ignore_ascii_case("bun") {
+            Some("bun")
+        } else {
+            None
+        }
+    })
+}
+
+fn package_script_name(command: &str) -> Option<String> {
+    let runner = package_script_runner(command)?;
+    let parts = command.split_whitespace().collect::<Vec<_>>();
+    let runner_index = parts.iter().position(|part| {
+        part.trim_matches(['\'', '"'])
+            .rsplit('/')
+            .next()
+            .is_some_and(|part| part.trim_end_matches(".cmd").eq_ignore_ascii_case(runner))
+    })?;
+    let mut index = runner_index + 1;
+    if parts
+        .get(index)
+        .is_some_and(|part| matches!(*part, "run" | "run-script"))
+    {
+        index += 1;
+    } else if runner == "npm" {
+        return None;
+    }
+    let script = parts.get(index)?.trim_matches(['\'', '"']);
+    if script.is_empty()
+        || script.starts_with('-')
+        || matches!(
+            script,
+            "add" | "create" | "dlx" | "exec" | "install" | "remove"
+        )
+    {
+        return None;
+    }
+    Some(script.to_string())
+}
+
+pub fn project_local_focus_url_port(project: &ProjectConfig) -> Option<u16> {
+    let url = optional_trimmed(project.focus.url.as_deref())?;
+    let parsed = reqwest::Url::parse(url).ok()?;
+    match parsed.host_str()? {
+        "localhost" | "127.0.0.1" | "::1" => parsed.port(),
+        _ => None,
+    }
+}
+
+pub fn ensure_runtime_expected_port_available(expected_port: Option<u16>) -> Result<(), String> {
+    let Some(port) = expected_port else {
+        return Ok(());
+    };
+    if port == 0 {
+        return Err("预期端口必须在 1-65535 之间".to_string());
+    }
+    match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(error) => Err(format!(
+            "预期端口 {} 已被占用，已取消启动。{} ({})",
+            port,
+            port_owner_detail(port)
+                .map(|detail| format!("占用者：{}", detail))
+                .unwrap_or_else(|| "请先停止占用该端口的进程".to_string()),
+            error
+        )),
+    }
+}
+
+fn port_owner_detail(port: u16) -> Option<String> {
+    #[cfg(unix)]
+    {
+        let output = Command::new("lsof")
+            .args(["-nP", &format!("-iTCP:{}", port), "-sTCP:LISTEN", "-Fpc"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        let pid = text.lines().find_map(|line| line.strip_prefix('p'))?;
+        let process = text
+            .lines()
+            .find_map(|line| line.strip_prefix('c'))
+            .unwrap_or("unknown");
+        let cwd_output = Command::new("lsof")
+            .args(["-a", "-p", pid, "-d", "cwd", "-Fn"])
+            .output()
+            .ok();
+        let cwd = cwd_output.as_ref().and_then(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .find_map(|line| line.strip_prefix('n').map(ToString::to_string))
+        });
+        return Some(match cwd {
+            Some(cwd) => format!("{} (PID {}, cwd {})", process, pid, cwd),
+            None => format!("{} (PID {})", process, pid),
+        });
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = port;
+        None
+    }
 }
 
 fn apply_network_proxy_env(
@@ -1850,6 +2255,9 @@ fn focus_navigation_entry(
         bundle_id: None,
         app_name: None,
         script: None,
+        tool: None,
+        tool_key: None,
+        tool_action: None,
         path: None,
         cwd: None,
         note: Some("runtime focus".to_string()),
@@ -1921,26 +2329,10 @@ fn open_app_bundle(bundle_id: &str) -> Result<(), String> {
     }
 }
 
-fn scrub_launcher_env(command: &mut Command) {
-    let inherited_keys = std::env::vars().map(|(key, _)| key).collect::<Vec<_>>();
-    for key in inherited_keys {
-        if should_strip_inherited_env(&key) {
-            command.env_remove(key);
-        }
-    }
-}
-
-fn should_strip_inherited_env(key: &str) -> bool {
-    key == "OUT_DIR"
-        || key.starts_with("TAURI_")
-        || key == "CARGO_MANIFEST_DIR"
-        || key == "CARGO_MANIFEST_PATH"
-        || key.starts_with("CARGO_PKG_")
-}
-
 fn preflight_command_checks(
     project: &ProjectConfig,
     debug_profile: Option<&ProjectDebugProfileConfig>,
+    options: &ProjectRuntimeLaunchOptions,
     checks: &mut Vec<ProjectRuntimePreflightCheck>,
 ) {
     let Some(command_config) = project_command_config(project, RuntimeTaskKind::Dev) else {
@@ -1963,7 +2355,9 @@ fn preflight_command_checks(
         return;
     };
 
-    let command = command_config.command.trim();
+    let command = optional_trimmed(options.command.as_deref())
+        .or_else(|| debug_profile.and_then(|profile| optional_trimmed(profile.command.as_deref())))
+        .unwrap_or_else(|| command_config.command.trim());
     if command.is_empty() {
         checks.push(preflight_check(
             "devCommand",
@@ -2034,6 +2428,7 @@ fn preflight_command_checks(
         if let Some(profile) = debug_profile {
             env.extend(profile.env.clone());
         }
+        env.extend(options.env.clone());
         if let Some(detail) = node_version_hint(cwd.as_deref(), command, &env) {
             checks.push(preflight_check(
                 "nodeVersion",
@@ -2053,6 +2448,56 @@ fn preflight_command_checks(
                 Some("建议在命令中使用 nvm use，或在项目目录放置 .nvmrc。"),
             ));
         }
+    }
+}
+
+fn preflight_expected_port_check(
+    project: &ProjectConfig,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    options: &ProjectRuntimeLaunchOptions,
+    checks: &mut Vec<ProjectRuntimePreflightCheck>,
+) {
+    let Ok(mut resolved) = resolve_project_command(project, RuntimeTaskKind::Dev) else {
+        return;
+    };
+    apply_command_override(&mut resolved, debug_profile, options.command.as_deref());
+    resolved.env.extend(options.env.clone());
+    let Some(port) = resolve_expected_port(project, debug_profile, options, &resolved) else {
+        return;
+    };
+    if port == 0 {
+        checks.push(preflight_check(
+            "devPort",
+            "预期端口",
+            "runtime",
+            "error",
+            "预期端口必须在 1-65535 之间",
+            Some("修正调试档案或本次启动参数中的预期端口。"),
+        ));
+        return;
+    }
+    match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => {
+            drop(listener);
+            checks.push(preflight_check(
+                "devPort",
+                "预期端口",
+                "runtime",
+                "ok",
+                format!("端口 {} 可用", port),
+                None,
+            ));
+        }
+        Err(_) => checks.push(preflight_check(
+            "devPort",
+            "预期端口",
+            "runtime",
+            "error",
+            port_owner_detail(port)
+                .map(|owner| format!("端口 {} 已被 {} 占用", port, owner))
+                .unwrap_or_else(|| format!("端口 {} 已被占用", port)),
+            Some("停止占用进程，或为本次启动选择其他预期端口。"),
+        )),
     }
 }
 
@@ -2815,13 +3260,6 @@ fn optional_owned(value: Option<&str>) -> Option<String> {
     optional_trimmed(value).map(ToString::to_string)
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
-}
-
 impl RuntimeTaskKind {
     fn command_label(self) -> &'static str {
         match self {
@@ -2863,5 +3301,117 @@ impl RuntimeTaskKind {
             Self::Dev => "在 projects.toml 里为该项目添加 [projects.dev] 并配置 command",
             Self::Build => "在 projects.toml 里为该项目添加可选的 [projects.build] 并配置 command",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ResolvedProjectCommand, apply_command_override, apply_vite_strict_port, command_port,
+        package_script_name, resolve_runtime_profile, shell_command_contains_vite,
+        vite_script_info,
+    };
+    use crate::config::{AppConfig, ProjectDebugProfileConfig};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    #[test]
+    fn parses_common_dev_server_port_arguments() {
+        assert_eq!(command_port("vite --port 1420"), Some(1420));
+        assert_eq!(command_port("vite --port=5173"), Some(5173));
+        assert_eq!(command_port("npm run dev"), None);
+    }
+
+    #[test]
+    fn launch_command_override_takes_priority_over_debug_profile() {
+        let profile = ProjectDebugProfileConfig {
+            command: Some("npm run profile".to_string()),
+            ..ProjectDebugProfileConfig::default()
+        };
+        let mut resolved = ResolvedProjectCommand {
+            command: "npm run dev".to_string(),
+            cwd: PathBuf::from("."),
+            env: BTreeMap::new(),
+        };
+        apply_command_override(&mut resolved, Some(&profile), Some("npm run once"));
+        assert_eq!(resolved.command, "npm run once");
+    }
+
+    #[test]
+    fn explicit_runtime_profile_takes_priority_over_debug_inheritance() {
+        let config: AppConfig = toml::from_str(
+            r#"
+projects = []
+
+[defaults]
+
+[[defaults.runtime_profiles]]
+key = "inherited"
+label = "Inherited"
+
+[[defaults.runtime_profiles]]
+key = "explicit"
+label = "Explicit"
+"#,
+        )
+        .unwrap();
+        let debug_profile = ProjectDebugProfileConfig {
+            runtime_profile: Some("inherited".to_string()),
+            ..ProjectDebugProfileConfig::default()
+        };
+        let selected = resolve_runtime_profile(&config, Some(&debug_profile), Some("explicit"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.key, "explicit");
+    }
+
+    #[test]
+    fn vite_strict_port_is_added_once_for_direct_and_npm_commands() {
+        assert_eq!(
+            apply_vite_strict_port("vite --port 5173", Some(5173), true, false),
+            "vite --port 5173 --strictPort"
+        );
+        assert_eq!(
+            apply_vite_strict_port("npm run dev", Some(5173), true, false),
+            "npm run dev -- --strictPort"
+        );
+        assert_eq!(
+            apply_vite_strict_port("npm run dev -- --host", Some(5173), true, false),
+            "npm run dev -- --host --strictPort"
+        );
+        assert_eq!(
+            apply_vite_strict_port("vite --strictPort --port 5173", Some(5173), true, true),
+            "vite --strictPort --port 5173"
+        );
+        assert_eq!(
+            apply_vite_strict_port("npm run dev", Some(5173), true, true),
+            "npm run dev"
+        );
+    }
+
+    #[test]
+    fn strict_port_transform_ignores_non_vite_or_unpinned_commands() {
+        assert_eq!(
+            apply_vite_strict_port("webpack serve", Some(5173), false, false),
+            "webpack serve"
+        );
+        assert_eq!(apply_vite_strict_port("vite", None, true, false), "vite");
+    }
+
+    #[test]
+    fn recognizes_vite_tokens_and_package_script_names() {
+        assert!(shell_command_contains_vite(
+            "./node_modules/.bin/vite --host"
+        ));
+        assert!(!shell_command_contains_vite("vitest run"));
+        assert_eq!(package_script_name("npm run dev"), Some("dev".to_string()));
+        assert_eq!(package_script_name("pnpm dev"), Some("dev".to_string()));
+        assert_eq!(
+            package_script_name("source ~/.nvm/nvm.sh && npm run dev"),
+            Some("dev".to_string())
+        );
+        assert_eq!(package_script_name("npm install"), None);
+        assert_eq!(vite_script_info("vite --strictPort"), (true, true));
+        assert_eq!(vite_script_info("vitest run"), (false, false));
     }
 }

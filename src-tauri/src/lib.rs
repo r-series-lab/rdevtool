@@ -1,6 +1,8 @@
+use notify::{Event, RecursiveMode, Watcher};
 use project_runtime::{
-    ProjectRuntimeLogKind, ProjectRuntimeLogResponse, ProjectRuntimePreflightResponse,
-    ProjectRuntimeSnapshot, ProjectRuntimeState,
+    AppStartedRuntimeShutdownReport, AppStartedRuntimeSummary, ProjectDebugProfileSummary,
+    ProjectRuntimeLaunchOptions, ProjectRuntimeLogKind, ProjectRuntimeLogResponse,
+    ProjectRuntimePreflightResponse, ProjectRuntimeSnapshot, ProjectRuntimeState,
 };
 use rdevtool_core::agent::{AgentContext, context_for_workspace};
 use rdevtool_core::build as core_build;
@@ -18,26 +20,52 @@ use rdevtool_core::config::{
     load_project_workspaces, load_workspace_config, save_config, save_project_workspace_config,
     save_workspace_config, set_project_workspace_instance,
 };
+use rdevtool_core::config_sources::{
+    ConfigSource, ConfigSourceComparison, ConfigSourceCopyResult, ConfigSourceDefinition,
+    CopyConfigSourceRequest, compare_config_sources as core_compare_config_sources,
+    config_sources_file_path, copy_config_source as core_copy_config_source,
+    delete_custom_config_source as core_delete_custom_config_source,
+    get_custom_config_source_definition, list_config_sources as core_list_config_sources,
+    load_config_source_preference as core_load_config_source_preference,
+    resolve_config_source as core_resolve_config_source,
+    save_config_source_preference as core_save_config_source_preference,
+    save_custom_config_source as core_save_custom_config_source,
+};
+use rdevtool_core::config_store::{is_recent_internal_config_write, write_config_text_atomic};
 use rdevtool_core::core::{
-    BranchCheckoutRequest, BranchCommitOverview, BranchCreateRequest, BranchPushRequest,
-    BranchPushStatus, BranchSwitchRequest, BranchSyncRequest, BranchTaskResponse,
-    BranchWorktreeSummary, BuildStatusResponse, BuildTriggerResponse, DeployPlan, DeployRequest,
-    DeployTargetMeta, ProjectDetail, ProjectSummary, StatusRequest, available_branch_options,
-    branch_commit_overview, branch_hint, branch_push_status, build_plan,
-    checkout_branch_to_directory, deploy_target_meta, execute_branch_create, execute_branch_push,
-    execute_branch_switch, execute_branch_sync, execute_merge, project_detail, project_summaries,
-    project_worktrees, refresh_deploy_status, trigger_deploy,
+    BranchCheckoutRequest, BranchCommitOverview, BranchCreateRequest, BranchFileDiffRequest,
+    BranchFileDiffResponse, BranchPushRequest, BranchPushStatus, BranchSwitchRequest,
+    BranchSyncRequest, BranchTaskResponse, BranchWorktreeSummary, BuildStatusResponse,
+    BuildTriggerResponse, DeployPlan, DeployRequest, DeployTargetMeta, ProjectDetail,
+    ProjectSummary, StatusRequest, available_branch_options, branch_commit_overview,
+    branch_file_diff, branch_hint, branch_push_status, build_plan, checkout_branch_to_directory,
+    deploy_target_meta, execute_branch_create, execute_branch_push, execute_branch_switch,
+    execute_branch_sync, execute_merge, project_detail, project_summaries, project_worktrees,
+    refresh_deploy_status, repair_project_worktree as core_repair_project_worktree, trigger_deploy,
 };
 use rdevtool_core::core::{MergeRequest, MergeResponse};
 use rdevtool_core::git;
+use rdevtool_core::link::{
+    LinkConfig, LinkExecutionReport, LinkExecutionStepReport, LinkPlan, LinkRuntimeSummary,
+    LinkStepConfig, LinkSummary, LinkWorkspaceAttachRequest, LinkWorkspaceAttachResult,
+    attach_link_to_workspace as core_attach_link_to_workspace,
+    delete_link_from_path as core_delete_link_from_path,
+    get_link_from_path as core_get_link_from_path, links_file_path,
+    list_link_summaries_from_path as core_list_link_summaries_from_path,
+    list_links_from_path as core_list_links_from_path, plan_link as core_plan_link,
+    plan_link_from_path as core_plan_link_from_path,
+    upsert_link_to_path_with_previous_key as core_upsert_link_to_path_with_previous_key,
+};
 use rdevtool_core::navigation::{
     NavigationData, NavigationEditorData, NavigationEntry, NavigationOpenResult,
-    load_navigation_data_for_workspace, load_navigation_editor_data, navigation_file_path,
-    open_navigation_entry_with_runtime_profiles, save_navigation_editor_data,
+    load_navigation_data_for_workspace, load_navigation_editor_data,
+    load_navigation_editor_data_from_path, load_navigation_source_data_for_workspace,
+    navigation_file_path, open_navigation_entry_with_runtime_profiles,
+    save_navigation_editor_data_to_path,
 };
 use rdevtool_core::proxy::{
-    ProxyDashboard, ProxyProfile, ProxyProfilePack, ProxyRequestDiagnosis, ProxyRule,
-    ProxyRuntimeState, default_proxy_path, delete_proxy_profile as core_delete_proxy_profile,
+    ProxyConfig, ProxyDashboard, ProxyProfile, ProxyProfilePack, ProxyRequestDiagnosis, ProxyRule,
+    default_proxy_path, delete_proxy_profile as core_delete_proxy_profile,
     delete_proxy_rule as core_delete_proxy_rule,
     diagnose_proxy_request as core_diagnose_proxy_request, ensure_proxy_config,
     export_proxy_profile_pack as core_export_proxy_profile_pack,
@@ -45,6 +73,7 @@ use rdevtool_core::proxy::{
     save_proxy_config, upsert_proxy_profile, upsert_proxy_rule, validate_proxy_profile,
     validate_proxy_rule,
 };
+use rdevtool_core::proxy_daemon::ProxyDaemonRuntime as ProxyRuntimeState;
 use rdevtool_core::runtime as core_runtime;
 use rdevtool_core::runtime_link::{
     BindProxyRuntimeRequest, BindProxyRuntimeResult, bind_proxy_runtime_profile,
@@ -53,6 +82,7 @@ use rdevtool_core::storage::{
     BuildHistoryEntry, DeployHistoryEntry, MergeHistoryEntry, SaveBuildHistoryRequest,
     SaveDeployHistoryRequest, SaveMergeHistoryRequest, Storage, default_storage_path,
 };
+use rdevtool_core::ui_profiles::{UiProfileManifest, ui_profile_manifest};
 use rdevtool_core::web_actions::{
     WebActionListResponse, WebActionRunRequest, WebActionRunResult, WebActionScriptRunRequest,
     WebActionTarget, list_web_action_navigation_targets as core_list_web_action_navigation_targets,
@@ -75,13 +105,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{
     Arc, RwLock,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicBool, AtomicU64, Ordering},
 };
-use std::time::SystemTime;
+use std::time::{Duration, Instant, SystemTime};
 use tauri::{
-    AppHandle, Manager, RunEvent, Runtime, WindowEvent,
+    AppHandle, Emitter, Manager, RunEvent, Runtime, WindowEvent,
     image::Image,
-    menu::{IconMenuItem, IsMenuItem, Menu, MenuItem, NativeIcon, PredefinedMenuItem, Submenu},
+    menu::{IconMenuItem, Menu, MenuItem, NativeIcon, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 #[cfg(target_os = "macos")]
@@ -95,7 +125,16 @@ struct AppState {
     project_runtime: ProjectRuntimeState,
     proxy_runtime: ProxyRuntimeState,
     config_state: AppConfigState,
+    exit_coordinator: AppExitCoordinator,
     tray_replay_running: Arc<AtomicBool>,
+    tray_menu_actions: Arc<RwLock<BTreeMap<String, TrayReplayAction>>>,
+    workspace_config_watcher_stop: Arc<AtomicBool>,
+}
+
+#[derive(Clone, Default)]
+struct AppExitCoordinator {
+    is_quitting: Arc<AtomicBool>,
+    request_in_progress: Arc<AtomicBool>,
 }
 
 #[derive(Clone, Default)]
@@ -107,6 +146,72 @@ struct AppConfigState {
 struct CachedAppConfig {
     config: AppConfig,
     modified_at: Option<SystemTime>,
+}
+
+const WORKSPACE_STATE_CHANGED_EVENT: &str = "rdevtool://workspace-state-changed";
+const CONFIG_SOURCES_CHANGED_EVENT: &str = "rdevtool://config-sources-changed";
+const TRAY_DOMAIN_ACTION_REQUESTED_EVENT: &str = "rdevtool://tray-domain-action-requested";
+const WORKSPACE_CONFIG_EVENT_DEBOUNCE: Duration = Duration::from_millis(180);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceStateChangedPayload {
+    revision: u64,
+    origin: String,
+    scopes: Vec<String>,
+    project_workspace_keys: Vec<String>,
+    project_workspaces_unknown: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigSourcesChangedPayload {
+    revision: u64,
+    origin: String,
+    source_ids: Vec<String>,
+    catalog_changed: bool,
+}
+
+struct WorkspaceConfigWatchTargets {
+    projects: PathBuf,
+    workspace: PathBuf,
+    project_workspaces: PathBuf,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct WorkspaceConfigEventImpact {
+    scopes: BTreeSet<&'static str>,
+    project_workspace_keys: BTreeSet<String>,
+    project_workspaces_unknown: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ConfigSourceWatchTarget {
+    id: String,
+    base_dir: PathBuf,
+    files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct ConfigSourceEventImpact {
+    source_ids: BTreeSet<String>,
+    catalog_changed: bool,
+}
+
+impl ConfigSourceEventImpact {
+    fn merge(&mut self, other: Self) {
+        self.source_ids.extend(other.source_ids);
+        self.catalog_changed |= other.catalog_changed;
+    }
+}
+
+impl WorkspaceConfigEventImpact {
+    fn merge(&mut self, other: Self) {
+        self.scopes.extend(other.scopes);
+        self.project_workspace_keys
+            .extend(other.project_workspace_keys);
+        self.project_workspaces_unknown |= other.project_workspaces_unknown;
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -292,10 +397,47 @@ fn default_project_workspace_type_value() -> String {
 #[serde(rename_all = "camelCase")]
 struct ProjectConfigEditorState {
     config_path: String,
+    #[serde(default)]
+    runtime_config_path: Option<String>,
+    #[serde(default)]
+    runtime_profile_scope: String,
     jenkins_profiles: Vec<String>,
     default_branch_rules: BranchRulesEditor,
     runtime_profiles: Vec<RuntimeProfileEditor>,
     projects: Vec<ProjectConfigEditorProject>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigSourceFileInspection {
+    key: String,
+    label: String,
+    capability: String,
+    path: Option<String>,
+    supported: bool,
+    exists: bool,
+    status: String,
+    message: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigSourceInspection {
+    source: ConfigSource,
+    definition: Option<ConfigSourceDefinition>,
+    editable: bool,
+    registry_path: String,
+    status: String,
+    summary: String,
+    issues: Vec<String>,
+    files: Vec<ConfigSourceFileInspection>,
+    runtime_profile_scope: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+struct RuntimeOverridesFile {
+    #[serde(default)]
+    runtime_profiles: Vec<RuntimeProfileConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -362,6 +504,10 @@ fn default_focus_editor_ready_timeout_ms() -> u64 {
 struct ProjectDebugProfileEditor {
     key: String,
     label: String,
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    expected_port: Option<u16>,
     #[serde(default)]
     runtime_profile: Option<String>,
     env_text: String,
@@ -598,25 +744,69 @@ struct SaveProjectDeployTargetsRequest {
     deploy_targets: Vec<DeployTargetEditor>,
 }
 
-const DEFAULT_PAGE_KEYS: [&str; 5] = ["overview", "projects", "merge", "build", "proxy"];
+const DEFAULT_PAGE_KEYS: [&str; 4] = ["overview", "projectManagement", "resources", "proxy"];
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "main-tray";
 const TRAY_SHOW_ID: &str = "tray_show_main";
 const TRAY_REPLAY_LAST_ID: &str = "tray_replay_last";
-const TRAY_PINNED_PREFIX: &str = "tray_pinned_action_";
-const TRAY_PINNED_SUBMENU_ID: &str = "tray_pinned_menu";
+const TRAY_WORKSPACE_ACTION_PREFIX: &str = "tray_workspace_action_";
+const TRAY_MORE_WORKSPACES_ID: &str = "tray_more_workspaces";
 const TRAY_QUIT_ID: &str = "tray_quit";
 const TRAY_STORAGE_NAMESPACE: &str = "tray";
 const TRAY_RECENT_STORAGE_KEY: &str = "recent-actions";
 const TRAY_PINNED_STORAGE_KEY: &str = "pinned-actions";
+const APP_EXIT_STORAGE_NAMESPACE: &str = "app";
+const APP_EXIT_RUNTIME_POLICY_KEY: &str = "exit-runtime-policy";
+const APP_EXIT_REQUESTED_EVENT: &str = "rdevtool://app-exit-requested";
+const APP_EXIT_FAILED_EVENT: &str = "rdevtool://app-exit-failed";
 const BRANCH_WORKFLOW_STORAGE_NAMESPACE: &str = "branch-workflow";
 const BRANCH_WORKFLOW_HISTORY_KEY: &str = "history";
 const TRAY_RECENT_LIMIT: usize = 6;
 const TRAY_PINNED_STORAGE_LIMIT: usize = 60;
-const TRAY_PINNED_MENU_LIMIT: usize = 5;
+const TRAY_WORKSPACE_MENU_LIMIT: usize = 6;
+const TRAY_CATEGORY_ITEM_LIMIT: usize = 10;
 
 fn should_use_tray() -> bool {
     !cfg!(debug_assertions)
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum AppExitRuntimePolicy {
+    Ask,
+    Keep,
+    Stop,
+}
+
+impl AppExitRuntimePolicy {
+    fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "ask" => Some(Self::Ask),
+            "keep" => Some(Self::Keep),
+            "stop" => Some(Self::Stop),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Keep => "keep",
+            Self::Stop => "stop",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppExitRequestedPayload {
+    active_runtime_count: usize,
+    project_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppExitFailedPayload {
+    message: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -625,12 +815,36 @@ struct TrayReplayAction {
     kind: String,
     label: String,
     detail: Option<String>,
+    #[serde(default)]
+    workspace_key: Option<String>,
     project_key: Option<String>,
     entry: Option<NavigationEntry>,
     #[serde(default)]
     payload: Option<serde_json::Value>,
     dedupe_key: String,
     updated_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct TrayMenuActionItem {
+    label: String,
+    enabled: bool,
+    action: TrayReplayAction,
+}
+
+#[derive(Debug, Clone)]
+struct TrayMenuCategory {
+    key: String,
+    label: String,
+    actions: Vec<TrayMenuActionItem>,
+}
+
+#[derive(Debug, Clone)]
+struct TrayWorkspaceMenu {
+    label: String,
+    active: bool,
+    open_action: TrayMenuActionItem,
+    categories: Vec<TrayMenuCategory>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -664,6 +878,7 @@ struct WorkspacePinnedActionsOverview {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceProxyProfileItem {
+    config_source_id: String,
     id: String,
     name: String,
     listen_host: String,
@@ -684,21 +899,41 @@ struct WorkspacePinnedActionItem {
     label: String,
     detail: Option<String>,
     project_key: Option<String>,
+    params: Vec<WorkspaceActionParamItem>,
     confirm_required: bool,
     updated_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceActionParamItem {
+    label: String,
+    value: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceResourceShortcutItem {
     key: String,
+    config_source_id: String,
     category: String,
     label: String,
     kind: String,
     kind_label: String,
     value: Option<String>,
+    detail: Option<String>,
+    tool: Option<String>,
+    tool_key: Option<String>,
+    tool_action: Option<String>,
+    link_runtime: Option<LinkRuntimeSummary>,
     open_kind: Option<String>,
     openable: bool,
+    #[serde(skip)]
+    entry: NavigationEntry,
+    #[serde(skip)]
+    tool_config_source_id: Option<String>,
+    #[serde(skip)]
+    tool_proxy_source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -715,6 +950,8 @@ struct WorkspaceProjectDirectoryItem {
     running: bool,
     can_start: bool,
     can_stop: bool,
+    can_focus_runtime: bool,
+    debug_profiles: Vec<ProjectDebugProfileSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -806,8 +1043,386 @@ impl AppConfigState {
     }
 }
 
+fn path_matches_config_file(path: &Path, target: &Path) -> bool {
+    if path == target {
+        return true;
+    }
+
+    let Some(target_name) = target.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    path.parent() == target.parent()
+        && path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| {
+                name.starts_with(&format!(".{target_name}.")) && name.ends_with(".tmp")
+            })
+}
+
+fn project_workspace_key_from_event_path(
+    path: &Path,
+    project_workspaces_dir: &Path,
+) -> Option<String> {
+    if path.parent() != Some(project_workspaces_dir) {
+        return None;
+    }
+    let file_name = path.file_name()?.to_str()?;
+    if let Some(key) = file_name.strip_suffix(".toml") {
+        return (!key.is_empty()).then(|| key.to_string());
+    }
+    let temporary_name = file_name.strip_prefix('.')?.strip_suffix(".tmp")?;
+    let (key, _) = temporary_name.split_once(".toml.")?;
+    (!key.is_empty()).then(|| key.to_string())
+}
+
+fn workspace_config_event_impact(
+    paths: &[PathBuf],
+    targets: &WorkspaceConfigWatchTargets,
+) -> WorkspaceConfigEventImpact {
+    let mut impact = WorkspaceConfigEventImpact::default();
+    for path in paths {
+        if path_matches_config_file(path, &targets.workspace) {
+            impact.scopes.insert("workspace");
+        }
+        if path_matches_config_file(path, &targets.projects) {
+            impact.scopes.insert("projects");
+        }
+        if path == &targets.project_workspaces {
+            impact.scopes.insert("projectWorkspaces");
+            impact.project_workspaces_unknown = true;
+        } else if let Some(key) =
+            project_workspace_key_from_event_path(path, &targets.project_workspaces)
+        {
+            impact.scopes.insert("projectWorkspaces");
+            impact.project_workspace_keys.insert(key);
+        }
+    }
+    impact
+}
+
+fn load_config_source_watch_targets() -> Result<Vec<ConfigSourceWatchTarget>, String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspaces =
+        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
+    let sources = core_list_config_sources(&workspaces).map_err(|error| error.to_string())?;
+    Ok(sources
+        .into_iter()
+        .map(|source| {
+            let mut files = vec![
+                PathBuf::from(source.files.navigation),
+                PathBuf::from(source.files.links),
+            ];
+            files.extend(source.files.proxy.map(PathBuf::from));
+            files.extend(source.files.runtime_overrides.map(PathBuf::from));
+            ConfigSourceWatchTarget {
+                id: source.id,
+                base_dir: PathBuf::from(source.base_dir),
+                files,
+            }
+        })
+        .collect())
+}
+
+fn config_source_event_impact(
+    paths: &[PathBuf],
+    registry_path: &Path,
+    targets: &[ConfigSourceWatchTarget],
+) -> ConfigSourceEventImpact {
+    let mut impact = ConfigSourceEventImpact::default();
+    for path in paths {
+        if path_matches_config_file(path, registry_path) {
+            impact.catalog_changed = true;
+        }
+        for target in targets {
+            if path == &target.base_dir
+                || target
+                    .files
+                    .iter()
+                    .any(|file| path_matches_config_file(path, file))
+            {
+                impact.source_ids.insert(target.id.clone());
+            }
+        }
+    }
+    impact
+}
+
+fn config_event_origin(
+    paths: &[PathBuf],
+    workspace_targets: &WorkspaceConfigWatchTargets,
+    registry_path: &Path,
+    config_source_targets: &[ConfigSourceWatchTarget],
+) -> &'static str {
+    let mut matched_targets = BTreeSet::new();
+    for path in paths {
+        if path_matches_config_file(path, &workspace_targets.workspace) {
+            matched_targets.insert(workspace_targets.workspace.clone());
+        }
+        if path_matches_config_file(path, &workspace_targets.projects) {
+            matched_targets.insert(workspace_targets.projects.clone());
+        }
+        if let Some(key) =
+            project_workspace_key_from_event_path(path, &workspace_targets.project_workspaces)
+        {
+            matched_targets.insert(
+                workspace_targets
+                    .project_workspaces
+                    .join(format!("{key}.toml")),
+            );
+        }
+        if path_matches_config_file(path, registry_path) {
+            matched_targets.insert(registry_path.to_path_buf());
+        }
+        for target in config_source_targets {
+            if path == &target.base_dir {
+                matched_targets.insert(target.base_dir.clone());
+            }
+            for file in &target.files {
+                if path_matches_config_file(path, file) {
+                    matched_targets.insert(file.clone());
+                }
+            }
+        }
+    }
+
+    if matched_targets.is_empty() {
+        return "external";
+    }
+    let has_recent_internal_write = matched_targets
+        .iter()
+        .any(|path| is_recent_internal_config_write(path));
+    let has_unmatched_file = matched_targets
+        .iter()
+        .any(|path| !path.is_dir() && !is_recent_internal_config_write(path));
+    if has_recent_internal_write && !has_unmatched_file {
+        "internal"
+    } else {
+        "external"
+    }
+}
+
+fn config_source_watch_directories(
+    config_dir: &Path,
+    targets: &[ConfigSourceWatchTarget],
+) -> BTreeSet<PathBuf> {
+    let mut candidates = BTreeSet::new();
+    for target in targets {
+        candidates.insert(target.base_dir.clone());
+        candidates.extend(
+            target
+                .files
+                .iter()
+                .filter_map(|path| path.parent().map(Path::to_path_buf)),
+        );
+    }
+    candidates.retain(|path| path.exists() && !path.starts_with(config_dir));
+    let snapshot = candidates.clone();
+    candidates.retain(|path| {
+        !snapshot
+            .iter()
+            .any(|other| other != path && path.starts_with(other))
+    });
+    candidates
+}
+
+fn sync_config_source_watch_directories<W: Watcher>(
+    watcher: &mut W,
+    config_dir: &Path,
+    targets: &[ConfigSourceWatchTarget],
+    watched_directories: &mut BTreeSet<PathBuf>,
+) {
+    let desired = config_source_watch_directories(config_dir, targets);
+    let mut active = watched_directories
+        .intersection(&desired)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for directory in watched_directories.difference(&desired) {
+        if let Err(error) = watcher.unwatch(directory) {
+            eprintln!(
+                "[workspace-config-watcher] failed to stop watching {}: {error}",
+                directory.display()
+            );
+        }
+    }
+    for directory in desired.difference(watched_directories) {
+        match watcher.watch(directory, RecursiveMode::Recursive) {
+            Ok(()) => {
+                active.insert(directory.clone());
+            }
+            Err(error) => {
+                eprintln!(
+                    "[workspace-config-watcher] failed to watch config source {}: {error}",
+                    directory.display()
+                );
+            }
+        }
+    }
+    *watched_directories = active;
+}
+
+fn start_workspace_config_watcher(app: AppHandle, stop: Arc<AtomicBool>) -> Result<(), String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspace_targets = WorkspaceConfigWatchTargets {
+        projects: paths.projects,
+        workspace: paths.workspace,
+        project_workspaces: paths.project_workspaces,
+    };
+    let config_dir = default_config_dir();
+    let registry_path = config_sources_file_path();
+    let mut config_source_targets = load_config_source_watch_targets().unwrap_or_else(|error| {
+        eprintln!("[workspace-config-watcher] failed to load config sources: {error}");
+        Vec::new()
+    });
+    let mut watched_config_source_directories = BTreeSet::new();
+    let (event_tx, event_rx) = std::sync::mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |result: notify::Result<Event>| {
+        let _ = event_tx.send(result);
+    })
+    .map_err(|error| format!("failed to create workspace config watcher: {error}"))?;
+    watcher
+        .watch(&config_dir, RecursiveMode::Recursive)
+        .map_err(|error| format!("failed to watch {}: {error}", config_dir.display()))?;
+    sync_config_source_watch_directories(
+        &mut watcher,
+        &config_dir,
+        &config_source_targets,
+        &mut watched_config_source_directories,
+    );
+
+    std::thread::Builder::new()
+        .name("rdevtool-workspace-config-watcher".to_string())
+        .spawn(move || {
+            let revision = AtomicU64::new(0);
+            while !stop.load(Ordering::Relaxed) {
+                let event = match event_rx.recv_timeout(Duration::from_millis(250)) {
+                    Ok(Ok(event)) if !event.kind.is_access() => event,
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(error)) => {
+                        eprintln!("[workspace-config-watcher] {error}");
+                        continue;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+
+                let mut changed_paths = event.paths.iter().cloned().collect::<BTreeSet<_>>();
+                let mut workspace_impact =
+                    workspace_config_event_impact(&event.paths, &workspace_targets);
+                let mut config_source_impact = config_source_event_impact(
+                    &event.paths,
+                    &registry_path,
+                    &config_source_targets,
+                );
+                if workspace_impact.scopes.is_empty()
+                    && config_source_impact.source_ids.is_empty()
+                    && !config_source_impact.catalog_changed
+                {
+                    continue;
+                }
+
+                let debounce_deadline = Instant::now() + WORKSPACE_CONFIG_EVENT_DEBOUNCE;
+                loop {
+                    let now = Instant::now();
+                    if now >= debounce_deadline {
+                        break;
+                    }
+                    match event_rx.recv_timeout(debounce_deadline - now) {
+                        Ok(Ok(event)) if !event.kind.is_access() => {
+                            changed_paths.extend(event.paths.iter().cloned());
+                            workspace_impact.merge(workspace_config_event_impact(
+                                &event.paths,
+                                &workspace_targets,
+                            ));
+                            config_source_impact.merge(config_source_event_impact(
+                                &event.paths,
+                                &registry_path,
+                                &config_source_targets,
+                            ));
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(error)) => {
+                            eprintln!("[workspace-config-watcher] {error}");
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+                    }
+                }
+
+                let changed_paths = changed_paths.into_iter().collect::<Vec<_>>();
+                let origin = config_event_origin(
+                    &changed_paths,
+                    &workspace_targets,
+                    &registry_path,
+                    &config_source_targets,
+                )
+                .to_string();
+                let catalog_changed = config_source_impact.catalog_changed
+                    || workspace_impact.scopes.contains("projectWorkspaces");
+                if catalog_changed {
+                    match load_config_source_watch_targets() {
+                        Ok(next_targets) => {
+                            sync_config_source_watch_directories(
+                                &mut watcher,
+                                &config_dir,
+                                &next_targets,
+                                &mut watched_config_source_directories,
+                            );
+                            config_source_targets = next_targets;
+                        }
+                        Err(error) => {
+                            eprintln!(
+                                "[workspace-config-watcher] failed to refresh config sources: {error}"
+                            );
+                        }
+                    }
+                }
+
+                let next_revision = revision.fetch_add(1, Ordering::Relaxed) + 1;
+                if !workspace_impact.scopes.is_empty() {
+                    let payload = WorkspaceStateChangedPayload {
+                        revision: next_revision,
+                        origin: origin.clone(),
+                        scopes: workspace_impact
+                            .scopes
+                            .into_iter()
+                            .map(str::to_string)
+                            .collect(),
+                        project_workspace_keys: workspace_impact
+                            .project_workspace_keys
+                            .into_iter()
+                            .collect(),
+                        project_workspaces_unknown: workspace_impact.project_workspaces_unknown,
+                    };
+                    if let Err(error) = app.emit(WORKSPACE_STATE_CHANGED_EVENT, payload) {
+                        eprintln!("[workspace-config-watcher] failed to emit update: {error}");
+                    }
+                }
+                if catalog_changed || !config_source_impact.source_ids.is_empty() {
+                    let payload = ConfigSourcesChangedPayload {
+                        revision: next_revision,
+                        origin,
+                        source_ids: config_source_impact.source_ids.into_iter().collect(),
+                        catalog_changed,
+                    };
+                    if let Err(error) = app.emit(CONFIG_SOURCES_CHANGED_EVENT, payload) {
+                        eprintln!(
+                            "[workspace-config-watcher] failed to emit config source update: {error}"
+                        );
+                    }
+                }
+                refresh_tray_menu(&app);
+            }
+
+            drop(watcher);
+        })
+        .map_err(|error| format!("failed to start workspace config watcher: {error}"))?;
+    Ok(())
+}
+
 fn normalize_style_mode(value: &str) -> String {
     match value {
+        "system" => "system".to_string(),
         "mono" => "mono".to_string(),
         _ => "light".to_string(),
     }
@@ -816,9 +1431,9 @@ fn normalize_style_mode(value: &str) -> String {
 fn normalize_page_key(value: Option<String>) -> Option<String> {
     let value = value?.trim().to_string();
     match value.as_str() {
-        "navigation" => Some("projects".to_string()),
+        "navigation" | "projects" => Some("resources".to_string()),
         "deploy" => Some("build".to_string()),
-        "overview" | "build" | "merge" | "projects" | "proxy" => Some(value),
+        "overview" | "projectManagement" | "resources" | "build" | "merge" | "proxy" => Some(value),
         _ => None,
     }
 }
@@ -1155,7 +1770,21 @@ fn project_workspace_editor_state(
 fn apply_active_workspace_context(config: &AppConfig) -> Result<AppConfig, String> {
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
     let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
-    Ok(apply_project_workspace_context(config, &workspace))
+    let workspaces =
+        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
+    let mut next_config = apply_project_workspace_context(config, &workspace);
+    let source = resolve_workspace_capability_source(&paths, &workspace, &workspaces, "runtime")?;
+    apply_runtime_overrides_for_source(&mut next_config, &source)?;
+    Ok(next_config)
+}
+
+fn active_workspace_proxy_path() -> Result<PathBuf, String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
+    let workspaces =
+        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
+    let source = resolve_workspace_capability_source(&paths, &workspace, &workspaces, "proxy")?;
+    proxy_path_for_config_source(&source)
 }
 
 fn same_path(left: &Path, right: &Path) -> bool {
@@ -1263,38 +1892,48 @@ fn save_project_workspace_editor_state(
     project_workspace_editor_state(config, Some(workspace.key.clone()))
 }
 
-fn active_workspace_project_filter() -> Result<Option<BTreeSet<String>>, String> {
+fn active_history_workspace() -> Result<ProjectWorkspaceConfig, String> {
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-    let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
-    if workspace.include_all_projects {
-        return Ok(None);
-    }
-    Ok(Some(workspace.projects.into_iter().collect()))
+    load_active_project_workspace(&paths).map_err(|error| error.to_string())
 }
 
-fn active_workspace_project_keys() -> Result<Option<Vec<String>>, String> {
-    Ok(active_workspace_project_filter()?.map(|keys| keys.into_iter().collect::<Vec<_>>()))
+fn active_history_scope(project_key: &str) -> Result<(String, Option<String>), String> {
+    let workspace = active_history_workspace()?;
+    let project_instance_path = workspace
+        .project_instance_path(project_key)
+        .map(|path| path.display().to_string());
+    Ok((workspace.key, project_instance_path))
+}
+
+fn scoped_build_history(
+    storage: &Storage,
+    workspace: &ProjectWorkspaceConfig,
+) -> Result<Vec<BuildHistoryEntry>, String> {
+    if workspace.is_system() {
+        return storage.list_deploy_history();
+    }
+    Ok(storage
+        .list_all_deploy_history()?
+        .into_iter()
+        .filter(|entry| entry.workspace_key.as_deref() == Some(workspace.key.as_str()))
+        .filter(|entry| workspace.allows_project(&entry.project_key))
+        .take(20)
+        .collect())
 }
 
 fn filter_build_history_by_active_workspace(
     storage: &Storage,
 ) -> Result<Vec<BuildHistoryEntry>, String> {
-    match active_workspace_project_filter()? {
-        None => storage.list_deploy_history(),
-        Some(project_keys) if project_keys.is_empty() => Ok(Vec::new()),
-        Some(project_keys) => Ok(storage
-            .list_all_deploy_history()?
-            .into_iter()
-            .filter(|entry| project_keys.contains(&entry.project_key))
-            .take(20)
-            .collect()),
-    }
+    let workspace = active_history_workspace()?;
+    scoped_build_history(storage, &workspace)
 }
 
 fn clear_build_history_by_active_workspace(storage: &Storage) -> Result<usize, String> {
-    match active_workspace_project_keys()? {
-        None => storage.clear_deploy_history(),
-        Some(project_keys) => storage.clear_deploy_history_for_projects(&project_keys),
+    let workspace = active_history_workspace()?;
+    if workspace.is_system() {
+        storage.clear_deploy_history()
+    } else {
+        storage.clear_deploy_history_for_workspace(&workspace.key)
     }
 }
 
@@ -1311,22 +1950,25 @@ fn clear_deploy_history_by_active_workspace(storage: &Storage) -> Result<usize, 
 fn filter_merge_history_by_active_workspace(
     storage: &Storage,
 ) -> Result<Vec<MergeHistoryEntry>, String> {
-    match active_workspace_project_filter()? {
-        None => storage.list_merge_history(),
-        Some(project_keys) if project_keys.is_empty() => Ok(Vec::new()),
-        Some(project_keys) => Ok(storage
-            .list_all_merge_history()?
-            .into_iter()
-            .filter(|entry| project_keys.contains(&entry.project_key))
-            .take(12)
-            .collect()),
+    let workspace = active_history_workspace()?;
+    if workspace.is_system() {
+        return storage.list_merge_history();
     }
+    Ok(storage
+        .list_all_merge_history()?
+        .into_iter()
+        .filter(|entry| entry.workspace_key.as_deref() == Some(workspace.key.as_str()))
+        .filter(|entry| workspace.allows_project(&entry.project_key))
+        .take(12)
+        .collect())
 }
 
 fn clear_merge_history_by_active_workspace(storage: &Storage) -> Result<usize, String> {
-    match active_workspace_project_keys()? {
-        None => storage.clear_merge_history(),
-        Some(project_keys) => storage.clear_merge_history_for_projects(&project_keys),
+    let workspace = active_history_workspace()?;
+    if workspace.is_system() {
+        storage.clear_merge_history()
+    } else {
+        storage.clear_merge_history_for_workspace(&workspace.key)
     }
 }
 
@@ -1413,15 +2055,6 @@ fn filter_proxy_dashboard_by_workspace(
     dashboard
 }
 
-fn proxy_dashboard_for_active_workspace(
-    runtime: &ProxyRuntimeState,
-    path: &Path,
-) -> Result<ProxyDashboard, String> {
-    let workspace = active_proxy_workspace()?;
-    let dashboard = runtime.dashboard(path).map_err(|error| error.to_string())?;
-    Ok(filter_proxy_dashboard_by_workspace(dashboard, &workspace))
-}
-
 fn select_proxy_profile_for_request_diagnosis(
     config: &rdevtool_core::proxy::ProxyConfig,
     profile: Option<String>,
@@ -1452,9 +2085,105 @@ fn app_info() -> serde_json::Value {
         "workspacePath": default_workspace_path().display().to_string(),
         "workspacesPath": default_project_workspaces_dir().display().to_string(),
         "navigationPath": navigation_file_path(),
+        "linksPath": links_file_path(),
         "proxyPath": default_proxy_path().display().to_string(),
         "storagePath": default_storage_path().display().to_string(),
     })
+}
+
+fn load_app_exit_runtime_policy(storage: &Storage) -> AppExitRuntimePolicy {
+    storage
+        .get_json(APP_EXIT_STORAGE_NAMESPACE, APP_EXIT_RUNTIME_POLICY_KEY)
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_str().and_then(AppExitRuntimePolicy::parse))
+        .unwrap_or(AppExitRuntimePolicy::Ask)
+}
+
+fn persist_app_exit_runtime_policy(
+    storage: &Storage,
+    policy: AppExitRuntimePolicy,
+) -> Result<(), String> {
+    storage.set_json(
+        APP_EXIT_STORAGE_NAMESPACE,
+        APP_EXIT_RUNTIME_POLICY_KEY,
+        &json!(policy.as_str()),
+    )
+}
+
+#[tauri::command]
+async fn get_app_exit_runtime_policy(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let storage = state.storage.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(load_app_exit_runtime_policy(&storage).as_str().to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn save_app_exit_runtime_policy(
+    state: tauri::State<'_, AppState>,
+    policy: String,
+) -> Result<String, String> {
+    let policy = AppExitRuntimePolicy::parse(&policy)
+        .ok_or_else(|| "退出策略必须是 ask、keep 或 stop".to_string())?;
+    let storage = state.storage.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        persist_app_exit_runtime_policy(&storage, policy)?;
+        Ok(policy.as_str().to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn cancel_app_exit(state: tauri::State<'_, AppState>) {
+    state
+        .exit_coordinator
+        .request_in_progress
+        .store(false, Ordering::Release);
+}
+
+#[tauri::command]
+async fn confirm_app_exit(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    policy: String,
+    remember: bool,
+) -> Result<AppStartedRuntimeShutdownReport, String> {
+    let policy = AppExitRuntimePolicy::parse(&policy)
+        .filter(|policy| *policy != AppExitRuntimePolicy::Ask)
+        .ok_or_else(|| "请选择保留运行或停止后退出".to_string())?;
+    let runtime = state.project_runtime.clone();
+    let storage = state.storage.clone();
+    let exit_coordinator = state.exit_coordinator.clone();
+    let report = tauri::async_runtime::spawn_blocking(move || {
+        if policy == AppExitRuntimePolicy::Stop {
+            runtime.shutdown_app_started_runtimes()
+        } else {
+            AppStartedRuntimeShutdownReport {
+                requested: 0,
+                stopped: 0,
+                skipped: 0,
+                failures: Vec::new(),
+            }
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+
+    if !report.failures.is_empty() {
+        exit_coordinator
+            .request_in_progress
+            .store(false, Ordering::Release);
+        return Err(report.failures.join("；"));
+    }
+    if remember {
+        persist_app_exit_runtime_policy(&storage, policy)?;
+    }
+    begin_app_exit(&app, &exit_coordinator);
+    Ok(report)
 }
 
 #[tauri::command]
@@ -1516,25 +2245,36 @@ async fn get_project_workspaces(
 
 #[tauri::command]
 async fn set_active_project_workspace(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     workspace_key: String,
 ) -> Result<ProjectWorkspaceState, String> {
     let config_state = state.config_state.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-        let workspace = load_project_workspace_by_key(&paths.project_workspaces, &workspace_key)
-            .map_err(|error| error.to_string())?;
-        let mut app_workspace =
-            load_workspace_config(&paths.workspace).map_err(|error| error.to_string())?;
-        app_workspace.app.active_workspace = Some(workspace.key);
-        save_workspace_config(&paths.workspace, &app_workspace)
-            .map_err(|error| error.to_string())?;
-
-        let config = config_state.load()?;
-        project_workspace_state(&config)
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        activate_project_workspace(&config_state, &workspace_key)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        refresh_tray_menu(&app);
+    }
+    result
+}
+
+fn activate_project_workspace(
+    config_state: &AppConfigState,
+    workspace_key: &str,
+) -> Result<ProjectWorkspaceState, String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)
+        .map_err(|error| error.to_string())?;
+    let mut app_workspace =
+        load_workspace_config(&paths.workspace).map_err(|error| error.to_string())?;
+    app_workspace.app.active_workspace = Some(workspace.key);
+    save_workspace_config(&paths.workspace, &app_workspace).map_err(|error| error.to_string())?;
+
+    let config = config_state.load()?;
+    project_workspace_state(&config)
 }
 
 #[tauri::command]
@@ -1587,6 +2327,56 @@ async fn create_project_workspace_config(
             },
         )
         .map_err(|error| error.to_string())?;
+
+        let config = config_state.load()?;
+        project_workspace_state(&config)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn delete_project_workspace_config(
+    state: tauri::State<'_, AppState>,
+    workspace_key: String,
+) -> Result<ProjectWorkspaceState, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let workspace = load_project_workspace_by_key(&paths.project_workspaces, &workspace_key)
+            .map_err(|error| error.to_string())?;
+        if workspace.is_system() {
+            return Err("全局工作区不能删除".to_string());
+        }
+
+        let path = paths
+            .project_workspaces
+            .join(format!("{}.toml", workspace.key));
+        if path.exists() {
+            fs::remove_file(&path)
+                .map_err(|error| format!("删除工作区配置失败：{} ({})", path.display(), error))?;
+        }
+
+        let mut app_workspace =
+            load_workspace_config(&paths.workspace).map_err(|error| error.to_string())?;
+        if active_project_workspace_key(&app_workspace) == workspace.key {
+            app_workspace.app.active_workspace = Some(SYSTEM_PROJECT_WORKSPACE_KEY.to_string());
+            save_workspace_config(&paths.workspace, &app_workspace)
+                .map_err(|error| error.to_string())?;
+        }
+
+        let proxy_path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        let mut proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+        let mut proxy_changed = false;
+        for profile in &mut proxy_config.profiles {
+            if profile.workspace_key.as_deref() == Some(workspace.key.as_str()) {
+                profile.workspace_key = None;
+                proxy_changed = true;
+            }
+        }
+        if proxy_changed {
+            save_proxy_config(&proxy_path, &proxy_config).map_err(|error| error.to_string())?;
+        }
 
         let config = config_state.load()?;
         project_workspace_state(&config)
@@ -1659,11 +2449,14 @@ async fn save_project_workspace_editor(
 }
 
 #[tauri::command]
-async fn get_proxy_dashboard(state: tauri::State<'_, AppState>) -> Result<ProxyDashboard, String> {
+async fn get_proxy_dashboard(
+    state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
+) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
-        proxy_dashboard_for_active_workspace(&runtime, &path)
+        let (source, path) = proxy_path_for_source_id(source_id)?;
+        proxy_dashboard_for_source(&runtime, &source, &path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1671,18 +2464,21 @@ async fn get_proxy_dashboard(state: tauri::State<'_, AppState>) -> Result<ProxyD
 
 #[tauri::command]
 async fn diagnose_proxy_request(
+    source_id: Option<String>,
     profile: Option<String>,
     method: String,
     url: String,
     headers: Option<BTreeMap<String, String>>,
 ) -> Result<ProxyRequestDiagnosis, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
-        let workspace = active_proxy_workspace()?;
-        let config = filter_proxy_config_for_workspace(
-            load_proxy_config(&path).map_err(|error| error.to_string())?,
-            &workspace,
-        );
+        let (source, path) = proxy_path_for_source_id(source_id)?;
+        let config = load_proxy_config(&path).map_err(|error| error.to_string())?;
+        let config = if source.is_default {
+            let workspace = active_proxy_workspace()?;
+            filter_proxy_config_for_workspace(config, &workspace)
+        } else {
+            config
+        };
         let selected_profile = select_proxy_profile_for_request_diagnosis(&config, profile)?;
         core_diagnose_proxy_request(
             &config,
@@ -1700,16 +2496,21 @@ async fn diagnose_proxy_request(
 #[tauri::command]
 async fn save_proxy_profile(
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     profile: ProxyProfile,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let workspace = active_proxy_workspace()?;
-        let profile = scope_proxy_profile_for_workspace(profile, &workspace);
+        let (source, path) = proxy_path_for_source_id(source_id)?;
+        let profile = if source.is_default {
+            let workspace = active_proxy_workspace()?;
+            scope_proxy_profile_for_workspace(profile, &workspace)
+        } else {
+            profile
+        };
         validate_proxy_profile(&profile).map_err(|error| error.to_string())?;
-        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
         upsert_proxy_profile(&path, profile).map_err(|error| error.to_string())?;
-        proxy_dashboard_for_active_workspace(&runtime, &path)
+        proxy_dashboard_for_source(&runtime, &source, &path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1718,15 +2519,16 @@ async fn save_proxy_profile(
 #[tauri::command]
 async fn delete_proxy_profile(
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     profile_id: String,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
-        runtime.stop_profile(&profile_id);
+        let (source, path) = proxy_path_for_source_id(source_id)?;
+        runtime.stop_profile(&path, &profile_id);
         core_delete_proxy_profile(&path, &profile_id).map_err(|error| error.to_string())?;
-        runtime.clear_events(Some(&profile_id));
-        proxy_dashboard_for_active_workspace(&runtime, &path)
+        runtime.clear_events(&path, Some(&profile_id));
+        proxy_dashboard_for_source(&runtime, &source, &path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1735,14 +2537,15 @@ async fn delete_proxy_profile(
 #[tauri::command]
 async fn save_proxy_rule(
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     rule: ProxyRule,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let (source, path) = proxy_path_for_source_id(source_id)?;
         validate_proxy_rule(&rule).map_err(|error| error.to_string())?;
-        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
         upsert_proxy_rule(&path, rule).map_err(|error| error.to_string())?;
-        proxy_dashboard_for_active_workspace(&runtime, &path)
+        proxy_dashboard_for_source(&runtime, &source, &path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1751,13 +2554,14 @@ async fn save_proxy_rule(
 #[tauri::command]
 async fn delete_proxy_rule(
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     rule_id: String,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        let (source, path) = proxy_path_for_source_id(source_id)?;
         core_delete_proxy_rule(&path, &rule_id).map_err(|error| error.to_string())?;
-        proxy_dashboard_for_active_workspace(&runtime, &path)
+        proxy_dashboard_for_source(&runtime, &source, &path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1765,12 +2569,14 @@ async fn delete_proxy_rule(
 
 #[tauri::command]
 async fn start_proxy_profile(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     profile_id: String,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let (source, path) = proxy_path_for_source_id(source_id)?;
         let config = load_proxy_config(&path).map_err(|error| error.to_string())?;
         let profile = config
             .profiles
@@ -1781,51 +2587,66 @@ async fn start_proxy_profile(
         runtime
             .start_profile(path.clone(), profile_id)
             .map_err(|error| error.to_string())?;
-        proxy_dashboard_for_active_workspace(&runtime, &path)
+        proxy_dashboard_for_source(&runtime, &source, &path)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        refresh_tray_menu(&app);
+    }
+    result
 }
 
 #[tauri::command]
 async fn stop_proxy_profile(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     profile_id: String,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
-        runtime.stop_profile(&profile_id);
-        proxy_dashboard_for_active_workspace(&runtime, &path)
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let (source, path) = proxy_path_for_source_id(source_id)?;
+        runtime
+            .stop_profile_result(&path, &profile_id)
+            .map_err(|error| error.to_string())?;
+        proxy_dashboard_for_source(&runtime, &source, &path)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        refresh_tray_menu(&app);
+    }
+    result
 }
 
 #[tauri::command]
 async fn clear_proxy_events(
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     profile_id: Option<String>,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let path = ensure_proxy_config().map_err(|error| error.to_string())?;
-        let workspace = active_proxy_workspace()?;
+        let (source, path) = proxy_path_for_source_id(source_id)?;
         if let Some(profile_id) = profile_id.as_deref() {
-            runtime.clear_events(Some(profile_id));
-        } else if workspace.is_system() {
-            runtime.clear_events(None);
-        } else {
-            let config = load_proxy_config(&path).map_err(|error| error.to_string())?;
-            for profile in config
-                .profiles
-                .iter()
-                .filter(|profile| profile.workspace_key.as_deref() == Some(workspace.key.as_str()))
-            {
-                runtime.clear_events(Some(&profile.id));
+            runtime.clear_events(&path, Some(profile_id));
+        } else if source.is_default {
+            let workspace = active_proxy_workspace()?;
+            if workspace.is_system() {
+                runtime.clear_events(&path, None);
+            } else {
+                let config = load_proxy_config(&path).map_err(|error| error.to_string())?;
+                for profile in config.profiles.iter().filter(|profile| {
+                    profile.workspace_key.as_deref() == Some(workspace.key.as_str())
+                }) {
+                    runtime.clear_events(&path, Some(&profile.id));
+                }
             }
+        } else {
+            runtime.clear_events(&path, None);
         }
-        proxy_dashboard_for_active_workspace(&runtime, &path)
+        proxy_dashboard_for_source(&runtime, &source, &path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1834,6 +2655,7 @@ async fn clear_proxy_events(
 #[tauri::command]
 async fn export_proxy_profile_pack(
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     profile_id: String,
     path: String,
 ) -> Result<ProxyDashboard, String> {
@@ -1843,7 +2665,7 @@ async fn export_proxy_profile_pack(
         if target_path.as_os_str().is_empty() {
             return Err("导出路径不能为空".to_string());
         }
-        let config_path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        let (source, config_path) = proxy_path_for_source_id(source_id)?;
         let pack = core_export_proxy_profile_pack(&config_path, &profile_id)
             .map_err(|error| error.to_string())?;
         let content = serde_json::to_string_pretty(&pack).map_err(|error| error.to_string())?;
@@ -1851,7 +2673,7 @@ async fn export_proxy_profile_pack(
             fs::create_dir_all(parent).map_err(|error| error.to_string())?;
         }
         fs::write(&target_path, content).map_err(|error| error.to_string())?;
-        proxy_dashboard_for_active_workspace(&runtime, &config_path)
+        proxy_dashboard_for_source(&runtime, &source, &config_path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -1860,6 +2682,7 @@ async fn export_proxy_profile_pack(
 #[tauri::command]
 async fn import_proxy_profile_pack(
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     path: String,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
@@ -1871,11 +2694,15 @@ async fn import_proxy_profile_pack(
         let content = fs::read_to_string(&source_path).map_err(|error| error.to_string())?;
         let pack: ProxyProfilePack =
             serde_json::from_str(&content).map_err(|error| error.to_string())?;
-        let workspace = active_proxy_workspace()?;
-        let pack = scope_proxy_pack_for_workspace(pack, &workspace);
-        let config_path = ensure_proxy_config().map_err(|error| error.to_string())?;
+        let (source, config_path) = proxy_path_for_source_id(source_id)?;
+        let pack = if source.is_default {
+            let workspace = active_proxy_workspace()?;
+            scope_proxy_pack_for_workspace(pack, &workspace)
+        } else {
+            pack
+        };
         core_import_proxy_profile_pack(&config_path, pack).map_err(|error| error.to_string())?;
-        proxy_dashboard_for_active_workspace(&runtime, &config_path)
+        proxy_dashboard_for_source(&runtime, &source, &config_path)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2453,6 +3280,7 @@ fn is_supported_browser_proxy_url(value: &str) -> bool {
 fn prepare_rdev_proxy_runtime_profile(
     config: &mut AppConfig,
     proxy_runtime: &ProxyRuntimeState,
+    proxy_path: &Path,
     runtime_profile_key: Option<&str>,
 ) -> Result<(), String> {
     let Some(runtime_profile_key) = runtime_profile_key
@@ -2479,7 +3307,7 @@ fn prepare_rdev_proxy_runtime_profile(
         return Ok(());
     };
 
-    let path = ensure_proxy_config().map_err(|error| error.to_string())?;
+    let path = proxy_path.to_path_buf();
     let proxy_config = load_proxy_config(&path).map_err(|error| error.to_string())?;
     let proxy_profile = proxy_config
         .profiles
@@ -2528,6 +3356,8 @@ fn debug_profile_to_editor(profile: &ProjectDebugProfileConfig) -> ProjectDebugP
     ProjectDebugProfileEditor {
         key: profile.key.clone(),
         label: profile.label.clone(),
+        command: profile.command.clone(),
+        expected_port: profile.expected_port,
         runtime_profile: profile.runtime_profile.clone(),
         env_text: env_map_to_editor_text(&profile.env),
         local_files: profile
@@ -2564,6 +3394,9 @@ fn debug_profiles_from_editor(
             return Err(format!("调试档案 key 重复: {}", key));
         }
         let label = profile.label.trim();
+        if profile.expected_port == Some(0) {
+            return Err(format!("调试档案 {} 的预期端口必须在 1-65535 之间", key));
+        }
         let local_files = profile
             .local_files
             .into_iter()
@@ -2605,6 +3438,8 @@ fn debug_profiles_from_editor(
             } else {
                 label.to_string()
             },
+            command: optional_editor_string(profile.command),
+            expected_port: profile.expected_port,
             runtime_profile: optional_editor_string(profile.runtime_profile),
             env: env_map_from_editor_text(&profile.env_text)?,
             local_files,
@@ -2715,6 +3550,8 @@ fn load_project_config_editor_state(path: &Path) -> Result<ProjectConfigEditorSt
     let config = load_config(path).map_err(|error| error.to_string())?;
     Ok(ProjectConfigEditorState {
         config_path: path.display().to_string(),
+        runtime_config_path: None,
+        runtime_profile_scope: "global".to_string(),
         jenkins_profiles: config.defaults.jenkins_profiles.keys().cloned().collect(),
         default_branch_rules: BranchRulesEditor {
             source_keywords: config.defaults.branch_rules.source_keywords.clone(),
@@ -2728,6 +3565,33 @@ fn load_project_config_editor_state(path: &Path) -> Result<ProjectConfigEditorSt
             .collect(),
         projects: config.projects.iter().map(project_to_editor).collect(),
     })
+}
+
+fn load_project_config_editor_state_for_source(
+    path: &Path,
+    source: &ConfigSource,
+) -> Result<ProjectConfigEditorState, String> {
+    let mut state = load_project_config_editor_state(path)?;
+    if source.is_default {
+        return Ok(state);
+    }
+    let Some(runtime_path) = runtime_overrides_path_for_config_source(source)? else {
+        state.runtime_profile_scope = "unsupported".to_string();
+        return Ok(state);
+    };
+    state.runtime_config_path = Some(runtime_path.display().to_string());
+    if runtime_path.exists() {
+        let overrides = load_runtime_overrides(&runtime_path)?;
+        state.runtime_profiles = overrides
+            .runtime_profiles
+            .iter()
+            .map(runtime_profile_to_editor)
+            .collect();
+        state.runtime_profile_scope = "override".to_string();
+    } else {
+        state.runtime_profile_scope = "inherited".to_string();
+    }
+    Ok(state)
 }
 
 fn deploy_targets_from_editor(
@@ -2803,10 +3667,13 @@ fn deploy_targets_from_editor(
 }
 
 #[tauri::command]
-async fn get_project_config_editor() -> Result<ProjectConfigEditorState, String> {
+async fn get_project_config_editor(
+    source_id: Option<String>,
+) -> Result<ProjectConfigEditorState, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-        load_project_config_editor_state(&paths.projects)
+        let source = resolve_app_config_source(source_id)?;
+        load_project_config_editor_state_for_source(&paths.projects, &source)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -2912,19 +3779,51 @@ async fn save_default_branch_rules(
 #[tauri::command]
 async fn save_runtime_profiles(
     state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
     request: SaveRuntimeProfilesRequest,
 ) -> Result<ProjectConfigEditorState, String> {
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let source = resolve_app_config_source(source_id)?;
+        let runtime_profiles = runtime_profiles_from_editor(request.runtime_profiles)?;
+        if !source.is_default {
+            let runtime_path = runtime_overrides_path_for_config_source(&source)?
+                .ok_or_else(|| format!("配置源不支持运行配置：{}", source.name))?;
+            save_runtime_overrides(&runtime_path, runtime_profiles)?;
+            return load_project_config_editor_state_for_source(&paths.projects, &source);
+        }
         let mut config = load_config(&paths.projects).map_err(|error| error.to_string())?;
 
-        config.defaults.runtime_profiles = runtime_profiles_from_editor(request.runtime_profiles)?;
+        config.defaults.runtime_profiles = runtime_profiles;
 
         save_config(&paths.projects, &config).map_err(|error| error.to_string())?;
         config_state.invalidate()?;
 
-        load_project_config_editor_state(&paths.projects)
+        load_project_config_editor_state_for_source(&paths.projects, &source)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn restore_runtime_profile_inheritance(
+    source_id: String,
+) -> Result<ProjectConfigEditorState, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let source = resolve_app_config_source(Some(source_id))?;
+        if source.is_default {
+            return Err("默认配置没有可恢复的上级运行配置".to_string());
+        }
+        let runtime_path = runtime_overrides_path_for_config_source(&source)?
+            .ok_or_else(|| format!("配置源不支持运行配置：{}", source.name))?;
+        if runtime_path.exists() {
+            fs::remove_file(&runtime_path).map_err(|error| {
+                format!("删除运行配置覆盖失败：{} ({error})", runtime_path.display())
+            })?;
+        }
+        load_project_config_editor_state_for_source(&paths.projects, &source)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -3615,6 +4514,43 @@ async fn execute_branch_switch_task(
     .map_err(|error| error.to_string())?
 }
 
+fn project_worktree_items(
+    config: &AppConfig,
+    workspace: &ProjectWorkspaceConfig,
+    project: &str,
+) -> Result<Vec<BranchWorktreeSummary>, String> {
+    let mut items = project_worktrees(config, project).map_err(|error| error.to_string())?;
+    let workspace_config = apply_project_workspace_context(config, workspace);
+    if let Ok(workspace_items) = project_worktrees(&workspace_config, project) {
+        for item in workspace_items {
+            if !items
+                .iter()
+                .any(|current| same_path(Path::new(&current.repo_path), Path::new(&item.repo_path)))
+            {
+                items.push(item);
+            }
+        }
+    }
+
+    if let Some(instance) = workspace
+        .project_instances
+        .iter()
+        .find(|instance| instance.project == project)
+    {
+        for item in &mut items {
+            if same_path(Path::new(&item.repo_path), &instance.path) {
+                item.is_workspace_instance = true;
+                item.managed = instance.managed;
+                if item.label == "默认目录" {
+                    item.label = "工作区副本".to_string();
+                }
+            }
+        }
+    }
+
+    Ok(items)
+}
+
 #[tauri::command]
 async fn list_project_worktrees(
     state: tauri::State<'_, AppState>,
@@ -3625,24 +4561,30 @@ async fn list_project_worktrees(
         let paths = ensure_default_configs().map_err(|error| error.to_string())?;
         let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
         let config = config_state.load()?;
-        let config = apply_project_workspace_context(&config, &workspace);
-        let mut items = project_worktrees(&config, &project).map_err(|error| error.to_string())?;
-        if let Some(instance) = workspace
-            .project_instances
-            .iter()
-            .find(|instance| instance.project == project)
-        {
-            for item in &mut items {
-                if same_path(Path::new(&item.repo_path), &instance.path) {
-                    item.is_workspace_instance = true;
-                    item.managed = instance.managed;
-                    if item.label == "默认目录" {
-                        item.label = "工作区副本".to_string();
-                    }
-                }
-            }
+        project_worktree_items(&config, &workspace, &project)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn repair_project_worktree(
+    state: tauri::State<'_, AppState>,
+    project: String,
+    repo_path: String,
+) -> Result<Vec<BranchWorktreeSummary>, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
+        let config = config_state.load()?;
+        let repo_path = PathBuf::from(repo_path.trim());
+        if repo_path.as_os_str().is_empty() {
+            return Err("工作副本目录不能为空".to_string());
         }
-        Ok(items)
+        core_repair_project_worktree(&config, &project, &repo_path)
+            .map_err(|error| error.to_string())?;
+        project_worktree_items(&config, &workspace, &project)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -3660,6 +4602,21 @@ async fn get_project_push_status(
         let config = apply_active_workspace_context(&config)?;
         branch_push_status(&config, &project, repo_path.as_deref())
             .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_project_file_diff(
+    state: tauri::State<'_, AppState>,
+    request: BranchFileDiffRequest,
+) -> Result<BranchFileDiffResponse, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        let config = apply_active_workspace_context(&config)?;
+        branch_file_diff(&config, &request).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -3706,32 +4663,1472 @@ async fn open_external_resource(kind: String, value: String) -> Result<(), Strin
 }
 
 #[tauri::command]
-async fn load_page_navigation() -> Result<NavigationData, String> {
+async fn load_page_navigation(source_id: Option<String>) -> Result<NavigationData, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let paths = ensure_default_configs().map_err(|error| error.to_string())?;
         let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
-        load_navigation_data_for_workspace(&workspace).map_err(|error| error.to_string())
+        let source = core_resolve_config_source(
+            source_id.as_deref(),
+            &load_project_workspaces(&paths.project_workspaces)
+                .map_err(|error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+        if source.is_default {
+            load_navigation_data_for_workspace(&workspace).map_err(|error| error.to_string())
+        } else {
+            load_navigation_source_data_for_workspace(
+                &PathBuf::from(source.files.navigation),
+                &workspace,
+            )
+            .map_err(|error| error.to_string())
+        }
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-async fn get_navigation_editor() -> Result<NavigationEditorData, String> {
+async fn list_config_sources() -> Result<Vec<ConfigSource>, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        load_navigation_editor_data().map_err(|error| error.to_string())
+        let workspaces = load_config_source_workspaces()?;
+        core_list_config_sources(&workspaces).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-async fn save_navigation_editor(data: NavigationEditorData) -> Result<NavigationData, String> {
+async fn compare_config_sources(
+    left_source_id: String,
+    right_source_id: String,
+) -> Result<ConfigSourceComparison, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        save_navigation_editor_data(data).map_err(|error| error.to_string())
+        let workspaces = load_config_source_workspaces()?;
+        core_compare_config_sources(&workspaces, &left_source_id, &right_source_id)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn copy_config_source(
+    request: CopyConfigSourceRequest,
+) -> Result<ConfigSourceCopyResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspaces = load_config_source_workspaces()?;
+        core_copy_config_source(&workspaces, request).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+fn list_ui_profiles() -> Result<UiProfileManifest, String> {
+    ui_profile_manifest().map_err(|error| error.to_string())
+}
+
+fn inspect_config_source_file<F>(
+    key: &str,
+    label: &str,
+    capability: &str,
+    path: Option<&str>,
+    supported: bool,
+    validate: F,
+) -> ConfigSourceFileInspection
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    let path = path.map(str::to_string);
+    if !supported {
+        return ConfigSourceFileInspection {
+            key: key.to_string(),
+            label: label.to_string(),
+            capability: capability.to_string(),
+            path,
+            supported: false,
+            exists: false,
+            status: "unsupported".to_string(),
+            message: "当前配置源未启用此能力".to_string(),
+        };
+    }
+    let Some(file_path) = path.as_deref() else {
+        return ConfigSourceFileInspection {
+            key: key.to_string(),
+            label: label.to_string(),
+            capability: capability.to_string(),
+            path,
+            supported: true,
+            exists: false,
+            status: "invalid".to_string(),
+            message: "未配置文件路径".to_string(),
+        };
+    };
+    let file_path = PathBuf::from(file_path);
+    if !file_path.exists() {
+        return ConfigSourceFileInspection {
+            key: key.to_string(),
+            label: label.to_string(),
+            capability: capability.to_string(),
+            path,
+            supported: true,
+            exists: false,
+            status: "missing".to_string(),
+            message: "首次保存时创建".to_string(),
+        };
+    }
+    match validate(&file_path) {
+        Ok(()) => ConfigSourceFileInspection {
+            key: key.to_string(),
+            label: label.to_string(),
+            capability: capability.to_string(),
+            path,
+            supported: true,
+            exists: true,
+            status: "ready".to_string(),
+            message: "格式有效".to_string(),
+        },
+        Err(error) => ConfigSourceFileInspection {
+            key: key.to_string(),
+            label: label.to_string(),
+            capability: capability.to_string(),
+            path,
+            supported: true,
+            exists: true,
+            status: "invalid".to_string(),
+            message: error,
+        },
+    }
+}
+
+fn inspect_config_source_state(source: ConfigSource) -> Result<ConfigSourceInspection, String> {
+    let resource_supported = config_source_supports(&source, "resource");
+    let link_supported = config_source_supports(&source, "link");
+    let proxy_supported = config_source_supports(&source, "proxy");
+    let runtime_supported = config_source_supports(&source, "runtime");
+    let files = vec![
+        inspect_config_source_file(
+            "navigation",
+            "资源入口",
+            "resource",
+            Some(&source.files.navigation),
+            resource_supported,
+            |path| {
+                load_navigation_editor_data_from_path(path)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+        ),
+        inspect_config_source_file(
+            "links",
+            "链路",
+            "link",
+            Some(&source.files.links),
+            link_supported,
+            |path| {
+                core_list_links_from_path(path)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+        ),
+        inspect_config_source_file(
+            "proxy",
+            "代理服务",
+            "proxy",
+            source.files.proxy.as_deref(),
+            proxy_supported,
+            |path| {
+                load_proxy_config(path)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+        ),
+        inspect_config_source_file(
+            "runtimeOverrides",
+            "运行配置覆盖",
+            "runtime",
+            source.files.runtime_overrides.as_deref(),
+            runtime_supported,
+            |path| load_runtime_overrides(path).map(|_| ()),
+        ),
+    ];
+    let invalid_files = files
+        .iter()
+        .filter(|file| file.status == "invalid")
+        .collect::<Vec<_>>();
+    let missing_count = files
+        .iter()
+        .filter(|file| file.supported && file.status == "missing")
+        .count();
+    let supported_count = files.iter().filter(|file| file.supported).count();
+    let (status, summary) = if !invalid_files.is_empty() {
+        (
+            "invalid".to_string(),
+            format!("{} 个配置文件需要修复", invalid_files.len()),
+        )
+    } else if supported_count == 0 {
+        ("unsupported".to_string(), "未启用配置能力".to_string())
+    } else if missing_count == supported_count {
+        (
+            "empty".to_string(),
+            "尚未初始化，首次保存时创建文件".to_string(),
+        )
+    } else if missing_count > 0 {
+        (
+            "ready".to_string(),
+            format!("配置可用，{missing_count} 个文件尚未创建"),
+        )
+    } else {
+        ("ready".to_string(), "全部配置文件格式有效".to_string())
+    };
+    let issues = invalid_files
+        .into_iter()
+        .map(|file| format!("{}：{}", file.label, file.message))
+        .collect::<Vec<_>>();
+    let definition =
+        get_custom_config_source_definition(&source.id).map_err(|error| error.to_string())?;
+    let runtime_profile_scope = if source.is_default {
+        "global"
+    } else if !runtime_supported {
+        "unsupported"
+    } else if source
+        .files
+        .runtime_overrides
+        .as_deref()
+        .is_some_and(|path| Path::new(path).exists())
+    {
+        "override"
+    } else {
+        "inherited"
+    };
+    Ok(ConfigSourceInspection {
+        editable: definition.is_some(),
+        source,
+        definition,
+        registry_path: config_sources_file_path().display().to_string(),
+        status,
+        summary,
+        issues,
+        files,
+        runtime_profile_scope: runtime_profile_scope.to_string(),
+    })
+}
+
+#[tauri::command]
+async fn inspect_config_source(
+    source_id: Option<String>,
+) -> Result<ConfigSourceInspection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = resolve_app_config_source(source_id)?;
+        inspect_config_source_state(source)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn save_config_source(
+    definition: ConfigSourceDefinition,
+) -> Result<ConfigSourceInspection, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspaces = load_config_source_workspaces()?;
+        let source = core_save_custom_config_source(&workspaces, definition)
+            .map_err(|error| error.to_string())?;
+        inspect_config_source_state(source)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn delete_config_source(source_id: String) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let workspaces = load_config_source_workspaces()?;
+        core_delete_custom_config_source(&workspaces, &source_id).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_config_source_preference(
+    workspace_key: String,
+    capability: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        core_load_config_source_preference(&paths, &workspace_key, &capability)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn save_config_source_preference(
+    workspace_key: String,
+    capability: String,
+    source_id: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        core_save_config_source_preference(&paths, &workspace_key, &capability, &source_id)
+            .map(|source| source.id)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn load_config_source_workspaces() -> Result<Vec<ProjectWorkspaceConfig>, String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())
+}
+
+fn resolve_app_config_source(source_id: Option<String>) -> Result<ConfigSource, String> {
+    let workspaces = load_config_source_workspaces()?;
+    core_resolve_config_source(source_id.as_deref(), &workspaces).map_err(|error| error.to_string())
+}
+
+fn config_source_supports(source: &ConfigSource, capability: &str) -> bool {
+    source
+        .capabilities
+        .iter()
+        .any(|item| item.trim() == capability)
+}
+
+fn proxy_path_for_config_source(source: &ConfigSource) -> Result<PathBuf, String> {
+    if !config_source_supports(source, "proxy") {
+        return Err(format!("配置源不支持代理配置：{}", source.name));
+    }
+    let path = source
+        .files
+        .proxy
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("配置源没有代理配置文件：{}", source.name))?;
+    if !path.exists() {
+        save_proxy_config(&path, &ProxyConfig::default()).map_err(|error| error.to_string())?;
+    }
+    Ok(path)
+}
+
+fn proxy_path_for_source_id(source_id: Option<String>) -> Result<(ConfigSource, PathBuf), String> {
+    let source = resolve_app_config_source(source_id)?;
+    let path = proxy_path_for_config_source(&source)?;
+    Ok((source, path))
+}
+
+fn runtime_overrides_path_for_config_source(
+    source: &ConfigSource,
+) -> Result<Option<PathBuf>, String> {
+    if !config_source_supports(source, "runtime") {
+        return Ok(None);
+    }
+    Ok(source.files.runtime_overrides.as_deref().map(PathBuf::from))
+}
+
+fn load_runtime_overrides(path: &Path) -> Result<RuntimeOverridesFile, String> {
+    if !path.exists() {
+        return Ok(RuntimeOverridesFile::default());
+    }
+    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
+    toml::from_str(&content).map_err(|error| error.to_string())
+}
+
+fn save_runtime_overrides(path: &Path, profiles: Vec<RuntimeProfileConfig>) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let data = RuntimeOverridesFile {
+        runtime_profiles: profiles,
+    };
+    let content = toml::to_string_pretty(&data).map_err(|error| error.to_string())?;
+    write_config_text_atomic(path, content).map_err(|error| error.to_string())
+}
+
+fn apply_runtime_overrides_for_source(
+    config: &mut AppConfig,
+    source: &ConfigSource,
+) -> Result<(), String> {
+    if source.is_default {
+        return Ok(());
+    }
+    let Some(path) = runtime_overrides_path_for_config_source(source)? else {
+        return Ok(());
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let overrides = load_runtime_overrides(&path)?;
+    config.defaults.runtime_profiles = overrides.runtime_profiles;
+    Ok(())
+}
+
+fn proxy_dashboard_for_source(
+    runtime: &ProxyRuntimeState,
+    source: &ConfigSource,
+    path: &Path,
+) -> Result<ProxyDashboard, String> {
+    let dashboard = runtime.dashboard(path).map_err(|error| error.to_string())?;
+    if source.is_default {
+        let workspace = active_proxy_workspace()?;
+        Ok(filter_proxy_dashboard_by_workspace(dashboard, &workspace))
+    } else {
+        Ok(dashboard)
+    }
+}
+
+#[tauri::command]
+async fn get_navigation_editor(source_id: Option<String>) -> Result<NavigationEditorData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = resolve_app_config_source(source_id)?;
+        load_navigation_editor_data_from_path(&PathBuf::from(source.files.navigation))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn save_navigation_editor(
+    source_id: Option<String>,
+    data: NavigationEditorData,
+) -> Result<NavigationData, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = resolve_app_config_source(source_id)?;
+        save_navigation_editor_data_to_path(data, &PathBuf::from(source.files.navigation))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn list_links(
+    state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
+) -> Result<Vec<LinkSummary>, String> {
+    let config_state = state.config_state.clone();
+    let proxy_runtime = state.proxy_runtime.clone();
+    let project_runtime = state.project_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (config, workspaces) = load_link_app_context(&config_state)?;
+        let source = core_resolve_config_source(source_id.as_deref(), &workspaces)
+            .map_err(|error| error.to_string())?;
+        let proxy_path = proxy_path_for_config_source(&source)?;
+        let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+        let links_path = PathBuf::from(source.files.links);
+        let mut summaries =
+            core_list_link_summaries_from_path(&links_path, &config, &workspaces, &proxy_config)
+                .map_err(|error| error.to_string())?;
+        let links = core_list_links_from_path(&links_path).map_err(|error| error.to_string())?;
+        let project_statuses = project_runtime
+            .list(&config)?
+            .into_iter()
+            .map(|snapshot| (snapshot.key.clone(), snapshot))
+            .collect::<BTreeMap<_, _>>();
+        attach_link_runtime_summaries(
+            &mut summaries,
+            &links,
+            &proxy_path,
+            &proxy_config,
+            &proxy_runtime,
+            &project_statuses,
+        );
+        Ok(summaries)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_link(source_id: Option<String>, key: String) -> Result<LinkConfig, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = resolve_app_config_source(source_id)?;
+        core_get_link_from_path(&PathBuf::from(source.files.links), &key)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn plan_link(
+    state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
+    key: String,
+) -> Result<LinkPlan, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (config, workspaces) = load_link_app_context(&config_state)?;
+        let source = core_resolve_config_source(source_id.as_deref(), &workspaces)
+            .map_err(|error| error.to_string())?;
+        let proxy_path = proxy_path_for_config_source(&source)?;
+        let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+        core_plan_link_from_path(
+            &PathBuf::from(source.files.links),
+            &key,
+            &config,
+            &workspaces,
+            &proxy_config,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn save_link(
+    state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
+    previous_key: Option<String>,
+    link: LinkConfig,
+) -> Result<serde_json::Value, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (config, workspaces) = load_link_app_context(&config_state)?;
+        let source = core_resolve_config_source(source_id.as_deref(), &workspaces)
+            .map_err(|error| error.to_string())?;
+        let proxy_path = proxy_path_for_config_source(&source)?;
+        let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+        let links_path = PathBuf::from(source.files.links);
+        let link =
+            core_upsert_link_to_path_with_previous_key(&links_path, link, previous_key.as_deref())
+                .map_err(|error| error.to_string())?;
+        let plan =
+            core_plan_link_from_path(&links_path, &link.key, &config, &workspaces, &proxy_config)
+                .map_err(|error| error.to_string())?;
+        Ok(json!({ "link": link, "plan": plan }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn delete_link(source_id: Option<String>, key: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = resolve_app_config_source(source_id)?;
+        let deleted = core_delete_link_from_path(&PathBuf::from(source.files.links), &key)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({ "key": key, "deleted": deleted }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn attach_link_to_workspace(
+    state: tauri::State<'_, AppState>,
+    request: LinkWorkspaceAttachRequest,
+) -> Result<serde_json::Value, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let link_key = request.link_key.clone();
+        let result: LinkWorkspaceAttachResult =
+            core_attach_link_to_workspace(&paths.project_workspaces, request)
+                .map_err(|error| error.to_string())?;
+        let (config, workspaces) = load_link_app_context(&config_state)?;
+        let source =
+            core_resolve_config_source(None, &workspaces).map_err(|error| error.to_string())?;
+        let proxy_path = proxy_path_for_config_source(&source)?;
+        let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+        let plan = core_plan_link(&link_key, &config, &workspaces, &proxy_config)
+            .map_err(|error| error.to_string())?;
+        Ok(json!({ "result": result, "plan": plan }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn check_link(
+    state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
+    key: String,
+) -> Result<LinkExecutionReport, String> {
+    execute_link_app_command(state, source_id, key, "check").await
+}
+
+#[tauri::command]
+async fn run_link(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
+    key: String,
+) -> Result<LinkExecutionReport, String> {
+    let result = execute_link_app_command(state, source_id, key, "run").await;
+    if result.is_ok() {
+        refresh_tray_menu(&app);
+    }
+    result
+}
+
+#[tauri::command]
+async fn stop_link(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
+    key: String,
+) -> Result<LinkExecutionReport, String> {
+    let result = execute_link_app_command(state, source_id, key, "stop").await;
+    if result.is_ok() {
+        refresh_tray_menu(&app);
+    }
+    result
+}
+
+async fn execute_link_app_command(
+    state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
+    key: String,
+    mode: &'static str,
+) -> Result<LinkExecutionReport, String> {
+    let config_state = state.config_state.clone();
+    let proxy_runtime = state.proxy_runtime.clone();
+    let project_runtime = state.project_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        execute_link_app(
+            &config_state,
+            &proxy_runtime,
+            &project_runtime,
+            LinkAppExecutionRequest {
+                link_source_id: source_id,
+                proxy_source_id: None,
+                workspace_key: None,
+                key,
+                mode: mode.to_string(),
+            },
+        )
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+fn attach_link_runtime_summaries(
+    summaries: &mut [LinkSummary],
+    links: &[LinkConfig],
+    proxy_path: &Path,
+    proxy_config: &ProxyConfig,
+    proxy_runtime: &ProxyRuntimeState,
+    project_statuses: &BTreeMap<String, ProjectRuntimeSnapshot>,
+) {
+    let links_by_key = links
+        .iter()
+        .map(|link| (link.key.as_str(), link))
+        .collect::<BTreeMap<_, _>>();
+    for summary in summaries {
+        summary.runtime = links_by_key.get(summary.key.as_str()).map(|link| {
+            link_runtime_summary_app(
+                link,
+                proxy_path,
+                proxy_config,
+                proxy_runtime,
+                project_statuses,
+            )
+        });
+    }
+}
+
+fn link_runtime_summary_app(
+    link: &LinkConfig,
+    proxy_path: &Path,
+    proxy_config: &ProxyConfig,
+    proxy_runtime: &ProxyRuntimeState,
+    project_statuses: &BTreeMap<String, ProjectRuntimeSnapshot>,
+) -> LinkRuntimeSummary {
+    let mut controllable_steps = 0usize;
+    let mut running_steps = 0usize;
+    let mut stoppable_steps = 0usize;
+    let mut blocked_steps = 0usize;
+
+    for step in &link.steps {
+        match step.step_type.trim() {
+            "proxy.start" => {
+                controllable_steps += 1;
+                let Some(profile) = link_step_proxy_profile(step)
+                    .and_then(|profile_key| find_link_proxy_profile(proxy_config, &profile_key))
+                else {
+                    blocked_steps += 1;
+                    continue;
+                };
+                let running = proxy_runtime
+                    .statuses_for_profiles(proxy_path, std::slice::from_ref(profile))
+                    .into_iter()
+                    .next()
+                    .is_some_and(|status| status.running);
+                if running {
+                    running_steps += 1;
+                    stoppable_steps += 1;
+                }
+            }
+            "runtime.start" => {
+                controllable_steps += 1;
+                let Some(project_key) = link_step_project(link, step) else {
+                    blocked_steps += 1;
+                    continue;
+                };
+                let Some(snapshot) = project_statuses.get(&project_key) else {
+                    blocked_steps += 1;
+                    continue;
+                };
+                if snapshot.can_stop {
+                    running_steps += 1;
+                    stoppable_steps += 1;
+                } else if matches!(
+                    snapshot.status_key.as_str(),
+                    "running" | "ready" | "external"
+                ) {
+                    running_steps += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let (status, label) = if controllable_steps == 0 {
+        ("planned", "计划")
+    } else if blocked_steps >= controllable_steps && running_steps == 0 {
+        ("invalid", "配置异常")
+    } else if running_steps == 0 && blocked_steps > 0 {
+        ("warning", "有风险")
+    } else if running_steps == 0 {
+        ("stopped", "未启动")
+    } else if blocked_steps == 0 && running_steps >= controllable_steps {
+        ("running", "运行中")
+    } else {
+        ("partial", "部分运行")
+    };
+    let can_stop = stoppable_steps > 0;
+    let can_run = controllable_steps == 0
+        || (blocked_steps < controllable_steps && running_steps < controllable_steps);
+
+    LinkRuntimeSummary {
+        status: status.to_string(),
+        label: label.to_string(),
+        running_steps,
+        controllable_steps,
+        blocked_steps,
+        can_run,
+        can_stop,
+    }
+}
+
+struct LinkAppExecutionRequest {
+    link_source_id: Option<String>,
+    proxy_source_id: Option<String>,
+    workspace_key: Option<String>,
+    key: String,
+    mode: String,
+}
+
+fn execute_link_app(
+    config_state: &AppConfigState,
+    proxy_runtime: &ProxyRuntimeState,
+    project_runtime: &ProjectRuntimeState,
+    request: LinkAppExecutionRequest,
+) -> Result<LinkExecutionReport, String> {
+    let context = workspace_execution_context(config_state, request.workspace_key.as_deref())?;
+    let link_source = if let Some(source_id) = request.link_source_id.as_deref() {
+        core_resolve_config_source(Some(source_id), &context.workspaces)
+            .map_err(|error| error.to_string())?
+    } else {
+        context.link_source.clone()
+    };
+    let proxy_source = if let Some(source_id) = request.proxy_source_id.as_deref() {
+        core_resolve_config_source(Some(source_id), &context.workspaces)
+            .map_err(|error| error.to_string())?
+    } else {
+        context.proxy_source.clone()
+    };
+    let links_path = PathBuf::from(&link_source.files.links);
+    let link =
+        core_get_link_from_path(&links_path, &request.key).map_err(|error| error.to_string())?;
+    let proxy_path = proxy_path_for_config_source(&proxy_source)?;
+    let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+    let plan = core_plan_link_from_path(
+        &links_path,
+        &link.key,
+        &context.config,
+        &context.workspaces,
+        &proxy_config,
+    )
+    .map_err(|error| error.to_string())?;
+    let mut warnings = plan.warnings.clone();
+    let mut indices = (0..link.steps.len()).collect::<Vec<_>>();
+    if request.mode == "stop" {
+        indices.reverse();
+    }
+
+    let mut steps = Vec::new();
+    for index in indices {
+        let step = &link.steps[index];
+        let report = execute_link_step_app(
+            &request.mode,
+            &context.config,
+            proxy_runtime,
+            project_runtime,
+            &proxy_path,
+            &proxy_config,
+            &link,
+            step,
+            plan.steps.get(index),
+            index,
+        );
+        for risk in &report.risks {
+            if report.status == "skipped" || report.status == "failed" {
+                push_unique_link_warning(&mut warnings, risk.clone());
+            }
+        }
+        steps.push(report);
+    }
+
+    Ok(LinkExecutionReport {
+        key: plan.key.clone(),
+        name: plan.name.clone(),
+        mode: request.mode,
+        plan,
+        steps,
+        warnings,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_link_step_app(
+    mode: &str,
+    effective_config: &AppConfig,
+    proxy_runtime: &ProxyRuntimeState,
+    project_runtime: &ProjectRuntimeState,
+    proxy_path: &Path,
+    proxy_config: &ProxyConfig,
+    link: &LinkConfig,
+    step: &LinkStepConfig,
+    plan_step: Option<&rdevtool_core::link::LinkPlanStep>,
+    index: usize,
+) -> LinkExecutionStepReport {
+    let id = plan_step
+        .map(|item| item.id.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("step-{}", index + 1));
+    let step_type = plan_step
+        .map(|item| item.step_type.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| step.step_type.trim().to_string());
+    let label = plan_step
+        .map(|item| item.label.clone())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| id.clone());
+    let planned_summary = plan_step
+        .map(|item| item.summary.clone())
+        .unwrap_or_else(|| "Link step".to_string());
+    let planned_risks = plan_step.map(|item| item.risks.clone()).unwrap_or_default();
+
+    if !planned_risks.is_empty() {
+        return LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: "计划校验未通过，已跳过执行。".to_string(),
+            detail: None,
+            risks: planned_risks,
+        };
+    }
+
+    match mode {
+        "check" => check_link_step_app(
+            effective_config,
+            proxy_runtime,
+            project_runtime,
+            proxy_path,
+            proxy_config,
+            link,
+            step,
+            id,
+            step_type,
+            label,
+            planned_summary,
+        ),
+        "run" => run_link_step_app(
+            effective_config,
+            proxy_runtime,
+            project_runtime,
+            proxy_path,
+            proxy_config,
+            link,
+            step,
+            id,
+            step_type,
+            label,
+            planned_summary,
+        ),
+        "stop" => stop_link_step_app(
+            effective_config,
+            proxy_runtime,
+            project_runtime,
+            proxy_path,
+            proxy_config,
+            link,
+            step,
+            id,
+            step_type,
+            label,
+            planned_summary,
+        ),
+        _ => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "failed".to_string(),
+            summary: format!("不支持的 Link 执行模式：{mode}"),
+            detail: None,
+            risks: vec![format!("不支持的 Link 执行模式：{mode}")],
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_link_step_app(
+    effective_config: &AppConfig,
+    proxy_runtime: &ProxyRuntimeState,
+    project_runtime: &ProjectRuntimeState,
+    proxy_path: &Path,
+    proxy_config: &ProxyConfig,
+    link: &LinkConfig,
+    step: &LinkStepConfig,
+    id: String,
+    step_type: String,
+    label: String,
+    planned_summary: String,
+) -> LinkExecutionStepReport {
+    match step_type.as_str() {
+        "localFile.ensure" => {
+            let project_key = link_step_project(link, step);
+            let path = optional_link_text(step.path.as_deref());
+            let mut risks = Vec::new();
+            let detail = match (project_key.as_deref(), path.as_deref()) {
+                (Some(project_key), Some(path)) => match effective_config.find_project(project_key)
+                {
+                    Ok(project) => {
+                        let absolute_path = project.repo_path.as_ref().map(|repo| repo.join(path));
+                        json!({
+                            "project": project_key,
+                            "path": path,
+                            "absolutePath": absolute_path.as_ref().map(|value| value.display().to_string()),
+                            "exists": absolute_path.as_ref().is_some_and(|value| value.exists())
+                        })
+                    }
+                    Err(error) => {
+                        risks.push(error.to_string());
+                        json!({ "project": project_key, "path": path })
+                    }
+                },
+                _ => json!({ "project": project_key, "path": path }),
+            };
+            LinkExecutionStepReport {
+                id,
+                step_type,
+                label,
+                status: if risks.is_empty() {
+                    "checked".to_string()
+                } else {
+                    "failed".to_string()
+                },
+                summary: "本地覆盖文件由运行调试配置在启动前应用。".to_string(),
+                detail: Some(detail),
+                risks,
+            }
+        }
+        "proxy.start" | "proxy.check" => match link_step_proxy_profile(step)
+            .and_then(|profile_key| find_link_proxy_profile(proxy_config, &profile_key))
+        {
+            Some(profile) => {
+                let status = proxy_runtime
+                    .statuses_for_profiles(proxy_path, std::slice::from_ref(profile))
+                    .into_iter()
+                    .next();
+                let running = status.as_ref().is_some_and(|item| item.running);
+                let mut risks = Vec::new();
+                if !running {
+                    risks.push(format!("代理未由 App 启动：{}", profile.listen_url()));
+                }
+                LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: if running {
+                        "checked".to_string()
+                    } else {
+                        "failed".to_string()
+                    },
+                    summary: if running {
+                        format!("代理正在监听 {}", profile.listen_url())
+                    } else {
+                        format!("代理未启动，期望监听 {}", profile.listen_url())
+                    },
+                    detail: Some(json!({
+                        "profileId": profile.id,
+                        "profileName": profile.name,
+                        "listenUrl": profile.listen_url(),
+                        "runtimeStatus": status
+                    })),
+                    risks,
+                }
+            }
+            None => LinkExecutionStepReport {
+                id,
+                step_type,
+                label,
+                status: "failed".to_string(),
+                summary: planned_summary,
+                detail: None,
+                risks: vec!["代理 profile 不存在，无法检查监听。".to_string()],
+            },
+        },
+        "runtime.start" => {
+            let Some(project_key) = link_step_project(link, step) else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "缺少项目，无法执行运行前检查。".to_string(),
+                    detail: None,
+                    risks: vec!["缺少 project。".to_string()],
+                };
+            };
+            let options = link_step_runtime_launch_options(step);
+            match project_runtime.preflight_with_options(effective_config, &project_key, &options) {
+                Ok(response) => {
+                    let status = if response.status_key == "error" {
+                        "failed"
+                    } else {
+                        "checked"
+                    };
+                    let risks = response
+                        .checks
+                        .iter()
+                        .filter(|check| check.status_key == "error")
+                        .map(|check| format!("{}：{}", check.title, check.detail))
+                        .collect::<Vec<_>>();
+                    LinkExecutionStepReport {
+                        id,
+                        step_type,
+                        label,
+                        status: status.to_string(),
+                        summary: response.summary.clone(),
+                        detail: Some(json!(response)),
+                        risks,
+                    }
+                }
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("运行前检查失败：{error}"),
+                    detail: None,
+                    risks: vec![error],
+                },
+            }
+        }
+        "runtime.focus" => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "checked".to_string(),
+            summary: "打开页面步骤已识别，检查模式不执行打开动作。".to_string(),
+            detail: None,
+            risks: Vec::new(),
+        },
+        _ => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: planned_summary,
+            detail: None,
+            risks: vec!["该步骤类型尚未接入 App 检查器。".to_string()],
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_link_step_app(
+    effective_config: &AppConfig,
+    proxy_runtime: &ProxyRuntimeState,
+    project_runtime: &ProjectRuntimeState,
+    proxy_path: &Path,
+    proxy_config: &ProxyConfig,
+    link: &LinkConfig,
+    step: &LinkStepConfig,
+    id: String,
+    step_type: String,
+    label: String,
+    planned_summary: String,
+) -> LinkExecutionStepReport {
+    match step_type.as_str() {
+        "localFile.ensure" => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "checked".to_string(),
+            summary: "本地覆盖文件不会由 Link 直接写入；启动 runtime 时由调试配置应用。"
+                .to_string(),
+            detail: Some(json!({
+                "project": link_step_project(link, step),
+                "path": optional_link_text(step.path.as_deref())
+            })),
+            risks: Vec::new(),
+        },
+        "proxy.start" => {
+            let Some(profile) = link_step_proxy_profile(step)
+                .and_then(|profile_key| find_link_proxy_profile(proxy_config, &profile_key))
+            else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "代理 profile 不存在，无法启动。".to_string(),
+                    detail: None,
+                    risks: vec!["代理 profile 不存在，无法启动。".to_string()],
+                };
+            };
+            if let Err(error) = validate_proxy_profile(profile) {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("代理配置校验失败：{error}"),
+                    detail: None,
+                    risks: vec![error.to_string()],
+                };
+            }
+            match proxy_runtime.start_profile(proxy_path.to_path_buf(), profile.id.clone()) {
+                Ok(status) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "started".to_string(),
+                    summary: format!("代理已启动：{}", status.listen_url),
+                    detail: Some(json!(status)),
+                    risks: Vec::new(),
+                },
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("代理启动失败：{error}"),
+                    detail: None,
+                    risks: vec![error.to_string()],
+                },
+            }
+        }
+        "proxy.check" => check_link_step_app(
+            effective_config,
+            proxy_runtime,
+            project_runtime,
+            proxy_path,
+            proxy_config,
+            link,
+            step,
+            id,
+            step_type,
+            label,
+            planned_summary,
+        ),
+        "runtime.start" => {
+            let Some(project_key) = link_step_project(link, step) else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "缺少项目，无法启动 runtime。".to_string(),
+                    detail: None,
+                    risks: vec!["缺少 project。".to_string()],
+                };
+            };
+            let options = link_step_runtime_launch_options(step);
+            let mut runtime_config = effective_config.clone();
+            let runtime_profile_key = match options.runtime_profile.clone() {
+                Some(value) => Some(value),
+                None => match project_runtime_profile_key(
+                    &runtime_config,
+                    &project_key,
+                    options.debug_profile.as_deref(),
+                ) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        return LinkExecutionStepReport {
+                            id,
+                            step_type,
+                            label,
+                            status: "failed".to_string(),
+                            summary: format!("运行配置解析失败：{error}"),
+                            detail: None,
+                            risks: vec![error],
+                        };
+                    }
+                },
+            };
+            if let Err(error) = prepare_rdev_proxy_runtime_profile(
+                &mut runtime_config,
+                proxy_runtime,
+                proxy_path,
+                runtime_profile_key.as_deref(),
+            ) {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("运行配置代理准备失败：{error}"),
+                    detail: None,
+                    risks: vec![error],
+                };
+            }
+            match project_runtime.start_with_options(&runtime_config, &project_key, &options) {
+                Ok(snapshot) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "started".to_string(),
+                    summary: snapshot.detail.clone(),
+                    detail: Some(json!(snapshot)),
+                    risks: Vec::new(),
+                },
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("项目启动失败：{error}"),
+                    detail: None,
+                    risks: vec![error],
+                },
+            }
+        }
+        "runtime.focus" => {
+            let Some(project_key) = link_step_project(link, step) else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "缺少项目，无法打开调试页面。".to_string(),
+                    detail: None,
+                    risks: vec!["缺少 project。".to_string()],
+                };
+            };
+            let options = link_step_runtime_launch_options(step);
+            match project_runtime.focus_runtime_with_profile(
+                effective_config,
+                &project_key,
+                options.debug_profile.as_deref(),
+                options.runtime_profile.as_deref(),
+            ) {
+                Ok(snapshot) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "started".to_string(),
+                    summary: snapshot.detail.clone(),
+                    detail: Some(json!(snapshot)),
+                    risks: Vec::new(),
+                },
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("打开调试页面失败：{error}"),
+                    detail: None,
+                    risks: vec![error],
+                },
+            }
+        }
+        _ => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: planned_summary,
+            detail: None,
+            risks: vec!["该步骤类型尚未接入 App 执行器。".to_string()],
+        },
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stop_link_step_app(
+    effective_config: &AppConfig,
+    proxy_runtime: &ProxyRuntimeState,
+    project_runtime: &ProjectRuntimeState,
+    proxy_path: &Path,
+    proxy_config: &ProxyConfig,
+    link: &LinkConfig,
+    step: &LinkStepConfig,
+    id: String,
+    step_type: String,
+    label: String,
+    planned_summary: String,
+) -> LinkExecutionStepReport {
+    match step_type.as_str() {
+        "runtime.start" => {
+            let Some(project_key) = link_step_project(link, step) else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "缺少项目，无法停止 runtime。".to_string(),
+                    detail: None,
+                    risks: vec!["缺少 project。".to_string()],
+                };
+            };
+            match project_runtime.stop(effective_config, &project_key) {
+                Ok(snapshot) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "stopped".to_string(),
+                    summary: snapshot.detail.clone(),
+                    detail: Some(json!(snapshot)),
+                    risks: Vec::new(),
+                },
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("停止项目失败：{error}"),
+                    detail: None,
+                    risks: vec![error],
+                },
+            }
+        }
+        "proxy.start" => {
+            let Some(profile) = link_step_proxy_profile(step)
+                .and_then(|profile_key| find_link_proxy_profile(proxy_config, &profile_key))
+            else {
+                return LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: "代理 profile 不存在，无法停止。".to_string(),
+                    detail: None,
+                    risks: vec!["代理 profile 不存在，无法停止。".to_string()],
+                };
+            };
+            match proxy_runtime.stop_profile_result(proxy_path, &profile.id) {
+                Ok(status) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "stopped".to_string(),
+                    summary: format!("代理已停止：{}", profile.name),
+                    detail: Some(json!(status)),
+                    risks: Vec::new(),
+                },
+                Err(error) => LinkExecutionStepReport {
+                    id,
+                    step_type,
+                    label,
+                    status: "failed".to_string(),
+                    summary: format!("代理停止失败：{error}"),
+                    detail: None,
+                    risks: vec![error.to_string()],
+                },
+            }
+        }
+        "localFile.ensure" => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: "本地覆盖文件不会在 Link stop 中自动删除。".to_string(),
+            detail: Some(json!({
+                "project": link_step_project(link, step),
+                "path": optional_link_text(step.path.as_deref())
+            })),
+            risks: Vec::new(),
+        },
+        "proxy.check" | "runtime.focus" => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: "检查/打开类步骤没有停止动作。".to_string(),
+            detail: None,
+            risks: Vec::new(),
+        },
+        _ => LinkExecutionStepReport {
+            id,
+            step_type,
+            label,
+            status: "skipped".to_string(),
+            summary: planned_summary,
+            detail: None,
+            risks: Vec::new(),
+        },
+    }
+}
+
+fn link_step_project(link: &LinkConfig, step: &LinkStepConfig) -> Option<String> {
+    optional_link_text(step.project.as_deref())
+        .or_else(|| optional_link_text(link.project.as_deref()))
+}
+
+fn link_step_proxy_profile(step: &LinkStepConfig) -> Option<String> {
+    optional_link_text(step.profile.as_deref())
+}
+
+fn link_step_runtime_launch_options(step: &LinkStepConfig) -> ProjectRuntimeLaunchOptions {
+    ProjectRuntimeLaunchOptions {
+        debug_profile: optional_link_text(step.debug_profile.as_deref()),
+        runtime_profile: optional_link_text(step.runtime_profile.as_deref()),
+        command: optional_link_text(step.command.as_deref()),
+        expected_port: step.expected_port,
+        env: step.env.clone(),
+    }
+}
+
+fn optional_link_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn find_link_proxy_profile<'a>(config: &'a ProxyConfig, key: &str) -> Option<&'a ProxyProfile> {
+    config
+        .profiles
+        .iter()
+        .find(|profile| profile.id == key || profile.name == key)
+}
+
+fn push_unique_link_warning(warnings: &mut Vec<String>, warning: String) {
+    if !warnings.iter().any(|item| item == &warning) {
+        warnings.push(warning);
+    }
+}
+
+fn load_link_app_context(
+    config_state: &AppConfigState,
+) -> Result<(AppConfig, Vec<ProjectWorkspaceConfig>), String> {
+    let config = config_state.load()?;
+    let config = apply_active_workspace_context(&config)?;
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspaces =
+        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
+    Ok((config, workspaces))
 }
 
 #[tauri::command]
@@ -3743,10 +6140,12 @@ async fn open_page_navigation_entry(
     let config_state = state.config_state.clone();
     let proxy_runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut config = config_state.load()?;
+        let mut config = apply_active_workspace_context(&config_state.load()?)?;
+        let proxy_path = active_workspace_proxy_path()?;
         prepare_rdev_proxy_runtime_profile(
             &mut config,
             &proxy_runtime,
+            &proxy_path,
             entry.runtime_profile.as_deref(),
         )?;
         let result =
@@ -3791,10 +6190,12 @@ async fn open_web_action_navigation_target(
     let config_state = state.config_state.clone();
     let proxy_runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut config = config_state.load()?;
+        let mut config = apply_active_workspace_context(&config_state.load()?)?;
+        let proxy_path = active_workspace_proxy_path()?;
         prepare_rdev_proxy_runtime_profile(
             &mut config,
             &proxy_runtime,
+            &proxy_path,
             entry.runtime_profile.as_deref(),
         )?;
         core_open_web_action_navigation_target(&entry, &config.defaults.runtime_profiles)
@@ -3821,10 +6222,12 @@ async fn list_web_action_navigation_targets(
     let config_state = state.config_state.clone();
     let proxy_runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut config = config_state.load()?;
+        let mut config = apply_active_workspace_context(&config_state.load()?)?;
+        let proxy_path = active_workspace_proxy_path()?;
         prepare_rdev_proxy_runtime_profile(
             &mut config,
             &proxy_runtime,
+            &proxy_path,
             entry.runtime_profile.as_deref(),
         )?;
         core_list_web_action_navigation_targets(&entry, &config.defaults.runtime_profiles)
@@ -3852,10 +6255,12 @@ async fn run_web_action_navigation(
     let config_state = state.config_state.clone();
     let proxy_runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut config = config_state.load()?;
+        let mut config = apply_active_workspace_context(&config_state.load()?)?;
+        let proxy_path = active_workspace_proxy_path()?;
         prepare_rdev_proxy_runtime_profile(
             &mut config,
             &proxy_runtime,
+            &proxy_path,
             entry.runtime_profile.as_deref(),
         )?;
         core_run_web_action_navigation(&entry, &config.defaults.runtime_profiles, request)
@@ -3885,10 +6290,12 @@ async fn run_web_action_navigation_script(
     let config_state = state.config_state.clone();
     let proxy_runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut config = config_state.load()?;
+        let mut config = apply_active_workspace_context(&config_state.load()?)?;
+        let proxy_path = active_workspace_proxy_path()?;
         prepare_rdev_proxy_runtime_profile(
             &mut config,
             &proxy_runtime,
+            &proxy_path,
             entry.runtime_profile.as_deref(),
         )?;
         core_run_web_action_navigation_script(&entry, &config.defaults.runtime_profiles, request)
@@ -4007,6 +6414,14 @@ async fn execute_tray_pinned_action(
 }
 
 #[tauri::command]
+fn record_tray_pinned_action_execution(
+    app: AppHandle,
+    action: TrayReplayAction,
+) -> Result<(), String> {
+    record_tray_replay_action(&app, action)
+}
+
+#[tauri::command]
 async fn set_tray_pinned_actions(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
@@ -4036,8 +6451,11 @@ async fn list_build_history(
 #[tauri::command]
 async fn save_build_history(
     state: tauri::State<'_, AppState>,
-    request: SaveBuildHistoryRequest,
+    mut request: SaveBuildHistoryRequest,
 ) -> Result<(), String> {
+    let (workspace_key, project_instance_path) = active_history_scope(&request.project_key)?;
+    request.workspace_key = Some(workspace_key);
+    request.project_instance_path = project_instance_path.or(request.project_instance_path);
     let storage = state.storage.clone();
     tauri::async_runtime::spawn_blocking(move || storage.save_deploy_history(request))
         .await
@@ -4067,8 +6485,11 @@ async fn list_deploy_history(
 #[tauri::command]
 async fn save_deploy_history(
     state: tauri::State<'_, AppState>,
-    request: SaveDeployHistoryRequest,
+    mut request: SaveDeployHistoryRequest,
 ) -> Result<(), String> {
+    let (workspace_key, project_instance_path) = active_history_scope(&request.project_key)?;
+    request.workspace_key = Some(workspace_key);
+    request.project_instance_path = project_instance_path.or(request.project_instance_path);
     let storage = state.storage.clone();
     tauri::async_runtime::spawn_blocking(move || storage.save_deploy_history(request))
         .await
@@ -4096,8 +6517,11 @@ async fn list_merge_history(
 #[tauri::command]
 async fn save_merge_history(
     state: tauri::State<'_, AppState>,
-    request: SaveMergeHistoryRequest,
+    mut request: SaveMergeHistoryRequest,
 ) -> Result<(), String> {
+    let (workspace_key, project_instance_path) = active_history_scope(&request.project_key)?;
+    request.workspace_key = Some(workspace_key);
+    request.project_instance_path = project_instance_path.or(request.project_instance_path);
     let storage = state.storage.clone();
     tauri::async_runtime::spawn_blocking(move || storage.save_merge_history(request))
         .await
@@ -4199,28 +6623,40 @@ async fn start_project_runtime(
     let config_state = state.config_state.clone();
     let proxy_runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut config = config_state.load()?;
+        let mut config = apply_active_workspace_context(&config_state.load()?)?;
+        let proxy_path = active_workspace_proxy_path()?;
         let debug_profile_key = optional_editor_string(debug_profile);
         let runtime_profile_key =
             project_runtime_profile_key(&config, &project, debug_profile_key.as_deref())?;
         prepare_rdev_proxy_runtime_profile(
             &mut config,
             &proxy_runtime,
+            &proxy_path,
             runtime_profile_key.as_deref(),
         )?;
-        let config = apply_active_workspace_context(&config)?;
         let explicit_env_overrides = env_overrides.is_some();
         let env_overrides = normalize_runtime_env_overrides(env_overrides);
-        let mut updated = runtime.start(
-            &config,
-            &project,
-            debug_profile_key.as_deref(),
-            if explicit_env_overrides {
-                Some(&env_overrides)
+        let launch_options = ProjectRuntimeLaunchOptions {
+            debug_profile: debug_profile_key.clone(),
+            env: env_overrides.clone(),
+            ..ProjectRuntimeLaunchOptions::default()
+        };
+        let preflight = runtime.preflight_with_options(&config, &project, &launch_options)?;
+        if preflight.status_key == "error" {
+            let details = preflight
+                .checks
+                .iter()
+                .filter(|check| check.status_key == "error")
+                .map(|check| format!("{}：{}", check.title, check.detail))
+                .collect::<Vec<_>>()
+                .join("；");
+            return Err(if details.is_empty() {
+                format!("启动前检查未通过：{}", preflight.summary)
             } else {
-                None
-            },
-        )?;
+                format!("启动前检查未通过：{}（{}）", preflight.summary, details)
+            });
+        }
+        let mut updated = runtime.start_with_options(&config, &project, &launch_options)?;
         if should_auto_focus_project(&config, &project, &updated) {
             match runtime.focus_runtime(&config, &project, debug_profile_key.as_deref()) {
                 Ok(next_snapshot) => {
@@ -4322,14 +6758,40 @@ fn stable_runtime_env_key(values: &BTreeMap<String, String>) -> String {
 
 #[tauri::command]
 async fn stop_project_runtime(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     project: String,
 ) -> Result<ProjectRuntimeSnapshot, String> {
     let runtime = state.project_runtime.clone();
     let config_state = state.config_state.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let config = config_state.load()?;
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        let config = apply_active_workspace_context(&config_state.load()?)?;
         runtime.stop(&config, &project)
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        refresh_tray_menu(&app);
+    }
+    result
+}
+
+#[tauri::command]
+async fn adopt_project_runtime(
+    state: tauri::State<'_, AppState>,
+    project: String,
+    pid: u32,
+    debug_profile: Option<String>,
+) -> Result<ProjectRuntimeSnapshot, String> {
+    let runtime = state.project_runtime.clone();
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = apply_active_workspace_context(&config_state.load()?)?;
+        let options = ProjectRuntimeLaunchOptions {
+            debug_profile: optional_editor_string(debug_profile),
+            ..ProjectRuntimeLaunchOptions::default()
+        };
+        runtime.adopt_with_options(&config, &project, pid, &options)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -4439,13 +6901,15 @@ async fn focus_project_runtime(
     let config_state = state.config_state.clone();
     let proxy_runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut config = config_state.load()?;
+        let mut config = apply_active_workspace_context(&config_state.load()?)?;
+        let proxy_path = active_workspace_proxy_path()?;
         let debug_profile_key = optional_editor_string(debug_profile);
         let runtime_profile_key =
             project_runtime_profile_key(&config, &project, debug_profile_key.as_deref())?;
         prepare_rdev_proxy_runtime_profile(
             &mut config,
             &proxy_runtime,
+            &proxy_path,
             runtime_profile_key.as_deref(),
         )?;
         let updated = runtime.focus_runtime(&config, &project, debug_profile_key.as_deref())?;
@@ -4607,6 +7071,7 @@ fn tray_action_for_project(
         label,
         detail,
         dedupe_key: format!("{}:{}", kind, project_key),
+        workspace_key: None,
         project_key: Some(project_key),
         entry: None,
         payload: None,
@@ -4627,6 +7092,7 @@ fn tray_action_for_navigation_entry(entry: &NavigationEntry) -> TrayReplayAction
         kind: "finder.shortcut.open".to_string(),
         label: format!("打开 {}", entry.name),
         detail: Some(entry.target_label.clone()),
+        workspace_key: None,
         project_key: None,
         entry: Some(entry.clone()),
         payload: None,
@@ -4672,20 +7138,6 @@ fn tray_pinned_actions(storage: &Storage) -> Vec<TrayReplayAction> {
         .collect()
 }
 
-fn action_project_allowed(
-    action: &TrayReplayAction,
-    project_filter: Option<&BTreeSet<String>>,
-) -> bool {
-    match project_filter {
-        None => true,
-        Some(project_keys) if project_keys.is_empty() => false,
-        Some(project_keys) => action
-            .project_key
-            .as_deref()
-            .is_none_or(|project_key| project_keys.contains(project_key)),
-    }
-}
-
 fn json_string(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(value) => value.clone(),
@@ -4724,7 +7176,8 @@ fn build_history_matches_pinned_action(
     let params = normalized_params(payload.get("params"));
 
     build_history.iter().any(|entry| {
-        entry.project_key == project_key
+        entry.workspace_key == action.workspace_key
+            && entry.project_key == project_key
             && entry.mode == target
             && normalized_params(Some(&entry.params)) == params
     })
@@ -4744,28 +7197,30 @@ fn branch_history_items(storage: &Storage) -> Vec<serde_json::Value> {
 
 fn branch_history_entry_allowed(
     entry: &serde_json::Value,
-    project_filter: Option<&BTreeSet<String>>,
+    workspace: Option<&ProjectWorkspaceConfig>,
 ) -> bool {
-    match project_filter {
-        None => true,
-        Some(project_keys) if project_keys.is_empty() => false,
-        Some(project_keys) => entry
-            .get("items")
-            .and_then(|value| value.as_array())
-            .is_some_and(|items| {
-                items.iter().any(|item| {
-                    item.get("projectKey")
-                        .and_then(|value| value.as_str())
-                        .is_some_and(|project_key| project_keys.contains(project_key))
-                })
-            }),
+    let Some(workspace) = workspace.filter(|workspace| !workspace.is_system()) else {
+        return true;
+    };
+    if entry.get("workspaceKey").and_then(|value| value.as_str()) != Some(workspace.key.as_str()) {
+        return false;
     }
+    entry
+        .get("items")
+        .and_then(|value| value.as_array())
+        .is_some_and(|items| {
+            items.iter().any(|item| {
+                item.get("projectKey")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|project_key| workspace.allows_project(project_key))
+            })
+        })
 }
 
 fn branch_history_matches_pinned_action(
     action: &TrayReplayAction,
     branch_history: &[serde_json::Value],
-    project_filter: Option<&BTreeSet<String>>,
+    workspace: Option<&ProjectWorkspaceConfig>,
 ) -> bool {
     let Some(serde_json::Value::Object(payload)) = action.payload.as_ref() else {
         return false;
@@ -4778,7 +7233,9 @@ fn branch_history_matches_pinned_action(
     };
 
     branch_history.iter().any(|entry| {
-        branch_history_entry_allowed(entry, project_filter)
+        entry.get("workspaceKey").and_then(|value| value.as_str())
+            == action.workspace_key.as_deref()
+            && branch_history_entry_allowed(entry, workspace)
             && entry
                 .get("replay")
                 .and_then(|value| value.as_object())
@@ -4788,59 +7245,19 @@ fn branch_history_matches_pinned_action(
     })
 }
 
-fn tray_pinned_actions_for_menu(storage: &Storage) -> Vec<TrayReplayAction> {
-    let actions = tray_pinned_actions(storage);
-    if actions.is_empty() {
-        return actions;
-    }
-
-    let project_filter = match active_workspace_project_filter() {
-        Ok(value) => value,
-        Err(error) => {
-            eprintln!(
-                "failed to filter tray pinned actions by workspace: {}",
-                error
-            );
-            None
-        }
-    };
-    let build_history = filter_build_history_by_active_workspace(storage).unwrap_or_else(|error| {
-        eprintln!("failed to filter tray pinned build history: {}", error);
-        Vec::new()
-    });
-    let branch_history = branch_history_items(storage);
-
-    actions
-        .into_iter()
-        .filter(|action| {
-            if !action_project_allowed(action, project_filter.as_ref()) {
-                return false;
-            }
-            match action.kind.as_str() {
-                "build.replay" | "deploy.replay" => {
-                    build_history_matches_pinned_action(action, &build_history)
-                }
-                "branch.replay" => branch_history_matches_pinned_action(
-                    action,
-                    &branch_history,
-                    project_filter.as_ref(),
-                ),
-                _ => true,
-            }
-        })
-        .take(TRAY_PINNED_MENU_LIMIT)
-        .collect()
-}
-
 fn tray_action_kind_label(kind: &str) -> String {
     match kind {
         "build.replay" | "deploy.replay" => "构建".to_string(),
         "branch.replay" => "分支".to_string(),
         "finder.shortcut.open" => "入口".to_string(),
         "project.runtime.start" => "启动".to_string(),
+        "project.runtime.stop" => "停止".to_string(),
         "project.runtime.focus" => "聚焦".to_string(),
         "project.build.run" => "构建".to_string(),
         "project.build.openOutput" | "project.openDirectory" => "打开".to_string(),
+        "proxy.start" | "proxy.stop" => "代理".to_string(),
+        "link.run" | "link.stop" => "联调".to_string(),
+        "workspace.open" => "工作区".to_string(),
         _ => "动作".to_string(),
     }
 }
@@ -4943,18 +7360,6 @@ fn workspace_allows_navigation_action(
         })
 }
 
-fn workspace_entry_count(workspace: &ProjectWorkspaceConfig) -> usize {
-    load_navigation_data_for_workspace(workspace)
-        .ok()
-        .map(|data| {
-            data.categories
-                .into_iter()
-                .map(|category| category.entries.len())
-                .sum()
-        })
-        .unwrap_or_default()
-}
-
 fn workspace_display_name(workspace: &ProjectWorkspaceConfig) -> String {
     if workspace.is_system() {
         "全局".to_string()
@@ -4992,6 +7397,7 @@ fn workspace_resource_kind_label(kind: &str) -> String {
         "directory" => "目录",
         "app" => "应用",
         "script" => "脚本",
+        "tool" => "工具",
         _ => "入口",
     }
     .to_string()
@@ -5033,15 +7439,39 @@ fn navigation_entry_shortcut_open_target(
                 (Some("localPath".to_string()), Some(value.to_string()))
             }
         }
+        "tool" => {
+            let value = entry
+                .tool_key
+                .as_deref()
+                .or(entry.tool.as_deref())
+                .unwrap_or(entry.target_label.as_str())
+                .trim();
+            if value.is_empty() {
+                (None, None)
+            } else {
+                (Some("tool".to_string()), Some(value.to_string()))
+            }
+        }
         _ => (None, None),
     }
 }
 
 fn workspace_resource_shortcuts(
     workspace: &ProjectWorkspaceConfig,
+    link_summaries: &BTreeMap<String, LinkSummary>,
+    config_source: &ConfigSource,
 ) -> Vec<WorkspaceResourceShortcutItem> {
     let workspace_key = workspace.key.clone();
-    load_navigation_data_for_workspace(workspace)
+    let config_source_id = config_source.id.clone();
+    let navigation = if config_source.is_default {
+        load_navigation_data_for_workspace(workspace)
+    } else {
+        load_navigation_source_data_for_workspace(
+            &PathBuf::from(&config_source.files.navigation),
+            workspace,
+        )
+    };
+    navigation
         .ok()
         .map(|data| {
             data.categories
@@ -5049,13 +7479,32 @@ fn workspace_resource_shortcuts(
                 .flat_map(|category| {
                     let category_title = category.title;
                     let workspace_key = workspace_key.clone();
+                    let config_source_id = config_source_id.clone();
                     category
                         .entries
                         .into_iter()
                         .enumerate()
                         .map(move |(index, entry)| {
+                            let menu_entry = entry.clone();
                             let kind = navigation_entry_shortcut_kind(&entry);
                             let (open_kind, value) = navigation_entry_shortcut_open_target(&entry);
+                            let tool = entry.tool.clone();
+                            let tool_key = entry.tool_key.clone();
+                            let tool_action = entry.tool_action.clone();
+                            let detail = workspace_resource_detail(&entry, link_summaries);
+                            let link_runtime = if kind == "tool"
+                                && tool
+                                    .as_deref()
+                                    .unwrap_or("link")
+                                    .eq_ignore_ascii_case("link")
+                            {
+                                tool_key
+                                    .as_deref()
+                                    .and_then(|key| link_summaries.get(key))
+                                    .and_then(|summary| summary.runtime.clone())
+                            } else {
+                                None
+                            };
                             let label = entry.name.trim();
                             let label = if label.is_empty() {
                                 entry.target_label.trim()
@@ -5063,22 +7512,136 @@ fn workspace_resource_shortcuts(
                                 label
                             }
                             .to_string();
-                            let openable = open_kind.is_some() && value.is_some();
+                            let openable = kind != "tool" && open_kind.is_some() && value.is_some();
                             WorkspaceResourceShortcutItem {
                                 key: format!("{}:{}:{}", workspace_key, category_title, index),
+                                config_source_id: config_source_id.clone(),
                                 category: category_title.clone(),
                                 label,
                                 kind_label: workspace_resource_kind_label(&kind),
                                 kind,
                                 value,
+                                detail,
+                                tool,
+                                tool_key,
+                                tool_action,
+                                link_runtime,
                                 open_kind,
                                 openable,
+                                entry: menu_entry,
+                                tool_config_source_id: None,
+                                tool_proxy_source_id: None,
                             }
                         })
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn workspace_resource_detail(
+    entry: &NavigationEntry,
+    link_summaries: &BTreeMap<String, LinkSummary>,
+) -> Option<String> {
+    if navigation_entry_shortcut_kind(entry) != "tool" {
+        return entry.note.clone();
+    }
+    let tool = entry.tool.as_deref().unwrap_or("link").trim();
+    let tool_key = entry.tool_key.as_deref().filter(|value| !value.is_empty());
+    let action = entry
+        .tool_action
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    if !tool.eq_ignore_ascii_case("link") {
+        let mut parts = Vec::new();
+        match tool.to_ascii_lowercase().as_str() {
+            "workflow" => {
+                parts.push("Workflow".to_string());
+                if let Some(key) = tool_key {
+                    parts.push(key.to_string());
+                }
+            }
+            "webaction" | "web-action" | "web_action" => {
+                parts.push("Web Action".to_string());
+                if let Some(key) = tool_key {
+                    parts.push(key.to_string());
+                }
+            }
+            "runtime" => {
+                if let Some(key) = tool_key {
+                    parts.push(format!("项目 {key}"));
+                } else {
+                    parts.push("Runtime".to_string());
+                }
+                if let Some(profile) = entry
+                    .runtime_profile
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    parts.push(format!("运行配置 {profile}"));
+                }
+            }
+            _ => {
+                parts.push(format!("工具 {tool}"));
+                if let Some(key) = tool_key {
+                    parts.push(key.to_string());
+                }
+            }
+        }
+        if let Some(action) = action {
+            parts.push(format!("动作 {action}"));
+        }
+        if let Some(note) = entry
+            .note
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+        {
+            parts.push(note.trim().to_string());
+        }
+        return Some(parts.join(" · "));
+    }
+    let Some(tool_key) = entry.tool_key.as_deref().filter(|value| !value.is_empty()) else {
+        return Some(
+            entry
+                .note
+                .clone()
+                .unwrap_or_else(|| "缺少 Link key，无法生成计划预览".to_string()),
+        );
+    };
+    let Some(summary) = link_summaries.get(tool_key) else {
+        return Some(format!("Link 配置不存在：{tool_key}"));
+    };
+    let mut parts = Vec::new();
+    parts.push(format!("{} 步", summary.step_count));
+    if let Some(runtime) = summary.runtime.as_ref() {
+        if runtime.status != "planned" {
+            parts.push(runtime.label.clone());
+        }
+    }
+    if let Some(project) = summary.project.as_deref() {
+        parts.push(format!("项目 {project}"));
+    }
+    if !summary.proxy_profiles.is_empty() {
+        parts.push(format!(
+            "代理 {}",
+            summary
+                .proxy_profiles
+                .iter()
+                .map(|profile| profile.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !summary.warnings.is_empty() {
+        parts.push(format!("{} 条提示", summary.warnings.len()));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join(" · "))
+    }
 }
 
 fn workspace_project_directory_items(
@@ -5145,7 +7708,7 @@ fn workspace_project_directory_items(
                     .map(|snapshot| snapshot.status_label.clone())
                     .unwrap_or_else(|| "未知".to_string()),
                 running: runtime_status
-                    .map(|snapshot| snapshot.status_key == "running")
+                    .map(|snapshot| matches!(snapshot.status_key.as_str(), "running" | "external"))
                     .unwrap_or(false),
                 can_start: runtime_status
                     .map(|snapshot| snapshot.can_start)
@@ -5153,6 +7716,12 @@ fn workspace_project_directory_items(
                 can_stop: runtime_status
                     .map(|snapshot| snapshot.can_stop)
                     .unwrap_or(false),
+                can_focus_runtime: runtime_status
+                    .map(|snapshot| snapshot.can_focus_runtime)
+                    .unwrap_or(false),
+                debug_profiles: runtime_status
+                    .map(|snapshot| snapshot.debug_profiles.clone())
+                    .unwrap_or_default(),
             })
         })
         .collect()
@@ -5173,6 +7742,38 @@ fn workspace_matches_action(
     workspace_allows_navigation_action(workspace, action)
 }
 
+fn workspace_key_for_pinned_action(
+    workspaces: &[ProjectWorkspaceConfig],
+    action: &TrayReplayAction,
+) -> String {
+    if let Some(workspace_key) = action.workspace_key.as_deref().filter(|workspace_key| {
+        workspaces
+            .iter()
+            .any(|workspace| workspace.key == *workspace_key)
+    }) {
+        return workspace_key.to_string();
+    }
+    if matches!(
+        action.kind.as_str(),
+        "build.replay" | "deploy.replay" | "branch.replay"
+    ) {
+        return SYSTEM_PROJECT_WORKSPACE_KEY.to_string();
+    }
+
+    let project_keys = tray_action_project_keys(action);
+    let matched_workspace_keys = workspaces
+        .iter()
+        .filter(|workspace| !workspace.is_system())
+        .filter(|workspace| workspace_matches_action(workspace, action, &project_keys))
+        .map(|workspace| workspace.key.clone())
+        .collect::<Vec<_>>();
+    if matched_workspace_keys.len() == 1 {
+        matched_workspace_keys[0].clone()
+    } else {
+        SYSTEM_PROJECT_WORKSPACE_KEY.to_string()
+    }
+}
+
 fn tray_action_available(
     action: &TrayReplayAction,
     build_history: &[BuildHistoryEntry],
@@ -5187,17 +7788,284 @@ fn tray_action_available(
     }
 }
 
-fn workspace_pinned_action_item(action: TrayReplayAction) -> WorkspacePinnedActionItem {
+fn workspace_pinned_action_item(
+    config: &AppConfig,
+    action: TrayReplayAction,
+) -> WorkspacePinnedActionItem {
     let project_key = tray_action_project_keys(&action).into_iter().next();
+    let params = workspace_action_params(config, &action);
     WorkspacePinnedActionItem {
         kind_label: tray_action_kind_label(&action.kind),
         label: action.label.clone(),
         detail: action.detail.clone(),
         project_key,
+        params,
         confirm_required: tray_action_confirm_required(&action.kind),
         updated_at_ms: action.updated_at_ms,
         action,
     }
+}
+
+fn workspace_action_params(
+    config: &AppConfig,
+    action: &TrayReplayAction,
+) -> Vec<WorkspaceActionParamItem> {
+    match action.kind.as_str() {
+        "build.replay" | "deploy.replay" => workspace_build_action_params(config, action),
+        "branch.replay" => workspace_branch_action_params(action),
+        "project.build.run" => workspace_project_build_action_params(action),
+        _ => Vec::new(),
+    }
+}
+
+fn workspace_project_build_action_params(
+    action: &TrayReplayAction,
+) -> Vec<WorkspaceActionParamItem> {
+    let mut params = Vec::new();
+    if let Some(project_key) = action
+        .project_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        push_action_param(&mut params, "项目", project_key);
+    }
+    params
+}
+
+fn workspace_build_action_params(
+    config: &AppConfig,
+    action: &TrayReplayAction,
+) -> Vec<WorkspaceActionParamItem> {
+    let Some(serde_json::Value::Object(payload)) = action.payload.as_ref() else {
+        return Vec::new();
+    };
+    let project_key = json_object_string(payload, "project")
+        .or_else(|| action.project_key.clone())
+        .unwrap_or_default();
+    let target_key = json_object_string(payload, "target");
+    let mut params = Vec::new();
+    if let Some(target) = target_key.as_deref() {
+        push_action_param(&mut params, "目标", target);
+    }
+    if let Some(env) = json_object_string(payload, "env") {
+        push_action_param(&mut params, "环境", &env);
+    }
+    if let Some(branch) = json_object_string(payload, "branch") {
+        push_action_param(&mut params, "分支", &branch);
+    }
+    if let Some(target) = target_key
+        .as_deref()
+        .and_then(|target| find_build_target(config, &project_key, target))
+    {
+        push_action_param(
+            &mut params,
+            "类型",
+            build_target_adapter_key(&target.adapter),
+        );
+        if !target.job_name.trim().is_empty() {
+            push_action_param(&mut params, "Job", &target.job_name);
+        }
+        if !target.jenkins_profile.trim().is_empty() {
+            push_action_param(&mut params, "Profile", &target.jenkins_profile);
+        }
+    }
+    if payload
+        .get("variant")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        push_action_param(&mut params, "变体", "是");
+    }
+    push_json_params(&mut params, payload.get("params"));
+    push_json_params(&mut params, payload.get("extraParams"));
+    params.truncate(8);
+    params
+}
+
+fn workspace_branch_action_params(action: &TrayReplayAction) -> Vec<WorkspaceActionParamItem> {
+    let Some(serde_json::Value::Object(payload)) = action.payload.as_ref() else {
+        return Vec::new();
+    };
+    let Some(serde_json::Value::Object(request)) = payload.get("request") else {
+        return Vec::new();
+    };
+    let mut params = Vec::new();
+    if let Some(project) = json_object_string(request, "project") {
+        push_action_param(&mut params, "项目", &project);
+    } else if let Some(projects) = request.get("projects").and_then(|value| value.as_array()) {
+        let projects = projects
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .take(3)
+            .collect::<Vec<_>>();
+        if !projects.is_empty() {
+            push_action_param(&mut params, "项目", &projects.join(", "));
+        }
+    }
+    if let Some(source_branch) = json_object_string(request, "sourceBranch") {
+        push_action_param(&mut params, "源分支", &source_branch);
+    }
+    if let Some(target_branch) = json_object_string(request, "targetBranch") {
+        push_action_param(&mut params, "目标分支", &target_branch);
+    } else if let Some(target_branches) = request
+        .get("targetBranches")
+        .and_then(|value| value.as_array())
+    {
+        let branches = target_branches
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .take(3)
+            .collect::<Vec<_>>();
+        if !branches.is_empty() {
+            push_action_param(&mut params, "目标分支", &branches.join(", "));
+        }
+    }
+    if let Some(destination_dir) = json_object_string(request, "destinationDir") {
+        push_action_param(&mut params, "目录", &destination_dir);
+    } else if let Some(repo_path) = json_object_string(request, "repoPath") {
+        push_action_param(&mut params, "目录", &repo_path);
+    }
+    if request
+        .get("commitBeforePush")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false)
+    {
+        push_action_param(&mut params, "提交", "是");
+    }
+    if let Some(message) = json_object_string(request, "commitMessage") {
+        push_action_param(&mut params, "提交信息", &message);
+    }
+    if let Some(paths) = request
+        .get("selectedPaths")
+        .and_then(|value| value.as_array())
+    {
+        let count = paths
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .count();
+        if count > 0 {
+            push_action_param(&mut params, "已选文件", &count.to_string());
+        }
+    }
+    params.truncate(8);
+    params
+}
+
+fn find_build_target<'a>(
+    config: &'a AppConfig,
+    project_key: &str,
+    target_key: &str,
+) -> Option<&'a DeployTargetConfig> {
+    config
+        .projects
+        .iter()
+        .find(|project| project.key == project_key)
+        .and_then(|project| {
+            project
+                .deploy_targets
+                .iter()
+                .find(|target| target.key == target_key)
+        })
+}
+
+fn json_object_string(
+    object: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
+    object
+        .get(key)
+        .and_then(json_value_summary)
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn json_value_summary(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Bool(value) => Some(if *value { "是" } else { "否" }.to_string()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Array(values) => {
+            let summary = values
+                .iter()
+                .filter_map(json_value_summary)
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(", ");
+            if summary.is_empty() {
+                None
+            } else {
+                Some(summary)
+            }
+        }
+        serde_json::Value::Object(_) => None,
+    }
+}
+
+fn push_json_params(params: &mut Vec<WorkspaceActionParamItem>, value: Option<&serde_json::Value>) {
+    let Some(serde_json::Value::Object(values)) = value else {
+        return;
+    };
+    for (key, value) in values {
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+        let value = if sensitive_action_param_key(key) {
+            Some("******".to_string())
+        } else {
+            json_value_summary(value)
+        };
+        if let Some(value) = value {
+            push_action_param(params, key, &value);
+        }
+    }
+}
+
+fn sensitive_action_param_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    ["token", "secret", "password", "passwd", "credential"]
+        .iter()
+        .any(|needle| key.contains(needle))
+}
+
+fn push_action_param(params: &mut Vec<WorkspaceActionParamItem>, label: &str, value: &str) {
+    let label = label.trim();
+    let value = value.trim();
+    if label.is_empty() || value.is_empty() {
+        return;
+    }
+    if params
+        .iter()
+        .any(|item| item.label == label && item.value == value)
+    {
+        return;
+    }
+    params.push(WorkspaceActionParamItem {
+        label: label.to_string(),
+        value: compact_action_param_value(value),
+    });
+}
+
+fn compact_action_param_value(value: &str) -> String {
+    const LIMIT: usize = 56;
+    let value = value.trim();
+    if value.chars().count() <= LIMIT {
+        return value.to_string();
+    }
+    let mut compact = value
+        .chars()
+        .take(LIMIT.saturating_sub(1))
+        .collect::<String>();
+    compact.push('…');
+    compact
 }
 
 fn proxy_rule_counts_by_profile(dashboard: &ProxyDashboard) -> BTreeMap<String, usize> {
@@ -5229,6 +8097,8 @@ fn proxy_status_by_profile(
 
 fn workspace_proxy_profile_items(
     dashboard: &ProxyDashboard,
+    config_source_id: &str,
+    filter_workspace: bool,
     workspace: &ProjectWorkspaceConfig,
     workspace_names: &BTreeMap<String, String>,
     rule_counts: &BTreeMap<String, usize>,
@@ -5239,7 +8109,8 @@ fn workspace_proxy_profile_items(
         .profiles
         .iter()
         .filter(|profile| {
-            workspace.is_system()
+            !filter_workspace
+                || workspace.is_system()
                 || profile.workspace_key.as_deref() == Some(workspace.key.as_str())
         })
         .map(|profile| {
@@ -5259,6 +8130,7 @@ fn workspace_proxy_profile_items(
                         .unwrap_or_else(|| "未归属".to_string())
                 });
             WorkspaceProxyProfileItem {
+                config_source_id: config_source_id.to_string(),
                 id: profile.id.clone(),
                 name: profile.name.clone(),
                 listen_host: profile.listen_host.clone(),
@@ -5274,6 +8146,45 @@ fn workspace_proxy_profile_items(
         .collect()
 }
 
+fn resolve_workspace_capability_source(
+    paths: &ConfigPaths,
+    workspace: &ProjectWorkspaceConfig,
+    workspaces: &[ProjectWorkspaceConfig],
+    capability: &str,
+) -> Result<ConfigSource, String> {
+    let source_id = core_load_config_source_preference(paths, &workspace.key, capability)
+        .map_err(|error| error.to_string())?;
+    core_resolve_config_source(Some(&source_id), workspaces).map_err(|error| error.to_string())
+}
+
+fn workspace_link_summary_map(
+    link_source: &ConfigSource,
+    config: &AppConfig,
+    workspaces: &[ProjectWorkspaceConfig],
+    proxy_path: &Path,
+    proxy_config: &ProxyConfig,
+    proxy_runtime: &ProxyRuntimeState,
+    project_runtime_statuses: &BTreeMap<String, ProjectRuntimeSnapshot>,
+) -> BTreeMap<String, LinkSummary> {
+    let links_path = PathBuf::from(&link_source.files.links);
+    let mut summaries =
+        core_list_link_summaries_from_path(&links_path, config, workspaces, proxy_config)
+            .unwrap_or_default();
+    let links = core_list_links_from_path(&links_path).unwrap_or_default();
+    attach_link_runtime_summaries(
+        &mut summaries,
+        &links,
+        proxy_path,
+        proxy_config,
+        proxy_runtime,
+        project_runtime_statuses,
+    );
+    summaries
+        .into_iter()
+        .map(|summary| (summary.key.clone(), summary))
+        .collect()
+}
+
 fn workspace_pinned_actions_overview(
     config: &AppConfig,
     storage: &Storage,
@@ -5284,22 +8195,10 @@ fn workspace_pinned_actions_overview(
     let workspaces =
         load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
     let actions = tray_pinned_actions(storage);
-    let proxy_path = ensure_proxy_config().map_err(|error| error.to_string())?;
-    let proxy_dashboard = proxy_runtime
-        .dashboard(&proxy_path)
-        .map_err(|error| error.to_string())?;
-    let proxy_rule_counts = proxy_rule_counts_by_profile(&proxy_dashboard);
-    let proxy_statuses = proxy_status_by_profile(&proxy_dashboard);
-    let project_runtime_statuses = project_runtime
-        .list(config)?
-        .into_iter()
-        .map(|snapshot| (snapshot.key.clone(), snapshot))
-        .collect::<BTreeMap<_, _>>();
     let workspace_names = workspaces
         .iter()
         .map(|workspace| (workspace.key.clone(), workspace_display_name(workspace)))
         .collect::<BTreeMap<_, _>>();
-
     let build_history = storage.list_all_deploy_history()?;
     let branch_history = branch_history_items(storage);
     let mut grouped = workspaces
@@ -5312,65 +8211,104 @@ fn workspace_pinned_actions_overview(
             continue;
         }
 
-        let project_keys = tray_action_project_keys(&action);
-        let matched_workspace_keys = workspaces
-            .iter()
-            .filter(|workspace| !workspace.is_system())
-            .filter(|workspace| workspace_matches_action(workspace, &action, &project_keys))
-            .map(|workspace| workspace.key.clone())
-            .collect::<Vec<_>>();
-        let target_key = if matched_workspace_keys.len() == 1 {
-            matched_workspace_keys[0].clone()
-        } else {
-            SYSTEM_PROJECT_WORKSPACE_KEY.to_string()
-        };
+        let target_key = workspace_key_for_pinned_action(&workspaces, &action);
 
         grouped.entry(target_key).or_default().push(action);
     }
 
-    let overview = workspaces
-        .into_iter()
-        .map(|workspace| {
-            let actions = grouped.remove(&workspace.key).unwrap_or_default();
-            let project_count = workspace.project_count_for(config);
-            let entry_count = workspace_entry_count(&workspace);
-            let resources = workspace_resource_shortcuts(&workspace);
-            let project_directories =
-                workspace_project_directory_items(config, &workspace, &project_runtime_statuses);
-            let proxy_profiles = workspace_proxy_profile_items(
-                &proxy_dashboard,
-                &workspace,
-                &workspace_names,
-                &proxy_rule_counts,
-                &proxy_statuses,
-            );
-            let items = actions
-                .into_iter()
-                .map(workspace_pinned_action_item)
-                .collect::<Vec<_>>();
-            WorkspacePinnedActionsOverview {
-                key: workspace.key.clone(),
-                name: workspace_display_name(&workspace),
-                description: workspace.description.clone(),
-                system: workspace.is_system(),
-                root_dir: workspace
-                    .root_dir
-                    .as_ref()
-                    .map(|path| path.display().to_string()),
-                workspace_kind: workspace_kind_label(&workspace),
-                workspace_type: workspace.workspace_type.clone(),
-                workspace_type_label: workspace_type_label(&workspace),
-                project_count,
-                entry_count,
-                action_count: items.len(),
-                proxy_profile_count: proxy_profiles.len(),
-                resources,
-                project_directories,
-                proxy_profiles,
-                actions: items,
+    let workspace_configs = workspaces.clone();
+    let mut overview = Vec::new();
+    for workspace in workspaces {
+        let resource_source = resolve_workspace_capability_source(
+            &paths,
+            &workspace,
+            &workspace_configs,
+            "resource",
+        )?;
+        let link_source =
+            resolve_workspace_capability_source(&paths, &workspace, &workspace_configs, "link")?;
+        let proxy_source =
+            resolve_workspace_capability_source(&paths, &workspace, &workspace_configs, "proxy")?;
+        let runtime_source =
+            resolve_workspace_capability_source(&paths, &workspace, &workspace_configs, "runtime")?;
+        let mut effective_config = apply_project_workspace_context(config, &workspace);
+        apply_runtime_overrides_for_source(&mut effective_config, &runtime_source)?;
+        let project_runtime_statuses = project_runtime
+            .list(&effective_config)?
+            .into_iter()
+            .map(|snapshot| (snapshot.key.clone(), snapshot))
+            .collect::<BTreeMap<_, _>>();
+        let proxy_path = proxy_path_for_config_source(&proxy_source)?;
+        let proxy_dashboard = proxy_runtime
+            .dashboard(&proxy_path)
+            .map_err(|error| error.to_string())?;
+        let proxy_dashboard = if proxy_source.is_default {
+            filter_proxy_dashboard_by_workspace(proxy_dashboard, &workspace)
+        } else {
+            proxy_dashboard
+        };
+        let proxy_rule_counts = proxy_rule_counts_by_profile(&proxy_dashboard);
+        let proxy_statuses = proxy_status_by_profile(&proxy_dashboard);
+        let link_summaries = workspace_link_summary_map(
+            &link_source,
+            &effective_config,
+            &workspace_configs,
+            &proxy_path,
+            &proxy_dashboard.config,
+            proxy_runtime,
+            &project_runtime_statuses,
+        );
+        let actions = grouped.remove(&workspace.key).unwrap_or_default();
+        let project_count = workspace.project_count_for(config);
+        let mut resources =
+            workspace_resource_shortcuts(&workspace, &link_summaries, &resource_source);
+        for resource in &mut resources {
+            if resource.kind == "tool" {
+                resource.tool_config_source_id = Some(link_source.id.clone());
+                resource.tool_proxy_source_id = Some(proxy_source.id.clone());
             }
-        })
-        .collect();
+        }
+        let entry_count = resources.len();
+        let project_directories = workspace_project_directory_items(
+            &effective_config,
+            &workspace,
+            &project_runtime_statuses,
+        );
+        let proxy_profiles = workspace_proxy_profile_items(
+            &proxy_dashboard,
+            &proxy_source.id,
+            false,
+            &workspace,
+            &workspace_names,
+            &proxy_rule_counts,
+            &proxy_statuses,
+        );
+        let items = actions
+            .into_iter()
+            .map(|action| workspace_pinned_action_item(&effective_config, action))
+            .collect::<Vec<_>>();
+        overview.push(WorkspacePinnedActionsOverview {
+            key: workspace.key.clone(),
+            name: workspace_display_name(&workspace),
+            description: workspace.description.clone(),
+            system: workspace.is_system(),
+            root_dir: workspace
+                .root_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            workspace_kind: workspace_kind_label(&workspace),
+            workspace_type: workspace.workspace_type.clone(),
+            workspace_type_label: workspace_type_label(&workspace),
+            project_count,
+            entry_count,
+            action_count: items.len(),
+            proxy_profile_count: proxy_profiles.len(),
+            resources,
+            project_directories,
+            proxy_profiles,
+            actions: items,
+        });
+    }
 
     Ok(overview)
 }
@@ -5582,9 +8520,15 @@ fn workspace_ai_context_markdown(
         } else {
             for resource in overview.resources.iter().take(options.item_limit) {
                 let value = resource.value.as_deref().unwrap_or("未配置目标");
+                let detail = resource
+                    .detail
+                    .as_deref()
+                    .filter(|value| !value.is_empty())
+                    .map(|value| format!(" · {}", value))
+                    .unwrap_or_default();
                 lines.push(format!(
-                    "- {} · {} · `{}`",
-                    resource.label, resource.kind_label, value
+                    "- {} · {} · `{}`{}",
+                    resource.label, resource.kind_label, value, detail
                 ));
             }
             if overview.resources.len() > options.item_limit {
@@ -5760,6 +8704,11 @@ fn normalize_tray_pinned_actions(mut actions: Vec<TrayReplayAction>) -> Vec<Tray
         if !valid_tray_action(&action) {
             continue;
         }
+        action.workspace_key = action
+            .workspace_key
+            .take()
+            .map(|workspace_key| workspace_key.trim().to_string())
+            .filter(|workspace_key| !workspace_key.is_empty());
         if action.updated_at_ms == 0 {
             action.updated_at_ms = unix_time_ms();
         }
@@ -5790,6 +8739,11 @@ fn record_tray_replay_action<R: Runtime>(
         return Ok(());
     };
 
+    if action.workspace_key.is_none()
+        && let Ok(workspace) = active_history_workspace()
+    {
+        action.workspace_key = Some(workspace.key);
+    }
     action.updated_at_ms = unix_time_ms();
     let mut actions = tray_recent_actions(&state.storage);
     actions.retain(|item| item.dedupe_key != action.dedupe_key);
@@ -5818,13 +8772,19 @@ fn truncate_menu_label(value: &str) -> String {
 
 fn tray_action_menu_meta(action: &TrayReplayAction) -> (&'static str, NativeIcon) {
     match action.kind.as_str() {
+        "workspace.open" => ("工作区", NativeIcon::Home),
         "branch.replay" => ("分支", NativeIcon::FollowLinkFreestanding),
         "build.replay" | "deploy.replay" => ("构建", NativeIcon::Advanced),
         "finder.shortcut.open" => ("入口", NativeIcon::Bookmarks),
         "project.runtime.start" => ("启动", NativeIcon::RightFacingTriangle),
+        "project.runtime.stop" => ("停止", NativeIcon::StopProgressFreestanding),
         "project.runtime.focus" => ("聚焦", NativeIcon::RevealFreestanding),
         "project.build.run" => ("构建", NativeIcon::Advanced),
         "project.build.openOutput" | "project.openDirectory" => ("打开", NativeIcon::Folder),
+        "proxy.start" => ("启动", NativeIcon::Network),
+        "proxy.stop" => ("停止", NativeIcon::StopProgressFreestanding),
+        "link.run" => ("启动", NativeIcon::FollowLinkFreestanding),
+        "link.stop" => ("停止", NativeIcon::StopProgressFreestanding),
         _ => ("操作", NativeIcon::SmartBadge),
     }
 }
@@ -5842,16 +8802,578 @@ fn tray_action_menu_label(action: &TrayReplayAction) -> String {
     truncate_menu_label(&format!("{} · {}", category, label))
 }
 
-fn create_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
-    let (recent_actions, pinned_actions) = app
-        .try_state::<AppState>()
-        .map(|state| {
-            (
-                tray_recent_actions(&state.storage),
-                tray_pinned_actions_for_menu(&state.storage),
-            )
+fn tray_workspace_action(
+    kind: &str,
+    workspace_key: &str,
+    label: String,
+    detail: Option<String>,
+    project_key: Option<String>,
+    payload: Option<serde_json::Value>,
+    dedupe_suffix: &str,
+) -> TrayReplayAction {
+    TrayReplayAction {
+        kind: kind.to_string(),
+        label,
+        detail,
+        workspace_key: Some(workspace_key.to_string()),
+        project_key,
+        entry: None,
+        payload,
+        dedupe_key: format!("{kind}:{workspace_key}:{dedupe_suffix}"),
+        updated_at_ms: unix_time_ms(),
+    }
+}
+
+fn tray_workspace_open_action(workspace_key: &str, workspace_name: &str) -> TrayReplayAction {
+    tray_workspace_action(
+        "workspace.open",
+        workspace_key,
+        format!("打开工作区 {}", workspace_name),
+        None,
+        None,
+        None,
+        workspace_key,
+    )
+}
+
+fn tray_navigation_action(
+    workspace_key: &str,
+    resource: &WorkspaceResourceShortcutItem,
+) -> TrayReplayAction {
+    let mut action = tray_action_for_navigation_entry(&resource.entry);
+    action.workspace_key = Some(workspace_key.to_string());
+    action.dedupe_key = format!("finder.shortcut.open:{}:{}", workspace_key, resource.key);
+    action
+}
+
+fn tray_recent_project_debug_profile(
+    recent_actions: &[TrayReplayAction],
+    workspace_key: &str,
+    active_workspace_key: &str,
+    project: &WorkspaceProjectDirectoryItem,
+) -> Option<(String, String)> {
+    let recent_profile = recent_actions.iter().find_map(|action| {
+        if action.kind != "project.runtime.start"
+            || action.project_key.as_deref() != Some(project.project_key.as_str())
+            || !(action.workspace_key.as_deref() == Some(workspace_key)
+                || (action.workspace_key.is_none() && workspace_key == active_workspace_key))
+        {
+            return None;
+        }
+        action
+            .payload
+            .as_ref()
+            .and_then(|payload| payload.get("debugProfile"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    });
+    let profile_key = recent_profile.or_else(|| {
+        if project.debug_profiles.len() == 1 {
+            project
+                .debug_profiles
+                .first()
+                .map(|profile| profile.key.clone())
+        } else {
+            None
+        }
+    })?;
+    let label = project
+        .debug_profiles
+        .iter()
+        .find(|profile| profile.key == profile_key)
+        .map(|profile| profile.label.clone())
+        .unwrap_or_else(|| profile_key.clone());
+    Some((profile_key, label))
+}
+
+fn tray_project_menu_actions(
+    workspace_key: &str,
+    active_workspace_key: &str,
+    projects: &[WorkspaceProjectDirectoryItem],
+    recent_actions: &[TrayReplayAction],
+    open_action: &TrayReplayAction,
+) -> Vec<TrayMenuActionItem> {
+    let mut actions = Vec::new();
+    let include_directory_action = projects.len() == 1;
+    let recent_project_rank = recent_actions
+        .iter()
+        .filter(|action| {
+            action.workspace_key.as_deref() == Some(workspace_key)
+                || (action.workspace_key.is_none() && workspace_key == active_workspace_key)
         })
-        .unwrap_or_default();
+        .filter_map(|action| {
+            action
+                .project_key
+                .as_ref()
+                .map(|key| (key.clone(), action.updated_at_ms))
+        })
+        .fold(BTreeMap::<String, u64>::new(), |mut ranks, (key, rank)| {
+            ranks
+                .entry(key)
+                .and_modify(|current| *current = (*current).max(rank))
+                .or_insert(rank);
+            ranks
+        });
+    let mut projects = projects.iter().collect::<Vec<_>>();
+    projects.sort_by(|left, right| {
+        right
+            .running
+            .cmp(&left.running)
+            .then_with(|| {
+                recent_project_rank
+                    .get(&right.project_key)
+                    .copied()
+                    .unwrap_or_default()
+                    .cmp(
+                        &recent_project_rank
+                            .get(&left.project_key)
+                            .copied()
+                            .unwrap_or_default(),
+                    )
+            })
+            .then_with(|| left.project_name.cmp(&right.project_name))
+    });
+    for project in projects {
+        let debug_profile = tray_recent_project_debug_profile(
+            recent_actions,
+            workspace_key,
+            active_workspace_key,
+            project,
+        );
+        if project.running {
+            if project.can_focus_runtime {
+                let (payload, profile_label) = debug_profile
+                    .as_ref()
+                    .map(|(key, label)| {
+                        (Some(json!({ "debugProfile": key })), Some(label.as_str()))
+                    })
+                    .unwrap_or((None, None));
+                actions.push(TrayMenuActionItem {
+                    label: profile_label
+                        .map(|profile| format!("打开 · {} · {}", project.project_name, profile))
+                        .unwrap_or_else(|| format!("打开 · {}", project.project_name)),
+                    enabled: true,
+                    action: tray_workspace_action(
+                        "project.runtime.focus",
+                        workspace_key,
+                        format!("打开 {}", project.project_name),
+                        None,
+                        Some(project.project_key.clone()),
+                        payload,
+                        &project.project_key,
+                    ),
+                });
+            } else {
+                let mut action = open_action.clone();
+                action.project_key = Some(project.project_key.clone());
+                actions.push(TrayMenuActionItem {
+                    label: format!("运行中 · {}", project.project_name),
+                    enabled: false,
+                    action,
+                });
+            }
+            if project.can_stop {
+                actions.push(TrayMenuActionItem {
+                    label: format!("停止 · {}", project.project_name),
+                    enabled: true,
+                    action: tray_workspace_action(
+                        "project.runtime.stop",
+                        workspace_key,
+                        format!("停止 {}", project.project_name),
+                        None,
+                        Some(project.project_key.clone()),
+                        None,
+                        &project.project_key,
+                    ),
+                });
+            }
+        } else if project.can_start {
+            let (payload, profile_label, dedupe_suffix) = match debug_profile {
+                Some((key, label)) => (
+                    Some(json!({ "debugProfile": key })),
+                    Some(label),
+                    format!("{}:profile", project.project_key),
+                ),
+                None => (None, None, project.project_key.clone()),
+            };
+            let label = profile_label
+                .as_deref()
+                .map(|profile| format!("启动 · {} · {}", project.project_name, profile))
+                .unwrap_or_else(|| format!("启动 · {}", project.project_name));
+            actions.push(TrayMenuActionItem {
+                label,
+                enabled: true,
+                action: tray_workspace_action(
+                    "project.runtime.start",
+                    workspace_key,
+                    format!("启动 {}", project.project_name),
+                    profile_label,
+                    Some(project.project_key.clone()),
+                    payload,
+                    &dedupe_suffix,
+                ),
+            });
+        } else {
+            let mut action = open_action.clone();
+            action.project_key = Some(project.project_key.clone());
+            actions.push(TrayMenuActionItem {
+                label: format!("{} · {}", project.status_label, project.project_name),
+                enabled: false,
+                action,
+            });
+        }
+
+        if include_directory_action && project.path.is_some() {
+            actions.push(TrayMenuActionItem {
+                label: format!("打开目录 · {}", project.project_name),
+                enabled: true,
+                action: tray_workspace_action(
+                    "project.openDirectory",
+                    workspace_key,
+                    format!("打开 {} 目录", project.project_name),
+                    project.path.clone(),
+                    Some(project.project_key.clone()),
+                    None,
+                    &project.project_key,
+                ),
+            });
+        }
+    }
+    actions
+}
+
+fn tray_proxy_menu_actions(
+    workspace_key: &str,
+    profiles: &[WorkspaceProxyProfileItem],
+) -> Vec<TrayMenuActionItem> {
+    profiles
+        .iter()
+        .map(|profile| {
+            let (kind, verb) = if profile.running {
+                ("proxy.stop", "停止")
+            } else {
+                ("proxy.start", "启动")
+            };
+            TrayMenuActionItem {
+                label: format!("{} · {}", verb, profile.name),
+                enabled: true,
+                action: tray_workspace_action(
+                    kind,
+                    workspace_key,
+                    format!("{} {}", verb, profile.name),
+                    Some(profile.listen_url.clone()),
+                    None,
+                    Some(json!({
+                        "sourceId": profile.config_source_id,
+                        "profileId": profile.id,
+                    })),
+                    &profile.id,
+                ),
+            }
+        })
+        .collect()
+}
+
+fn tray_link_menu_actions(
+    workspace_key: &str,
+    resources: &[WorkspaceResourceShortcutItem],
+    open_action: &TrayReplayAction,
+) -> Vec<TrayMenuActionItem> {
+    let mut actions = Vec::new();
+    for resource in resources.iter().filter(|resource| {
+        resource.kind == "tool"
+            && resource
+                .tool
+                .as_deref()
+                .unwrap_or("link")
+                .eq_ignore_ascii_case("link")
+    }) {
+        let Some(link_key) = resource
+            .tool_key
+            .as_deref()
+            .filter(|value| !value.is_empty())
+        else {
+            let mut action = open_action.clone();
+            action.detail = resource.detail.clone();
+            actions.push(TrayMenuActionItem {
+                label: format!("配置异常 · {}", resource.label),
+                enabled: false,
+                action,
+            });
+            continue;
+        };
+        let Some(runtime) = resource.link_runtime.as_ref() else {
+            let mut action = open_action.clone();
+            action.detail = resource.detail.clone();
+            actions.push(TrayMenuActionItem {
+                label: format!("配置异常 · {}", resource.label),
+                enabled: false,
+                action,
+            });
+            continue;
+        };
+        let payload = json!({
+            "sourceId": resource.tool_config_source_id,
+            "proxySourceId": resource.tool_proxy_source_id,
+            "linkKey": link_key,
+        });
+        if runtime.can_run {
+            let verb = if runtime.controllable_steps == 0 {
+                "执行"
+            } else if runtime.status == "partial" {
+                "继续启动"
+            } else {
+                "启动"
+            };
+            actions.push(TrayMenuActionItem {
+                label: format!("{} · {}", verb, resource.label),
+                enabled: true,
+                action: tray_workspace_action(
+                    "link.run",
+                    workspace_key,
+                    format!("{} {}", verb, resource.label),
+                    resource.detail.clone(),
+                    None,
+                    Some(payload.clone()),
+                    link_key,
+                ),
+            });
+        }
+        if runtime.can_stop {
+            actions.push(TrayMenuActionItem {
+                label: format!("停止 · {}", resource.label),
+                enabled: true,
+                action: tray_workspace_action(
+                    "link.stop",
+                    workspace_key,
+                    format!("停止 {}", resource.label),
+                    resource.detail.clone(),
+                    None,
+                    Some(payload),
+                    link_key,
+                ),
+            });
+        }
+        if !runtime.can_run && !runtime.can_stop {
+            let mut action = open_action.clone();
+            action.detail = resource.detail.clone();
+            actions.push(TrayMenuActionItem {
+                label: format!("{} · {}", runtime.label, resource.label),
+                enabled: false,
+                action,
+            });
+        }
+    }
+    actions
+}
+
+fn limited_tray_category_actions(
+    mut actions: Vec<TrayMenuActionItem>,
+    open_action: &TrayReplayAction,
+) -> Vec<TrayMenuActionItem> {
+    if actions.len() <= TRAY_CATEGORY_ITEM_LIMIT {
+        return actions;
+    }
+    actions.truncate(TRAY_CATEGORY_ITEM_LIMIT.saturating_sub(1));
+    actions.push(TrayMenuActionItem {
+        label: "在 rDevTool 中查看全部…".to_string(),
+        enabled: true,
+        action: open_action.clone(),
+    });
+    actions
+}
+
+fn tray_workspace_menus(
+    overview: Vec<WorkspacePinnedActionsOverview>,
+    active_workspace_key: &str,
+    recent_actions: &[TrayReplayAction],
+) -> (Vec<TrayWorkspaceMenu>, usize) {
+    let recent_workspace_rank = recent_actions
+        .iter()
+        .filter_map(|action| {
+            action
+                .workspace_key
+                .as_ref()
+                .map(|key| (key.clone(), action.updated_at_ms))
+        })
+        .fold(BTreeMap::<String, u64>::new(), |mut ranks, (key, rank)| {
+            ranks
+                .entry(key)
+                .and_modify(|current| *current = (*current).max(rank))
+                .or_insert(rank);
+            ranks
+        });
+    let mut overview = overview
+        .into_iter()
+        .filter(|workspace| !workspace.system)
+        .collect::<Vec<_>>();
+    overview.sort_by(|left, right| {
+        let left_active = left.key == active_workspace_key;
+        let right_active = right.key == active_workspace_key;
+        right_active
+            .cmp(&left_active)
+            .then_with(|| {
+                recent_workspace_rank
+                    .get(&right.key)
+                    .copied()
+                    .unwrap_or_default()
+                    .cmp(
+                        &recent_workspace_rank
+                            .get(&left.key)
+                            .copied()
+                            .unwrap_or_default(),
+                    )
+            })
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    let workspace_count = overview.len();
+    overview.truncate(TRAY_WORKSPACE_MENU_LIMIT);
+
+    let menus = overview
+        .into_iter()
+        .map(|workspace| {
+            let active = workspace.key == active_workspace_key;
+            let open_action = tray_workspace_open_action(&workspace.key, &workspace.name);
+            let open_item = TrayMenuActionItem {
+                label: "打开工作区".to_string(),
+                enabled: true,
+                action: open_action.clone(),
+            };
+            let entry_actions = workspace
+                .resources
+                .iter()
+                .filter(|resource| resource.kind != "tool")
+                .map(|resource| TrayMenuActionItem {
+                    label: resource.label.clone(),
+                    enabled: true,
+                    action: tray_navigation_action(&workspace.key, resource),
+                })
+                .collect::<Vec<_>>();
+            let project_actions = tray_project_menu_actions(
+                &workspace.key,
+                active_workspace_key,
+                &workspace.project_directories,
+                recent_actions,
+                &open_action,
+            );
+            let proxy_actions = tray_proxy_menu_actions(&workspace.key, &workspace.proxy_profiles);
+            let link_actions =
+                tray_link_menu_actions(&workspace.key, &workspace.resources, &open_action);
+            let shortcut_actions = workspace
+                .actions
+                .into_iter()
+                .map(|item| {
+                    let mut action = item.action;
+                    action.workspace_key = Some(workspace.key.clone());
+                    TrayMenuActionItem {
+                        label: tray_action_menu_label(&action),
+                        enabled: true,
+                        action,
+                    }
+                })
+                .collect::<Vec<_>>();
+            let mut categories = Vec::new();
+            for (key, label, actions) in [
+                ("entries", "入口", entry_actions),
+                ("projects", "项目", project_actions),
+                ("proxies", "代理", proxy_actions),
+                ("links", "本地联调", link_actions),
+                ("shortcuts", "快捷操作", shortcut_actions),
+            ] {
+                if !actions.is_empty() {
+                    categories.push(TrayMenuCategory {
+                        key: key.to_string(),
+                        label: label.to_string(),
+                        actions: limited_tray_category_actions(actions, &open_action),
+                    });
+                }
+            }
+            TrayWorkspaceMenu {
+                label: if active {
+                    format!("● {}", truncate_menu_label(&workspace.name))
+                } else {
+                    truncate_menu_label(&workspace.name)
+                },
+                active,
+                open_action: open_item,
+                categories,
+            }
+        })
+        .collect();
+    (menus, workspace_count)
+}
+
+fn register_tray_menu_action(
+    actions: &mut BTreeMap<String, TrayReplayAction>,
+    action: TrayReplayAction,
+) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in action
+        .workspace_key
+        .as_deref()
+        .unwrap_or_default()
+        .bytes()
+        .chain(action.kind.bytes())
+        .chain(action.dedupe_key.bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    let base_id = format!("{}{hash:016x}", TRAY_WORKSPACE_ACTION_PREFIX);
+    let mut id = base_id.clone();
+    let mut occurrence = 2;
+    while actions.contains_key(&id) {
+        id = format!("{base_id}_{occurrence}");
+        occurrence += 1;
+    }
+    actions.insert(id.clone(), action);
+    id
+}
+
+fn tray_category_icon(category: &str) -> NativeIcon {
+    match category {
+        "entries" => NativeIcon::Bookmarks,
+        "projects" => NativeIcon::Folder,
+        "proxies" => NativeIcon::Network,
+        "links" => NativeIcon::FollowLinkFreestanding,
+        "shortcuts" => NativeIcon::SmartBadge,
+        _ => NativeIcon::ListView,
+    }
+}
+
+fn create_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let (recent_actions, workspace_menus, workspace_count) = if let Some(state) =
+        app.try_state::<AppState>()
+    {
+        let recent_actions = tray_recent_actions(&state.storage);
+        let active_workspace_key = active_history_workspace()
+            .map(|workspace| workspace.key)
+            .unwrap_or_else(|error| {
+                eprintln!("failed to load active workspace for tray menu: {error}");
+                SYSTEM_PROJECT_WORKSPACE_KEY.to_string()
+            });
+        let workspace_menus = state
+            .config_state
+            .load()
+            .and_then(|config| {
+                workspace_pinned_actions_overview(
+                    &config,
+                    &state.storage,
+                    &state.proxy_runtime,
+                    &state.project_runtime,
+                )
+            })
+            .map(|overview| tray_workspace_menus(overview, &active_workspace_key, &recent_actions))
+            .unwrap_or_else(|error| {
+                eprintln!("failed to build workspace tray menu: {error}");
+                (Vec::new(), 0)
+            });
+        (recent_actions, workspace_menus.0, workspace_menus.1)
+    } else {
+        (Vec::new(), Vec::new(), 0)
+    };
 
     let show_item = IconMenuItem::with_id_and_native_icon(
         app,
@@ -5872,60 +9394,104 @@ fn create_tray_menu<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         Some(NativeIcon::RefreshFreestanding),
         None::<&str>,
     )?;
+    let menu = Menu::new(app)?;
+    menu.append(&show_item)?;
+    menu.append(&replay_last_item)?;
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
 
-    let pinned_menu_items = if pinned_actions.is_empty() {
-        vec![IconMenuItem::with_id_and_native_icon(
+    let mut registered_actions = BTreeMap::new();
+    if workspace_menus.is_empty() {
+        let empty_item = IconMenuItem::with_id_and_native_icon(
             app,
-            "tray_pinned_empty",
-            "暂无已标记操作",
+            "tray_workspaces_empty",
+            "暂无可用工作区",
             false,
-            Some(NativeIcon::Bookmarks),
+            Some(NativeIcon::Folder),
             None::<&str>,
-        )?]
+        )?;
+        menu.append(&empty_item)?;
     } else {
-        pinned_actions
-            .iter()
-            .take(TRAY_PINNED_MENU_LIMIT)
-            .enumerate()
-            .map(|(index, action)| {
-                let (_, icon) = tray_action_menu_meta(action);
-                IconMenuItem::with_id_and_native_icon(
-                    app,
-                    format!("{}{}", TRAY_PINNED_PREFIX, index),
-                    tray_action_menu_label(action),
-                    true,
-                    Some(icon),
-                    None::<&str>,
-                )
-            })
-            .collect::<tauri::Result<Vec<_>>>()?
-    };
-    let pinned_menu_refs = pinned_menu_items
-        .iter()
-        .map(|item| item as &dyn IsMenuItem<R>)
-        .collect::<Vec<_>>();
-    let pinned_submenu = Submenu::with_id_and_items(
-        app,
-        TRAY_PINNED_SUBMENU_ID,
-        "已标记",
-        true,
-        &pinned_menu_refs,
-    )?;
+        for (workspace_index, workspace) in workspace_menus.into_iter().enumerate() {
+            let workspace_submenu = Submenu::with_id_and_native_icon(
+                app,
+                format!("tray_workspace_menu_{workspace_index}"),
+                workspace.label,
+                true,
+                Some(if workspace.active {
+                    NativeIcon::StatusAvailable
+                } else {
+                    NativeIcon::Folder
+                }),
+            )?;
+            let open_id =
+                register_tray_menu_action(&mut registered_actions, workspace.open_action.action);
+            let open_item = IconMenuItem::with_id_and_native_icon(
+                app,
+                open_id,
+                workspace.open_action.label,
+                workspace.open_action.enabled,
+                Some(NativeIcon::Home),
+                None::<&str>,
+            )?;
+            workspace_submenu.append(&open_item)?;
 
-    let separator_top = PredefinedMenuItem::separator(app)?;
-    let separator_bottom = PredefinedMenuItem::separator(app)?;
+            if !workspace.categories.is_empty() {
+                workspace_submenu.append(&PredefinedMenuItem::separator(app)?)?;
+            }
+            for (category_index, category) in workspace.categories.into_iter().enumerate() {
+                let category_submenu = Submenu::with_id_and_native_icon(
+                    app,
+                    format!(
+                        "tray_workspace_category_{}_{}_{}",
+                        workspace_index, category_index, category.key
+                    ),
+                    category.label,
+                    true,
+                    Some(tray_category_icon(&category.key)),
+                )?;
+                for item in category.actions {
+                    let (_, icon) = tray_action_menu_meta(&item.action);
+                    let action_id = register_tray_menu_action(&mut registered_actions, item.action);
+                    let action_item = IconMenuItem::with_id_and_native_icon(
+                        app,
+                        action_id,
+                        truncate_menu_label(&item.label),
+                        item.enabled,
+                        Some(icon),
+                        None::<&str>,
+                    )?;
+                    category_submenu.append(&action_item)?;
+                }
+                workspace_submenu.append(&category_submenu)?;
+            }
+            menu.append(&workspace_submenu)?;
+        }
+    }
+
+    if workspace_count > TRAY_WORKSPACE_MENU_LIMIT {
+        let more_item = IconMenuItem::with_id_and_native_icon(
+            app,
+            TRAY_MORE_WORKSPACES_ID,
+            "更多工作区…",
+            true,
+            Some(NativeIcon::ListView),
+            None::<&str>,
+        )?;
+        menu.append(&more_item)?;
+    }
+
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
     let quit_item = MenuItem::with_id(app, TRAY_QUIT_ID, "退出", true, None::<&str>)?;
-    Menu::with_items(
-        app,
-        &[
-            &show_item,
-            &replay_last_item,
-            &separator_top,
-            &pinned_submenu,
-            &separator_bottom,
-            &quit_item,
-        ],
-    )
+    menu.append(&quit_item)?;
+
+    if let Some(state) = app.try_state::<AppState>() {
+        match state.tray_menu_actions.write() {
+            Ok(mut actions) => *actions = registered_actions,
+            Err(_) => eprintln!("failed to update tray menu action registry"),
+        }
+    }
+
+    Ok(menu)
 }
 
 fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
@@ -5939,6 +9505,47 @@ fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
         Ok(()) => {}
         Err(error) => eprintln!("failed to refresh tray menu: {}", error),
     }
+}
+
+struct WorkspaceExecutionContext {
+    workspaces: Vec<ProjectWorkspaceConfig>,
+    config: AppConfig,
+    link_source: ConfigSource,
+    proxy_source: ConfigSource,
+    proxy_path: PathBuf,
+}
+
+fn workspace_execution_context(
+    config_state: &AppConfigState,
+    workspace_key: Option<&str>,
+) -> Result<WorkspaceExecutionContext, String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspaces =
+        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
+    let workspace = if let Some(workspace_key) = workspace_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        load_project_workspace_by_key(&paths.project_workspaces, workspace_key)
+            .map_err(|error| error.to_string())?
+    } else {
+        load_active_project_workspace(&paths).map_err(|error| error.to_string())?
+    };
+    let mut config = apply_project_workspace_context(&config_state.load()?, &workspace);
+    let runtime_source =
+        resolve_workspace_capability_source(&paths, &workspace, &workspaces, "runtime")?;
+    apply_runtime_overrides_for_source(&mut config, &runtime_source)?;
+    let link_source = resolve_workspace_capability_source(&paths, &workspace, &workspaces, "link")?;
+    let proxy_source =
+        resolve_workspace_capability_source(&paths, &workspace, &workspaces, "proxy")?;
+    let proxy_path = proxy_path_for_config_source(&proxy_source)?;
+    Ok(WorkspaceExecutionContext {
+        workspaces,
+        config,
+        link_source,
+        proxy_source,
+        proxy_path,
+    })
 }
 
 fn open_project_directory_action(
@@ -5965,6 +9572,47 @@ fn tray_payload(action: &TrayReplayAction, label: &str) -> Result<serde_json::Va
         .payload
         .clone()
         .ok_or_else(|| format!("缺少{}回放参数", label))
+}
+
+fn tray_payload_string(
+    action: &TrayReplayAction,
+    key: &str,
+    label: &str,
+) -> Result<String, String> {
+    action
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| format!("缺少{label}"))
+}
+
+fn tray_optional_payload_string(action: &TrayReplayAction, key: &str) -> Option<String> {
+    action
+        .payload
+        .as_ref()
+        .and_then(|payload| payload.get(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn tray_action_is_repeatable(action: &TrayReplayAction) -> bool {
+    !matches!(
+        action.kind.as_str(),
+        "workspace.open" | "project.runtime.stop" | "proxy.stop" | "link.stop"
+    )
+}
+
+fn tray_action_uses_frontend_workflow(action: &TrayReplayAction) -> bool {
+    matches!(
+        action.kind.as_str(),
+        "build.replay" | "deploy.replay" | "branch.replay"
+    )
 }
 
 fn execute_build_tray_replay(
@@ -6023,12 +9671,31 @@ fn execute_tray_replay_action<R: Runtime>(
     };
 
     match action.kind.as_str() {
+        "workspace.open" => {
+            let workspace_key = action
+                .workspace_key
+                .as_deref()
+                .ok_or_else(|| "缺少工作区 Key".to_string())?;
+            activate_project_workspace(&state.config_state, workspace_key)?;
+            show_main_window(app);
+            let _ = app.emit(
+                WORKSPACE_STATE_CHANGED_EVENT,
+                WorkspaceStateChangedPayload {
+                    revision: unix_time_ms(),
+                    origin: "internal".to_string(),
+                    scopes: vec!["workspace".to_string()],
+                    project_workspace_keys: vec![workspace_key.to_string()],
+                    project_workspaces_unknown: false,
+                },
+            );
+        }
         "project.runtime.start" => {
             let project_key = action
                 .project_key
                 .as_deref()
                 .ok_or_else(|| "缺少项目 Key".to_string())?;
-            let mut config = state.config_state.load()?;
+            let mut context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
             let debug_profile = action
                 .payload
                 .as_ref()
@@ -6037,10 +9704,11 @@ fn execute_tray_replay_action<R: Runtime>(
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
             let runtime_profile_key =
-                project_runtime_profile_key(&config, project_key, debug_profile)?;
+                project_runtime_profile_key(&context.config, project_key, debug_profile)?;
             prepare_rdev_proxy_runtime_profile(
-                &mut config,
+                &mut context.config,
                 &state.proxy_runtime,
+                &context.proxy_path,
                 runtime_profile_key.as_deref(),
             )?;
             let env_overrides = action
@@ -6053,7 +9721,7 @@ fn execute_tray_replay_action<R: Runtime>(
             let explicit_env_overrides = env_overrides.is_some();
             let env_overrides = normalize_runtime_env_overrides(env_overrides);
             state.project_runtime.start(
-                &config,
+                &context.config,
                 project_key,
                 debug_profile,
                 if explicit_env_overrides {
@@ -6063,30 +9731,44 @@ fn execute_tray_replay_action<R: Runtime>(
                 },
             )?;
         }
+        "project.runtime.stop" => {
+            let project_key = action
+                .project_key
+                .as_deref()
+                .ok_or_else(|| "缺少项目 Key".to_string())?;
+            let context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
+            state.project_runtime.stop(&context.config, project_key)?;
+        }
         "project.build.run" => {
             let project_key = action
                 .project_key
                 .as_deref()
                 .ok_or_else(|| "缺少项目 Key".to_string())?;
-            let config = state.config_state.load()?;
-            state.project_runtime.run_build(&config, project_key)?;
+            let context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
+            state
+                .project_runtime
+                .run_build(&context.config, project_key)?;
         }
         "project.build.openOutput" => {
             let project_key = action
                 .project_key
                 .as_deref()
                 .ok_or_else(|| "缺少项目 Key".to_string())?;
-            let config = state.config_state.load()?;
+            let context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
             state
                 .project_runtime
-                .open_build_output(&config, project_key)?;
+                .open_build_output(&context.config, project_key)?;
         }
         "project.runtime.focus" => {
             let project_key = action
                 .project_key
                 .as_deref()
                 .ok_or_else(|| "缺少项目 Key".to_string())?;
-            let mut config = state.config_state.load()?;
+            let mut context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
             let debug_profile = action
                 .payload
                 .as_ref()
@@ -6095,53 +9777,123 @@ fn execute_tray_replay_action<R: Runtime>(
                 .map(str::trim)
                 .filter(|value| !value.is_empty());
             let runtime_profile_key =
-                project_runtime_profile_key(&config, project_key, debug_profile)?;
+                project_runtime_profile_key(&context.config, project_key, debug_profile)?;
             prepare_rdev_proxy_runtime_profile(
-                &mut config,
+                &mut context.config,
                 &state.proxy_runtime,
+                &context.proxy_path,
                 runtime_profile_key.as_deref(),
             )?;
             state
                 .project_runtime
-                .focus_runtime(&config, project_key, debug_profile)?;
+                .focus_runtime(&context.config, project_key, debug_profile)?;
         }
         "project.openDirectory" => {
             let project_key = action
                 .project_key
                 .as_deref()
                 .ok_or_else(|| "缺少项目 Key".to_string())?;
-            let config = state.config_state.load()?;
-            open_project_directory_action(&state.project_runtime, &config, project_key)?;
+            let context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
+            open_project_directory_action(&state.project_runtime, &context.config, project_key)?;
         }
         "finder.shortcut.open" => {
             let entry = action
                 .entry
                 .clone()
                 .ok_or_else(|| "缺少快捷入口".to_string())?;
-            let mut config = state.config_state.load()?;
+            let mut context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
             prepare_rdev_proxy_runtime_profile(
-                &mut config,
+                &mut context.config,
                 &state.proxy_runtime,
+                &context.proxy_path,
                 entry.runtime_profile.as_deref(),
             )?;
-            open_navigation_entry_with_runtime_profiles(&entry, &config.defaults.runtime_profiles)
+            open_navigation_entry_with_runtime_profiles(
+                &entry,
+                &context.config.defaults.runtime_profiles,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        "proxy.start" | "proxy.stop" => {
+            let context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
+            let source_id = tray_optional_payload_string(action, "sourceId")
+                .unwrap_or_else(|| context.proxy_source.id.clone());
+            let source = core_resolve_config_source(Some(&source_id), &context.workspaces)
                 .map_err(|error| error.to_string())?;
+            let proxy_path = proxy_path_for_config_source(&source)?;
+            let profile_id = tray_payload_string(action, "profileId", "代理配置 Key")?;
+            if action.kind == "proxy.start" {
+                let config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+                let profile = config
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == profile_id)
+                    .ok_or_else(|| format!("代理配置不存在：{profile_id}"))?;
+                validate_proxy_profile(profile).map_err(|error| error.to_string())?;
+                state
+                    .proxy_runtime
+                    .start_profile(proxy_path, profile_id)
+                    .map_err(|error| error.to_string())?;
+            } else {
+                state
+                    .proxy_runtime
+                    .stop_profile_result(&proxy_path, &profile_id)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        "link.run" | "link.stop" => {
+            let link_key = tray_payload_string(action, "linkKey", "Link Key")?;
+            let source_id = tray_optional_payload_string(action, "sourceId");
+            let proxy_source_id = tray_optional_payload_string(action, "proxySourceId");
+            execute_link_app(
+                &state.config_state,
+                &state.proxy_runtime,
+                &state.project_runtime,
+                LinkAppExecutionRequest {
+                    link_source_id: source_id,
+                    proxy_source_id,
+                    workspace_key: action.workspace_key.clone(),
+                    key: link_key,
+                    mode: if action.kind == "link.run" {
+                        "run".to_string()
+                    } else {
+                        "stop".to_string()
+                    },
+                },
+            )?;
         }
         "build.replay" | "deploy.replay" => {
-            let config = state.config_state.load()?;
-            execute_build_tray_replay(&state.project_runtime, &config, action)?;
+            let context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
+            execute_build_tray_replay(&state.project_runtime, &context.config, action)?;
         }
         "branch.replay" => {
-            let config = state.config_state.load()?;
-            execute_branch_tray_replay(&config, action)?;
+            let context =
+                workspace_execution_context(&state.config_state, action.workspace_key.as_deref())?;
+            execute_branch_tray_replay(&context.config, action)?;
         }
         _ => return Err(format!("不支持回放的操作: {}", action.kind)),
     }
-    record_tray_replay_action(app, action.clone())?;
+    if tray_action_is_repeatable(action) {
+        record_tray_replay_action(app, action.clone())?;
+    } else {
+        refresh_tray_menu(app);
+    }
     Ok(())
 }
 
 fn spawn_tray_replay<R: Runtime>(app: AppHandle<R>, action: TrayReplayAction) {
+    if tray_action_uses_frontend_workflow(&action) {
+        show_main_window(&app);
+        if let Err(error) = app.emit(TRAY_DOMAIN_ACTION_REQUESTED_EVENT, action) {
+            eprintln!("tray domain action dispatch failed: {}", error);
+        }
+        return;
+    }
+
     let replay_guard = app
         .try_state::<AppState>()
         .map(|state| state.tray_replay_running.clone());
@@ -6169,18 +9921,87 @@ fn tray_action_by_index<R: Runtime>(app: &AppHandle<R>, index: usize) -> Option<
         .and_then(|actions| actions.into_iter().nth(index))
 }
 
-fn tray_pinned_action_by_index<R: Runtime>(
+fn tray_workspace_action_by_id<R: Runtime>(
     app: &AppHandle<R>,
-    index: usize,
+    action_id: &str,
 ) -> Option<TrayReplayAction> {
-    app.try_state::<AppState>()
-        .map(|state| tray_pinned_actions_for_menu(&state.storage))
-        .and_then(|actions| actions.into_iter().nth(index))
+    app.try_state::<AppState>().and_then(|state| {
+        state
+            .tray_menu_actions
+            .read()
+            .ok()
+            .and_then(|actions| actions.get(action_id).cloned())
+    })
+}
+
+fn begin_app_exit<R: Runtime>(app: &AppHandle<R>, coordinator: &AppExitCoordinator) {
+    coordinator.is_quitting.store(true, Ordering::Release);
+    app.exit(0);
+}
+
+fn emit_app_exit_failure<R: Runtime>(
+    app: &AppHandle<R>,
+    coordinator: &AppExitCoordinator,
+    message: String,
+) {
+    coordinator
+        .request_in_progress
+        .store(false, Ordering::Release);
+    show_main_window(app);
+    let _ = app.emit(APP_EXIT_FAILED_EVENT, AppExitFailedPayload { message });
+}
+
+fn request_app_exit<R: Runtime>(app: &AppHandle<R>) {
+    let Some(state) = app.try_state::<AppState>() else {
+        app.exit(0);
+        return;
+    };
+    let coordinator = state.exit_coordinator.clone();
+    if coordinator.is_quitting.load(Ordering::Acquire)
+        || coordinator
+            .request_in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+    {
+        return;
+    }
+
+    let summary: AppStartedRuntimeSummary = state.project_runtime.app_started_runtime_summary();
+    if summary.count == 0 {
+        begin_app_exit(app, &coordinator);
+        return;
+    }
+
+    match load_app_exit_runtime_policy(&state.storage) {
+        AppExitRuntimePolicy::Keep => begin_app_exit(app, &coordinator),
+        AppExitRuntimePolicy::Ask => {
+            show_main_window(app);
+            let _ = app.emit(
+                APP_EXIT_REQUESTED_EVENT,
+                AppExitRequestedPayload {
+                    active_runtime_count: summary.count,
+                    project_names: summary.project_names,
+                },
+            );
+        }
+        AppExitRuntimePolicy::Stop => {
+            let runtime = state.project_runtime.clone();
+            let app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let report = runtime.shutdown_app_started_runtimes();
+                if report.failures.is_empty() {
+                    begin_app_exit(&app, &coordinator);
+                } else {
+                    emit_app_exit_failure(&app, &coordinator, report.failures.join("；"));
+                }
+            });
+        }
+    }
 }
 
 fn build_tray<R: tauri::Runtime>(
     app: &AppHandle<R>,
-    is_quitting: Arc<AtomicBool>,
+    exit_coordinator: AppExitCoordinator,
 ) -> tauri::Result<()> {
     let menu = create_tray_menu(app)?;
 
@@ -6189,25 +10010,22 @@ fn build_tray<R: tauri::Runtime>(
         .tooltip("rDevTool")
         .show_menu_on_left_click(false)
         .on_menu_event({
-            let is_quitting = is_quitting.clone();
+            let exit_coordinator = exit_coordinator.clone();
             move |app, event| match event.id().as_ref() {
                 TRAY_SHOW_ID => show_main_window(app),
+                TRAY_MORE_WORKSPACES_ID => show_main_window(app),
                 TRAY_REPLAY_LAST_ID => {
                     if let Some(action) = tray_action_by_index(app, 0) {
                         spawn_tray_replay(app.clone(), action);
                     }
                 }
                 TRAY_QUIT_ID => {
-                    is_quitting.store(true, Ordering::Relaxed);
-                    app.exit(0);
+                    if !exit_coordinator.is_quitting.load(Ordering::Acquire) {
+                        request_app_exit(app);
+                    }
                 }
-                id if id.starts_with(TRAY_PINNED_PREFIX) => {
-                    let index = id
-                        .strip_prefix(TRAY_PINNED_PREFIX)
-                        .and_then(|value| value.parse::<usize>().ok());
-                    if let Some(action) =
-                        index.and_then(|value| tray_pinned_action_by_index(app, value))
-                    {
+                id if id.starts_with(TRAY_WORKSPACE_ACTION_PREFIX) => {
+                    if let Some(action) = tray_workspace_action_by_id(app, id) {
                         spawn_tray_replay(app.clone(), action);
                     }
                 }
@@ -6327,8 +10145,9 @@ fn inside_polygon(x: f32, y: f32, points: &[(f32, f32)]) -> bool {
 }
 
 pub fn run() {
-    let is_quitting = Arc::new(AtomicBool::new(false));
-    let tray_quitting = is_quitting.clone();
+    let exit_coordinator = AppExitCoordinator::default();
+    let window_exit_coordinator = exit_coordinator.clone();
+    let setup_exit_coordinator = exit_coordinator.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -6336,35 +10155,46 @@ pub fn run() {
             show_main_window(&app);
         }))
         .on_window_event({
-            let is_quitting = is_quitting.clone();
             move |window, event| {
                 if window.label() != MAIN_WINDOW_LABEL {
                     return;
                 }
 
                 if let WindowEvent::CloseRequested { api, .. } = event {
-                    if is_quitting.load(Ordering::Relaxed) {
+                    if window_exit_coordinator.is_quitting.load(Ordering::Acquire) {
                         return;
                     }
 
+                    api.prevent_close();
                     if should_use_tray() {
-                        api.prevent_close();
                         let _ = window.hide();
+                    } else {
+                        request_app_exit(window.app_handle());
                     }
                 }
             }
         })
         .setup(move |app| {
             let storage = Storage::new_default().map_err(std::io::Error::other)?;
+            let workspace_config_watcher_stop = Arc::new(AtomicBool::new(false));
             app.manage(AppState {
                 storage,
                 project_runtime: ProjectRuntimeState::default(),
                 proxy_runtime: ProxyRuntimeState::default(),
                 config_state: AppConfigState::default(),
+                exit_coordinator: setup_exit_coordinator.clone(),
                 tray_replay_running: Arc::new(AtomicBool::new(false)),
+                tray_menu_actions: Arc::new(RwLock::new(BTreeMap::new())),
+                workspace_config_watcher_stop: workspace_config_watcher_stop.clone(),
             });
+            if let Err(error) =
+                start_workspace_config_watcher(app.handle().clone(), workspace_config_watcher_stop)
+            {
+                eprintln!("[workspace-config-watcher] {error}");
+            }
             if should_use_tray() {
-                build_tray(app.handle(), tray_quitting.clone()).map_err(std::io::Error::other)?;
+                build_tray(app.handle(), setup_exit_coordinator.clone())
+                    .map_err(std::io::Error::other)?;
             }
             #[cfg(target_os = "macos")]
             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
@@ -6380,11 +10210,16 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            get_app_exit_runtime_policy,
+            save_app_exit_runtime_policy,
+            cancel_app_exit,
+            confirm_app_exit,
             get_workspace_app_preferences,
             save_workspace_app_preferences,
             get_project_workspaces,
             set_active_project_workspace,
             create_project_workspace_config,
+            delete_project_workspace_config,
             init_demand_workspace_config,
             get_project_workspace_editor,
             save_project_workspace_editor,
@@ -6403,6 +10238,7 @@ pub fn run() {
             get_project_config_editor,
             save_default_branch_rules,
             save_runtime_profiles,
+            restore_runtime_profile_inheritance,
             save_project_config_basics,
             add_project_config,
             delete_project_config,
@@ -6428,13 +10264,33 @@ pub fn run() {
             unbind_project_workspace_project_directory,
             execute_branch_switch_task,
             list_project_worktrees,
+            repair_project_worktree,
             get_project_push_status,
+            get_project_file_diff,
             execute_branch_push_task,
             open_local_path,
             open_external_resource,
+            list_config_sources,
+            compare_config_sources,
+            copy_config_source,
+            list_ui_profiles,
+            inspect_config_source,
+            save_config_source,
+            delete_config_source,
+            get_config_source_preference,
+            save_config_source_preference,
             load_page_navigation,
             get_navigation_editor,
             save_navigation_editor,
+            list_links,
+            get_link,
+            plan_link,
+            save_link,
+            delete_link,
+            attach_link_to_workspace,
+            check_link,
+            run_link,
+            stop_link,
             open_page_navigation_entry,
             list_web_actions,
             open_web_action_target,
@@ -6452,6 +10308,7 @@ pub fn run() {
             get_workspace_pinned_actions_overview,
             get_workspace_ai_context,
             execute_tray_pinned_action,
+            record_tray_pinned_action_execution,
             set_tray_pinned_actions,
             list_build_history,
             save_build_history,
@@ -6468,6 +10325,7 @@ pub fn run() {
             inspect_project_runtime,
             start_project_runtime,
             stop_project_runtime,
+            adopt_project_runtime,
             run_project_build,
             stop_project_build,
             open_project_build_output,
@@ -6478,11 +10336,511 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
-        .run(|app, event| {
-            if matches!(event, RunEvent::ExitRequested { .. } | RunEvent::Exit) {
+        .run(|app, event| match event {
+            RunEvent::ExitRequested { api, .. } => {
+                if let Some(state) = app.try_state::<AppState>()
+                    && !state.exit_coordinator.is_quitting.load(Ordering::Acquire)
+                {
+                    api.prevent_exit();
+                    request_app_exit(app);
+                }
+            }
+            RunEvent::Exit => {
                 if let Some(state) = app.try_state::<AppState>() {
+                    state
+                        .workspace_config_watcher_stop
+                        .store(true, Ordering::Relaxed);
                     state.project_runtime.shutdown_all();
                 }
             }
+            _ => {}
         });
+}
+
+#[cfg(test)]
+mod workspace_config_watcher_tests {
+    use super::*;
+
+    fn workspace(key: &str, projects: &[&str]) -> ProjectWorkspaceConfig {
+        ProjectWorkspaceConfig {
+            key: key.to_string(),
+            name: key.to_string(),
+            projects: projects.iter().map(|project| project.to_string()).collect(),
+            ..ProjectWorkspaceConfig::default()
+        }
+    }
+
+    fn build_pin(workspace_key: Option<&str>) -> TrayReplayAction {
+        TrayReplayAction {
+            kind: "build.replay".to_string(),
+            label: "构建 demo".to_string(),
+            detail: None,
+            workspace_key: workspace_key.map(ToString::to_string),
+            project_key: Some("demo".to_string()),
+            entry: None,
+            payload: None,
+            dedupe_key: "build.replay:demo".to_string(),
+            updated_at_ms: 1,
+        }
+    }
+
+    fn test_navigation_entry(name: &str, kind: &str) -> NavigationEntry {
+        NavigationEntry {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            target_label: format!("/{name}"),
+            url: (kind == "url").then(|| format!("https://{name}.example.com")),
+            browser: None,
+            browser_profile: None,
+            runtime_profile: None,
+            bundle_id: None,
+            app_name: None,
+            script: None,
+            tool: None,
+            tool_key: None,
+            tool_action: None,
+            path: (kind == "directory").then(|| format!("/{name}")),
+            cwd: None,
+            note: None,
+        }
+    }
+
+    fn test_resource(workspace_key: &str, name: &str) -> WorkspaceResourceShortcutItem {
+        WorkspaceResourceShortcutItem {
+            key: format!("{workspace_key}:{name}"),
+            config_source_id: "default".to_string(),
+            category: "常用".to_string(),
+            label: name.to_string(),
+            kind: "url".to_string(),
+            kind_label: "网站".to_string(),
+            value: Some(format!("https://{name}.example.com")),
+            detail: None,
+            tool: None,
+            tool_key: None,
+            tool_action: None,
+            link_runtime: None,
+            open_kind: Some("url".to_string()),
+            openable: true,
+            entry: test_navigation_entry(name, "url"),
+            tool_config_source_id: None,
+            tool_proxy_source_id: None,
+        }
+    }
+
+    fn test_link_resource(workspace_key: &str, name: &str) -> WorkspaceResourceShortcutItem {
+        let mut entry = test_navigation_entry(name, "tool");
+        entry.tool = Some("link".to_string());
+        entry.tool_key = Some(format!("{workspace_key}-link"));
+        WorkspaceResourceShortcutItem {
+            key: format!("{workspace_key}:{name}"),
+            config_source_id: "workspace-test".to_string(),
+            category: "工具".to_string(),
+            label: name.to_string(),
+            kind: "tool".to_string(),
+            kind_label: "工具".to_string(),
+            value: Some(format!("{workspace_key}-link")),
+            detail: None,
+            tool: Some("link".to_string()),
+            tool_key: Some(format!("{workspace_key}-link")),
+            tool_action: Some("run".to_string()),
+            link_runtime: Some(LinkRuntimeSummary {
+                status: "stopped".to_string(),
+                label: "未启动".to_string(),
+                running_steps: 0,
+                controllable_steps: 2,
+                blocked_steps: 0,
+                can_run: true,
+                can_stop: false,
+            }),
+            open_kind: Some("tool".to_string()),
+            openable: false,
+            entry,
+            tool_config_source_id: Some("workspace-test".to_string()),
+            tool_proxy_source_id: Some("default".to_string()),
+        }
+    }
+
+    fn test_project(key: &str, name: &str) -> WorkspaceProjectDirectoryItem {
+        WorkspaceProjectDirectoryItem {
+            project_key: key.to_string(),
+            project_name: name.to_string(),
+            mode: "global".to_string(),
+            mode_label: "全局目录".to_string(),
+            path: Some(format!("/{key}")),
+            managed: false,
+            status_key: "stopped".to_string(),
+            status_label: "未启动".to_string(),
+            running: false,
+            can_start: true,
+            can_stop: false,
+            can_focus_runtime: false,
+            debug_profiles: Vec::new(),
+        }
+    }
+
+    fn test_proxy(workspace_key: &str, id: &str) -> WorkspaceProxyProfileItem {
+        WorkspaceProxyProfileItem {
+            config_source_id: "default".to_string(),
+            id: id.to_string(),
+            name: format!("{id} 代理"),
+            listen_host: "127.0.0.1".to_string(),
+            listen_port: 8791,
+            listen_url: "http://127.0.0.1:8791".to_string(),
+            workspace_key: Some(workspace_key.to_string()),
+            workspace_label: workspace_key.to_string(),
+            rule_count: 2,
+            running: false,
+            started_at: None,
+        }
+    }
+
+    fn test_overview(
+        key: &str,
+        active_content: bool,
+        system: bool,
+    ) -> WorkspacePinnedActionsOverview {
+        WorkspacePinnedActionsOverview {
+            key: key.to_string(),
+            name: key.to_string(),
+            description: None,
+            system,
+            root_dir: None,
+            workspace_kind: if system { "global" } else { "scope" }.to_string(),
+            workspace_type: if system { "system" } else { "custom" }.to_string(),
+            workspace_type_label: if system { "全局" } else { "未分类" }.to_string(),
+            project_count: usize::from(active_content),
+            entry_count: usize::from(active_content),
+            action_count: 0,
+            proxy_profile_count: usize::from(active_content),
+            resources: if active_content {
+                vec![
+                    test_resource(key, "需求入口"),
+                    test_link_resource(key, "本地联调"),
+                ]
+            } else {
+                Vec::new()
+            },
+            project_directories: if active_content {
+                vec![test_project("demo", "演示项目")]
+            } else {
+                Vec::new()
+            },
+            proxy_profiles: if active_content {
+                vec![test_proxy(key, "demo-proxy")]
+            } else {
+                Vec::new()
+            },
+            actions: Vec::new(),
+        }
+    }
+
+    fn targets() -> WorkspaceConfigWatchTargets {
+        WorkspaceConfigWatchTargets {
+            projects: PathBuf::from("/config/projects.toml"),
+            workspace: PathBuf::from("/config/workspace.toml"),
+            project_workspaces: PathBuf::from("/config/workspaces"),
+        }
+    }
+
+    fn config_source_targets() -> Vec<ConfigSourceWatchTarget> {
+        vec![ConfigSourceWatchTarget {
+            id: "team".to_string(),
+            base_dir: PathBuf::from("/sources/team"),
+            files: vec![
+                PathBuf::from("/sources/team/navigation.toml"),
+                PathBuf::from("/sources/team/links.toml"),
+            ],
+        }]
+    }
+
+    #[test]
+    fn keeps_explicit_build_pin_in_its_workspace_when_projects_overlap() {
+        let workspaces = vec![
+            ProjectWorkspaceConfig::default(),
+            workspace("feature", &["demo"]),
+            workspace("release", &["demo"]),
+        ];
+
+        assert_eq!(
+            workspace_key_for_pinned_action(&workspaces, &build_pin(Some("feature"))),
+            "feature"
+        );
+    }
+
+    #[test]
+    fn keeps_legacy_build_pin_global_when_workspace_is_ambiguous() {
+        let workspaces = vec![
+            ProjectWorkspaceConfig::default(),
+            workspace("feature", &["demo"]),
+            workspace("release", &["demo"]),
+        ];
+
+        assert_eq!(
+            workspace_key_for_pinned_action(&workspaces, &build_pin(None)),
+            SYSTEM_PROJECT_WORKSPACE_KEY
+        );
+    }
+
+    #[test]
+    fn builds_workspace_first_three_level_tray_model() {
+        let recent = TrayReplayAction {
+            kind: "project.runtime.start".to_string(),
+            label: "启动演示项目".to_string(),
+            detail: None,
+            workspace_key: Some("active".to_string()),
+            project_key: Some("demo".to_string()),
+            entry: None,
+            payload: Some(json!({ "debugProfile": "dc2" })),
+            dedupe_key: "project.runtime.start:active:demo:dc2".to_string(),
+            updated_at_ms: 10,
+        };
+        let (menus, count) = tray_workspace_menus(
+            vec![
+                test_overview("system", false, true),
+                test_overview("other", false, false),
+                test_overview("active", true, false),
+            ],
+            "active",
+            &[recent],
+        );
+
+        assert_eq!(count, 2);
+        assert_eq!(menus.len(), 2);
+        assert!(menus[0].active);
+        assert!(menus[0].label.starts_with("● "));
+        assert_eq!(
+            menus[0]
+                .categories
+                .iter()
+                .map(|category| category.label.as_str())
+                .collect::<Vec<_>>(),
+            vec!["入口", "项目", "代理", "本地联调"]
+        );
+        let project_actions = &menus[0].categories[1].actions;
+        assert_eq!(project_actions[0].label, "启动 · 演示项目 · dc2");
+        assert_eq!(
+            project_actions[0].action.workspace_key.as_deref(),
+            Some("active")
+        );
+        assert_eq!(menus[0].categories[2].actions[0].action.kind, "proxy.start");
+        assert_eq!(menus[0].categories[3].actions[0].action.kind, "link.run");
+    }
+
+    #[test]
+    fn limits_workspaces_and_long_category_lists() {
+        let mut crowded = test_overview("active", false, false);
+        crowded.resources = (0..12)
+            .map(|index| test_resource("active", &format!("入口{index}")))
+            .collect();
+        let mut overview = vec![crowded];
+        overview
+            .extend((0..6).map(|index| test_overview(&format!("workspace-{index}"), false, false)));
+
+        let (menus, count) = tray_workspace_menus(overview, "active", &[]);
+
+        assert_eq!(count, 7);
+        assert_eq!(menus.len(), TRAY_WORKSPACE_MENU_LIMIT);
+        assert_eq!(
+            menus[0].categories[0].actions.len(),
+            TRAY_CATEGORY_ITEM_LIMIT
+        );
+        assert_eq!(
+            menus[0].categories[0].actions.last().unwrap().label,
+            "在 rDevTool 中查看全部…"
+        );
+    }
+
+    #[test]
+    fn keeps_tray_action_ids_stable_across_menu_refreshes() {
+        let action = tray_workspace_open_action("active", "Active");
+        let mut first_menu = BTreeMap::new();
+        let first_id = register_tray_menu_action(&mut first_menu, action.clone());
+        let duplicate_id = register_tray_menu_action(&mut first_menu, action.clone());
+        let mut refreshed_menu = BTreeMap::new();
+        let refreshed_id = register_tray_menu_action(&mut refreshed_menu, action);
+
+        assert_eq!(first_id, refreshed_id);
+        assert_ne!(first_id, duplicate_id);
+    }
+
+    #[test]
+    fn build_and_branch_tray_actions_use_frontend_workflows() {
+        let mut build = build_pin(Some("active"));
+        build.kind = "build.replay".to_string();
+        let mut branch = build.clone();
+        branch.kind = "branch.replay".to_string();
+        let mut runtime = build.clone();
+        runtime.kind = "project.runtime.start".to_string();
+
+        assert!(tray_action_uses_frontend_workflow(&build));
+        assert!(tray_action_uses_frontend_workflow(&branch));
+        assert!(!tray_action_uses_frontend_workflow(&runtime));
+    }
+
+    #[test]
+    fn classifies_workspace_configuration_paths() {
+        let paths = vec![
+            PathBuf::from("/config/workspace.toml"),
+            PathBuf::from("/config/projects.toml"),
+            PathBuf::from("/config/workspaces/team.toml"),
+        ];
+
+        assert_eq!(
+            workspace_config_event_impact(&paths, &targets()),
+            WorkspaceConfigEventImpact {
+                scopes: BTreeSet::from(["projectWorkspaces", "projects", "workspace"]),
+                project_workspace_keys: BTreeSet::from(["team".to_string()]),
+                project_workspaces_unknown: false,
+            },
+        );
+    }
+
+    #[test]
+    fn recognizes_atomic_write_temporary_files() {
+        let paths = vec![
+            PathBuf::from("/config/.workspace.toml.123.456.0.tmp"),
+            PathBuf::from("/config/.projects.toml.123.456.0.tmp"),
+        ];
+
+        assert_eq!(
+            workspace_config_event_impact(&paths, &targets()),
+            WorkspaceConfigEventImpact {
+                scopes: BTreeSet::from(["projects", "workspace"]),
+                ..WorkspaceConfigEventImpact::default()
+            },
+        );
+    }
+
+    #[test]
+    fn extracts_project_workspace_keys_from_atomic_writes() {
+        let paths = vec![
+            PathBuf::from("/config/workspaces/.team.toml.123.456.0.tmp"),
+            PathBuf::from("/config/workspaces/other.toml"),
+            PathBuf::from("/config/workspaces/other.toml.bak"),
+        ];
+
+        assert_eq!(
+            workspace_config_event_impact(&paths, &targets()),
+            WorkspaceConfigEventImpact {
+                scopes: BTreeSet::from(["projectWorkspaces"]),
+                project_workspace_keys: BTreeSet::from(["other".to_string(), "team".to_string(),]),
+                project_workspaces_unknown: false,
+            },
+        );
+    }
+
+    #[test]
+    fn marks_directory_level_workspace_events_as_unknown() {
+        let paths = vec![PathBuf::from("/config/workspaces")];
+
+        assert!(workspace_config_event_impact(&paths, &targets()).project_workspaces_unknown);
+    }
+
+    #[test]
+    fn ignores_unrelated_configuration_files() {
+        let paths = vec![
+            PathBuf::from("/config/proxy.toml"),
+            PathBuf::from("/config/projects.toml.bak"),
+        ];
+
+        assert!(
+            workspace_config_event_impact(&paths, &targets())
+                .scopes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn classifies_config_source_registry_and_content_changes() {
+        let paths = vec![
+            PathBuf::from("/config/config_sources.toml"),
+            PathBuf::from("/sources/team/.navigation.toml.123.456.0.tmp"),
+        ];
+
+        assert_eq!(
+            config_source_event_impact(
+                &paths,
+                Path::new("/config/config_sources.toml"),
+                &config_source_targets(),
+            ),
+            ConfigSourceEventImpact {
+                source_ids: BTreeSet::from(["team".to_string()]),
+                catalog_changed: true,
+            },
+        );
+    }
+
+    #[test]
+    fn ignores_config_source_backups_and_unmapped_files() {
+        let paths = vec![
+            PathBuf::from("/sources/team/navigation.toml.bak"),
+            PathBuf::from("/sources/team/notes.txt"),
+        ];
+
+        assert_eq!(
+            config_source_event_impact(
+                &paths,
+                Path::new("/config/config_sources.toml"),
+                &config_source_targets(),
+            ),
+            ConfigSourceEventImpact::default(),
+        );
+    }
+
+    #[test]
+    fn marks_recent_app_writes_as_internal() {
+        let root = std::env::temp_dir().join(format!(
+            "rdevtool-origin-{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let workspace_targets = WorkspaceConfigWatchTargets {
+            projects: root.join("projects.toml"),
+            workspace: root.join("workspace.toml"),
+            project_workspaces: root.join("workspaces"),
+        };
+        rdevtool_core::config_store::register_internal_config_write(&workspace_targets.workspace);
+
+        assert_eq!(
+            config_event_origin(
+                &[root.join(".workspace.toml.123.456.0.tmp")],
+                &workspace_targets,
+                &root.join("config_sources.toml"),
+                &[],
+            ),
+            "internal",
+        );
+    }
+
+    #[test]
+    fn keeps_mixed_app_and_external_writes_external() {
+        let root = std::env::temp_dir().join(format!(
+            "rdevtool-origin-mixed-{}",
+            SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let workspace_targets = WorkspaceConfigWatchTargets {
+            projects: root.join("projects.toml"),
+            workspace: root.join("workspace.toml"),
+            project_workspaces: root.join("workspaces"),
+        };
+        rdevtool_core::config_store::register_internal_config_write(&workspace_targets.workspace);
+
+        assert_eq!(
+            config_event_origin(
+                &[
+                    workspace_targets.workspace.clone(),
+                    workspace_targets.projects.clone(),
+                ],
+                &workspace_targets,
+                &root.join("config_sources.toml"),
+                &[],
+            ),
+            "external",
+        );
+    }
 }

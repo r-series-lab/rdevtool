@@ -8,6 +8,7 @@ export type TrayPinnedAction = {
   kind: string;
   label: string;
   detail?: string | null;
+  workspaceKey?: string | null;
   projectKey?: string | null;
   entry?: unknown | null;
   payload?: unknown | null;
@@ -57,6 +58,7 @@ export function normalizeTrayPinnedActions(actions: unknown[]): TrayPinnedAction
       kind,
       label: action.label.trim(),
       detail: action.detail ?? null,
+      workspaceKey: action.workspaceKey?.trim() || null,
       projectKey: action.projectKey ?? null,
       entry: action.entry ?? null,
       payload: action.payload ?? null,
