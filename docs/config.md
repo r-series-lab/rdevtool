@@ -32,7 +32,9 @@ Linux:
 | `config_sources.toml` | 自建配置源注册表：目录、文件映射、界面配置和能力范围 |
 | `sources/workspaces/<key>/` | 工作区自动生成的独立配置目录 |
 | `navigation.toml` | 入口事实源：网站、目录、应用、脚本 |
+| `links.toml` | Link 事实源：本地文件、代理、Runtime 与页面步骤 |
 | `proxy.toml` | 代理事实源：profile、规则、工作区归属 |
+| `runtime_overrides.toml` | 配置源提供的 Runtime profile 覆盖 |
 | `web_actions.toml` | Chrome CDP 网页动作 |
 
 仓库内模板：
@@ -43,6 +45,15 @@ workspace.template.toml
 project-workspace.template.toml
 navigation.template.toml
 ```
+
+## Local State And Migrations
+
+`~/.rdevtool/rdevtool.sqlite` 保存 notes、构建/合并历史、统一操作事件和少量本机状态，不是项目配置事实源。数据库启用 WAL，并使用 `PRAGMA user_version` 做只向前迁移：
+
+- schema v1：KV、notes、构建历史和合并历史基础表。
+- schema v2：为构建与合并历史增加工作区和项目实例范围。
+
+应用会在启动时逐级迁移旧库；如果数据库版本高于当前应用支持版本，会拒绝打开而不是尝试降级。SQLite 没有应用层加密，备份或迁移时应把它视为本机开发历史数据；不要在构建参数、活动 payload 或 notes 中保存 token、密码、cookie 和私钥。
 
 ## Workspace
 
@@ -107,12 +118,18 @@ rdevtool --json config-source use team-local --capability proxy
 key = "marketing-rework"
 name = "营销改造"
 description = "营销相关项目和入口"
+root_dir = "/path/to/workspace"
+resource_dir = "/path/to/workspace/resources"
+worklog_file = "WORKLOG.md"
+worklog_auto_record = true
 include_all_projects = false
 include_all_navigation = false
 projects = ["imop-admin", "imop-coupon"]
 navigation_categories = ["营销后台", "Jenkins"]
 navigation_entries = ["Jenkins 智能营销"]
 ```
+
+`root_dir` 是项目副本和运行目录的根；`resource_dir` 是该需求的文档、附件、脚本和软链接目录；`worklog_file` 必须是 `resource_dir` 内的相对 Markdown 路径。`worklog_auto_record` 默认开启，只记录构建、Git、Runtime 和关键配置操作的完成或失败结果，并对同一终态事件去重。它们与全局 SQLite notes 的用途不同，工作日志会随工作区资料一起迁移，并进入 AI 工作区上下文。
 
 不要在工作区里复制项目配置、Jenkins 配置或导航入口详情。它们仍然分别属于 `projects.toml`、`navigation.toml` 和 `proxy.toml`。
 
@@ -156,6 +173,9 @@ action_kind = "deploy"
 jenkins_profile = "default"
 job_name = "Marketing/example-web-vke"
 
+[projects.deploy_targets.artifact]
+output_dir = "/path/to/example-web/jenkins-artifacts"
+
 [[projects.deploy_targets.params]]
 key = "ENV_PROFILE"
 label = "环境"
@@ -192,7 +212,7 @@ options = ["macos", "windows", "linux"]
 ```bash
 rdevtool --json projects add --key example-web --name "示例项目" --repo-path /path/to/example-web
 rdevtool --json projects set-command example-web --kind dev --command "npm run dev" --cwd /path/to/example-web
-rdevtool --json projects build-target-add example-web --key vke --label VKE --adapter jenkins --action-kind deploy --profile default --job "Marketing/example-web-vke"
+rdevtool --json projects build-target-add example-web --key vke --label VKE --adapter jenkins --action-kind deploy --profile default --job "Marketing/example-web-vke" --output-dir /path/to/example-web/jenkins-artifacts
 rdevtool --json projects build-target-add example-web --key package --label "本地打包" --adapter r_series_package
 rdevtool --json projects build-param-add example-web vke --key ENV_PROFILE --label "环境" --kind select --option uat3 --option pre --default uat3 --required
 ```
@@ -214,7 +234,7 @@ action_kind = "deploy"
 | `local_command` | 本地命令构建，可留空 `jenkins_profile`，`job_name` 作为命令覆盖 |
 | `r_series_package` | R 系列本地打包，可复用 `[projects.build]`，参数会注入为 `RDEVTOOL_PARAM_*` 环境变量 |
 
-本地 adapter 的命令解析顺序是 `build_command` 参数、target `job_name`、`[projects.build].command`、默认 `npm run build`。`build_cwd`、`build_output_dir` 参数可覆盖工作目录和产物目录。
+每个 target 可通过 `[projects.deploy_targets.artifact].output_dir` 声明产物目录。它是 rDevTool 自身的产物元数据，不会作为 Jenkins 参数发送；Jenkins target 的 `build plan` 会返回该目录。本地 adapter 的命令解析顺序是 `build_command` 参数、target `job_name`、`[projects.build].command`、默认 `npm run build`。产物目录解析顺序是运行参数 `build_output_dir`、target `artifact.output_dir`、`[projects.build].output_dir`；运行参数保留用于兼容旧配置和一次性覆盖。
 
 ## R 系列应用
 
@@ -240,11 +260,8 @@ adapter = "local_command"
 action_kind = "build"
 job_name = "npm run web:build"
 
-[[projects.deploy_targets.params]]
-key = "build_output_dir"
-label = "产物目录"
-type = "hidden"
-default = "/Users/ikiru/Documents/r-series-public/rdevtool/web/dist"
+[projects.deploy_targets.artifact]
+output_dir = "/Users/ikiru/Documents/r-series-public/rdevtool/web/dist"
 
 [[projects.deploy_targets]]
 key = "package"

@@ -75,6 +75,8 @@ pub fn plan_adapter(
     match target.adapter {
         BuildTargetAdapter::Jenkins => {
             let profile = selected_jenkins_profile(config, target)?;
+            let output_dir =
+                resolve_target_artifact_output_dir(&project_base_dir(project)?, target);
             Ok(BuildAdapterPlan {
                 adapter: adapter_key(&target.adapter).to_string(),
                 action_kind: action_kind_key(&target.action_kind).to_string(),
@@ -83,7 +85,7 @@ pub fn plan_adapter(
                 jenkins_base_url: profile.base_url.clone(),
                 command: None,
                 cwd: None,
-                output_dir: None,
+                output_dir: output_dir.map(|path| path.display().to_string()),
             })
         }
         BuildTargetAdapter::LocalCommand | BuildTargetAdapter::RSeriesPackage => {
@@ -240,6 +242,8 @@ fn resolve_local_command_plan(
         ],
     ) {
         Some(resolve_path(&cwd, Path::new(&value)))
+    } else if let Some(output_dir) = resolve_target_artifact_output_dir(&cwd, target) {
+        Some(output_dir)
     } else {
         build_config
             .and_then(|config| config.output_dir.as_ref())
@@ -251,6 +255,17 @@ fn resolve_local_command_plan(
         cwd,
         output_dir,
     })
+}
+
+fn resolve_target_artifact_output_dir(
+    base_dir: &Path,
+    target: &DeployTargetConfig,
+) -> Option<PathBuf> {
+    target
+        .artifact
+        .as_ref()
+        .and_then(|artifact| artifact.output_dir.as_ref())
+        .map(|path| resolve_path(base_dir, path))
 }
 
 fn run_local_command(
@@ -486,5 +501,110 @@ fn jenkins_state_key(state: jenkins::TriggerState) -> &'static str {
         jenkins::TriggerState::Success => "success",
         jenkins::TriggerState::Failure => "failure",
         jenkins::TriggerState::Cancelled => "cancelled",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn local_project() -> ProjectConfig {
+        toml::from_str(
+            r#"
+key = "demo"
+name = "Demo"
+repo_path = "repo"
+
+[build]
+command = "npm run build"
+output_dir = "project-output"
+
+[[deploy_targets]]
+key = "web"
+label = "Web"
+adapter = "local_command"
+action_kind = "build"
+job_name = "npm run web:build"
+
+[deploy_targets.artifact]
+output_dir = "target-output"
+"#,
+        )
+        .expect("parse local project")
+    }
+
+    #[test]
+    fn local_target_artifact_precedes_project_output_dir() {
+        let project = local_project();
+        let plan =
+            resolve_local_command_plan(&project, &project.deploy_targets[0], &BTreeMap::new())
+                .expect("resolve local plan");
+
+        assert_eq!(
+            plan.output_dir,
+            Some(PathBuf::from("repo").join("target-output"))
+        );
+    }
+
+    #[test]
+    fn legacy_output_param_remains_a_runtime_override() {
+        let project = local_project();
+        let mut params = BTreeMap::new();
+        params.insert(
+            "build_output_dir".to_string(),
+            "override-output".to_string(),
+        );
+
+        let plan = resolve_local_command_plan(&project, &project.deploy_targets[0], &params)
+            .expect("resolve overridden local plan");
+
+        assert_eq!(
+            plan.output_dir,
+            Some(PathBuf::from("repo").join("override-output"))
+        );
+    }
+
+    #[test]
+    fn jenkins_plan_exposes_artifact_without_turning_it_into_a_parameter() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[defaults]
+
+[defaults.jenkins_profiles.default]
+base_url = "https://jenkins.example"
+username = "ci"
+
+[[projects]]
+key = "demo"
+name = "Demo"
+repo_path = "repo"
+
+[[projects.deploy_targets]]
+key = "standard"
+label = "Standard"
+adapter = "jenkins"
+action_kind = "deploy"
+jenkins_profile = "default"
+job_name = "Demo/demo"
+
+[projects.deploy_targets.artifact]
+output_dir = "jenkins-output"
+"#,
+        )
+        .expect("parse Jenkins config");
+        let project = &config.projects[0];
+
+        let plan = plan_adapter(
+            &config,
+            project,
+            &project.deploy_targets[0],
+            &BTreeMap::new(),
+        )
+        .expect("resolve Jenkins plan");
+
+        assert_eq!(
+            plan.output_dir.map(PathBuf::from),
+            Some(PathBuf::from("repo").join("jenkins-output"))
+        );
     }
 }

@@ -23,6 +23,8 @@ export type ResourcesPageProps = Pick<
   | "onMarkShortcutUsed"
   | "onRefresh"
   | "onOpenFinderEntry"
+  | "recordActivity"
+  | "updateActivity"
 > & {
   resourceConfigOpenSignal?: number;
   activeProjectWorkspaceKey: string;

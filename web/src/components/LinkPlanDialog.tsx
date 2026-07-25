@@ -11,6 +11,7 @@ import {
   Typography,
 } from "@mui/material";
 import type { LinkExecutionReport, LinkPlan, LinkRuntimeSummary } from "../app-types";
+import { runtimeContextFromExecutionDetail } from "../lib/runtimeContext";
 import {
   ClearIcon,
   FolderIcon,
@@ -18,6 +19,7 @@ import {
   TerminalIcon,
   WorkflowIcon,
 } from "./AppIcons";
+import { RuntimeContextCard } from "./RuntimeContextCard";
 
 export type LinkPlanDialogAction = "check" | "run" | "stop";
 
@@ -44,6 +46,10 @@ type LinkPlanDialogProps = {
 
 function linkExecutionStatusLabel(status: string): string {
   switch (status) {
+    case "ready":
+      return "可启动";
+    case "blocked":
+      return "被阻塞";
     case "checked":
       return "已检查";
     case "started":
@@ -63,6 +69,10 @@ function linkExecutionStatusColor(
   status: string,
 ): "default" | "primary" | "secondary" | "error" | "info" | "success" | "warning" {
   switch (status) {
+    case "ready":
+      return "info";
+    case "blocked":
+      return "warning";
     case "checked":
     case "started":
     case "stopped":
@@ -182,6 +192,32 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                 <Chip size="small" label={state.plan.workspaceKey} />
               ) : null}
               {state.plan.project ? <Chip size="small" label={state.plan.project} /> : null}
+              {state.plan.sourceContext?.aligned ? (
+                <Chip
+                  size="small"
+                  color="info"
+                  variant="outlined"
+                  label={`配置源 ${state.plan.sourceContext.linkSourceName}`}
+                />
+              ) : state.plan.sourceContext ? (
+                <>
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`Link ${state.plan.sourceContext.linkSourceName}`}
+                  />
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`代理 ${state.plan.sourceContext.proxySourceName}`}
+                  />
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`运行 ${state.plan.sourceContext.runtimeSourceName}`}
+                  />
+                </>
+              ) : null}
             </Stack>
             {state.plan.warnings.length > 0 ? (
               <Stack className="link-plan-warning-list" spacing={0.4}>
@@ -225,6 +261,15 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                       ))}
                     </Box>
                   ) : null}
+                  {step.runtime ? (
+                    <Box sx={{ gridColumn: "1 / -1", minWidth: 0, mt: 0.35 }}>
+                      <RuntimeContextCard
+                        compact
+                        title="计划运行目标"
+                        context={step.runtime}
+                      />
+                    </Box>
+                  ) : null}
                 </Box>
               ))}
             </Box>
@@ -240,35 +285,47 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                     ))}
                   </Stack>
                 ) : null}
-                {state.report.steps.map((step) => (
-                  <Box
-                    key={`${state.report?.mode}-${step.id}`}
-                    className={`link-plan-report-row is-${step.status}`}
-                  >
-                    <Stack direction="row" spacing={0.8} alignItems="center" minWidth={0}>
-                      <Chip
-                        size="small"
-                        color={linkExecutionStatusColor(step.status)}
-                        label={linkExecutionStatusLabel(step.status)}
-                      />
-                      <Typography variant="body2" fontWeight={700} noWrap>
-                        {step.label}
-                      </Typography>
-                    </Stack>
-                    <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                      {step.summary}
-                    </Typography>
-                    {step.risks.length > 0 ? (
-                      <Stack spacing={0.25} sx={{ mt: 0.7 }}>
-                        {step.risks.map((risk) => (
-                          <Typography key={risk} variant="caption" color="warning.main">
-                            {risk}
-                          </Typography>
-                        ))}
+                {state.report.steps.map((step) => {
+                  const runtimeContext = runtimeContextFromExecutionDetail(step.detail);
+                  return (
+                    <Box
+                      key={`${state.report?.mode}-${step.id}`}
+                      className={`link-plan-report-row is-${step.status}`}
+                    >
+                      <Stack direction="row" spacing={0.8} alignItems="center" minWidth={0}>
+                        <Chip
+                          size="small"
+                          color={linkExecutionStatusColor(step.status)}
+                          label={linkExecutionStatusLabel(step.status)}
+                        />
+                        <Typography variant="body2" fontWeight={700} noWrap>
+                          {step.label}
+                        </Typography>
                       </Stack>
-                    ) : null}
-                  </Box>
-                ))}
+                      <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
+                        {step.summary}
+                      </Typography>
+                      {step.risks.length > 0 ? (
+                        <Stack spacing={0.25} sx={{ mt: 0.7 }}>
+                          {step.risks.map((risk) => (
+                            <Typography key={risk} variant="caption" color="warning.main">
+                              {risk}
+                            </Typography>
+                          ))}
+                        </Stack>
+                      ) : null}
+                      {runtimeContext ? (
+                        <Box sx={{ mt: 0.75 }}>
+                          <RuntimeContextCard
+                            compact
+                            title="检查运行目标"
+                            context={runtimeContext}
+                          />
+                        </Box>
+                      ) : null}
+                    </Box>
+                  );
+                })}
               </Stack>
             ) : null}
           </Box>

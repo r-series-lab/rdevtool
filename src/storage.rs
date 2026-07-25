@@ -1,14 +1,80 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+use crate::config::ProjectWorkspaceConfig;
+use crate::core::{BranchTaskResponse, BuildStatusResponse};
+
 const DEPLOY_HISTORY_LIMIT: usize = 20;
 const MERGE_HISTORY_LIMIT: usize = 20;
+const CURRENT_SCHEMA_VERSION: i64 = 2;
+
+const SCHEMA_V1_SQL: &str = r#"
+    CREATE TABLE IF NOT EXISTS kv_store (
+        namespace TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(namespace, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS notes (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        content TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        is_pinned INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_notes_updated_at ON notes(updated_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_notes_pinned_updated ON notes(is_pinned DESC, updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS deploy_history (
+        history_key TEXT PRIMARY KEY,
+        project_key TEXT NOT NULL,
+        project_name TEXT NOT NULL,
+        mode TEXT NOT NULL,
+        env TEXT NOT NULL,
+        branch TEXT NOT NULL,
+        state_key TEXT NOT NULL,
+        state_label TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        queue_url TEXT,
+        build_url TEXT,
+        params_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_deploy_history_updated ON deploy_history(updated_at DESC);
+
+    CREATE TABLE IF NOT EXISTS merge_history (
+        history_key TEXT PRIMARY KEY,
+        project_key TEXT NOT NULL,
+        project_name TEXT NOT NULL,
+        source_branch TEXT NOT NULL,
+        target_branch TEXT NOT NULL,
+        success INTEGER NOT NULL,
+        remote INTEGER NOT NULL,
+        summary TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        merged_commit TEXT,
+        source_commit_json TEXT,
+        target_commit_json TEXT,
+        created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_merge_history_created ON merge_history(created_at DESC);
+"#;
 
 #[derive(Debug, Clone)]
 pub struct Storage {
@@ -71,7 +137,7 @@ pub struct DeployHistoryEntry {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SaveDeployHistoryRequest {
     pub history_key: String,
@@ -166,93 +232,22 @@ impl Storage {
     }
 
     fn open(&self) -> Result<Connection, String> {
-        Connection::open(&self.db_path).map_err(|error| error.to_string())
+        let connection = Connection::open(&self.db_path).map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(Duration::from_secs(2))
+            .map_err(|error| error.to_string())?;
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|error| error.to_string())?;
+        Ok(connection)
     }
 
     fn init_schema(&self) -> Result<(), String> {
-        let connection = self.open()?;
+        let mut connection = self.open()?;
         connection
-            .execute_batch(
-                r#"
-                PRAGMA journal_mode = WAL;
-                PRAGMA foreign_keys = ON;
-
-                CREATE TABLE IF NOT EXISTS kv_store (
-                    namespace TEXT NOT NULL,
-                    key TEXT NOT NULL,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    PRIMARY KEY(namespace, key)
-                );
-
-                CREATE TABLE IF NOT EXISTS notes (
-                    id TEXT PRIMARY KEY,
-                    title TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    summary TEXT NOT NULL,
-                    tags_json TEXT NOT NULL DEFAULT '[]',
-                    is_pinned INTEGER NOT NULL DEFAULT 0,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_notes_updated_at ON notes(updated_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_notes_pinned_updated ON notes(is_pinned DESC, updated_at DESC);
-
-                CREATE TABLE IF NOT EXISTS deploy_history (
-                    history_key TEXT PRIMARY KEY,
-                    workspace_key TEXT,
-                    project_instance_path TEXT,
-                    project_key TEXT NOT NULL,
-                    project_name TEXT NOT NULL,
-                    mode TEXT NOT NULL,
-                    env TEXT NOT NULL,
-                    branch TEXT NOT NULL,
-                    state_key TEXT NOT NULL,
-                    state_label TEXT NOT NULL,
-                    detail TEXT NOT NULL,
-                    queue_url TEXT,
-                    build_url TEXT,
-                    params_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_deploy_history_updated ON deploy_history(updated_at DESC);
-
-                CREATE TABLE IF NOT EXISTS merge_history (
-                    history_key TEXT PRIMARY KEY,
-                    workspace_key TEXT,
-                    project_instance_path TEXT,
-                    project_key TEXT NOT NULL,
-                    project_name TEXT NOT NULL,
-                    source_branch TEXT NOT NULL,
-                    target_branch TEXT NOT NULL,
-                    success INTEGER NOT NULL,
-                    remote INTEGER NOT NULL,
-                    summary TEXT NOT NULL,
-                    detail TEXT NOT NULL,
-                    merged_commit TEXT,
-                    source_commit_json TEXT,
-                    target_commit_json TEXT,
-                    created_at TEXT NOT NULL
-                );
-
-                CREATE INDEX IF NOT EXISTS idx_merge_history_created ON merge_history(created_at DESC);
-                "#,
-            )
+            .execute_batch("PRAGMA journal_mode = WAL;")
             .map_err(|error| error.to_string())?;
-        ensure_history_scope_columns(&connection)?;
-        connection
-            .execute_batch(
-                r#"
-                CREATE INDEX IF NOT EXISTS idx_deploy_history_workspace_updated
-                    ON deploy_history(workspace_key, updated_at DESC);
-                CREATE INDEX IF NOT EXISTS idx_merge_history_workspace_created
-                    ON merge_history(workspace_key, created_at DESC);
-                "#,
-            )
-            .map_err(|error| error.to_string())
+        migrate_schema(&mut connection)
     }
 
     pub fn get_json(&self, namespace: &str, key: &str) -> Result<Option<Value>, String> {
@@ -287,6 +282,52 @@ impl Storage {
             )
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    pub fn prepend_json_array(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: Value,
+        limit: usize,
+    ) -> Result<Value, String> {
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let stored = transaction
+            .query_row(
+                "SELECT value FROM kv_store WHERE namespace = ?1 AND key = ?2",
+                params![namespace, key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        let mut items = stored
+            .and_then(|stored| serde_json::from_str::<Value>(&stored).ok())
+            .and_then(|value| value.as_array().cloned())
+            .unwrap_or_default();
+        if let Some(value_id) = value.get("id").and_then(Value::as_str) {
+            items.retain(|item| item.get("id").and_then(Value::as_str) != Some(value_id));
+        }
+        items.insert(0, value);
+        items.truncate(limit.max(1));
+        let result = Value::Array(items);
+        let payload = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                r#"
+                INSERT INTO kv_store(namespace, key, value, updated_at)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(namespace, key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                "#,
+                params![namespace, key, payload, now_iso()],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(result)
     }
 
     pub fn delete_json(&self, namespace: &str, key: &str) -> Result<(), String> {
@@ -591,6 +632,64 @@ impl Storage {
         Ok(())
     }
 
+    pub fn update_deploy_history_status(
+        &self,
+        status: &BuildStatusResponse,
+        requested_queue_url: Option<&str>,
+        requested_build_url: Option<&str>,
+        requested_project: Option<&str>,
+        requested_workspace_key: Option<&str>,
+    ) -> Result<Option<SaveDeployHistoryRequest>, String> {
+        let has_url_identity = status.queue_url.is_some()
+            || status.build_url.is_some()
+            || requested_queue_url.is_some()
+            || requested_build_url.is_some();
+        let entry = self.list_all_deploy_history()?.into_iter().find(|entry| {
+            if requested_workspace_key
+                .is_some_and(|workspace_key| entry.workspace_key.as_deref() != Some(workspace_key))
+            {
+                return false;
+            }
+            let queue_matches = entry.queue_url.as_deref().is_some_and(|entry_url| {
+                [status.queue_url.as_deref(), requested_queue_url]
+                    .into_iter()
+                    .flatten()
+                    .any(|candidate| candidate == entry_url)
+            });
+            let build_matches = entry.build_url.as_deref().is_some_and(|entry_url| {
+                [status.build_url.as_deref(), requested_build_url]
+                    .into_iter()
+                    .flatten()
+                    .any(|candidate| candidate == entry_url)
+            });
+            queue_matches
+                || build_matches
+                || (!has_url_identity
+                    && requested_project.is_some_and(|project| entry.project_key == project))
+        });
+        let Some(entry) = entry else {
+            return Ok(None);
+        };
+        let request = SaveDeployHistoryRequest {
+            history_key: entry.history_key,
+            workspace_key: entry.workspace_key,
+            project_instance_path: entry.project_instance_path,
+            project_key: entry.project_key,
+            project_name: entry.project_name,
+            mode: entry.mode,
+            env: Some(entry.env),
+            branch: Some(entry.branch),
+            state_key: status.state_key.clone(),
+            state_label: status.state_label.clone(),
+            detail: status.detail.clone(),
+            queue_url: status.queue_url.clone().or(entry.queue_url),
+            build_url: status.build_url.clone().or(entry.build_url),
+            params: entry.params,
+        };
+        self.save_deploy_history(request.clone())?;
+        Ok(Some(request))
+    }
+
     pub fn list_deploy_history(&self) -> Result<Vec<DeployHistoryEntry>, String> {
         self.list_deploy_history_filtered(None, DEPLOY_HISTORY_LIMIT)
     }
@@ -843,6 +942,72 @@ impl Storage {
         Ok(())
     }
 
+    pub fn save_branch_task_merge_history(
+        &self,
+        workspace: &ProjectWorkspaceConfig,
+        response: &BranchTaskResponse,
+        origin: &str,
+    ) -> Result<usize, String> {
+        self.save_branch_task_merge_history_for_event(
+            workspace,
+            response,
+            origin,
+            &Uuid::new_v4().to_string(),
+        )
+        .map(|keys| keys.len())
+    }
+
+    pub fn save_branch_task_merge_history_for_event(
+        &self,
+        workspace: &ProjectWorkspaceConfig,
+        response: &BranchTaskResponse,
+        origin: &str,
+        event_id: &str,
+    ) -> Result<Vec<String>, String> {
+        let origin = origin.trim();
+        let origin = if origin.is_empty() { "unknown" } else { origin };
+        let event_id = event_id.trim();
+        let event_id = if event_id.is_empty() {
+            Uuid::new_v4().to_string()
+        } else {
+            event_id.to_string()
+        };
+        let mut history_keys = Vec::new();
+
+        for (index, item) in response.items.iter().enumerate() {
+            let Some(target_branch) = item.target_branch.as_deref() else {
+                continue;
+            };
+            let history_key = format!("branch-sync-{origin}-{event_id}-{index}");
+            let target_commit = item.commit.as_ref().map(|commit| HistoryCommitInfo {
+                short_hash: commit.short_hash.clone(),
+                subject: commit.subject.clone(),
+                committed_at: commit.committed_at.clone(),
+            });
+            self.save_merge_history(SaveMergeHistoryRequest {
+                history_key: history_key.clone(),
+                workspace_key: Some(workspace.key.clone()),
+                project_instance_path: workspace
+                    .project_instance_path(&item.project_key)
+                    .map(|path| path.display().to_string()),
+                project_key: item.project_key.clone(),
+                project_name: item.project_name.clone(),
+                source_branch: item.source_branch.clone(),
+                target_branch: target_branch.to_string(),
+                success: item.success,
+                remote: item.remote,
+                summary: item.summary.clone(),
+                detail: item.detail.clone(),
+                merged_commit: None,
+                source_commit: None,
+                target_commit,
+            })?;
+            history_keys.push(history_key);
+        }
+
+        Ok(history_keys)
+    }
+
     pub fn list_merge_history(&self) -> Result<Vec<MergeHistoryEntry>, String> {
         self.list_merge_history_filtered(None, 12)
     }
@@ -1041,6 +1206,52 @@ impl Storage {
     }
 }
 
+fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
+    let mut version = connection
+        .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+        .map_err(|error| error.to_string())?;
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(format!(
+            "storage schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
+        ));
+    }
+
+    if version < 1 {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch(SCHEMA_V1_SQL)
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch("PRAGMA user_version = 1;")
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        version = 1;
+    }
+
+    if version < 2 {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        ensure_history_scope_columns(&transaction)?;
+        transaction
+            .execute_batch(
+                r#"
+                CREATE INDEX IF NOT EXISTS idx_deploy_history_workspace_updated
+                    ON deploy_history(workspace_key, updated_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_merge_history_workspace_created
+                    ON merge_history(workspace_key, created_at DESC);
+                PRAGMA user_version = 2;
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+    }
+
+    Ok(())
+}
+
 fn ensure_history_scope_columns(connection: &Connection) -> Result<(), String> {
     ensure_table_column(connection, "deploy_history", "workspace_key", "TEXT")?;
     ensure_table_column(
@@ -1214,6 +1425,7 @@ pub fn db_path(storage: &Storage) -> &Path {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::BranchTaskItemResult;
 
     fn temp_db_path(label: &str) -> PathBuf {
         std::env::temp_dir().join(format!(
@@ -1221,6 +1433,130 @@ mod tests {
             std::process::id(),
             Uuid::new_v4()
         ))
+    }
+
+    #[test]
+    fn prepends_and_limits_shared_json_history_atomically() {
+        let path = temp_db_path("prepend-json-history");
+        let storage = Storage::new(path.clone()).expect("create storage");
+
+        storage
+            .prepend_json_array(
+                "branch-workflow",
+                "history",
+                serde_json::json!({ "id": "a" }),
+                2,
+            )
+            .expect("prepend first item");
+        storage
+            .prepend_json_array(
+                "branch-workflow",
+                "history",
+                serde_json::json!({ "id": "b" }),
+                2,
+            )
+            .expect("prepend second item");
+        let result = storage
+            .prepend_json_array(
+                "branch-workflow",
+                "history",
+                serde_json::json!({ "id": "a", "updated": true }),
+                2,
+            )
+            .expect("replace and prepend first item");
+
+        assert_eq!(
+            result,
+            serde_json::json!([
+                { "id": "a", "updated": true },
+                { "id": "b" }
+            ])
+        );
+        assert_eq!(
+            storage
+                .get_json("branch-workflow", "history")
+                .expect("load shared history"),
+            Some(result)
+        );
+        remove_test_db(&path);
+    }
+
+    #[test]
+    fn saves_batch_merge_items_in_shared_workspace_history() {
+        let path = temp_db_path("branch-task-history");
+        let storage = Storage::new(path.clone()).expect("create storage");
+        let workspace = ProjectWorkspaceConfig {
+            key: "feature-a".to_string(),
+            name: "Feature A".to_string(),
+            projects: vec!["alpha".to_string(), "beta".to_string()],
+            ..ProjectWorkspaceConfig::default()
+        };
+        let response = BranchTaskResponse {
+            task_kind: "sync".to_string(),
+            success: false,
+            summary: "成功 1 / 失败 1".to_string(),
+            detail: "batch detail".to_string(),
+            items: vec![
+                BranchTaskItemResult {
+                    project_key: "alpha".to_string(),
+                    project_name: "Alpha".to_string(),
+                    source_branch: "feature/a".to_string(),
+                    target_branch: Some("main".to_string()),
+                    output_path: None,
+                    checkout_mode: None,
+                    fallback_reason: None,
+                    success: true,
+                    status_key: "merged".to_string(),
+                    status_label: "已合并".to_string(),
+                    summary: "合并成功".to_string(),
+                    detail: "merged".to_string(),
+                    remote: true,
+                    commit: None,
+                },
+                BranchTaskItemResult {
+                    project_key: "beta".to_string(),
+                    project_name: "Beta".to_string(),
+                    source_branch: "feature/a".to_string(),
+                    target_branch: Some("main".to_string()),
+                    output_path: None,
+                    checkout_mode: None,
+                    fallback_reason: None,
+                    success: false,
+                    status_key: "source_missing".to_string(),
+                    status_label: "失败".to_string(),
+                    summary: "源分支不存在".to_string(),
+                    detail: "远端不存在源分支 feature/a".to_string(),
+                    remote: false,
+                    commit: None,
+                },
+            ],
+        };
+
+        let saved = storage
+            .save_branch_task_merge_history(&workspace, &response, "test")
+            .expect("save batch history");
+        let history = storage
+            .list_all_merge_history()
+            .expect("list batch history");
+
+        assert_eq!(saved, 2);
+        assert_eq!(history.len(), 2);
+        assert!(
+            history
+                .iter()
+                .all(|item| item.history_key.starts_with("branch-sync-test-"))
+        );
+        assert!(
+            history
+                .iter()
+                .all(|item| { item.workspace_key.as_deref() == Some("feature-a") })
+        );
+        assert!(
+            history
+                .iter()
+                .any(|item| { !item.success && item.detail.contains("远端不存在源分支") })
+        );
+        remove_test_db(&path);
     }
 
     fn remove_test_db(path: &Path) {
@@ -1249,19 +1585,19 @@ mod tests {
     }
 
     #[test]
-    fn adds_history_scope_columns_to_existing_tables() {
+    fn migrates_v1_history_scope_columns_and_records_version() {
         let path = temp_db_path("migration");
         let connection = Connection::open(&path).expect("open test database");
         connection
-            .execute_batch(
-                r#"
-                CREATE TABLE deploy_history (history_key TEXT PRIMARY KEY);
-                CREATE TABLE merge_history (history_key TEXT PRIMARY KEY);
-                "#,
-            )
+            .execute_batch(SCHEMA_V1_SQL)
             .expect("create legacy tables");
+        connection
+            .execute_batch("PRAGMA user_version = 1;")
+            .expect("record legacy schema version");
+        drop(connection);
 
-        ensure_history_scope_columns(&connection).expect("migrate history tables");
+        let storage = Storage::new(path.clone()).expect("migrate storage");
+        let connection = storage.open().expect("open migrated database");
 
         for table in ["deploy_history", "merge_history"] {
             let mut statement = connection
@@ -1279,8 +1615,26 @@ mod tests {
                     .any(|column| column == "project_instance_path")
             );
         }
+        let version = connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .expect("read schema version");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
 
         drop(connection);
+        remove_test_db(&path);
+    }
+
+    #[test]
+    fn rejects_storage_from_a_newer_schema_version() {
+        let path = temp_db_path("future-schema");
+        let connection = Connection::open(&path).expect("open test database");
+        connection
+            .execute_batch("PRAGMA user_version = 999;")
+            .expect("record future schema version");
+        drop(connection);
+
+        let error = Storage::new(path.clone()).expect_err("reject future schema");
+        assert!(error.contains("newer than supported"));
         remove_test_db(&path);
     }
 
@@ -1311,6 +1665,75 @@ mod tests {
             .count();
         assert_eq!(feature_count, DEPLOY_HISTORY_LIMIT);
         assert_eq!(release_count, DEPLOY_HISTORY_LIMIT);
+
+        remove_test_db(&path);
+    }
+
+    #[test]
+    fn updates_build_history_by_remote_url_or_local_project() {
+        let path = temp_db_path("build-status-update");
+        let storage = Storage::new(path.clone()).expect("create storage");
+        let mut remote = build_request("feature", 1);
+        remote.history_key = "http://jenkins/queue/item/42/".to_string();
+        remote.queue_url = Some(remote.history_key.clone());
+        let mut local = build_request("feature", 2);
+        local.history_key = "activity-local-build".to_string();
+        local.project_key = "local-app".to_string();
+        local.project_name = "Local App".to_string();
+        let mut other_workspace = build_request("release", 3);
+        other_workspace.history_key = "other-workspace-local-build".to_string();
+        other_workspace.project_key = "local-app".to_string();
+        other_workspace.project_name = "Local App".to_string();
+        storage
+            .save_deploy_history(remote)
+            .expect("save remote build history");
+        storage
+            .save_deploy_history(local)
+            .expect("save local build history");
+        storage
+            .save_deploy_history(other_workspace)
+            .expect("save other workspace build history");
+
+        let remote_update = storage
+            .update_deploy_history_status(
+                &BuildStatusResponse {
+                    queue_url: Some("http://jenkins/queue/item/42/".to_string()),
+                    build_url: Some("http://jenkins/job/admin/42/".to_string()),
+                    state_key: "success".to_string(),
+                    state_label: "构建成功".to_string(),
+                    detail: "SUCCESS".to_string(),
+                },
+                Some("http://jenkins/queue/item/42/"),
+                None,
+                None,
+                Some("feature"),
+            )
+            .expect("update remote build")
+            .expect("match remote build");
+        assert_eq!(remote_update.state_key, "success");
+        assert_eq!(
+            remote_update.build_url.as_deref(),
+            Some("http://jenkins/job/admin/42/")
+        );
+
+        let local_update = storage
+            .update_deploy_history_status(
+                &BuildStatusResponse {
+                    queue_url: None,
+                    build_url: None,
+                    state_key: "failure".to_string(),
+                    state_label: "构建失败".to_string(),
+                    detail: "command exited with status 1".to_string(),
+                },
+                None,
+                None,
+                Some("local-app"),
+                Some("feature"),
+            )
+            .expect("update local build")
+            .expect("match local build");
+        assert_eq!(local_update.history_key, "activity-local-build");
+        assert_eq!(local_update.state_key, "failure");
 
         remove_test_db(&path);
     }

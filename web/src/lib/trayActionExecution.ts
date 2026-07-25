@@ -27,6 +27,7 @@ export const TRAY_DOMAIN_ACTION_REQUESTED_EVENT =
 
 type DomainRunOptions = {
   force: true;
+  origin: "tray";
   workspaceKey?: string | null;
 };
 
@@ -117,7 +118,7 @@ export async function executeTrayPinnedActionWorkflow(
     await handlers.activateWorkspace(workspaceKey);
   }
 
-  const options = { force: true, workspaceKey } as const;
+  const options = { force: true, origin: "tray", workspaceKey } as const;
   if (BUILD_REPLAY_KINDS.has(action.kind)) {
     const completed = await handlers.replayBuild(
       buildRequestFromAction(action),

@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 const DAEMON_MARKER: &str = "--rdevtool-proxy-daemon";
 const STATE_SCHEMA_VERSION: u16 = 1;
 // Bump when daemon state or runtime behavior requires a managed restart.
-const DAEMON_PROTOCOL_VERSION: u16 = 1;
+const DAEMON_PROTOCOL_VERSION: u16 = 2;
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const START_TIMEOUT: Duration = Duration::from_secs(5);
 const STOP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -60,6 +60,14 @@ pub struct ProxyDaemonStatus {
     pub owner: Option<String>,
     pub state_path: String,
     pub detail: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProxyDaemonArtifactStateObservation {
+    pub state: ProxyDaemonState,
+    pub ownership_verified: bool,
+    pub active: bool,
+    pub version_compatible: bool,
 }
 
 #[derive(Clone, Default)]
@@ -534,7 +542,15 @@ fn proxy_listener_running(profile: &ProxyProfile) -> bool {
 }
 
 fn proxy_daemon_state_path(config_path: &Path, profile_id: &str) -> PathBuf {
-    proxy_runtime_dir().join(format!(
+    proxy_daemon_state_path_in(&proxy_runtime_dir(), config_path, profile_id)
+}
+
+pub(crate) fn proxy_daemon_state_path_in(
+    runtime_dir: &Path,
+    config_path: &Path,
+    profile_id: &str,
+) -> PathBuf {
+    runtime_dir.join(format!(
         "proxy-{:016x}.json",
         runtime_key_hash(config_path, profile_id)
     ))
@@ -561,6 +577,33 @@ fn proxy_daemon_lock_path(state_path: &Path) -> PathBuf {
 
 fn proxy_daemon_log_path(state_path: &Path) -> PathBuf {
     state_path.with_extension("log")
+}
+
+pub(crate) fn inspect_proxy_daemon_artifact_state(
+    state_path: &Path,
+) -> Result<ProxyDaemonArtifactStateObservation> {
+    let state = read_state(state_path)?;
+    let expected_name = proxy_daemon_state_path_in(
+        state_path.parent().unwrap_or_else(|| Path::new(".")),
+        Path::new(&state.config_path),
+        &state.profile_id,
+    )
+    .file_name()
+    .map(|value| value.to_os_string());
+    let ownership_verified = state.schema_version == STATE_SCHEMA_VERSION
+        && !state.profile_id.trim().is_empty()
+        && !state.config_path.trim().is_empty()
+        && expected_name.as_deref() == state_path.file_name();
+    let active = ownership_verified
+        && process_is_alive(state.pid)
+        && process_is_managed_daemon(state.pid, state_path);
+    let version_compatible = daemon_state_version_compatible(&state);
+    Ok(ProxyDaemonArtifactStateObservation {
+        state,
+        ownership_verified,
+        active,
+        version_compatible,
+    })
 }
 
 fn runtime_key_hash(config_path: &Path, profile_id: &str) -> u64 {

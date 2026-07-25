@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "requested": {
+    "projectKey": "demo-web",
+    "debugProfileKey": "feature",
+    "runtimeProfileKey": "browser",
+    "command": null,
+    "expectedPort": null,
+    "envKeys": [
+      "MODE"
+    ]
+  },
+  "effective": {
+    "debugProfileKey": "feature",
+    "debugProfileLabel": "Feature",
+    "runtimeProfileKey": "browser",
+    "runtimeProfileLabel": "Browser",
+    "target": {
+      "command": "npm run dev",
+      "commandSource": "projectDev",
+      "cwd": "/workspace/demo-web",
+      "cwdSource": "debugProfile",
+      "expectedPort": 4173,
+      "expectedPortSource": "debugProfile",
+      "focusUrl": "http://127.0.0.1:4173/debug",
+      "focusUrlSource": "debugProfile",
+      "readyProbe": {
+        "url": null,
+        "path": "/health",
+        "expectedStatuses": [
+          204
+        ],
+        "timeoutMs": 90000
+      }
+    }
+  },
+  "observed": {
+    "available": true,
+    "sessions": [
+      {
+        "runId": "run-demo-1",
+        "phase": "ready",
+        "running": true,
+        "managed": true,
+        "adopted": false,
+        "cwd": "/workspace/demo-web",
+        "expectedPort": 4173,
+        "readyUrl": "http://127.0.0.1:4173/health",
+        "readyProbe": {
+          "url": null,
+          "path": "/health",
+          "expectedStatuses": [
+            204
+          ],
+          "timeoutMs": 90000
+        },
+        "daemonPid": 4100,
+        "workerPid": 4200,
+        "startedAtMs": 1784563200000,
+        "logPath": "/workspace/.rdevtool/runtime/demo-web.log"
+      }
+    ]
+  },
+  "status": {
+    "key": "running",
+    "label": "运行中",
+    "success": true,
+    "terminal": false,
+    "detail": "当前目录存在 rDevTool 管理的运行会话。"
+  },
+  "evidence": [
+    {
+      "kind": "config",
+      "source": "debugProfile",
+      "detail": "cwd=/workspace/demo-web"
+    }
+  ],
+  "risks": [],
+  "managedArtifacts": [
+    {
+      "kind": "runtimeLog",
+      "path": "/workspace/.rdevtool/runtime/demo-web.log",
+      "ownership": "rdevtool",
+      "lifecycle": "session"
+    }
+  ],
+  "recommendedActions": [
+    {
+      "command": "rdevtool runtime log --project demo-web --current",
+      "reason": "查看当前运行会话日志",
+      "risk": "readOnly"
+    }
+  ]
+}

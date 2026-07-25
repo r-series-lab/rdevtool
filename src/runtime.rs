@@ -1,16 +1,20 @@
 use crate::config::{
     AppConfig, ProjectCommandConfig, ProjectConfig, ProjectDebugLocalFileConfig,
-    ProjectDebugProfileConfig, ProjectNetworkProxyConfig, ProjectReadyConfig, RuntimeProfileConfig,
-    default_config_dir,
+    ProjectDebugProfileConfig, ProjectDebugReadyProbeConfig, ProjectNetworkProxyConfig,
+    ProjectReadyConfig, RuntimeProfileConfig, default_config_dir,
 };
 use crate::navigation::{
     NavigationEntry, NavigationOpenResult, open_navigation_entry_with_runtime_profiles,
 };
+use crate::operation::{
+    ManagedArtifact, OperationEvidence, OperationRisk, OperationStatus, RecommendedAction,
+};
 use crate::proxy::{ProxyConfig, ProxyProfile};
 use crate::runtime_daemon::{
-    RuntimeDaemonAdoptRequest, RuntimeDaemonAdoptResponse, RuntimeDaemonPhase,
-    RuntimeDaemonReadyConfig, RuntimeDaemonStartRequest, RuntimeProcessIdentity,
-    adopt as adopt_runtime_daemon, listening_process, start_with_result as start_runtime_daemon,
+    RuntimeDaemonAdoptRequest, RuntimeDaemonAdoptResponse, RuntimeDaemonHttpReadyConfig,
+    RuntimeDaemonPhase, RuntimeDaemonReadyConfig, RuntimeDaemonStartRequest,
+    RuntimeProcessIdentity, adopt as adopt_runtime_daemon, find as find_runtime_daemon,
+    list as list_runtime_daemons, listening_process, start_with_result as start_runtime_daemon,
 };
 use crate::runtime_local_proxy::local_proxy_spec;
 use crate::web_actions::list_web_actions;
@@ -21,7 +25,8 @@ use std::io::{BufRead, BufReader};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, Instant};
 
 const NODE_PROXY_HOOK_FILENAME: &str = "rdevtool-node-proxy-hook.cjs";
 const NODE_PROXY_HOOK: &str = r#"'use strict';
@@ -179,8 +184,92 @@ pub struct ProjectRuntimeLogResponse {
     pub path: String,
     pub lines: Vec<String>,
     pub truncated: bool,
+    pub selection: String,
+    pub requested_run_id: Option<String>,
+    pub effective_run_id: Option<String>,
     pub ready_summary: ProjectRuntimeReadySummary,
     pub session_summary: ProjectRuntimeLogSessionSummary,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum ProjectRuntimeWaitUntil {
+    ProcessStarted,
+    ListenerReady,
+    HttpVerified,
+}
+
+impl ProjectRuntimeWaitUntil {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::ProcessStarted => "processStarted",
+            Self::ListenerReady => "listenerReady",
+            Self::HttpVerified => "httpVerified",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ProjectRuntimeWaitOptions {
+    pub run_id: Option<String>,
+    pub until: ProjectRuntimeWaitUntil,
+    pub timeout_ms: Option<u64>,
+    pub poll_interval_ms: u64,
+    pub probe_url: Option<String>,
+    pub probe_path: Option<String>,
+    pub expected_statuses: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeWaitRequestSummary {
+    pub run_id: Option<String>,
+    pub until: String,
+    pub timeout_ms: Option<u64>,
+    pub probe_url: Option<String>,
+    pub probe_path: Option<String>,
+    pub expected_statuses: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeWaitEffectiveSummary {
+    pub run_id: Option<String>,
+    pub debug_profile_key: Option<String>,
+    pub until: String,
+    pub timeout_ms: u64,
+    pub poll_interval_ms: u64,
+    pub probe_url: Option<String>,
+    pub expected_statuses: Vec<u16>,
+    pub default_status_range: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeWaitObservedSummary {
+    pub daemon_phase: Option<String>,
+    pub process_started: bool,
+    pub listener_ready: bool,
+    pub http_verified: bool,
+    pub expected_port: Option<u16>,
+    pub http_status: Option<u16>,
+    pub http_error: Option<String>,
+    pub ready_detection: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeWaitResponse {
+    pub schema_version: u16,
+    pub project_key: String,
+    pub requested: ProjectRuntimeWaitRequestSummary,
+    pub effective: ProjectRuntimeWaitEffectiveSummary,
+    pub observed: ProjectRuntimeWaitObservedSummary,
+    pub status: OperationStatus,
+    pub evidence: Vec<OperationEvidence>,
+    pub risks: Vec<OperationRisk>,
+    pub managed_artifacts: Vec<ManagedArtifact>,
+    pub recommended_actions: Vec<RecommendedAction>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,7 +284,82 @@ pub struct ProjectRuntimePreflightResponse {
     pub status_key: String,
     pub status_label: String,
     pub summary: String,
+    pub target: Option<ProjectRuntimeTargetSummary>,
     pub checks: Vec<ProjectRuntimePreflightCheck>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeTargetSummary {
+    pub command: String,
+    pub command_source: String,
+    pub cwd: String,
+    pub cwd_source: String,
+    pub expected_port: Option<u16>,
+    pub expected_port_source: Option<String>,
+    pub focus_url: Option<String>,
+    pub focus_url_source: Option<String>,
+    pub ready_probe: Option<ProjectRuntimeReadyProbeSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeContextRequest {
+    pub project_key: String,
+    pub debug_profile_key: Option<String>,
+    pub runtime_profile_key: Option<String>,
+    pub command: Option<String>,
+    pub expected_port: Option<u16>,
+    pub env_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeContextEffective {
+    pub debug_profile_key: Option<String>,
+    pub debug_profile_label: Option<String>,
+    pub runtime_profile_key: Option<String>,
+    pub runtime_profile_label: Option<String>,
+    pub target: Option<ProjectRuntimeTargetSummary>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeSessionObservation {
+    pub run_id: Option<String>,
+    pub phase: String,
+    pub running: bool,
+    pub managed: bool,
+    pub adopted: bool,
+    pub cwd: String,
+    pub expected_port: Option<u16>,
+    pub ready_url: Option<String>,
+    pub ready_probe: Option<ProjectRuntimeReadyProbeSummary>,
+    pub daemon_pid: Option<u32>,
+    pub worker_pid: Option<u32>,
+    pub started_at_ms: Option<u64>,
+    pub log_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeContextObserved {
+    pub available: bool,
+    pub sessions: Vec<ProjectRuntimeSessionObservation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeContextSnapshot {
+    pub schema_version: u16,
+    pub requested: ProjectRuntimeContextRequest,
+    pub effective: ProjectRuntimeContextEffective,
+    pub observed: ProjectRuntimeContextObserved,
+    pub status: OperationStatus,
+    pub evidence: Vec<OperationEvidence>,
+    pub risks: Vec<OperationRisk>,
+    pub managed_artifacts: Vec<ManagedArtifact>,
+    pub recommended_actions: Vec<RecommendedAction>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -223,11 +387,68 @@ pub struct ProjectRuntimeInspectResponse {
     pub status_key: String,
     pub status_label: String,
     pub summary: String,
+    pub target: Option<ProjectRuntimeTargetSummary>,
+    pub environment: ProjectRuntimeEnvironmentInspect,
     pub env_preview: Vec<ProjectRuntimeEnvPreview>,
     pub local_files: Vec<ProjectRuntimeLocalFileInspect>,
     pub proxies: Vec<ProjectRuntimeProxyInspect>,
     pub checks: Vec<ProjectRuntimePreflightCheck>,
     pub handoff: ProjectRuntimeHandoff,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeEnvironmentInspect {
+    pub status_key: String,
+    pub cwd: Option<String>,
+    pub package_json: Option<ProjectRuntimePackageInspect>,
+    pub node_version: Option<ProjectRuntimeNodeVersionInspect>,
+    pub dev: ProjectRuntimeDevEnvironmentInspect,
+    pub port: ProjectRuntimePortInspect,
+    pub vite_config: Option<ProjectRuntimeViteConfigInspect>,
+    pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimePackageInspect {
+    pub path: String,
+    pub name: Option<String>,
+    pub package_manager: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeNodeVersionInspect {
+    pub value: String,
+    pub source: String,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeDevEnvironmentInspect {
+    pub configured_command: Option<String>,
+    pub script_name: Option<String>,
+    pub script_command: Option<String>,
+    pub package_manager: Option<String>,
+    pub vite: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimePortInspect {
+    pub effective_port: Option<u16>,
+    pub source: Option<String>,
+    pub confidence: String,
+    pub suggested_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeViteConfigInspect {
+    pub path: String,
+    pub evaluated: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -340,6 +561,8 @@ pub struct ProjectRuntimeStartResponse {
     pub runtime_profile_key: Option<String>,
     pub command: String,
     pub cwd: String,
+    pub focus_url: Option<String>,
+    pub ready_probe: Option<ProjectRuntimeReadyProbeSummary>,
     pub pid: Option<u32>,
     pub started_at_ms: u64,
     pub log_path: String,
@@ -364,6 +587,15 @@ pub struct ProjectRuntimeLaunchOptions {
     pub command: Option<String>,
     pub expected_port: Option<u16>,
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeReadyProbeSummary {
+    pub url: Option<String>,
+    pub path: Option<String>,
+    pub expected_statuses: Vec<u16>,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -471,6 +703,333 @@ pub fn runtime_profile_show(
         .ok_or_else(|| format!("runtime profile not found: {}", key))
 }
 
+pub fn project_runtime_context_snapshot(
+    config: &AppConfig,
+    project_key: &str,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<ProjectRuntimeContextSnapshot, String> {
+    let project = config
+        .find_project(project_key)
+        .map_err(|error| error.to_string())?;
+    let requested_debug_profile_key = optional_owned(options.debug_profile.as_deref());
+    let requested_runtime_profile_key = optional_owned(options.runtime_profile.as_deref());
+    let requested = ProjectRuntimeContextRequest {
+        project_key: project.key.clone(),
+        debug_profile_key: requested_debug_profile_key.clone(),
+        runtime_profile_key: requested_runtime_profile_key.clone(),
+        command: optional_owned(options.command.as_deref()),
+        expected_port: options.expected_port,
+        env_keys: options.env.keys().cloned().collect(),
+    };
+
+    let mut risks = Vec::new();
+    let debug_profile = match selected_debug_profile(project, options.debug_profile.as_deref()) {
+        Ok(profile) => profile,
+        Err(error) => {
+            risks.push(OperationRisk {
+                code: "debugProfileNotFound".to_string(),
+                severity: "error".to_string(),
+                detail: error,
+            });
+            None
+        }
+    };
+    let runtime_profile = match resolve_runtime_profile(
+        config,
+        debug_profile.as_ref(),
+        options.runtime_profile.as_deref(),
+    ) {
+        Ok(profile) => profile,
+        Err(error) => {
+            risks.push(OperationRisk {
+                code: "runtimeProfileNotFound".to_string(),
+                severity: "error".to_string(),
+                detail: error,
+            });
+            None
+        }
+    };
+    let target = if risks.is_empty() {
+        match resolve_runtime_target_summary(project, debug_profile.as_ref(), options) {
+            Ok(target) => Some(target),
+            Err(error) => {
+                risks.push(OperationRisk {
+                    code: "runtimeTargetInvalid".to_string(),
+                    severity: "error".to_string(),
+                    detail: error,
+                });
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let effective_runtime_profile_key = runtime_profile.as_ref().map(|profile| profile.key.clone());
+    let effective = ProjectRuntimeContextEffective {
+        debug_profile_key: debug_profile.as_ref().map(|profile| profile.key.clone()),
+        debug_profile_label: debug_profile.as_ref().map(|profile| profile.label.clone()),
+        runtime_profile_key: effective_runtime_profile_key,
+        runtime_profile_label: runtime_profile
+            .as_ref()
+            .map(|profile| profile.label.clone()),
+        target: target.clone(),
+    };
+
+    let target_cwd = target.as_ref().map(|target| {
+        PathBuf::from(&target.cwd)
+            .canonicalize()
+            .unwrap_or_else(|_| PathBuf::from(&target.cwd))
+            .display()
+            .to_string()
+    });
+    let candidate_cwds = if target_cwd.is_none() {
+        project_runtime_candidate_cwds(project)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let (observed_available, daemon_statuses) = match list_runtime_daemons() {
+        Ok(statuses) => (
+            true,
+            statuses
+                .into_iter()
+                .filter(|status| status.project_key == project.key)
+                .filter(|status| {
+                    target_cwd
+                        .as_deref()
+                        .is_some_and(|cwd| status.canonical_cwd == cwd)
+                        || (target_cwd.is_none()
+                            && candidate_cwds
+                                .iter()
+                                .any(|cwd| cwd == &status.canonical_cwd))
+                })
+                .take(5)
+                .collect::<Vec<_>>(),
+        ),
+        Err(error) => {
+            risks.push(OperationRisk {
+                code: "runtimeObservationFailed".to_string(),
+                severity: "error".to_string(),
+                detail: format!("读取 runtime daemon 状态失败: {error}"),
+            });
+            (false, Vec::new())
+        }
+    };
+    let sessions = daemon_statuses
+        .iter()
+        .map(|status| {
+            let state = status.state.as_ref();
+            ProjectRuntimeSessionObservation {
+                run_id: state.map(|state| state.run_id.clone()),
+                phase: status.phase_key.clone(),
+                running: status.running,
+                managed: status.managed,
+                adopted: state.is_some_and(|state| state.adopted),
+                cwd: status.canonical_cwd.clone(),
+                expected_port: state.and_then(|state| state.expected_port),
+                ready_url: state.and_then(|state| state.ready_url.clone()),
+                ready_probe: state.and_then(|state| {
+                    state
+                        .ready_probe
+                        .as_ref()
+                        .map(|probe| ProjectRuntimeReadyProbeSummary {
+                            url: probe.url.clone(),
+                            path: probe.path.clone(),
+                            expected_statuses: probe.expected_statuses.clone(),
+                            timeout_ms: probe.timeout_ms,
+                        })
+                }),
+                daemon_pid: state.map(|state| state.daemon_pid),
+                worker_pid: state.and_then(|state| state.worker_pid),
+                started_at_ms: state.map(|state| state.started_at_ms),
+                log_path: state.map(|state| state.log_path.clone()),
+            }
+        })
+        .collect::<Vec<_>>();
+    let running_sessions = sessions
+        .iter()
+        .filter(|session| session.running)
+        .collect::<Vec<_>>();
+    if running_sessions.iter().any(|session| !session.managed) {
+        risks.push(OperationRisk {
+            code: "unmanagedRuntime".to_string(),
+            severity: "error".to_string(),
+            detail: "目标目录存在未受 rDevTool 管理的运行进程，不能安全执行生命周期操作。"
+                .to_string(),
+        });
+    }
+    if running_sessions.len() > 1 {
+        risks.push(OperationRisk {
+            code: "ambiguousRuntimeSessions".to_string(),
+            severity: "error".to_string(),
+            detail: format!(
+                "目标匹配到 {} 个活动运行会话，需要按 runId 收窄。",
+                running_sessions.len()
+            ),
+        });
+    }
+
+    let has_error = risks.iter().any(|risk| risk.severity == "error");
+    let (status_key, status_label, status_detail) = if has_error {
+        (
+            "blocked",
+            "运行上下文有阻塞",
+            risks
+                .iter()
+                .find(|risk| risk.severity == "error")
+                .map(|risk| risk.detail.clone())
+                .unwrap_or_else(|| "运行上下文无法安全使用".to_string()),
+        )
+    } else if let Some(session) = running_sessions.first() {
+        (
+            "running",
+            "运行中",
+            format!(
+                "已观测到受管运行会话 {}，phase={}",
+                session.run_id.as_deref().unwrap_or("<unknown>"),
+                session.phase
+            ),
+        )
+    } else {
+        (
+            "configured",
+            "目标已解析",
+            if sessions.is_empty() {
+                "Runtime Target 已解析，当前未观测到运行会话。".to_string()
+            } else {
+                format!(
+                    "Runtime Target 已解析，最近会话 phase={}。",
+                    sessions[0].phase
+                )
+            },
+        )
+    };
+    let status = operation_status(status_key, status_label, !has_error, status_detail);
+
+    let mut evidence = Vec::new();
+    if let Some(target) = target.as_ref() {
+        evidence.push(OperationEvidence {
+            kind: "configuration".to_string(),
+            source: "runtimeTargetResolver".to_string(),
+            detail: format!(
+                "cwd={} commandSource={} expectedPort={}",
+                target.cwd,
+                target.command_source,
+                target
+                    .expected_port
+                    .map(|port| port.to_string())
+                    .unwrap_or_else(|| "<none>".to_string())
+            ),
+        });
+    }
+    evidence.extend(sessions.iter().map(|session| OperationEvidence {
+        kind: "process".to_string(),
+        source: "runtimeDaemon".to_string(),
+        detail: format!(
+            "runId={} phase={} running={} managed={} cwd={}",
+            session.run_id.as_deref().unwrap_or("<unknown>"),
+            session.phase,
+            session.running,
+            session.managed,
+            session.cwd
+        ),
+    }));
+    let managed_artifacts = daemon_statuses
+        .iter()
+        .flat_map(|daemon_status| {
+            let mut artifacts = vec![ManagedArtifact {
+                kind: "runtimeState".to_string(),
+                path: daemon_status.state_path.clone(),
+                ownership: "rdevtool".to_string(),
+                lifecycle: "runtimeSession".to_string(),
+            }];
+            if let Some(log_path) = daemon_status
+                .state
+                .as_ref()
+                .map(|state| state.log_path.clone())
+            {
+                artifacts.push(ManagedArtifact {
+                    kind: "runtimeLog".to_string(),
+                    path: log_path,
+                    ownership: "rdevtool".to_string(),
+                    lifecycle: "runtimeSession".to_string(),
+                });
+            }
+            artifacts
+        })
+        .collect();
+    let recommended_actions = runtime_context_recommended_actions(
+        &project.key,
+        debug_profile.as_ref().map(|profile| profile.key.as_str()),
+        runtime_profile.as_ref().map(|profile| profile.key.as_str()),
+        running_sessions
+            .first()
+            .and_then(|session| session.run_id.as_deref()),
+        target.as_ref(),
+    );
+
+    Ok(ProjectRuntimeContextSnapshot {
+        schema_version: 1,
+        requested,
+        effective,
+        observed: ProjectRuntimeContextObserved {
+            available: observed_available,
+            sessions,
+        },
+        status,
+        evidence,
+        risks,
+        managed_artifacts,
+        recommended_actions,
+    })
+}
+
+fn runtime_context_recommended_actions(
+    project_key: &str,
+    debug_profile_key: Option<&str>,
+    runtime_profile_key: Option<&str>,
+    run_id: Option<&str>,
+    target: Option<&ProjectRuntimeTargetSummary>,
+) -> Vec<RecommendedAction> {
+    let profile_args = debug_profile_key
+        .map(|key| format!(" --debug-profile {key}"))
+        .unwrap_or_default()
+        + &runtime_profile_key
+            .map(|key| format!(" --runtime-profile {key}"))
+            .unwrap_or_default();
+    if let Some(run_id) = run_id {
+        let mut actions = vec![RecommendedAction {
+            command: format!(
+                "rdevtool --json runtime status --project {project_key} --run-id {run_id}"
+            ),
+            reason: "复核当前会话的 daemon 与进程状态".to_string(),
+            risk: "readOnly".to_string(),
+        }];
+        if target.is_some_and(|target| {
+            target.expected_port.is_some()
+                || target.focus_url.is_some()
+                || target.ready_probe.is_some()
+        }) {
+            actions.push(RecommendedAction {
+                command: format!(
+                    "rdevtool --json runtime wait --project {project_key} --run-id {run_id} --until http-verified"
+                ),
+                reason: "验证当前运行会话的页面或 HTTP 服务可访问".to_string(),
+                risk: "readOnly".to_string(),
+            });
+        }
+        return actions;
+    }
+    vec![RecommendedAction {
+        command: format!("rdevtool --json runtime preflight --project {project_key}{profile_args}"),
+        reason: "在启动前执行目标目录、命令、端口和代理检查".to_string(),
+        risk: "readOnly".to_string(),
+    }]
+}
+
 pub fn project_runtime_preflight(
     config: &AppConfig,
     project_key: &str,
@@ -573,9 +1132,10 @@ pub fn project_runtime_preflight_for_project_with_options(
     preflight_proxy_checks(debug_profile.as_ref(), runtime_profile, &mut checks);
     preflight_runtime_profile_checks(runtime_profile_key.as_deref(), runtime_profile, &mut checks);
     preflight_expected_port_check(project, debug_profile.as_ref(), options, &mut checks);
-    preflight_focus_checks(project, &mut checks);
+    preflight_focus_checks(project, debug_profile.as_ref(), &mut checks);
 
     let (status_key, status_label, summary) = summarize_preflight(&checks);
+    let target = resolve_runtime_target_summary(project, debug_profile.as_ref(), options).ok();
     ProjectRuntimePreflightResponse {
         project_key: project.key.clone(),
         project_name: project.name.clone(),
@@ -586,6 +1146,7 @@ pub fn project_runtime_preflight_for_project_with_options(
         status_key,
         status_label,
         summary,
+        target,
         checks,
     }
 }
@@ -618,6 +1179,8 @@ pub fn inspect_project_runtime_with_options(
         debug_profile.as_ref(),
         options.runtime_profile.as_deref(),
     )?;
+    let environment = inspect_project_environment(project, debug_profile.as_ref(), options);
+    let target = resolve_runtime_target_summary(project, debug_profile.as_ref(), options).ok();
     let mut checks =
         project_runtime_preflight_for_project_with_options(config, project, options).checks;
     let mut env_preview =
@@ -670,6 +1233,8 @@ pub fn inspect_project_runtime_with_options(
         status_key,
         status_label,
         summary,
+        target,
+        environment,
         env_preview,
         local_files,
         proxies,
@@ -706,29 +1271,19 @@ pub fn start_project_runtime_detached_with_options(
         debug_profile.as_ref(),
         options.runtime_profile.as_deref(),
     )?;
-    let mut resolved = resolve_project_command(project, RuntimeTaskKind::Dev)?;
-    apply_command_override(
-        &mut resolved,
-        debug_profile.as_ref(),
-        options.command.as_deref(),
-    );
-    if let Some(profile) = debug_profile.as_ref() {
-        for (key, value) in &profile.env {
-            resolved.env.insert(key.clone(), value.clone());
-        }
-    }
+    let mut resolved = resolve_runtime_command(project, debug_profile.as_ref(), options)?;
     let proxy_applied = apply_network_proxy_env(
         &mut resolved,
         debug_profile.as_ref(),
         runtime_profile.as_ref(),
     )?;
-    for (key, value) in &options.env {
-        let key = key.trim();
-        if !key.is_empty() {
-            resolved.env.insert(key.to_string(), value.clone());
-        }
-    }
     let expected_port = resolve_expected_port(project, debug_profile.as_ref(), options, &resolved);
+    let focus_url = effective_project_focus_url(project, debug_profile.as_ref());
+    let ready_probe = runtime_ready_probe_summary(
+        debug_profile
+            .as_ref()
+            .and_then(|profile| profile.ready_probe.as_ref()),
+    );
     let (vite_command, vite_strict_port) =
         resolved_vite_command_info(&resolved.command, &resolved.cwd);
     resolved.command = apply_vite_strict_port(
@@ -760,14 +1315,16 @@ pub fn start_project_runtime_detached_with_options(
             enabled: project.focus.ready.enabled,
             url_patterns: project.focus.ready.url_patterns.clone(),
             success_markers: project.focus.ready.success_markers.clone(),
-            fallback_url: project
-                .focus
-                .url
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string),
+            fallback_url: focus_url.clone(),
         },
+        ready_probe: ready_probe
+            .as_ref()
+            .map(|probe| RuntimeDaemonHttpReadyConfig {
+                url: probe.url.clone(),
+                path: probe.path.clone(),
+                expected_statuses: probe.expected_statuses.clone(),
+                timeout_ms: probe.timeout_ms,
+            }),
         log_path: log_path.clone(),
         local_proxy: debug_profile
             .as_ref()
@@ -798,6 +1355,8 @@ pub fn start_project_runtime_detached_with_options(
         runtime_profile_key: state.runtime_profile,
         command: state.command,
         cwd: state.canonical_cwd,
+        focus_url,
+        ready_probe,
         pid: daemon_status.running.then_some(state.worker_pid).flatten(),
         started_at_ms: state.started_at_ms,
         log_path: state.log_path,
@@ -898,12 +1457,7 @@ fn resolve_runtime_adoption_context_for_project(
     options: &ProjectRuntimeLaunchOptions,
 ) -> Result<ResolvedRuntimeAdoptionContext, String> {
     let debug_profile = selected_debug_profile(project, options.debug_profile.as_deref())?;
-    let mut resolved = resolve_project_command(project, RuntimeTaskKind::Dev)?;
-    apply_command_override(
-        &mut resolved,
-        debug_profile.as_ref(),
-        options.command.as_deref(),
-    );
+    let mut resolved = resolve_runtime_command(project, debug_profile.as_ref(), options)?;
     let expected_port = resolve_expected_port(project, debug_profile.as_ref(), options, &resolved);
     let (vite_command, vite_strict_port) =
         resolved_vite_command_info(&resolved.command, &resolved.cwd);
@@ -919,13 +1473,7 @@ fn resolve_runtime_adoption_context_for_project(
         cwd: resolved.cwd,
         command: resolved.command,
         expected_port,
-        ready_url: project
-            .focus
-            .url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(ToString::to_string),
+        ready_url: effective_project_focus_url(project, debug_profile.as_ref()),
         log_path: task_log_path(project, RuntimeTaskKind::Dev),
     })
 }
@@ -958,14 +1506,7 @@ pub fn focus_project_runtime_with_profile(
         .and_then(|value| optional_trimmed(Some(value)))
         .map(ToString::to_string)
         .or_else(|| ready_summary.url.clone())
-        .or_else(|| {
-            project
-                .focus
-                .url
-                .as_deref()
-                .and_then(|value| optional_trimmed(Some(value)))
-                .map(ToString::to_string)
-        });
+        .or_else(|| effective_project_focus_url(project, debug_profile.as_ref()));
     if let Some(url) = url.as_ref() {
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Err(format!(
@@ -1025,21 +1566,479 @@ pub fn read_project_runtime_log(
     kind: ProjectRuntimeLogKind,
     max_lines: usize,
 ) -> Result<ProjectRuntimeLogResponse, String> {
+    read_project_runtime_log_with_selection(config, project_key, kind, max_lines, false, None)
+}
+
+pub fn read_project_runtime_log_with_selection(
+    config: &AppConfig,
+    project_key: &str,
+    kind: ProjectRuntimeLogKind,
+    max_lines: usize,
+    current_only: bool,
+    run_id: Option<&str>,
+) -> Result<ProjectRuntimeLogResponse, String> {
     let project = config
         .find_project(project_key)
         .map_err(|error| error.to_string())?;
     let task_kind = RuntimeTaskKind::from(kind);
     let path = project_task_log_path(project, kind);
     let normalized_limit = max_lines.clamp(20, 500);
-    let (lines, truncated, session_summary) = tail_log_lines(&path, normalized_limit)?;
+    let requested_run_id = run_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    let (lines, truncated, session_summary, selection) =
+        if current_only || requested_run_id.is_some() {
+            let (lines, truncated, session_summary) =
+                tail_runtime_session_lines(&path, normalized_limit, requested_run_id.as_deref())?;
+            let selection = if requested_run_id.is_some() {
+                "runId"
+            } else {
+                "current"
+            };
+            (lines, truncated, session_summary, selection)
+        } else {
+            let (lines, truncated, session_summary) = tail_log_lines(&path, normalized_limit)?;
+            (lines, truncated, session_summary, "tail")
+        };
     let ready_summary = project_runtime_ready_summary(project, task_kind, &lines);
     Ok(ProjectRuntimeLogResponse {
         path: path.display().to_string(),
         lines,
         truncated,
+        selection: selection.to_string(),
+        requested_run_id,
+        effective_run_id: session_summary.run_id.clone(),
         ready_summary,
         session_summary,
     })
+}
+
+pub fn wait_project_runtime(
+    config: &AppConfig,
+    project_key: &str,
+    options: &ProjectRuntimeWaitOptions,
+) -> Result<ProjectRuntimeWaitResponse, String> {
+    let project = config
+        .find_project(project_key)
+        .map_err(|error| error.to_string())?;
+    let requested_run_id = options
+        .run_id
+        .as_deref()
+        .and_then(|value| optional_trimmed(Some(value)))
+        .map(ToString::to_string);
+    let initial_daemon = find_runtime_daemon(project_key, requested_run_id.as_deref())
+        .map_err(|error| error.to_string())?;
+    let debug_profile_key = initial_daemon
+        .as_ref()
+        .and_then(|daemon| daemon.state.as_ref())
+        .and_then(|state| state.debug_profile.clone());
+    let debug_profile = debug_profile_key.as_deref().and_then(|key| {
+        project
+            .debug_profiles
+            .iter()
+            .find(|profile| profile.key == key)
+    });
+    let persisted_ready_probe = initial_daemon
+        .as_ref()
+        .and_then(|daemon| daemon.state.as_ref())
+        .and_then(|state| state.ready_probe.as_ref());
+    let configured_ready_probe = debug_profile.and_then(|profile| profile.ready_probe.as_ref());
+    let timeout_ms = options
+        .timeout_ms
+        .or_else(|| persisted_ready_probe.and_then(|probe| probe.timeout_ms))
+        .or_else(|| configured_ready_probe.and_then(|probe| probe.timeout_ms))
+        .unwrap_or(180_000)
+        .clamp(100, 600_000);
+    let poll_interval_ms = options.poll_interval_ms.clamp(50, 5_000);
+    let effective_probe_base = optional_owned(options.probe_url.as_deref())
+        .or_else(|| persisted_ready_probe.and_then(|probe| optional_owned(probe.url.as_deref())))
+        .or_else(|| configured_ready_probe.and_then(|probe| optional_owned(probe.url.as_deref())));
+    let effective_probe_path = optional_owned(options.probe_path.as_deref())
+        .or_else(|| persisted_ready_probe.and_then(|probe| optional_owned(probe.path.as_deref())))
+        .or_else(|| configured_ready_probe.and_then(|probe| optional_owned(probe.path.as_deref())));
+    let effective_focus_url = effective_project_focus_url(project, debug_profile);
+    let mut expected_statuses = if options.expected_statuses.is_empty() {
+        persisted_ready_probe
+            .map(|probe| probe.expected_statuses.clone())
+            .or_else(|| configured_ready_probe.map(|probe| probe.expected_statuses.clone()))
+            .unwrap_or_default()
+    } else {
+        options.expected_statuses.clone()
+    };
+    expected_statuses.sort_unstable();
+    expected_statuses.dedup();
+    if expected_statuses
+        .iter()
+        .any(|status| !(100..=599).contains(status))
+    {
+        return Err("HTTP expected status must be between 100 and 599".to_string());
+    }
+    if let Some(url) = effective_probe_base.as_deref() {
+        resolve_runtime_probe_url(Some(url), effective_probe_path.as_deref(), None, None, None)?;
+    }
+
+    let requested = ProjectRuntimeWaitRequestSummary {
+        run_id: requested_run_id.clone(),
+        until: options.until.key().to_string(),
+        timeout_ms: options.timeout_ms,
+        probe_url: optional_owned(options.probe_url.as_deref()),
+        probe_path: optional_owned(options.probe_path.as_deref()),
+        expected_statuses: options.expected_statuses.clone(),
+    };
+    let client = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(poll_interval_ms.clamp(250, 2_000)))
+        .redirect(reqwest::redirect::Policy::limited(5))
+        .no_proxy()
+        .build()
+        .map_err(|error| format!("failed to create HTTP ready client: {error}"))?;
+    let started = Instant::now();
+    let mut effective_run_id = requested_run_id.clone();
+    let mut effective_probe_url = effective_probe_base.clone();
+    let mut observed = ProjectRuntimeWaitObservedSummary {
+        daemon_phase: None,
+        process_started: false,
+        listener_ready: false,
+        http_verified: false,
+        expected_port: None,
+        http_status: None,
+        http_error: None,
+        ready_detection: Vec::new(),
+    };
+
+    let status = loop {
+        let daemon = find_runtime_daemon(project_key, effective_run_id.as_deref())
+            .map_err(|error| error.to_string())?;
+        if let Some(state) = daemon.as_ref().and_then(|daemon| daemon.state.as_ref()) {
+            observed.daemon_phase = Some(runtime_daemon_phase_key(&state.phase).to_string());
+            observed.expected_port = state.expected_port;
+            if effective_run_id.is_none() {
+                effective_run_id = Some(state.run_id.clone());
+            }
+            if effective_run_id.as_deref() != Some(state.run_id.as_str()) {
+                break operation_status(
+                    "runReplaced",
+                    "运行已被替换",
+                    false,
+                    format!(
+                        "等待会话 {}，当前会话为 {}",
+                        effective_run_id.as_deref().unwrap_or("<none>"),
+                        state.run_id
+                    ),
+                );
+            }
+
+            observed.process_started = matches!(
+                state.phase,
+                RuntimeDaemonPhase::Starting | RuntimeDaemonPhase::Running
+            ) && (state.worker_pid.is_some() || state.adopted);
+            observed.listener_ready = state
+                .expected_port
+                .is_some_and(|port| tcp_port_listening("127.0.0.1", port));
+            effective_probe_url = resolve_runtime_probe_url(
+                effective_probe_base.as_deref(),
+                effective_probe_path.as_deref(),
+                state.ready_url.as_deref(),
+                effective_focus_url.as_deref(),
+                state.expected_port,
+            )?;
+
+            if options.until == ProjectRuntimeWaitUntil::HttpVerified
+                && let Some(url) = effective_probe_url.as_deref()
+            {
+                let probe = probe_runtime_http(&client, url, &expected_statuses);
+                observed.http_status = probe.status;
+                observed.http_error = probe.error;
+                observed.http_verified = probe.verified;
+            }
+
+            let target_reached = match options.until {
+                ProjectRuntimeWaitUntil::ProcessStarted => observed.process_started,
+                ProjectRuntimeWaitUntil::ListenerReady => observed.listener_ready,
+                ProjectRuntimeWaitUntil::HttpVerified => observed.http_verified,
+            };
+            if target_reached {
+                break operation_status(
+                    options.until.key(),
+                    runtime_wait_success_label(options.until),
+                    true,
+                    format!("运行会话 {} 已达到目标状态", state.run_id),
+                );
+            }
+            if matches!(
+                state.phase,
+                RuntimeDaemonPhase::Exited | RuntimeDaemonPhase::Failed
+            ) {
+                break operation_status(
+                    "runtimeTerminated",
+                    "运行已终止",
+                    false,
+                    state
+                        .exit
+                        .as_ref()
+                        .map(|exit| exit.reason.clone())
+                        .unwrap_or_else(|| format!("daemon phase is {:?}", state.phase)),
+                );
+            }
+            if observed.process_started
+                && options.until == ProjectRuntimeWaitUntil::ListenerReady
+                && state.expected_port.is_none()
+            {
+                break operation_status(
+                    "listenerProbeUnconfigured",
+                    "未配置监听端口",
+                    false,
+                    "当前运行没有 expectedPort，无法验证 listenerReady".to_string(),
+                );
+            }
+            if observed.process_started
+                && options.until == ProjectRuntimeWaitUntil::HttpVerified
+                && effective_probe_url.is_none()
+            {
+                break operation_status(
+                    "httpProbeUnconfigured",
+                    "未配置 HTTP 探测地址",
+                    false,
+                    "请提供 --probe-url，或配置 ready/focus URL 或 expectedPort".to_string(),
+                );
+            }
+        }
+
+        if started.elapsed() >= Duration::from_millis(timeout_ms) {
+            break operation_status(
+                "timeout",
+                "等待超时",
+                false,
+                format!("{} ms 内未达到 {}", timeout_ms, options.until.key()),
+            );
+        }
+        thread::sleep(Duration::from_millis(poll_interval_ms));
+    };
+
+    if observed.process_started {
+        observed.ready_detection.push("process".to_string());
+    }
+    if observed.listener_ready {
+        observed.ready_detection.push("tcpListener".to_string());
+    }
+    if observed.http_verified {
+        observed.ready_detection.push("httpProbe".to_string());
+    }
+    let evidence = runtime_wait_evidence(
+        effective_run_id.as_deref(),
+        effective_probe_url.as_deref(),
+        &observed,
+    );
+    let risks = runtime_wait_risks(&status, &observed);
+    let recommended_actions = if status.success {
+        Vec::new()
+    } else {
+        vec![
+            RecommendedAction {
+                command: format!("rdevtool --json runtime log --project {project_key} --current"),
+                reason: "检查同一运行会话的启动输出".to_string(),
+                risk: "readOnly".to_string(),
+            },
+            RecommendedAction {
+                command: format!("rdevtool --json runtime diagnose --project {project_key}"),
+                reason: "检查守护进程、进程组和监听端口状态".to_string(),
+                risk: "readOnly".to_string(),
+            },
+        ]
+    };
+
+    Ok(ProjectRuntimeWaitResponse {
+        schema_version: 2,
+        project_key: project.key.clone(),
+        requested,
+        effective: ProjectRuntimeWaitEffectiveSummary {
+            run_id: effective_run_id,
+            debug_profile_key,
+            until: options.until.key().to_string(),
+            timeout_ms,
+            poll_interval_ms,
+            probe_url: effective_probe_url,
+            expected_statuses: expected_statuses.clone(),
+            default_status_range: expected_statuses.is_empty().then(|| "200-399".to_string()),
+        },
+        observed,
+        status,
+        evidence,
+        risks,
+        managed_artifacts: Vec::new(),
+        recommended_actions,
+    })
+}
+
+fn resolve_runtime_probe_url(
+    requested_url: Option<&str>,
+    requested_path: Option<&str>,
+    ready_url: Option<&str>,
+    focus_url: Option<&str>,
+    expected_port: Option<u16>,
+) -> Result<Option<String>, String> {
+    let base = requested_url
+        .and_then(|value| optional_trimmed(Some(value)))
+        .or_else(|| ready_url.and_then(|value| optional_trimmed(Some(value))))
+        .or_else(|| focus_url.and_then(|value| optional_trimmed(Some(value))))
+        .map(ToString::to_string)
+        .or_else(|| expected_port.map(|port| format!("http://127.0.0.1:{port}/")));
+    let Some(base) = base else {
+        return Ok(None);
+    };
+    let mut url = reqwest::Url::parse(&base)
+        .map_err(|error| format!("invalid HTTP ready probe URL {base}: {error}"))?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return Err(format!(
+            "HTTP ready probe URL must use http or https: {base}"
+        ));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(
+            "HTTP ready probe URL must not contain credentials; use a non-secret readiness endpoint"
+                .to_string(),
+        );
+    }
+    if let Some(path) = requested_path.and_then(|value| optional_trimmed(Some(value))) {
+        if path.starts_with('/') {
+            url.set_path(path);
+            url.set_query(None);
+            url.set_fragment(None);
+        } else {
+            url = url
+                .join(path)
+                .map_err(|error| format!("invalid HTTP ready probe path {path}: {error}"))?;
+        }
+    }
+    Ok(Some(url.to_string()))
+}
+
+struct RuntimeHttpProbeObservation {
+    verified: bool,
+    status: Option<u16>,
+    error: Option<String>,
+}
+
+fn probe_runtime_http(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    expected_statuses: &[u16],
+) -> RuntimeHttpProbeObservation {
+    match client.get(url).send() {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            RuntimeHttpProbeObservation {
+                verified: runtime_http_status_matches(status, expected_statuses),
+                status: Some(status),
+                error: None,
+            }
+        }
+        Err(error) => RuntimeHttpProbeObservation {
+            verified: false,
+            status: None,
+            error: Some(error.to_string()),
+        },
+    }
+}
+
+fn runtime_http_status_matches(status: u16, expected_statuses: &[u16]) -> bool {
+    if expected_statuses.is_empty() {
+        (200..=399).contains(&status)
+    } else {
+        expected_statuses.contains(&status)
+    }
+}
+
+fn runtime_daemon_phase_key(phase: &RuntimeDaemonPhase) -> &'static str {
+    match phase {
+        RuntimeDaemonPhase::Starting => "starting",
+        RuntimeDaemonPhase::Running => "running",
+        RuntimeDaemonPhase::Stopping => "stopping",
+        RuntimeDaemonPhase::Exited => "exited",
+        RuntimeDaemonPhase::Failed => "failed",
+    }
+}
+
+fn runtime_wait_success_label(until: ProjectRuntimeWaitUntil) -> &'static str {
+    match until {
+        ProjectRuntimeWaitUntil::ProcessStarted => "进程已启动",
+        ProjectRuntimeWaitUntil::ListenerReady => "端口已监听",
+        ProjectRuntimeWaitUntil::HttpVerified => "HTTP 已验证",
+    }
+}
+
+fn operation_status(key: &str, label: &str, success: bool, detail: String) -> OperationStatus {
+    OperationStatus {
+        key: key.to_string(),
+        label: label.to_string(),
+        success,
+        terminal: true,
+        detail,
+    }
+}
+
+fn runtime_wait_evidence(
+    run_id: Option<&str>,
+    probe_url: Option<&str>,
+    observed: &ProjectRuntimeWaitObservedSummary,
+) -> Vec<OperationEvidence> {
+    let mut evidence = Vec::new();
+    if let Some(phase) = observed.daemon_phase.as_deref() {
+        evidence.push(OperationEvidence {
+            kind: "process".to_string(),
+            source: "runtimeDaemon".to_string(),
+            detail: format!(
+                "runId={} phase={} processStarted={}",
+                run_id.unwrap_or("<none>"),
+                phase,
+                observed.process_started
+            ),
+        });
+    }
+    if let Some(port) = observed.expected_port {
+        evidence.push(OperationEvidence {
+            kind: "listener".to_string(),
+            source: "tcpConnect".to_string(),
+            detail: format!("127.0.0.1:{port} listening={}", observed.listener_ready),
+        });
+    }
+    if let Some(url) = probe_url {
+        evidence.push(OperationEvidence {
+            kind: "http".to_string(),
+            source: "httpProbe".to_string(),
+            detail: match (observed.http_status, observed.http_error.as_deref()) {
+                (Some(status), _) => format!(
+                    "GET {url} status={status} verified={}",
+                    observed.http_verified
+                ),
+                (None, Some(error)) => format!("GET {url} failed: {error}"),
+                _ => format!("GET {url} not attempted"),
+            },
+        });
+    }
+    evidence
+}
+
+fn runtime_wait_risks(
+    status: &OperationStatus,
+    observed: &ProjectRuntimeWaitObservedSummary,
+) -> Vec<OperationRisk> {
+    let mut risks = Vec::new();
+    if observed.listener_ready && !observed.http_verified {
+        risks.push(OperationRisk {
+            code: "listenerWithoutHttpVerification".to_string(),
+            severity: "warning".to_string(),
+            detail: "TCP 端口已监听，但尚未证明页面或 HTTP 服务可访问".to_string(),
+        });
+    }
+    if status.key == "timeout" {
+        risks.push(OperationRisk {
+            code: "runtimeWaitTimeout".to_string(),
+            severity: "error".to_string(),
+            detail: status.detail.clone(),
+        });
+    }
+    risks
 }
 
 pub fn clear_project_runtime_log(
@@ -1064,6 +2063,9 @@ pub fn clear_project_runtime_log(
         path: path.display().to_string(),
         lines: Vec::new(),
         truncated: false,
+        selection: "cleared".to_string(),
+        requested_run_id: None,
+        effective_run_id: None,
         ready_summary: project_runtime_ready_summary(project, RuntimeTaskKind::from(kind), &[]),
         session_summary: ProjectRuntimeLogSessionSummary::empty(0),
     })
@@ -1683,45 +2685,333 @@ fn resolve_runtime_profile(
         .ok_or_else(|| format!("运行配置不存在: {}", runtime_profile_key))
 }
 
-fn resolve_project_command(
+fn resolve_debug_profile_cwd(
     project: &ProjectConfig,
-    kind: RuntimeTaskKind,
-) -> Result<ResolvedProjectCommand, String> {
-    let Some(command_config) = project_command_config(project, kind) else {
-        return Err(kind.missing_config_message().to_string());
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(cwd) = debug_profile.and_then(|profile| profile.cwd.as_ref()) else {
+        return Ok(None);
     };
-    let command = command_config.command.trim().to_string();
-    if command.is_empty() {
+    if cwd.is_absolute() {
+        return Ok(Some(cwd.clone()));
+    }
+    project
+        .repo_path
+        .as_ref()
+        .map(|repo_path| Some(repo_path.join(cwd)))
+        .ok_or_else(|| {
+            format!(
+                "project {} uses a relative debug profile cwd but has no repo_path",
+                project.key
+            )
+        })
+}
+
+pub fn project_runtime_candidate_cwds(project: &ProjectConfig) -> Result<Vec<PathBuf>, String> {
+    let mut candidates = Vec::new();
+    if let Some(command) = project.dev.as_ref()
+        && let Ok(cwd) = resolve_command_cwd(project, command, RuntimeTaskKind::Dev)
+    {
+        candidates.push(cwd);
+    }
+    for profile in &project.debug_profiles {
+        if let Some(cwd) = resolve_debug_profile_cwd(project, Some(profile))? {
+            candidates.push(cwd);
+        }
+    }
+    for cwd in &mut candidates {
+        *cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+    }
+    candidates.sort();
+    candidates.dedup();
+    if candidates.is_empty() {
         return Err(format!(
-            "{}为空，请在 {} 下配置 command",
-            kind.command_label(),
-            kind.config_block()
+            "project {} has no dev.cwd, debug profile cwd, or repo_path for runtime lookup",
+            project.key
         ));
     }
-    let cwd = resolve_command_cwd(project, command_config, kind)?;
+    Ok(candidates)
+}
+
+fn resolve_runtime_command(
+    project: &ProjectConfig,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<ResolvedProjectCommand, String> {
+    let Some(command_config) = project_command_config(project, RuntimeTaskKind::Dev) else {
+        return Err(RuntimeTaskKind::Dev.missing_config_message().to_string());
+    };
+    let command = optional_trimmed(options.command.as_deref())
+        .or_else(|| debug_profile.and_then(|profile| optional_trimmed(profile.command.as_deref())))
+        .unwrap_or_else(|| command_config.command.trim())
+        .to_string();
+    if command.is_empty() {
+        return Err("启动命令为空，请在 dev 下配置 command".to_string());
+    }
+    let cwd = match resolve_debug_profile_cwd(project, debug_profile)? {
+        Some(cwd) => cwd,
+        None => resolve_command_cwd(project, command_config, RuntimeTaskKind::Dev)?,
+    };
     if !cwd.exists() {
-        return Err(format!("{}不存在: {}", kind.cwd_label(), cwd.display()));
+        return Err(format!("启动目录不存在: {}", cwd.display()));
     }
     if !cwd.is_dir() {
-        return Err(format!("{}不是文件夹: {}", kind.cwd_label(), cwd.display()));
+        return Err(format!("启动目录不是文件夹: {}", cwd.display()));
     }
-    Ok(ResolvedProjectCommand {
-        command,
-        cwd,
-        env: command_config.env.clone(),
+    let mut env = command_config.env.clone();
+    if let Some(profile) = debug_profile {
+        env.extend(profile.env.clone());
+    }
+    env.extend(options.env.clone());
+    Ok(ResolvedProjectCommand { command, cwd, env })
+}
+
+fn effective_project_focus_url(
+    project: &ProjectConfig,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+) -> Option<String> {
+    debug_profile
+        .and_then(|profile| optional_trimmed(profile.focus_url.as_deref()))
+        .or_else(|| optional_trimmed(project.focus.url.as_deref()))
+        .map(ToString::to_string)
+}
+
+fn runtime_ready_probe_summary(
+    probe: Option<&ProjectDebugReadyProbeConfig>,
+) -> Option<ProjectRuntimeReadyProbeSummary> {
+    probe.map(|probe| ProjectRuntimeReadyProbeSummary {
+        url: optional_owned(probe.url.as_deref()),
+        path: optional_owned(probe.path.as_deref()),
+        expected_statuses: probe.expected_statuses.clone(),
+        timeout_ms: probe.timeout_ms,
     })
 }
 
-fn apply_command_override(
-    resolved: &mut ResolvedProjectCommand,
+fn resolve_runtime_target_summary(
+    project: &ProjectConfig,
     debug_profile: Option<&ProjectDebugProfileConfig>,
-    launch_override: Option<&str>,
-) {
-    if let Some(command) = optional_trimmed(launch_override)
-        .or_else(|| debug_profile.and_then(|profile| optional_trimmed(profile.command.as_deref())))
-    {
-        resolved.command = command.to_string();
+    options: &ProjectRuntimeLaunchOptions,
+) -> Result<ProjectRuntimeTargetSummary, String> {
+    let resolved = resolve_runtime_command(project, debug_profile, options)?;
+    let port = resolve_expected_port_detail(project, debug_profile, options, &resolved);
+    let focus_url = effective_project_focus_url(project, debug_profile);
+    Ok(ProjectRuntimeTargetSummary {
+        command: resolved.command,
+        command_source: if optional_trimmed(options.command.as_deref()).is_some() {
+            "launchOverride"
+        } else if debug_profile
+            .and_then(|profile| optional_trimmed(profile.command.as_deref()))
+            .is_some()
+        {
+            "debugProfile"
+        } else {
+            "projectDev"
+        }
+        .to_string(),
+        cwd: resolved.cwd.display().to_string(),
+        cwd_source: if debug_profile
+            .and_then(|profile| profile.cwd.as_ref())
+            .is_some()
+        {
+            "debugProfile"
+        } else if project
+            .dev
+            .as_ref()
+            .and_then(|dev| dev.cwd.as_ref())
+            .is_some()
+        {
+            "projectDev"
+        } else {
+            "projectRepo"
+        }
+        .to_string(),
+        expected_port: port.map(|item| item.0),
+        expected_port_source: port.map(|item| item.1.to_string()),
+        focus_url,
+        focus_url_source: if debug_profile
+            .and_then(|profile| optional_trimmed(profile.focus_url.as_deref()))
+            .is_some()
+        {
+            Some("debugProfile".to_string())
+        } else if optional_trimmed(project.focus.url.as_deref()).is_some() {
+            Some("projectFocus".to_string())
+        } else {
+            None
+        },
+        ready_probe: runtime_ready_probe_summary(
+            debug_profile.and_then(|profile| profile.ready_probe.as_ref()),
+        ),
+    })
+}
+
+fn inspect_project_environment(
+    project: &ProjectConfig,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    options: &ProjectRuntimeLaunchOptions,
+) -> ProjectRuntimeEnvironmentInspect {
+    let mut diagnostics = Vec::new();
+    let resolved = match resolve_runtime_command(project, debug_profile, options) {
+        Ok(resolved) => Some(resolved),
+        Err(error) => {
+            diagnostics.push(error);
+            None
+        }
+    };
+
+    let cwd = resolved
+        .as_ref()
+        .map(|item| item.cwd.clone())
+        .or_else(|| project.repo_path.clone());
+    if cwd.as_ref().is_some_and(|path| !path.is_dir()) {
+        diagnostics.push(format!(
+            "工作目录不可用: {}",
+            cwd.as_ref().expect("cwd was checked").display()
+        ));
     }
+
+    let configured_command = resolved
+        .as_ref()
+        .map(|item| item.command.clone())
+        .or_else(|| {
+            optional_trimmed(options.command.as_deref())
+                .or_else(|| {
+                    debug_profile.and_then(|profile| optional_trimmed(profile.command.as_deref()))
+                })
+                .or_else(|| {
+                    project
+                        .dev
+                        .as_ref()
+                        .and_then(|dev| optional_trimmed(Some(&dev.command)))
+                })
+                .map(ToString::to_string)
+        });
+    let script_name = configured_command.as_deref().and_then(package_script_name);
+    let script_command = match (configured_command.as_deref(), cwd.as_deref()) {
+        (Some(command), Some(cwd)) => package_script_command(command, cwd),
+        _ => None,
+    };
+    let vite = configured_command
+        .as_deref()
+        .is_some_and(shell_command_contains_vite)
+        || script_command
+            .as_deref()
+            .is_some_and(shell_command_contains_vite);
+    let package_manager = configured_command
+        .as_deref()
+        .and_then(package_script_runner)
+        .map(ToString::to_string)
+        .or_else(|| cwd.as_deref().and_then(detect_package_manager));
+    let package_json = cwd.as_deref().and_then(|cwd| {
+        let path = cwd.join("package.json");
+        if !path.is_file() {
+            return None;
+        }
+        match fs::read_to_string(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|content| {
+                serde_json::from_str::<serde_json::Value>(&content)
+                    .map_err(|error| error.to_string())
+            }) {
+            Ok(value) => Some(ProjectRuntimePackageInspect {
+                path: path.display().to_string(),
+                name: value
+                    .get("name")
+                    .and_then(|value| value.as_str())
+                    .map(ToString::to_string),
+                package_manager: value
+                    .get("packageManager")
+                    .and_then(|value| value.as_str())
+                    .and_then(|value| value.split('@').next())
+                    .map(ToString::to_string)
+                    .or_else(|| package_manager.clone()),
+            }),
+            Err(error) => {
+                diagnostics.push(format!("package.json 解析失败: {error}"));
+                None
+            }
+        }
+    });
+    let empty_env = BTreeMap::new();
+    let node_version = detect_node_version(
+        cwd.as_deref(),
+        configured_command.as_deref().unwrap_or_default(),
+        resolved
+            .as_ref()
+            .map(|item| &item.env)
+            .unwrap_or(&empty_env),
+    );
+    let port_detail = resolved.as_ref().and_then(|resolved| {
+        resolve_expected_port_detail(project, debug_profile, options, resolved)
+    });
+    let vite_config = cwd.as_deref().and_then(find_vite_config);
+    let suggested_port = if vite && port_detail.is_none() && vite_config.is_none() {
+        Some(5173)
+    } else {
+        None
+    };
+    let status_key = if resolved.is_none() {
+        "unavailable"
+    } else if diagnostics.is_empty() {
+        "detected"
+    } else {
+        "partial"
+    };
+
+    ProjectRuntimeEnvironmentInspect {
+        status_key: status_key.to_string(),
+        cwd: cwd.map(|path| path.display().to_string()),
+        package_json,
+        node_version,
+        dev: ProjectRuntimeDevEnvironmentInspect {
+            configured_command,
+            script_name,
+            script_command,
+            package_manager,
+            vite,
+        },
+        port: ProjectRuntimePortInspect {
+            effective_port: port_detail.map(|item| item.0),
+            source: port_detail.map(|item| item.1.to_string()),
+            confidence: if port_detail.is_some() {
+                "high"
+            } else {
+                "unknown"
+            }
+            .to_string(),
+            suggested_port,
+        },
+        vite_config: vite_config.map(|path| ProjectRuntimeViteConfigInspect {
+            path: path.display().to_string(),
+            evaluated: false,
+        }),
+        diagnostics,
+    }
+}
+
+fn detect_package_manager(cwd: &Path) -> Option<String> {
+    [
+        ("pnpm-lock.yaml", "pnpm"),
+        ("yarn.lock", "yarn"),
+        ("bun.lockb", "bun"),
+        ("bun.lock", "bun"),
+        ("package-lock.json", "npm"),
+    ]
+    .into_iter()
+    .find_map(|(file, manager)| cwd.join(file).is_file().then(|| manager.to_string()))
+}
+
+fn find_vite_config(cwd: &Path) -> Option<PathBuf> {
+    [
+        "vite.config.ts",
+        "vite.config.js",
+        "vite.config.mts",
+        "vite.config.mjs",
+        "vite.config.cts",
+        "vite.config.cjs",
+    ]
+    .into_iter()
+    .map(|name| cwd.join(name))
+    .find(|path| path.is_file())
 }
 
 fn resolve_expected_port(
@@ -1730,17 +3020,44 @@ fn resolve_expected_port(
     options: &ProjectRuntimeLaunchOptions,
     resolved: &ResolvedProjectCommand,
 ) -> Option<u16> {
+    resolve_expected_port_detail(project, debug_profile, options, resolved).map(|item| item.0)
+}
+
+fn resolve_expected_port_detail(
+    project: &ProjectConfig,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    options: &ProjectRuntimeLaunchOptions,
+    resolved: &ResolvedProjectCommand,
+) -> Option<(u16, &'static str)> {
     options
         .expected_port
-        .or_else(|| debug_profile.and_then(|profile| profile.expected_port))
-        .or_else(|| command_port(&resolved.command))
+        .map(|port| (port, "launchOverride"))
+        .or_else(|| {
+            debug_profile
+                .and_then(|profile| profile.expected_port)
+                .map(|port| (port, "debugProfile"))
+        })
+        .or_else(|| command_port(&resolved.command).map(|port| (port, "commandArg")))
+        .or_else(|| {
+            package_script_command(&resolved.command, &resolved.cwd)
+                .as_deref()
+                .and_then(command_port)
+                .map(|port| (port, "packageScript"))
+        })
         .or_else(|| {
             resolved
                 .env
                 .get("PORT")
                 .and_then(|value| value.parse().ok())
+                .map(|port| (port, "envPort"))
         })
-        .or_else(|| project_local_focus_url_port(project))
+        .or_else(|| {
+            debug_profile
+                .and_then(|profile| profile.focus_url.as_deref())
+                .and_then(local_focus_url_port)
+                .map(|port| (port, "debugProfileFocusUrl"))
+        })
+        .or_else(|| project_local_focus_url_port(project).map(|port| (port, "projectFocusUrl")))
 }
 
 fn command_port(command: &str) -> Option<u16> {
@@ -1806,6 +3123,17 @@ fn resolved_vite_command_info(command: &str, cwd: &Path) -> (bool, bool) {
                 .map(vite_script_info)
         })
         .unwrap_or((false, false))
+}
+
+fn package_script_command(command: &str, cwd: &Path) -> Option<String> {
+    let script_name = package_script_name(command)?;
+    let content = fs::read_to_string(cwd.join("package.json")).ok()?;
+    serde_json::from_str::<serde_json::Value>(&content)
+        .ok()?
+        .get("scripts")?
+        .get(script_name)?
+        .as_str()
+        .map(ToString::to_string)
 }
 
 fn vite_script_info(script: &str) -> (bool, bool) {
@@ -1894,6 +3222,10 @@ fn package_script_name(command: &str) -> Option<String> {
 
 pub fn project_local_focus_url_port(project: &ProjectConfig) -> Option<u16> {
     let url = optional_trimmed(project.focus.url.as_deref())?;
+    local_focus_url_port(url)
+}
+
+fn local_focus_url_port(url: &str) -> Option<u16> {
     let parsed = reqwest::Url::parse(url).ok()?;
     match parsed.host_str()? {
         "localhost" | "127.0.0.1" | "::1" => parsed.port(),
@@ -2378,7 +3710,13 @@ fn preflight_command_checks(
         ));
     }
 
-    let cwd = match resolve_command_cwd(project, command_config, RuntimeTaskKind::Dev) {
+    let cwd_result = resolve_debug_profile_cwd(project, debug_profile).and_then(|cwd| {
+        cwd.map_or_else(
+            || resolve_command_cwd(project, command_config, RuntimeTaskKind::Dev),
+            Ok,
+        )
+    });
+    let cwd = match cwd_result {
         Ok(path) => {
             if path.exists() && path.is_dir() {
                 checks.push(preflight_check(
@@ -2457,11 +3795,9 @@ fn preflight_expected_port_check(
     options: &ProjectRuntimeLaunchOptions,
     checks: &mut Vec<ProjectRuntimePreflightCheck>,
 ) {
-    let Ok(mut resolved) = resolve_project_command(project, RuntimeTaskKind::Dev) else {
+    let Ok(resolved) = resolve_runtime_command(project, debug_profile, options) else {
         return;
     };
-    apply_command_override(&mut resolved, debug_profile, options.command.as_deref());
-    resolved.env.extend(options.env.clone());
     let Some(port) = resolve_expected_port(project, debug_profile, options, &resolved) else {
         return;
     };
@@ -2678,15 +4014,19 @@ fn preflight_runtime_profile_checks(
     }
 }
 
-fn preflight_focus_checks(project: &ProjectConfig, checks: &mut Vec<ProjectRuntimePreflightCheck>) {
-    let focus_url = project.focus.url.as_deref().map(str::trim).unwrap_or("");
+fn preflight_focus_checks(
+    project: &ProjectConfig,
+    debug_profile: Option<&ProjectDebugProfileConfig>,
+    checks: &mut Vec<ProjectRuntimePreflightCheck>,
+) {
+    let focus_url = effective_project_focus_url(project, debug_profile).unwrap_or_default();
     if focus_url.starts_with("http://") || focus_url.starts_with("https://") {
         checks.push(preflight_check(
             "focusUrl",
             "启动页面",
             "webActions",
             "ok",
-            focus_url,
+            &focus_url,
             None,
         ));
     } else if focus_url.is_empty() {
@@ -2704,9 +4044,53 @@ fn preflight_focus_checks(project: &ProjectConfig, checks: &mut Vec<ProjectRunti
             "启动页面",
             "webActions",
             "warning",
-            format!("focus.url 不是 HTTP 地址: {}", focus_url),
+            format!("focus URL 不是 HTTP 地址: {}", focus_url),
             Some("网页动作需要 http:// 或 https:// 地址。"),
         ));
+    }
+
+    if let Some(probe) = debug_profile.and_then(|profile| profile.ready_probe.as_ref()) {
+        let statuses_valid = probe
+            .expected_statuses
+            .iter()
+            .all(|status| (100..=599).contains(status));
+        let timeout_valid = probe
+            .timeout_ms
+            .is_none_or(|timeout| (100..=600_000).contains(&timeout));
+        let resolved_url = resolve_runtime_probe_url(
+            probe.url.as_deref(),
+            probe.path.as_deref(),
+            None,
+            Some(&focus_url),
+            None,
+        );
+        if statuses_valid && timeout_valid && resolved_url.is_ok() {
+            checks.push(preflight_check(
+                "readyProbe",
+                "HTTP Ready 探测",
+                "runtime",
+                "ok",
+                resolved_url
+                    .ok()
+                    .flatten()
+                    .unwrap_or_else(|| "等待运行端口".to_string()),
+                None,
+            ));
+        } else {
+            let detail = resolved_url
+                .err()
+                .or_else(|| (!statuses_valid).then(|| "HTTP 状态码必须在 100-599 之间".to_string()))
+                .or_else(|| (!timeout_valid).then(|| "超时必须在 100-600000ms 之间".to_string()))
+                .unwrap_or_else(|| "readyProbe 配置无效".to_string());
+            checks.push(preflight_check(
+                "readyProbe",
+                "HTTP Ready 探测",
+                "runtime",
+                "error",
+                detail,
+                Some("修正调试档案的 readyProbe 配置。"),
+            ));
+        }
     }
 
     let ready = &project.focus.ready;
@@ -2831,12 +4215,43 @@ fn node_version_hint(
     command: &str,
     env: &BTreeMap<String, String>,
 ) -> Option<String> {
+    detect_node_version(cwd, command, env).map(|detected| match detected.source.as_str() {
+        "command" => detected.value,
+        "env" => detected.value,
+        "nvmrc" | "nodeVersionFile" => format!(
+            "{} {}",
+            detected
+                .path
+                .as_deref()
+                .and_then(|path| Path::new(path).file_name())
+                .and_then(|name| name.to_str())
+                .unwrap_or("Node version file"),
+            detected.value
+        ),
+        "packageEngines" => format!("package.json engines.node {}", detected.value),
+        _ => detected.value,
+    })
+}
+
+fn detect_node_version(
+    cwd: Option<&Path>,
+    command: &str,
+    env: &BTreeMap<String, String>,
+) -> Option<ProjectRuntimeNodeVersionInspect> {
     let lower_command = command.to_ascii_lowercase();
     if lower_command.contains("nvm use") {
-        return Some("命令中包含 nvm use".to_string());
+        return Some(ProjectRuntimeNodeVersionInspect {
+            value: "命令中包含 nvm use".to_string(),
+            source: "command".to_string(),
+            path: None,
+        });
     }
     if lower_command.contains("volta") {
-        return Some("命令中包含 Volta".to_string());
+        return Some(ProjectRuntimeNodeVersionInspect {
+            value: "命令中包含 Volta".to_string(),
+            source: "command".to_string(),
+            path: None,
+        });
     }
     for key in ["NODE_VERSION", "npm_config_target"] {
         if let Some(value) = env
@@ -2845,7 +4260,11 @@ fn node_version_hint(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            return Some(format!("环境变量 {}={}", key, value));
+            return Some(ProjectRuntimeNodeVersionInspect {
+                value: format!("{}={}", key, value),
+                source: "env".to_string(),
+                path: None,
+            });
         }
     }
     let cwd = cwd?;
@@ -2854,11 +4273,23 @@ fn node_version_hint(
         if let Ok(value) = fs::read_to_string(&path) {
             let version = value.trim();
             if !version.is_empty() {
-                return Some(format!("{} {}", file_name, version));
+                return Some(ProjectRuntimeNodeVersionInspect {
+                    value: version.to_string(),
+                    source: if file_name == ".nvmrc" {
+                        "nvmrc".to_string()
+                    } else {
+                        "nodeVersionFile".to_string()
+                    },
+                    path: Some(path.display().to_string()),
+                });
             }
         }
     }
-    package_json_node_engine(cwd).map(|value| format!("package.json engines.node {}", value))
+    package_json_node_engine(cwd).map(|value| ProjectRuntimeNodeVersionInspect {
+        value,
+        source: "packageEngines".to_string(),
+        path: Some(cwd.join("package.json").display().to_string()),
+    })
 }
 
 fn package_json_node_engine(cwd: &Path) -> Option<String> {
@@ -2973,6 +4404,89 @@ fn tail_log_lines(
         total > max_lines,
         session_summary,
     ))
+}
+
+fn tail_runtime_session_lines(
+    path: &Path,
+    max_lines: usize,
+    requested_run_id: Option<&str>,
+) -> Result<(Vec<String>, bool, ProjectRuntimeLogSessionSummary), String> {
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((Vec::new(), false, ProjectRuntimeLogSessionSummary::empty(0)));
+        }
+        Err(error) => return Err(format!("读取运行日志失败: {}", error)),
+    };
+    let reader = BufReader::new(file);
+    let mut selected_lines = VecDeque::with_capacity(max_lines.saturating_add(1));
+    let mut selected_line_count = 0usize;
+    let mut total_line_count = 0usize;
+    let mut selecting = false;
+    let mut found = false;
+    let mut session_summary = ProjectRuntimeLogSessionSummary::empty(0);
+
+    for line in reader.lines() {
+        total_line_count += 1;
+        let line = line.map_err(|error| format!("读取运行日志失败: {}", error))?;
+        if let Some(mut next_session) = parse_runtime_session_marker(&line) {
+            let matches_requested = requested_run_id
+                .map(|requested| next_session.run_id.as_deref() == Some(requested))
+                .unwrap_or(true);
+            if requested_run_id.is_none() {
+                selected_lines.clear();
+                selected_line_count = 0;
+                selecting = true;
+                found = true;
+                next_session.total_line_count = total_line_count;
+                session_summary = next_session;
+                push_bounded_log_line(&mut selected_lines, max_lines, line);
+            } else if matches_requested {
+                selecting = true;
+                found = true;
+                next_session.total_line_count = total_line_count;
+                session_summary = next_session;
+                selected_line_count = 0;
+                selected_lines.clear();
+                push_bounded_log_line(&mut selected_lines, max_lines, line);
+            } else if selecting {
+                selecting = false;
+                session_summary.active = false;
+            }
+            continue;
+        }
+
+        if selecting {
+            selected_line_count += 1;
+            session_summary.current_line_count += 1;
+            if session_summary.pid.is_none() {
+                session_summary.pid = parse_running_pid(&line);
+            }
+            if is_runtime_session_end_line(&line) {
+                session_summary.active = false;
+                selecting = false;
+            }
+            push_bounded_log_line(&mut selected_lines, max_lines, line);
+        }
+    }
+    session_summary.total_line_count = total_line_count;
+    if let Some(requested_run_id) = requested_run_id
+        && !found
+    {
+        return Err(format!("runtime log session not found: {requested_run_id}"));
+    }
+    Ok((
+        selected_lines.into_iter().collect(),
+        selected_line_count.saturating_add(1) > max_lines,
+        session_summary,
+    ))
+}
+
+fn push_bounded_log_line(lines: &mut VecDeque<String>, max_lines: usize, line: String) {
+    if lines.len() == max_lines {
+        lines.pop_front();
+    }
+    lines.push_back(line);
 }
 
 fn parse_runtime_session_marker(line: &str) -> Option<ProjectRuntimeLogSessionSummary> {
@@ -3261,13 +4775,6 @@ fn optional_owned(value: Option<&str>) -> Option<String> {
 }
 
 impl RuntimeTaskKind {
-    fn command_label(self) -> &'static str {
-        match self {
-            Self::Dev => "启动命令",
-            Self::Build => "打包命令",
-        }
-    }
-
     fn config_block(self) -> &'static str {
         match self {
             Self::Dev => "[projects.dev]",
@@ -3307,13 +4814,23 @@ impl RuntimeTaskKind {
 #[cfg(test)]
 mod tests {
     use super::{
-        ResolvedProjectCommand, apply_command_override, apply_vite_strict_port, command_port,
-        package_script_name, resolve_runtime_profile, shell_command_contains_vite,
-        vite_script_info,
+        ProjectRuntimeContextEffective, ProjectRuntimeContextObserved,
+        ProjectRuntimeContextRequest, ProjectRuntimeContextSnapshot,
+        ProjectRuntimeReadyProbeSummary, ProjectRuntimeSessionObservation,
+        ProjectRuntimeTargetSummary, apply_vite_strict_port, command_port,
+        inspect_project_environment, package_script_name, probe_runtime_http,
+        project_runtime_context_snapshot, resolve_runtime_probe_url, resolve_runtime_profile,
+        resolve_runtime_target_summary, runtime_http_status_matches, shell_command_contains_vite,
+        tail_runtime_session_lines, vite_script_info,
     };
-    use crate::config::{AppConfig, ProjectDebugProfileConfig};
-    use std::collections::BTreeMap;
-    use std::path::PathBuf;
+    use crate::config::{AppConfig, ProjectConfig, ProjectDebugProfileConfig};
+    use crate::operation::{
+        ManagedArtifact, OperationEvidence, OperationStatus, RecommendedAction,
+    };
+    use crate::runtime::ProjectRuntimeLaunchOptions;
+    use serde_json::json;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     #[test]
     fn parses_common_dev_server_port_arguments() {
@@ -3323,18 +4840,252 @@ mod tests {
     }
 
     #[test]
-    fn launch_command_override_takes_priority_over_debug_profile() {
+    fn detects_package_script_port_and_environment_metadata() {
+        let cwd = std::env::temp_dir().join(format!(
+            "rdevtool-runtime-environment-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(
+            cwd.join("package.json"),
+            r#"{
+  "name": "demo-web",
+  "packageManager": "pnpm@9.1.0",
+  "engines": { "node": ">=20" },
+  "scripts": { "dev": "vite --port 4173" }
+}"#,
+        )
+        .unwrap();
+        let project: ProjectConfig = serde_json::from_value(json!({
+            "key": "demo-web",
+            "name": "Demo Web",
+            "repo_path": cwd,
+            "dev": { "command": "pnpm dev" }
+        }))
+        .unwrap();
+
+        let environment =
+            inspect_project_environment(&project, None, &ProjectRuntimeLaunchOptions::default());
+
+        assert_eq!(environment.status_key, "detected");
+        assert_eq!(environment.dev.script_name.as_deref(), Some("dev"));
+        assert_eq!(
+            environment.dev.script_command.as_deref(),
+            Some("vite --port 4173")
+        );
+        assert!(environment.dev.vite);
+        assert_eq!(environment.dev.package_manager.as_deref(), Some("pnpm"));
+        assert_eq!(environment.port.effective_port, Some(4173));
+        assert_eq!(environment.port.source.as_deref(), Some("packageScript"));
+        assert_eq!(
+            environment
+                .node_version
+                .as_ref()
+                .map(|item| item.source.as_str()),
+            Some("packageEngines")
+        );
+
+        std::fs::remove_dir_all(project.repo_path.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn debug_profile_runtime_target_resolves_cwd_focus_and_launch_precedence() {
+        let repo =
+            std::env::temp_dir().join(format!("rdevtool-runtime-target-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(repo.join("worktrees/feature")).unwrap();
+        let project: ProjectConfig = serde_json::from_value(json!({
+            "key": "demo-web",
+            "name": "Demo Web",
+            "repo_path": repo,
+            "dev": { "command": "npm run dev" },
+            "focus": { "url": "http://127.0.0.1:3000/" }
+        }))
+        .unwrap();
         let profile = ProjectDebugProfileConfig {
             command: Some("npm run profile".to_string()),
+            cwd: Some("worktrees/feature".into()),
+            focus_url: Some("http://127.0.0.1:4173/debug".to_string()),
             ..ProjectDebugProfileConfig::default()
         };
-        let mut resolved = ResolvedProjectCommand {
-            command: "npm run dev".to_string(),
-            cwd: PathBuf::from("."),
-            env: BTreeMap::new(),
+        let options = ProjectRuntimeLaunchOptions {
+            command: Some("npm run once".to_string()),
+            ..ProjectRuntimeLaunchOptions::default()
         };
-        apply_command_override(&mut resolved, Some(&profile), Some("npm run once"));
-        assert_eq!(resolved.command, "npm run once");
+        let target = resolve_runtime_target_summary(&project, Some(&profile), &options).unwrap();
+        assert_eq!(target.command, "npm run once");
+        assert_eq!(target.command_source, "launchOverride");
+        assert_eq!(target.cwd_source, "debugProfile");
+        assert!(target.cwd.ends_with("worktrees/feature"));
+        assert_eq!(target.expected_port, Some(4173));
+        assert_eq!(
+            target.expected_port_source.as_deref(),
+            Some("debugProfileFocusUrl")
+        );
+        assert_eq!(target.focus_url.as_deref(), profile.focus_url.as_deref());
+
+        std::fs::remove_dir_all(project.repo_path.unwrap()).unwrap();
+    }
+
+    #[test]
+    fn runtime_context_snapshot_keeps_requested_effective_and_observed_separate() {
+        let repo =
+            std::env::temp_dir().join(format!("rdevtool-runtime-context-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(repo.join("worktrees/feature")).unwrap();
+        let project_key = format!("runtime-context-{}", uuid::Uuid::new_v4());
+        let config: AppConfig = serde_json::from_value(json!({
+            "defaults": {
+                "runtime_profiles": [{
+                    "key": "browser",
+                    "label": "Browser"
+                }]
+            },
+            "projects": [{
+                "key": project_key,
+                "name": "Runtime Context",
+                "git_url": "",
+                "repo_path": repo,
+                "dev": { "command": "npm run dev" },
+                "focus": { "url": "http://127.0.0.1:3000/" },
+                "debug_profiles": [{
+                    "key": "feature",
+                    "label": "Feature",
+                    "cwd": "worktrees/feature",
+                    "runtime_profile": "browser",
+                    "focus_url": "http://127.0.0.1:4173/debug",
+                    "ready_probe": {
+                        "path": "/health",
+                        "expected_statuses": [204]
+                    }
+                }]
+            }]
+        }))
+        .unwrap();
+        let snapshot = project_runtime_context_snapshot(
+            &config,
+            &project_key,
+            &ProjectRuntimeLaunchOptions {
+                debug_profile: Some("feature".to_string()),
+                ..ProjectRuntimeLaunchOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            snapshot.requested.debug_profile_key.as_deref(),
+            Some("feature")
+        );
+        assert_eq!(
+            snapshot.effective.runtime_profile_key.as_deref(),
+            Some("browser")
+        );
+        let target = snapshot.effective.target.as_ref().unwrap();
+        assert!(target.cwd.ends_with("worktrees/feature"));
+        assert_eq!(
+            target.focus_url.as_deref(),
+            Some("http://127.0.0.1:4173/debug")
+        );
+        assert_eq!(
+            target
+                .ready_probe
+                .as_ref()
+                .and_then(|probe| probe.path.as_deref()),
+            Some("/health")
+        );
+        assert!(snapshot.observed.available);
+        assert!(snapshot.observed.sessions.is_empty());
+        assert_eq!(snapshot.status.key, "configured");
+        assert!(snapshot.status.success);
+        assert!(!snapshot.evidence.is_empty());
+        assert!(!snapshot.recommended_actions.is_empty());
+
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    #[test]
+    fn runtime_context_snapshot_json_contract_matches_fixture() {
+        let ready_probe = ProjectRuntimeReadyProbeSummary {
+            url: None,
+            path: Some("/health".to_string()),
+            expected_statuses: vec![204],
+            timeout_ms: Some(90_000),
+        };
+        let snapshot = ProjectRuntimeContextSnapshot {
+            schema_version: 1,
+            requested: ProjectRuntimeContextRequest {
+                project_key: "demo-web".to_string(),
+                debug_profile_key: Some("feature".to_string()),
+                runtime_profile_key: Some("browser".to_string()),
+                command: None,
+                expected_port: None,
+                env_keys: vec!["MODE".to_string()],
+            },
+            effective: ProjectRuntimeContextEffective {
+                debug_profile_key: Some("feature".to_string()),
+                debug_profile_label: Some("Feature".to_string()),
+                runtime_profile_key: Some("browser".to_string()),
+                runtime_profile_label: Some("Browser".to_string()),
+                target: Some(ProjectRuntimeTargetSummary {
+                    command: "npm run dev".to_string(),
+                    command_source: "projectDev".to_string(),
+                    cwd: "/workspace/demo-web".to_string(),
+                    cwd_source: "debugProfile".to_string(),
+                    expected_port: Some(4173),
+                    expected_port_source: Some("debugProfile".to_string()),
+                    focus_url: Some("http://127.0.0.1:4173/debug".to_string()),
+                    focus_url_source: Some("debugProfile".to_string()),
+                    ready_probe: Some(ready_probe.clone()),
+                }),
+            },
+            observed: ProjectRuntimeContextObserved {
+                available: true,
+                sessions: vec![ProjectRuntimeSessionObservation {
+                    run_id: Some("run-demo-1".to_string()),
+                    phase: "ready".to_string(),
+                    running: true,
+                    managed: true,
+                    adopted: false,
+                    cwd: "/workspace/demo-web".to_string(),
+                    expected_port: Some(4173),
+                    ready_url: Some("http://127.0.0.1:4173/health".to_string()),
+                    ready_probe: Some(ready_probe),
+                    daemon_pid: Some(4100),
+                    worker_pid: Some(4200),
+                    started_at_ms: Some(1_784_563_200_000),
+                    log_path: Some("/workspace/.rdevtool/runtime/demo-web.log".to_string()),
+                }],
+            },
+            status: OperationStatus {
+                key: "running".to_string(),
+                label: "运行中".to_string(),
+                success: true,
+                terminal: false,
+                detail: "当前目录存在 rDevTool 管理的运行会话。".to_string(),
+            },
+            evidence: vec![OperationEvidence {
+                kind: "config".to_string(),
+                source: "debugProfile".to_string(),
+                detail: "cwd=/workspace/demo-web".to_string(),
+            }],
+            risks: vec![],
+            managed_artifacts: vec![ManagedArtifact {
+                kind: "runtimeLog".to_string(),
+                path: "/workspace/.rdevtool/runtime/demo-web.log".to_string(),
+                ownership: "rdevtool".to_string(),
+                lifecycle: "session".to_string(),
+            }],
+            recommended_actions: vec![RecommendedAction {
+                command: "rdevtool runtime log --project demo-web --current".to_string(),
+                reason: "查看当前运行会话日志".to_string(),
+                risk: "readOnly".to_string(),
+            }],
+        };
+
+        let actual = serde_json::to_value(snapshot).expect("serialize runtime context snapshot");
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/runtime-context-snapshot.json"
+        ))
+        .expect("parse runtime context contract fixture");
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -3413,5 +5164,78 @@ label = "Explicit"
         assert_eq!(package_script_name("npm install"), None);
         assert_eq!(vite_script_info("vite --strictPort"), (true, true));
         assert_eq!(vite_script_info("vitest run"), (false, false));
+    }
+
+    #[test]
+    fn current_runtime_log_selection_excludes_previous_sessions() {
+        let path = std::env::temp_dir().join(format!(
+            "rdevtool-runtime-log-session-{}.log",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &path,
+            [
+                "legacy output",
+                r#"{"rdevtool":"runtimeSession","runId":"old","projectKey":"sample","kind":"dev"}"#,
+                "old session line",
+                r#"{"rdevtool":"runtimeSession","runId":"current","projectKey":"sample","kind":"dev"}"#,
+                "running pid=4242",
+                "current session line",
+            ]
+            .join("\n"),
+        )
+        .expect("write runtime log");
+
+        let (current_lines, _, current_summary) =
+            tail_runtime_session_lines(&path, 20, None).expect("read current session");
+        assert_eq!(current_summary.run_id.as_deref(), Some("current"));
+        assert!(
+            current_lines
+                .iter()
+                .any(|line| line == "current session line")
+        );
+        assert!(!current_lines.iter().any(|line| line == "old session line"));
+
+        let (old_lines, _, old_summary) =
+            tail_runtime_session_lines(&path, 20, Some("old")).expect("read old session");
+        assert_eq!(old_summary.run_id.as_deref(), Some("old"));
+        assert!(old_lines.iter().any(|line| line == "old session line"));
+        assert!(!old_lines.iter().any(|line| line == "current session line"));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn http_ready_probe_supports_custom_paths_and_statuses() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind HTTP test listener");
+        let address = listener.local_addr().expect("read listener address");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept HTTP request");
+            let mut request = [0u8; 1024];
+            let size = stream.read(&mut request).expect("read HTTP request");
+            let request = String::from_utf8_lossy(&request[..size]);
+            assert!(request.starts_with("GET /health HTTP/1.1"));
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+                .expect("write HTTP response");
+        });
+        let url = resolve_runtime_probe_url(
+            Some(&format!("http://{address}/")),
+            Some("/health"),
+            None,
+            None,
+            None,
+        )
+        .expect("resolve probe URL")
+        .expect("probe URL");
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build HTTP client");
+        let result = probe_runtime_http(&client, &url, &[204]);
+        assert!(result.verified);
+        assert_eq!(result.status, Some(204));
+        server.join().expect("join HTTP server");
+        assert!(runtime_http_status_matches(302, &[]));
+        assert!(!runtime_http_status_matches(204, &[200]));
     }
 }

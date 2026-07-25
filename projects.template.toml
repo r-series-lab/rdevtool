@@ -94,11 +94,8 @@ adapter = "local_command"
 action_kind = "build"
 job_name = "npm run web:build"
 
-[[projects.deploy_targets.params]]
-key = "build_output_dir"
-label = "产物目录"
-type = "hidden"
-default = "/path/to/example-web/dist"
+[projects.deploy_targets.artifact]
+output_dir = "/path/to/example-web/dist"
 
 [[projects.deploy_targets]]
 key = "package"

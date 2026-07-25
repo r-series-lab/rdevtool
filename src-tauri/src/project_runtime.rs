@@ -6,12 +6,13 @@ use rdevtool_core::config::{
 use rdevtool_core::navigation::{NavigationEntry, open_in_current_chrome};
 pub use rdevtool_core::runtime::{
     ProjectRuntimeLaunchOptions, ProjectRuntimeLogKind, ProjectRuntimeLogResponse,
-    ProjectRuntimeLogSessionSummary, ProjectRuntimePreflightResponse, ProjectRuntimeReadySummary,
+    ProjectRuntimeLogSessionSummary, ProjectRuntimePreflightResponse,
+    ProjectRuntimeReadyProbeSummary, ProjectRuntimeReadySummary,
 };
 use rdevtool_core::runtime::{
     adopt_project_runtime_with_options as core_adopt_project_runtime,
     clear_project_runtime_log as core_clear_project_runtime_log,
-    detect_external_project_runtime_for_project_with_options,
+    detect_external_project_runtime_for_project_with_options, project_runtime_candidate_cwds,
     project_runtime_preflight_for_project_with_options,
     read_project_runtime_log as core_read_project_runtime_log,
     start_project_runtime_detached_with_options as core_start_project_runtime,
@@ -74,7 +75,10 @@ pub struct ProjectDebugProfileSummary {
     pub key: String,
     pub label: String,
     pub command: Option<String>,
+    pub cwd: Option<String>,
     pub expected_port: Option<u16>,
+    pub focus_url: Option<String>,
+    pub ready_probe: Option<ProjectRuntimeReadyProbeSummary>,
     pub env: BTreeMap<String, String>,
     pub env_count: usize,
     pub local_file_count: usize,
@@ -171,7 +175,7 @@ struct ProjectRuntimeStore {
     running_builds: HashMap<String, RunningProjectProcess>,
     last_build_results: HashMap<String, ProjectTaskLastState>,
     app_started_runtimes: HashMap<String, AppStartedRuntimeSession>,
-    external_runtime_cache: HashMap<String, ExternalRuntimeCacheEntry>,
+    external_runtime_cache: HashMap<ExternalRuntimeCacheKey, ExternalRuntimeCacheEntry>,
 }
 
 impl ProjectRuntimeStore {
@@ -212,6 +216,14 @@ struct ProjectTaskLastState {
 struct ExternalRuntimeCacheEntry {
     checked_at_ms: u64,
     detection: Option<rdevtool_core::runtime::ProjectRuntimeExternalDetection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ExternalRuntimeCacheKey {
+    project_key: String,
+    canonical_cwd: PathBuf,
+    command: String,
+    focus_url: String,
 }
 
 #[derive(Clone)]
@@ -295,7 +307,10 @@ impl ProjectRuntimeState {
 
         let mut snapshots = Vec::new();
         for project_key in project_keys {
-            store.external_runtime_cache.remove(project_key);
+            clear_external_runtime_cache_for_project(
+                &mut store.external_runtime_cache,
+                project_key,
+            );
             let project = config
                 .find_project(project_key)
                 .map_err(|error| error.to_string())?;
@@ -547,7 +562,11 @@ impl ProjectRuntimeState {
         let project = config
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
-        let cwd = project_runtime_daemon_cwd(project)?;
+        let cwd = runtime_daemon_status_for_project_context(project)?
+            .filter(|status| status.running)
+            .map(|status| PathBuf::from(status.canonical_cwd))
+            .map(Ok)
+            .unwrap_or_else(|| project_runtime_daemon_cwd(project))?;
         let stopped =
             runtime_daemon::stop(&project.key, &cwd).map_err(|error| error.to_string())?;
         log_project_runtime_event(format!(
@@ -564,7 +583,7 @@ impl ProjectRuntimeState {
             .lock()
             .map_err(|_| "project runtime lock poisoned".to_string())?;
         store.app_started_runtimes.remove(&stopped.status_key);
-        store.external_runtime_cache.remove(&project.key);
+        clear_external_runtime_cache_for_project(&mut store.external_runtime_cache, &project.key);
         snapshot_for_project(&mut store, project)
     }
 
@@ -702,12 +721,20 @@ impl ProjectRuntimeState {
         &self,
         config: &AppConfig,
         project_key: &str,
+        output_dir_override: Option<&str>,
     ) -> Result<ProjectRuntimeSnapshot, String> {
         let project = config
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
-        let output_dir = resolve_build_output_dir(project)
-            .ok_or_else(|| "未找到产物目录，请在 [projects.build] 下配置 output_dir".to_string())?;
+        let output_dir = output_dir_override
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| resolve_build_output_dir(project))
+            .ok_or_else(|| {
+                "未找到产物目录，请配置 target artifact.output_dir 或 [projects.build].output_dir"
+                    .to_string()
+            })?;
         log_project_runtime_event(format!(
             "open build output key={} dir={}",
             project.key,
@@ -895,7 +922,17 @@ fn snapshot_for_project(
                 key: profile.key.clone(),
                 label: profile.label.clone(),
                 command: profile.command.clone(),
+                cwd: profile.cwd.as_ref().map(|path| path.display().to_string()),
                 expected_port: profile.expected_port,
+                focus_url: profile.focus_url.clone(),
+                ready_probe: profile.ready_probe.as_ref().map(|probe| {
+                    ProjectRuntimeReadyProbeSummary {
+                        url: probe.url.clone(),
+                        path: probe.path.clone(),
+                        expected_statuses: probe.expected_statuses.clone(),
+                        timeout_ms: probe.timeout_ms,
+                    }
+                }),
                 runtime_profile: profile.runtime_profile.clone(),
                 env: profile.env.clone(),
                 env_count: profile.env.len(),
@@ -985,20 +1022,65 @@ fn project_runtime_daemon_cwd(project: &ProjectConfig) -> Result<PathBuf, String
     resolve_command_cwd(project, command, ProjectCommandKind::Dev)
 }
 
+fn runtime_daemon_status_for_project_context(
+    project: &ProjectConfig,
+) -> Result<Option<RuntimeDaemonStatus>, String> {
+    let candidates = project_runtime_candidate_cwds(project)?;
+    runtime_daemon_status_for_project_candidates(project, &candidates)
+}
+
+fn runtime_daemon_status_for_project_candidates(
+    project: &ProjectConfig,
+    candidates: &[PathBuf],
+) -> Result<Option<RuntimeDaemonStatus>, String> {
+    runtime_daemon::list()
+        .map_err(|error| error.to_string())
+        .map(|statuses| {
+            statuses.into_iter().find(|status| {
+                status.project_key == project.key
+                    && candidates
+                        .iter()
+                        .any(|cwd| Path::new(&status.canonical_cwd) == cwd)
+            })
+        })
+}
+
 fn runtime_daemon_task_state(
     project: &ProjectConfig,
     display: &TaskDisplayConfig,
-    external_runtime_cache: &mut HashMap<String, ExternalRuntimeCacheEntry>,
+    external_runtime_cache: &mut HashMap<ExternalRuntimeCacheKey, ExternalRuntimeCacheEntry>,
 ) -> Result<TaskSnapshotState, String> {
-    let cwd = match project_runtime_daemon_cwd(project) {
-        Ok(cwd) => cwd,
-        Err(error) => return Ok(unavailable_task_state(display, error)),
+    let candidate_cwds = match project_runtime_candidate_cwds(project) {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            let detail = if display.configured {
+                error
+            } else {
+                ProjectCommandKind::Dev.missing_config_message().to_string()
+            };
+            return Ok(unavailable_task_state(display, detail));
+        }
     };
-    let status = runtime_daemon::status(&project.key, &cwd).map_err(|error| error.to_string())?;
+    let latest_status = runtime_daemon_status_for_project_candidates(project, &candidate_cwds)?;
+    let cwd = latest_status
+        .as_ref()
+        .map(|status| PathBuf::from(&status.canonical_cwd))
+        .or_else(|| project_runtime_daemon_cwd(project).ok());
+    let Some(cwd) = cwd else {
+        return Ok(unavailable_task_state(
+            display,
+            ProjectCommandKind::Dev.missing_config_message().to_string(),
+        ));
+    };
+    let status = match latest_status {
+        Some(status) => status,
+        None => runtime_daemon::status(&project.key, &cwd).map_err(|error| error.to_string())?,
+    };
     if !status.running {
         let now = now_ms();
+        let cache_key = external_runtime_cache_key(project, display, &cwd);
         let cached = external_runtime_cache
-            .get(&project.key)
+            .get(&cache_key)
             .filter(|entry| {
                 let ttl = if entry.detection.is_some() {
                     600
@@ -1017,7 +1099,7 @@ fn runtime_daemon_task_state(
                         .ok()
                         .flatten();
                 external_runtime_cache.insert(
-                    project.key.clone(),
+                    cache_key,
                     ExternalRuntimeCacheEntry {
                         checked_at_ms: now,
                         detection: detection.clone(),
@@ -1037,6 +1119,26 @@ fn runtime_daemon_task_state(
         };
     }
     Ok(runtime_daemon_status_to_task_state(&status))
+}
+
+fn external_runtime_cache_key(
+    project: &ProjectConfig,
+    display: &TaskDisplayConfig,
+    cwd: &Path,
+) -> ExternalRuntimeCacheKey {
+    ExternalRuntimeCacheKey {
+        project_key: project.key.clone(),
+        canonical_cwd: cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf()),
+        command: display.command.clone().unwrap_or_default(),
+        focus_url: project.focus.url.clone().unwrap_or_default(),
+    }
+}
+
+fn clear_external_runtime_cache_for_project(
+    cache: &mut HashMap<ExternalRuntimeCacheKey, ExternalRuntimeCacheEntry>,
+    project_key: &str,
+) {
+    cache.retain(|key, _| key.project_key != project_key);
 }
 
 fn unavailable_task_state(display: &TaskDisplayConfig, detail: String) -> TaskSnapshotState {
@@ -1748,9 +1850,10 @@ fn spawn_ready_focus_watcher(
             match runtime_ready_summary_from_file(&project, ProjectCommandKind::Dev) {
                 Ok(summary) if summary.ready => {
                     let url = summary.url.or_else(|| {
-                        project
-                            .focus
-                            .url
+                        debug_profile
+                            .as_ref()
+                            .and_then(|profile| profile.focus_url.as_deref())
+                            .or(project.focus.url.as_deref())
                             .as_deref()
                             .map(str::trim)
                             .filter(|value| !value.is_empty())
@@ -1901,7 +2004,10 @@ fn project_web_action_context_params(
         insert_context_param(&mut params, "project.repoPath", path.display().to_string());
         insert_context_param(&mut params, "project.repo_path", path.display().to_string());
     }
-    if let Some(url) = optional_trimmed(project.focus.url.as_deref()) {
+    if let Some(url) = debug_profile
+        .and_then(|profile| optional_trimmed(profile.focus_url.as_deref()))
+        .or_else(|| optional_trimmed(project.focus.url.as_deref()))
+    {
         insert_context_param(&mut params, "project.focusUrl", url);
         insert_context_param(&mut params, "project.focus_url", url);
     }
@@ -2708,14 +2814,35 @@ fn log_project_runtime_event(message: String) {
 mod tests {
     use super::{
         AppStartedRuntimeSession, app_owns_runtime_status, external_dev_task_state,
-        running_build_task_state, runtime_daemon_status_to_task_state, should_strip_inherited_env,
+        running_build_task_state, runtime_daemon_status_to_task_state, runtime_daemon_task_state,
+        runtime_display_config, should_strip_inherited_env,
+    };
+    use rdevtool_core::config::{
+        BranchRules, Jobs, ProjectCommandConfig, ProjectConfig, ProjectFocusConfig,
     };
     use rdevtool_core::runtime::ProjectRuntimeExternalDetection;
     use rdevtool_core::runtime_daemon::{
         RuntimeDaemonExit, RuntimeDaemonPhase, RuntimeDaemonState, RuntimeDaemonStatus,
         RuntimeProcessIdentity,
     };
-    use std::path::PathBuf;
+    use std::{collections::HashMap, path::PathBuf};
+
+    fn project_without_runtime_path(dev: Option<ProjectCommandConfig>) -> ProjectConfig {
+        ProjectConfig {
+            key: "deploy-only".to_string(),
+            name: "Deploy Only".to_string(),
+            category: "Workspace".to_string(),
+            repo_path: None,
+            git_url: String::new(),
+            deploy_targets: Vec::new(),
+            jobs: Jobs::default(),
+            dev,
+            build: None,
+            focus: ProjectFocusConfig::default(),
+            branch_rules: BranchRules::default(),
+            debug_profiles: Vec::new(),
+        }
+    }
 
     fn daemon_status(
         phase: RuntimeDaemonPhase,
@@ -2765,6 +2892,7 @@ mod tests {
                 debug_profile: None,
                 runtime_profile: None,
                 expected_port: Some(3000),
+                ready_probe: None,
                 ready_url: Some("http://localhost:3000".to_string()),
                 daemon_pid: 10,
                 worker_pid: Some(11),
@@ -2796,6 +2924,34 @@ mod tests {
             assert_eq!(state.status_key, expected_key);
             assert_eq!(state.can_stop, expected_can_stop);
         }
+    }
+
+    #[test]
+    fn deploy_only_project_is_reported_as_not_configured_in_runtime_list() {
+        let project = project_without_runtime_path(None);
+        let display = runtime_display_config(&project);
+        let state = runtime_daemon_task_state(&project, &display.dev, &mut HashMap::new()).unwrap();
+
+        assert_eq!(state.status_key, "notConfigured");
+        assert_eq!(
+            state.detail,
+            "在 projects.toml 里为该项目添加 [projects.dev] 并配置 command"
+        );
+        assert!(!state.is_available);
+    }
+
+    #[test]
+    fn dev_project_without_any_runtime_path_is_reported_as_invalid_config() {
+        let project = project_without_runtime_path(Some(ProjectCommandConfig {
+            command: "npm run dev".to_string(),
+            ..ProjectCommandConfig::default()
+        }));
+        let display = runtime_display_config(&project);
+        let state = runtime_daemon_task_state(&project, &display.dev, &mut HashMap::new()).unwrap();
+
+        assert_eq!(state.status_key, "invalidConfig");
+        assert!(state.detail.contains("has no dev.cwd"));
+        assert!(!state.is_available);
     }
 
     #[test]

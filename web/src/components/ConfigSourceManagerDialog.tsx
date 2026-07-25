@@ -400,6 +400,7 @@ export function ConfigSourceManagerDialog({
       description: `将移除“${inspection.source.name}”的注册记录，已有配置文件会保留。`,
       confirmLabel: "移除",
       tone: "danger",
+      preferenceKey: "destructive.delete",
     });
     if (!accepted) return;
     setSaving(true);

@@ -5,19 +5,27 @@
   "scripts": {
     "dev": "node ./scripts/dev.mjs",
     "prebuild": "npm run clean:build-cache",
-    "build": "cd src-tauri && ../web/node_modules/.bin/tauri build --config tauri.conf.json",
-    "postbuild": "python3 ./scripts/apply-macos-appicon-assets.py --rebuild-dmg",
+    "build": "node ./scripts/build-release.mjs",
+    "release:artifacts": "node ./scripts/collect-release-artifacts.mjs",
     "cli": "cargo run --quiet --",
     "cli:json": "cargo run --quiet -- --json",
+    "manifest:check": "node ./scripts/validate-app-manifest.mjs",
+    "manifest:check:json": "node ./scripts/validate-app-manifest.mjs --json",
+    "ipc:check": "node ./scripts/check-ipc-contract.mjs",
+    "ipc:check:json": "node ./scripts/check-ipc-contract.mjs --json",
     "web:install": "npm --prefix web install",
     "web:dev": "npm --prefix web run dev",
     "web:build": "npm --prefix web run build",
     "web:test": "npm --prefix web test",
+    "web:test:e2e": "npm --prefix web run test:e2e",
     "icons": "python3 ./scripts/generate-icons.py && cd src-tauri && ../web/node_modules/.bin/tauri icon icons/rdevtool-app-icon-source.png && cd .. && python3 ./scripts/generate-icons.py --post-export && cp src-tauri/icons/128x128.png web/public/rdevtool.png",
-    "rust-check": "cargo check --manifest-path ./src-tauri/Cargo.toml",
+    "rust-check": "cargo check --locked --manifest-path ./src-tauri/Cargo.toml",
+    "rust-test": "cargo test --locked --quiet && cargo test --locked --quiet --manifest-path ./src-tauri/Cargo.toml",
+    "check": "npm run manifest:check && npm run ipc:check && npm run web:test && npm run web:build && npm run rust-test && npm run rust-check",
+    "check:full": "npm run check && npm run web:test:e2e",
     "size": "du -sh ./target ./web/node_modules ./web/dist 2>/dev/null || true",
-    "clean:build-cache": "cargo clean --manifest-path ./src-tauri/Cargo.toml -p rdevtool-core -p rdevtool-tauri && rm -rf ./web/dist ./target/release/bundle",
-    "clean": "cargo clean --manifest-path ./src-tauri/Cargo.toml && rm -rf ./web/dist",
-    "clean:all": "cargo clean --manifest-path ./src-tauri/Cargo.toml && rm -rf ./web/dist ./web/node_modules"
+    "clean:build-cache": "node ./scripts/clean.mjs build-cache",
+    "clean": "node ./scripts/clean.mjs standard",
+    "clean:all": "node ./scripts/clean.mjs all"
   }
 }

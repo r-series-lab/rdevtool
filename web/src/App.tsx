@@ -21,6 +21,7 @@ import { ConfigSourceManagerDialog } from "./components/ConfigSourceManagerDialo
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { useAppShell } from "./hooks/useAppShell";
 import { useActivityCenter } from "./hooks/useActivityCenter";
+import { useActivityPreferences } from "./hooks/useActivityPreferences";
 import { useAppBootstrap } from "./hooks/useAppBootstrap";
 import { useBranchContext } from "./hooks/useBranchContext";
 import { useMergeSelection } from "./hooks/useMergeSelection";
@@ -37,8 +38,19 @@ import type {
   CreateProjectWorkspacePayload,
   InitDemandWorkspacePayload,
   InitDemandWorkspaceResult,
+  LinkExecutionReport,
 } from "./app-types";
 import type { ActivityEntry } from "./lib/activityCenter";
+import {
+  linkActivityDraft,
+  linkActivityFailurePatch,
+  linkActivityResultPatch,
+  linkCheckActivityDraft,
+  linkCheckActivityFailurePatch,
+  linkCheckActivityResultPatch,
+  linkCheckFailureReason,
+  linkCheckPassed,
+} from "./lib/linkActivities";
 import type { TrayPinnedAction } from "./lib/trayPins";
 import {
   executeTrayPinnedActionWorkflow,
@@ -93,10 +105,12 @@ function App() {
     () => appShell.projects.map((project) => project.key),
     [appShell.projects],
   );
+  const { preferences: activityPreferences } = useActivityPreferences();
   const activityCenter = useActivityCenter({
     setError,
     projectKeys: activeProjectKeys,
     includeAllProjects: activeProjectWorkspace?.includeAllProjects ?? true,
+    configActivityVisibility: activityPreferences.configActivityVisibility,
   });
   const workflowSignals = useWorkflowSignals({ setError });
   const workflowAutoRunKeyRef = useRef("");
@@ -254,6 +268,8 @@ function App() {
   const proxyModule = useProxyModule({
     enabled: proxyEnabled,
     setError,
+    recordActivity: activityCenter.recordActivity,
+    updateActivity: activityCenter.updateActivity,
   });
   const trayDomainActionRunningRef = useRef(false);
   const trayDomainActionHandlerRef = useRef<
@@ -307,6 +323,10 @@ function App() {
       } else {
         unlisten = nextUnlisten;
       }
+    }).catch((reason) => {
+      if (!disposed) {
+        setError(`监听托盘操作失败：${String(reason)}`);
+      }
     });
     return () => {
       disposed = true;
@@ -348,6 +368,10 @@ function App() {
     mergeModule,
     projectsModule,
     proxyModule,
+    activityCenter: {
+      recordActivity: activityCenter.recordActivity,
+      updateActivity: activityCenter.updateActivity,
+    },
     busy,
     workflowSignals,
   });
@@ -662,6 +686,205 @@ function App() {
       });
       return;
     }
+    if (action.kind === "linkRecover") {
+      const sourceId = action.sourceId || null;
+      setBusy("正在检查联调链路");
+      setError("");
+      const checkActivityId = activityCenter.recordActivity(
+        linkCheckActivityDraft(
+          action.linkKey,
+          action.linkName,
+          action.replayAction,
+        ),
+      );
+      try {
+        const checkReport = await invoke<LinkExecutionReport>("check_link", {
+          sourceId,
+          key: action.linkKey,
+        });
+        activityCenter.updateActivity(
+          checkActivityId,
+          linkCheckActivityResultPatch(checkReport),
+        );
+        if (!linkCheckPassed(checkReport)) {
+          setError(`检查未通过：${linkCheckFailureReason(checkReport)}`);
+          return;
+        }
+
+        setBusy(action.replayAction === "stop" ? "正在重新停止联调链路" : "正在重新启动联调链路");
+        const replayActivityId = activityCenter.recordActivity(
+          linkActivityDraft(
+            action.linkKey,
+            action.linkName,
+            action.replayAction,
+            sourceId,
+          ),
+        );
+        try {
+          const report = await invoke<LinkExecutionReport>(
+            action.replayAction === "stop" ? "stop_link" : "run_link",
+            {
+              sourceId,
+              key: action.linkKey,
+              activityId: replayActivityId,
+              operationOrigin: "app",
+            },
+          );
+          const replayPatch = linkActivityResultPatch(
+            report,
+            action.replayAction,
+            sourceId,
+          );
+          activityCenter.updateActivity(replayActivityId, replayPatch);
+          if (replayPatch.status === "success") {
+            activityCenter.updateActivity(entry.id, {
+              action: null,
+              acknowledgedAt: new Date().toISOString(),
+              updatedAt: entry.updatedAt,
+            });
+          } else {
+            setError(linkCheckFailureReason(report));
+          }
+        } catch (reason) {
+          const message = String(reason);
+          activityCenter.updateActivity(
+            replayActivityId,
+            linkActivityFailurePatch(
+              action.linkKey,
+              action.linkName,
+              action.replayAction,
+              sourceId,
+              message,
+            ),
+          );
+          setError(message);
+        }
+      } catch (reason) {
+        const message = String(reason);
+        activityCenter.updateActivity(
+          checkActivityId,
+          linkCheckActivityFailurePatch(message),
+        );
+        setError(message);
+      } finally {
+        setBusy("");
+      }
+      return;
+    }
+    if (action.kind === "branchReplay") {
+      setError("");
+      try {
+        const success = await mergeModule.handleReplayBranchRequest(
+          action.replay,
+          {
+            force: true,
+            origin: "app",
+            stepLabel: `重试${entry.title}`,
+          },
+        );
+        if (success) {
+          activityCenter.updateActivity(entry.id, {
+            action: null,
+            acknowledgedAt: new Date().toISOString(),
+            updatedAt: entry.updatedAt,
+          });
+        }
+      } catch (reason) {
+        setError(String(reason));
+      }
+      return;
+    }
+    if (action.kind === "buildRecover") {
+      setError("");
+      try {
+        const recordedWorkspaceKey = action.workspaceKey?.trim() || "";
+        if (
+          recordedWorkspaceKey &&
+          recordedWorkspaceKey !== appShell.activeProjectWorkspaceKey
+        ) {
+          await changeProjectWorkspace(recordedWorkspaceKey);
+        }
+        openActivityEntry(entry);
+        const success = await buildModule.handleTriggerBuildRequest(
+          action.request,
+          "正在重新规划并重试构建",
+          {
+            force: true,
+            origin: "app",
+            workspaceKey: action.workspaceKey,
+            stepLabel: `重试${entry.title}`,
+          },
+        );
+        if (success) {
+          activityCenter.updateActivity(entry.id, {
+            action: null,
+            acknowledgedAt: new Date().toISOString(),
+            updatedAt: entry.updatedAt,
+          });
+        }
+      } catch (reason) {
+        setError(String(reason));
+      }
+      return;
+    }
+    if (action.kind === "runtimeRecover") {
+      setError("");
+      try {
+        const success = action.replayAction === "stop"
+          ? await projectsModule.handleStopRuntime(action.projectKey)
+          : await projectsModule.handleStartRuntime(
+              action.projectKey,
+              action.debugProfileKey || undefined,
+              action.envOverrides ?? undefined,
+            );
+        if (success) {
+          activityCenter.updateActivity(entry.id, {
+            action: null,
+            acknowledgedAt: new Date().toISOString(),
+            updatedAt: entry.updatedAt,
+          });
+        }
+      } catch (reason) {
+        setError(String(reason));
+      }
+      return;
+    }
+    if (action.kind === "proxyRecover") {
+      setError("");
+      try {
+        const dashboard = action.replayAction === "stop"
+          ? await proxyModule.stopProxyProfile(
+              action.profileId,
+              action.sourceId || undefined,
+            )
+          : await proxyModule.startProxyProfile(
+              action.profileId,
+              action.sourceId || undefined,
+            );
+        const status = dashboard.statuses.find(
+          (item) => item.profileId === action.profileId,
+        );
+        const success = action.replayAction === "stop"
+          ? !status?.running
+          : Boolean(status?.running);
+        if (success) {
+          activityCenter.updateActivity(entry.id, {
+            action: null,
+            acknowledgedAt: new Date().toISOString(),
+            updatedAt: entry.updatedAt,
+          });
+        } else {
+          setError(
+            action.replayAction === "stop"
+              ? "代理停止后仍在监听，请查看新活动的诊断详情"
+              : "代理启动后未监听，请查看新活动的诊断详情",
+          );
+        }
+      } catch (reason) {
+        setError(String(reason));
+      }
+      return;
+    }
 
     setBusy("正在重新加载配置");
     setError("");
@@ -720,7 +943,7 @@ function App() {
         onCreateProjectWorkspace={createProjectWorkspace}
         onProjectConfigSaved={reloadProjectsAfterConfigSave}
         activityItems={activityCenter.items}
-        activityAlertCount={activityCenter.stats.running + activityCenter.stats.failed}
+        activityAlertCount={activityCenter.stats.attention}
         onOpenActivityEntry={openActivityEntry}
         onOpenActivityResource={(entry) => {
           void openActivityResource(entry);
@@ -768,8 +991,12 @@ function App() {
         onProjectManagementViewChange={appShell.setProjectManagementView}
         onProjectChange={appShell.setSelectedProject}
         onOpenFinderEntry={projectsModule.handleOpenFinderEntry}
-        onStartRuntime={projectsModule.handleStartRuntime}
-        onStopRuntime={projectsModule.handleStopRuntime}
+        onStartRuntime={async (projectKey) => {
+          await projectsModule.handleStartRuntime(projectKey);
+        }}
+        onStopRuntime={async (projectKey) => {
+          await projectsModule.handleStopRuntime(projectKey);
+        }}
         onRunBuild={projectsModule.handleRunBuild}
         onStopBuild={projectsModule.handleStopBuild}
         onOpenBuildOutput={projectsModule.handleOpenBuildOutput}

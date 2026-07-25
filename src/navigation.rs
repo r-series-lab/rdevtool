@@ -174,6 +174,7 @@ enum NavigationEntryKind {
     Script,
     Tool,
     Directory,
+    File,
 }
 
 impl NavigationEntryKind {
@@ -184,6 +185,7 @@ impl NavigationEntryKind {
             Self::Script => "script",
             Self::Tool => "tool",
             Self::Directory => "directory",
+            Self::File => "file",
         }
     }
 
@@ -194,6 +196,7 @@ impl NavigationEntryKind {
             Self::Script => "脚本",
             Self::Tool => "工具",
             Self::Directory => "目录",
+            Self::File => "文件",
         }
     }
 }
@@ -586,6 +589,7 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
             .or_else(|| tool.clone())
             .unwrap_or_else(|| "tool".to_string()),
         NavigationEntryKind::Directory => path.clone().filter(|value| !value.is_empty())?,
+        NavigationEntryKind::File => path.clone().filter(|value| !value.is_empty())?,
     };
 
     Some(NavigationEntry {
@@ -642,7 +646,10 @@ fn navigation_entry_from_config(entry: NavigationEntryConfig) -> Option<Navigati
         } else {
             None
         },
-        path: if matches!(kind, NavigationEntryKind::Directory) {
+        path: if matches!(
+            kind,
+            NavigationEntryKind::Directory | NavigationEntryKind::File
+        ) {
             path
         } else {
             None
@@ -960,6 +967,7 @@ pub fn open_navigation_entry_with_runtime_profiles(
         NavigationEntryKind::Script => open_navigation_script(entry),
         NavigationEntryKind::Tool => open_navigation_tool(entry),
         NavigationEntryKind::Directory => open_navigation_directory(entry),
+        NavigationEntryKind::File => open_navigation_file(entry),
     }
 }
 
@@ -1392,6 +1400,27 @@ fn open_navigation_directory(entry: &NavigationEntry) -> Result<NavigationOpenRe
     })
 }
 
+fn open_navigation_file(entry: &NavigationEntry) -> Result<NavigationOpenResult> {
+    let path = entry
+        .path
+        .as_deref()
+        .ok_or_else(|| anyhow!("missing path for file shortcut"))?;
+    let file = resolve_file_path(path)?;
+
+    let status = Command::new("open")
+        .arg(file.as_os_str())
+        .status()
+        .map_err(|error| anyhow!("failed to open file: {error}"))?;
+    if !status.success() {
+        anyhow::bail!("failed to open file: {}", file.display());
+    }
+
+    Ok(NavigationOpenResult {
+        url: file.display().to_string(),
+        detail: "已打开文件入口".to_string(),
+    })
+}
+
 pub fn list_navigation_entries(limit: usize) -> Result<Vec<NavigationIndexEntry>> {
     let data = load_navigation_data()?;
     Ok(list_navigation_entries_from_data(&data, limit))
@@ -1629,6 +1658,7 @@ fn resolve_entry_kind(entry: &NavigationEntryConfig) -> Option<NavigationEntryKi
             "script" => Some(NavigationEntryKind::Script),
             "tool" => Some(NavigationEntryKind::Tool),
             "directory" | "dir" | "folder" => Some(NavigationEntryKind::Directory),
+            "file" | "document" => Some(NavigationEntryKind::File),
             _ => None,
         };
     }
@@ -1662,6 +1692,7 @@ fn normalize_entry_kind(value: &str) -> Option<String> {
         "script" => Some(NavigationEntryKind::Script.key().to_string()),
         "tool" => Some(NavigationEntryKind::Tool.key().to_string()),
         "directory" | "dir" | "folder" => Some(NavigationEntryKind::Directory.key().to_string()),
+        "file" | "document" => Some(NavigationEntryKind::File.key().to_string()),
         _ => None,
     }
 }
@@ -1673,6 +1704,7 @@ fn entry_kind(entry: &NavigationEntry) -> Result<NavigationEntryKind> {
         "script" => Ok(NavigationEntryKind::Script),
         "tool" => Ok(NavigationEntryKind::Tool),
         "directory" | "dir" | "folder" => Ok(NavigationEntryKind::Directory),
+        "file" | "document" => Ok(NavigationEntryKind::File),
         other => Err(anyhow!("unsupported navigation entry kind: {}", other)),
     }
 }
@@ -1713,6 +1745,20 @@ fn resolve_directory_path(path: &str) -> Result<PathBuf> {
     }
 
     Ok(directory)
+}
+
+fn resolve_file_path(path: &str) -> Result<PathBuf> {
+    let file = PathBuf::from(path);
+    if !file.is_absolute() {
+        anyhow::bail!("file shortcut requires an absolute path");
+    }
+    if !file.exists() {
+        anyhow::bail!("file does not exist: {}", file.display());
+    }
+    if !file.is_file() {
+        anyhow::bail!("file shortcut target is not a file: {}", file.display());
+    }
+    Ok(file)
 }
 
 fn preferred_navigation_category(categories: &[NavigationCategory]) -> Option<String> {

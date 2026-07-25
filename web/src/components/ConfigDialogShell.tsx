@@ -62,6 +62,7 @@ export function ConfigDialogShell({
         description: "关闭后，本次尚未保存的配置修改将丢失。",
         confirmLabel: "放弃改动",
         tone: "danger",
+        preferenceKey: "configuration.discard",
       });
       if (!accepted) return;
     }

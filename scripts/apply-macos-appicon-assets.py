@@ -184,8 +184,15 @@ def compile_assets(env):
     return assets_car, partial_info
 
 
-def app_path(product_name):
-    return ROOT / "target" / "release" / "bundle" / "macos" / f"{product_name}.app"
+def bundle_root(target):
+    root = ROOT / "target"
+    if target:
+        root /= target
+    return root / "release" / "bundle"
+
+
+def app_path(product_name, target):
+    return bundle_root(target) / "macos" / f"{product_name}.app"
 
 
 def merge_plist(info_plist, partial_info):
@@ -204,8 +211,8 @@ def merge_plist(info_plist, partial_info):
         plistlib.dump(info, fh, sort_keys=False)
 
 
-def patch_app(product_name, assets_car, partial_info):
-    app = app_path(product_name)
+def patch_app(product_name, assets_car, partial_info, target):
+    app = app_path(product_name, target)
     if not app.exists():
         raise SystemExit(f"Missing built app: {app}")
 
@@ -217,7 +224,12 @@ def patch_app(product_name, assets_car, partial_info):
     run(["codesign", "--force", "--sign", "-", "--deep", str(app)])
 
 
-def arch_suffix():
+def arch_suffix(target):
+    if target:
+        if target.startswith("aarch64-"):
+            return "aarch64"
+        if target.startswith("x86_64-"):
+            return "x64"
     machine = platform.machine()
     if machine == "arm64":
         return "aarch64"
@@ -257,12 +269,13 @@ def finalize_rw_dmg(output_dmg, macos_dir):
     return True
 
 
-def rebuild_dmg(product_name, version):
-    dmg_dir = ROOT / "target" / "release" / "bundle" / "dmg"
-    macos_dir = ROOT / "target" / "release" / "bundle" / "macos"
+def rebuild_dmg(product_name, version, target):
+    root = bundle_root(target)
+    dmg_dir = root / "dmg"
+    macos_dir = root / "macos"
     bundle_script = dmg_dir / "bundle_dmg.sh"
     volume_icon = dmg_dir / "icon.icns"
-    output_dmg = dmg_dir / f"{product_name}_{version}_{arch_suffix()}.dmg"
+    output_dmg = dmg_dir / f"{product_name}_{version}_{arch_suffix(target)}.dmg"
 
     if not bundle_script.exists():
         print(f"Skipping DMG rebuild: missing {bundle_script}")
@@ -306,6 +319,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--generate-only", action="store_true")
     parser.add_argument("--rebuild-dmg", action="store_true")
+    parser.add_argument("--target")
     args = parser.parse_args()
 
     config = load_config()
@@ -317,9 +331,9 @@ def main():
     assets_car, partial_info = compile_assets(env)
 
     if not args.generate_only:
-        patch_app(product_name, assets_car, partial_info)
+        patch_app(product_name, assets_car, partial_info, args.target)
         if args.rebuild_dmg:
-            rebuild_dmg(product_name, version)
+            rebuild_dmg(product_name, version, args.target)
 
     print("macOS app icon asset catalog is ready.")
 

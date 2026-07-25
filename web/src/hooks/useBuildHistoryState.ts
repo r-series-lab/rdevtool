@@ -12,6 +12,12 @@ import {
   BUILD_STATUS_SYNC_MAX_FAILURES,
   stableActivityJson,
 } from "../lib/activityCenter";
+import {
+  buildRecoveryAction,
+  buildRecoveryActionForRequest,
+  buildActivityParameters,
+  type BuildActivityParameterMeta,
+} from "../lib/historyActivities";
 import type { BuildPlan, BuildRequest } from "./useBuildContext";
 
 const BUILD_STATUS_POLL_DELAY_MS = 3000;
@@ -206,6 +212,7 @@ type UseBuildHistoryOptions = {
   target: string;
   env: string;
   branch: string;
+  buildParamMeta?: BuildActivityParameterMeta[];
   currentPlan: BuildPlan | null;
   currentBuildRequest: () => BuildRequest;
   setPlan: (value: BuildPlan | null) => void;
@@ -218,11 +225,24 @@ type UseBuildHistoryOptions = {
 
 export type BuildReplayOptions = {
   force?: boolean;
+  origin?: "app" | "tray";
   workspaceKey?: string | null;
   chainId?: string | null;
   parentId?: string | null;
   stepLabel?: string | null;
 };
+
+export function resolveBuildExecutionWorkspaceKey(
+  activeWorkspaceKey: string,
+  requestedWorkspaceKey?: string | null,
+  recordedWorkspaceKey?: string | null,
+) {
+  return (
+    requestedWorkspaceKey?.trim() ||
+    recordedWorkspaceKey?.trim() ||
+    activeWorkspaceKey.trim()
+  );
+}
 
 export function useBuildHistoryState({
   enabled,
@@ -231,6 +251,7 @@ export function useBuildHistoryState({
   target,
   env,
   branch,
+  buildParamMeta = [],
   currentPlan,
   currentBuildRequest,
   setPlan,
@@ -249,6 +270,9 @@ export function useBuildHistoryState({
   );
   const [buildAutoRefreshTimedOut, setBuildAutoRefreshTimedOut] = useState(false);
   const currentBuildActivityIdRef = useRef("");
+  const buildRefreshInFlightRef = useRef(false);
+  const buildRefreshRequestIdRef = useRef(0);
+  const buildRefreshScopeRef = useRef("");
 
   const buildViewScopeKey = useMemo(
     () =>
@@ -263,6 +287,12 @@ export function useBuildHistoryState({
     [buildHistory],
   );
 
+  useEffect(() => {
+    buildRefreshScopeRef.current = `${enabled}:${buildViewScopeKey}`;
+    buildRefreshRequestIdRef.current += 1;
+    buildRefreshInFlightRef.current = false;
+  }, [buildViewScopeKey, enabled]);
+
   function upsertBuildHistoryEntry(entry: BuildHistoryEntry) {
     setBuildHistory((current) => {
       const next = [entry, ...current.filter((item) => item.historyKey !== entry.historyKey)];
@@ -273,6 +303,32 @@ export function useBuildHistoryState({
       );
       return next.slice(0, MAX_BUILD_HISTORY_ITEMS);
     });
+  }
+
+  function activityParametersForBuild(
+    projectKey: string,
+    mode: string | null | undefined,
+    params?: Record<string, string> | null,
+  ) {
+    const normalizedParams = normalizeBuildParams(params);
+    const parameterMeta =
+      projectKey === selectedProject && (mode ?? "") === target
+        ? buildParamMeta
+        : [];
+    return buildActivityParameters({
+      mode: mode ?? "",
+      env:
+        normalizedParams.ENV_PROFILE ??
+        normalizedParams.projectEnv ??
+        normalizedParams.env ??
+        "",
+      branch:
+        normalizedParams.BRANCH ??
+        normalizedParams.branch ??
+        normalizedParams.Branch ??
+        "",
+      params: normalizedParams,
+    }, parameterMeta);
   }
 
   function syncBuildActivityFromEntry(item: BuildHistoryEntry, result: BuildResult) {
@@ -296,7 +352,16 @@ export function useBuildHistoryState({
         executionKey,
         projectKey: item.projectKey,
         projectName: result.plan?.projectName || item.projectName,
+        parameters: activityParametersForBuild(item.projectKey, item.mode, item.params),
         resource: buildRecordResource({ queueUrl, buildUrl }),
+        action: buildRecoveryAction({
+          ...item,
+          stateKey: result.stateKey,
+          stateLabel: result.stateLabel,
+          detail: result.detail,
+          queueUrl,
+          buildUrl,
+        }),
       },
     );
   }
@@ -433,12 +498,23 @@ export function useBuildHistoryState({
       buildResult.stateKey === "accepted"
         ? ACCEPTED_STATUS_POLL_DELAY_MS
         : BUILD_STATUS_POLL_DELAY_MS;
-    const timer = window.setInterval(() => {
-      void refreshCurrentBuildStatus({ silent: true });
-    }, delay);
+    let disposed = false;
+    let timer: number | undefined;
+    const scheduleNextRefresh = () => {
+      timer = window.setTimeout(async () => {
+        await refreshCurrentBuildStatus({ silent: true });
+        if (!disposed) {
+          scheduleNextRefresh();
+        }
+      }, delay);
+    };
+    scheduleNextRefresh();
 
     return () => {
-      window.clearInterval(timer);
+      disposed = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
     };
   }, [
     buildAutoRefreshTimedOut,
@@ -533,6 +609,10 @@ export function useBuildHistoryState({
       return false;
     }
     const actionCopy = actionCopyForPlan(currentPlan);
+    const executionWorkspaceKey = resolveBuildExecutionWorkspaceKey(
+      activeProjectWorkspaceKey,
+      options.workspaceKey,
+    );
     setBusy(busyText);
     setError("");
     const activityProjectName =
@@ -546,6 +626,11 @@ export function useBuildHistoryState({
         executionKey: buildActivityExecutionKey(request.project, request.target, request.params),
         projectKey: request.project,
         projectName: activityProjectName,
+        parameters: activityParametersForBuild(
+          request.project,
+          request.target,
+          request.params,
+        ),
         target: {
           page: "build",
           projectKey: request.project,
@@ -555,6 +640,10 @@ export function useBuildHistoryState({
     try {
       const result = await invoke<BuildResult>("trigger_build", {
         request,
+        activityId: activityId || null,
+        operationOrigin: options.origin ?? "app",
+        activityTitle: actionCopy.triggerTitle,
+        expectedWorkspaceKey: executionWorkspaceKey || null,
       });
       setPlan(result.plan ?? null);
       setBuildResult(result);
@@ -568,29 +657,42 @@ export function useBuildHistoryState({
       const historyKey =
         result.queueUrl ??
         result.buildUrl ??
-        `${request.project}:${request.target ?? target}:${Date.now()}`;
+        (activityId || `${request.project}:${request.target ?? target}:${Date.now()}`);
       setCurrentBuildHistoryKey(historyKey);
       await persistBuildHistory(
         historyKey,
         result,
-        options.workspaceKey ?? activeProjectWorkspaceKey,
+        executionWorkspaceKey,
       );
       if (activityId) {
+        const status = activityStatusFromBuildResult(result.stateKey, result);
         updateActivity?.(activityId, {
-          status: activityStatusFromBuildResult(result.stateKey, result),
+          status,
           summary: `${result.stateLabel} · ${result.detail}`,
           detail: result.buildUrl || result.queueUrl || null,
           projectName: result.plan?.projectName || activityProjectName,
           resource: buildRecordResource(result),
+          action: status === "failed"
+            ? buildRecoveryActionForRequest(
+                request,
+                result.plan?.projectName || activityProjectName,
+                executionWorkspaceKey,
+              )
+            : null,
         });
       }
-      return true;
+      return activityStatusFromBuildResult(result.stateKey, result) !== "failed";
     } catch (reason) {
       if (activityId) {
         updateActivity?.(activityId, {
           status: "failed",
           summary: actionCopy.triggerFailed,
           detail: String(reason),
+          action: buildRecoveryActionForRequest(
+            request,
+            activityProjectName,
+            executionWorkspaceKey,
+          ),
         });
       }
       setError(String(reason));
@@ -619,6 +721,19 @@ export function useBuildHistoryState({
     setError("");
     const replayTarget = item.mode || null;
     const replayParams = normalizeBuildParams(item.params);
+    const replayRequest: BuildRequest = {
+      project: item.projectKey,
+      target: replayTarget,
+      variant: false,
+      env: item.env || null,
+      branch: item.branch || null,
+      params: replayParams,
+    };
+    const executionWorkspaceKey = resolveBuildExecutionWorkspaceKey(
+      activeProjectWorkspaceKey,
+      options.workspaceKey,
+      item.workspaceKey,
+    );
     const activityId =
       recordActivity?.({
         kind: "build",
@@ -632,6 +747,11 @@ export function useBuildHistoryState({
         chainLabel: options.chainId ? "联动链路" : null,
         projectKey: item.projectKey,
         projectName: item.projectName,
+        parameters: activityParametersForBuild(
+          item.projectKey,
+          replayTarget,
+          replayParams,
+        ),
         target: {
           page: "build",
           projectKey: item.projectKey,
@@ -640,11 +760,11 @@ export function useBuildHistoryState({
     currentBuildActivityIdRef.current = activityId;
     try {
       const result = await invoke<BuildResult>("trigger_build", {
-        request: {
-          project: item.projectKey,
-          target: replayTarget,
-          params: replayParams,
-        },
+        request: replayRequest,
+        activityId: activityId || null,
+        operationOrigin: options.origin ?? "app",
+        activityTitle: actionCopy.replayTitle,
+        expectedWorkspaceKey: executionWorkspaceKey || null,
       });
       setPlan(result.plan ?? null);
       setBuildResult(result);
@@ -658,12 +778,17 @@ export function useBuildHistoryState({
       const historyKey =
         result.queueUrl ??
         result.buildUrl ??
-        `${item.projectKey}:${item.mode}:${Date.now()}`;
+        (activityId || `${item.projectKey}:${item.mode}:${Date.now()}`);
       setCurrentBuildHistoryKey(historyKey);
-      await persistBuildHistory(historyKey, result);
+      await persistBuildHistory(
+        historyKey,
+        result,
+        executionWorkspaceKey,
+      );
       if (activityId) {
+        const status = activityStatusFromBuildResult(result.stateKey, result);
         updateActivity?.(activityId, {
-          status: activityStatusFromBuildResult(result.stateKey, result),
+          status,
           summary: `${result.stateLabel} · ${result.detail}`,
           detail: result.buildUrl || result.queueUrl || null,
           chainId: options.chainId ?? undefined,
@@ -672,6 +797,13 @@ export function useBuildHistoryState({
           chainLabel: options.chainId ? "联动链路" : undefined,
           projectName: result.plan?.projectName || item.projectName,
           resource: buildRecordResource(result),
+          action: status === "failed"
+            ? buildRecoveryActionForRequest(
+                replayRequest,
+                result.plan?.projectName || item.projectName,
+                executionWorkspaceKey,
+              )
+            : null,
         });
       }
     } catch (reason) {
@@ -680,6 +812,11 @@ export function useBuildHistoryState({
           status: "failed",
           summary: actionCopy.replayFailed,
           detail: String(reason),
+          action: buildRecoveryActionForRequest(
+            replayRequest,
+            item.projectName,
+            executionWorkspaceKey,
+          ),
         });
       }
       setError(String(reason));
@@ -696,6 +833,13 @@ export function useBuildHistoryState({
     if (!currentResult || !canRefreshBuildResult(currentResult)) {
       return;
     }
+    if (buildRefreshInFlightRef.current) {
+      return;
+    }
+    const requestId = buildRefreshRequestIdRef.current + 1;
+    const requestScope = `${enabled}:${buildViewScopeKey}`;
+    buildRefreshRequestIdRef.current = requestId;
+    buildRefreshInFlightRef.current = true;
     if (!silent) {
       setBusy("正在刷新构建状态");
       setError("");
@@ -712,6 +856,12 @@ export function useBuildHistoryState({
         ...result,
         plan: result.plan ?? currentResult.plan ?? currentPlan ?? undefined,
       };
+      if (
+        requestId !== buildRefreshRequestIdRef.current ||
+        requestScope !== buildRefreshScopeRef.current
+      ) {
+        return;
+      }
       const changed = buildResultChanged(currentResult, nextResult);
       setBuildResult(nextResult);
       setBuildResultUpdatedAtMs(Date.now());
@@ -737,6 +887,9 @@ export function useBuildHistoryState({
         setError(String(reason));
       }
     } finally {
+      if (requestId === buildRefreshRequestIdRef.current) {
+        buildRefreshInFlightRef.current = false;
+      }
       if (!silent) {
         setBusy("");
       }

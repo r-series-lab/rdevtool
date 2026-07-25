@@ -51,6 +51,8 @@ const PROJECT_MENU_SPLIT_MIGRATION_KEY = "project-menu-split-v1";
 const PROJECT_MENU_SECONDARY_NAV_MIGRATION_KEY = "project-menu-secondary-nav-v1";
 const SYSTEM_STYLE_MEDIA_QUERY = "(prefers-color-scheme: dark)";
 const EXTERNAL_WORKSPACE_FOCUS_REFRESH_INTERVAL_MS = 1200;
+const EXTERNAL_WORKSPACE_REFRESH_RETRY_LIMIT = 3;
+const EXTERNAL_WORKSPACE_REFRESH_RETRY_BASE_MS = 300;
 
 function normalizeExitRuntimePolicy(value: unknown): AppExitRuntimePolicy {
   return value === "keep" || value === "stop" ? value : "ask";
@@ -374,11 +376,13 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     let refreshTimer: number | undefined;
     let refreshTimerDueAt = 0;
     let lastRefreshAt = 0;
+    let refreshFailureCount = 0;
     let disposed = false;
     let unlistenWorkspaceChanges: (() => void) | undefined;
 
     async function refreshExternalWorkspaceChanges() {
       if (
+        disposed ||
         !storageHydrated ||
         refreshInFlight ||
         (typeof document !== "undefined" && document.visibilityState !== "visible")
@@ -391,6 +395,7 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       const refreshPlan = pendingRefreshPlan;
       pendingRefreshPlan = EMPTY_WORKSPACE_REFRESH_PLAN;
       refreshInFlight = true;
+      let retryDelayMs: number | null = null;
       try {
         const [preferences, state, items] = await Promise.all([
           refreshPlan.preferences
@@ -403,19 +408,41 @@ export function useAppShell({ setError }: UseAppShellOptions) {
             ? invoke<ProjectSummary[]>("list_projects")
             : Promise.resolve(null),
         ]);
+        if (disposed) {
+          return;
+        }
         applyExternalWorkspacePreferences(preferences);
         applyProjectWorkspaceState(state);
         if (items) {
           applyProjectList(items);
         }
         lastRefreshAt = Date.now();
+        refreshFailureCount = 0;
       } catch (reason) {
+        if (disposed) {
+          return;
+        }
+        refreshFailureCount += 1;
+        if (refreshFailureCount <= EXTERNAL_WORKSPACE_REFRESH_RETRY_LIMIT) {
+          pendingRefreshPlan = mergeWorkspaceRefreshPlans(
+            pendingRefreshPlan,
+            refreshPlan,
+          );
+          retryDelayMs =
+            EXTERNAL_WORKSPACE_REFRESH_RETRY_BASE_MS *
+            2 ** (refreshFailureCount - 1);
+        }
         setError(`刷新工作区状态失败：${String(reason)}`);
       } finally {
         refreshInFlight = false;
-        if (refreshQueued || hasWorkspaceRefreshWork(pendingRefreshPlan)) {
-          refreshQueued = false;
-          scheduleExternalWorkspaceRefresh(EMPTY_WORKSPACE_REFRESH_PLAN, 0);
+        if (!disposed) {
+          if (retryDelayMs != null) {
+            refreshQueued = false;
+            scheduleExternalWorkspaceRefresh(EMPTY_WORKSPACE_REFRESH_PLAN, retryDelayMs);
+          } else if (refreshQueued || hasWorkspaceRefreshWork(pendingRefreshPlan)) {
+            refreshQueued = false;
+            scheduleExternalWorkspaceRefresh(EMPTY_WORKSPACE_REFRESH_PLAN, 0);
+          }
         }
       }
     }

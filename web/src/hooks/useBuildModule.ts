@@ -43,6 +43,7 @@ export function useBuildModule({
     target: buildContext.target,
     env: buildContext.env,
     branch: buildContext.branch,
+    buildParamMeta: buildContext.targetMeta?.params,
     currentPlan: buildContext.plan,
     currentBuildRequest: buildContext.currentBuildRequest,
     setPlan: buildContext.setPlan,

@@ -75,6 +75,8 @@ function navigationKindLabel(kind: string) {
       return "工具";
     case "directory":
       return "目录";
+    case "file":
+      return "文件";
     default:
       return "网站";
   }
@@ -90,6 +92,8 @@ function NavigationKindIcon({ kind }: { kind: string }) {
       return <TerminalIcon fontSize="inherit" />;
     case "directory":
       return <FolderIcon fontSize="inherit" />;
+    case "file":
+      return <OpenExternalIcon fontSize="inherit" />;
     default:
       return <OpenExternalIcon fontSize="inherit" />;
   }

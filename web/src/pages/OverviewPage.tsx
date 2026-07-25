@@ -74,6 +74,7 @@ import {
   WorkspacePageToolbarAction,
 } from "../components/WorkspacePageToolbar";
 import { useWorkspaceTypeOptions } from "../hooks/useWorkspaceTypeOptions";
+import { useConfirmationPreferences } from "../hooks/useConfirmationPreferences";
 import {
   AI_CONTEXT_LIMIT_OPTIONS,
   AI_CONTEXT_SCOPE_OPTIONS,
@@ -88,6 +89,12 @@ import {
   type AiContextPreset as WorkspaceAiContextPreset,
 } from "../lib/aiContextTemplates";
 import type { TrayPinnedAction } from "../lib/trayPins";
+import type { ActivityRecorder, ActivityUpdater } from "../lib/activityCenter";
+import {
+  linkActivityDraft,
+  linkActivityFailurePatch,
+  linkActivityResultPatch,
+} from "../lib/linkActivities";
 import {
   DEFAULT_NEW_WORKSPACE_TYPE,
   normalizeWorkspaceType,
@@ -96,6 +103,10 @@ import {
   workspaceTypeOptionsWithValues,
 } from "../lib/workspaceTypes";
 import { configSourceIdForWorkspace } from "../lib/configSources";
+import {
+  confirmationEnabled,
+  confirmationPreferenceKeyForTrayAction,
+} from "../lib/confirmationPreferences";
 
 export type OverviewPageProps = {
   projectWorkspaces: ProjectWorkspaceSummary[];
@@ -120,6 +131,8 @@ export type OverviewPageProps = {
   onStartProxyProfile: (profileId: string) => Promise<unknown> | unknown;
   onStopProxyProfile: (profileId: string) => Promise<unknown> | unknown;
   onFocusProjectRuntime: (projectKey: string) => Promise<unknown> | unknown;
+  recordActivity?: ActivityRecorder;
+  updateActivity?: ActivityUpdater;
   onExecutePinnedAction: (action: TrayPinnedAction) => Promise<void>;
 };
 
@@ -154,6 +167,10 @@ type WorkspacePinnedActionsOverview = {
   description?: string | null;
   system: boolean;
   rootDir?: string | null;
+  resourceDir?: string | null;
+  worklogPath?: string | null;
+  worklogExists: boolean;
+  worklogAutoRecord: boolean;
   workspaceKind: string;
   workspaceType: string;
   workspaceTypeLabel: string;
@@ -665,6 +682,8 @@ function shortcutIcon(kind: string) {
   switch (kind) {
     case "directory":
       return <FolderIcon fontSize="small" />;
+    case "file":
+      return <LocateIcon fontSize="small" />;
     case "url":
       return <WebsiteIcon fontSize="small" />;
     case "app":
@@ -741,6 +760,8 @@ export function OverviewPage({
   onStartProxyProfile,
   onStopProxyProfile,
   onFocusProjectRuntime,
+  recordActivity,
+  updateActivity,
   onExecutePinnedAction,
 }: OverviewPageProps) {
   const [groups, setGroups] = useState<WorkspacePinnedActionsOverview[]>([]);
@@ -766,6 +787,9 @@ export function OverviewPage({
   const [newWorkspaceType, setNewWorkspaceType] = useState(DEFAULT_NEW_WORKSPACE_TYPE);
   const [newWorkspaceIndependentDir, setNewWorkspaceIndependentDir] = useState(false);
   const [newWorkspaceRootDir, setNewWorkspaceRootDir] = useState("");
+  const [newWorkspaceResourceDir, setNewWorkspaceResourceDir] = useState("");
+  const [createWorkspaceWorklog, setCreateWorkspaceWorklog] = useState(true);
+  const [autoRecordWorkspaceWorklog, setAutoRecordWorkspaceWorklog] = useState(true);
   const [copyCurrentWorkspace, setCopyCurrentWorkspace] = useState(true);
   const [demandId, setDemandId] = useState("");
   const [demandRequirementDir, setDemandRequirementDir] = useState("");
@@ -792,6 +816,7 @@ export function OverviewPage({
   const [overviewQuery, setOverviewQuery] = useState("");
   const [workspaceTypeFilter, setWorkspaceTypeFilter] = useState("all");
   const [confirm, confirmDialog] = useAppConfirmDialog();
+  const { preferences: confirmationPreferences } = useConfirmationPreferences();
   const {
     options: workspaceTypeOptions,
     addWorkspaceType,
@@ -1054,11 +1079,13 @@ export function OverviewPage({
   }, [activeProjectWorkspaceKey, loadProjectWorkspaceEditor, workspaceConfigOpenSignal]);
 
   async function executeAction(item: WorkspacePinnedActionItem) {
-    if (item.confirmRequired) {
+    const preferenceKey = confirmationPreferenceKeyForTrayAction(item.action.kind);
+    if (preferenceKey || item.confirmRequired) {
       const confirmed = await confirm({
         title: "确认运行",
         description: `确认运行“${item.label}”？`,
         confirmLabel: "运行",
+        preferenceKey: preferenceKey ?? undefined,
       });
       if (!confirmed) {
         return;
@@ -1192,6 +1219,11 @@ export function OverviewPage({
     const command =
       action === "check" ? "check_link" : action === "run" ? "run_link" : "stop_link";
     const sourceId = linkPlanDialog?.sourceId ?? configSourceIdForWorkspace(activeProjectWorkspaceKey);
+    const linkName = linkPlanDialog?.entryName.trim() || key;
+    const activityId =
+      action === "check"
+        ? ""
+        : recordActivity?.(linkActivityDraft(key, linkName, action, sourceId)) ?? "";
     setLinkPlanDialog((current) =>
       current
         ? {
@@ -1202,7 +1234,20 @@ export function OverviewPage({
         : current,
     );
     try {
-      const report = await invoke<LinkExecutionReport>(command, { sourceId, key });
+      const report = await invoke<LinkExecutionReport>(
+        command,
+        action === "check"
+          ? { sourceId, key }
+          : {
+              sourceId,
+              key,
+              activityId: activityId || null,
+              operationOrigin: "app",
+            },
+      );
+      if (activityId && action !== "check") {
+        updateActivity?.(activityId, linkActivityResultPatch(report, action, sourceId));
+      }
       setLinkPlanDialog((current) =>
         current
           ? {
@@ -1217,6 +1262,12 @@ export function OverviewPage({
         await loadOverview();
       }
     } catch (reason) {
+      if (activityId && action !== "check") {
+        updateActivity?.(
+          activityId,
+          linkActivityFailurePatch(key, linkName, action, sourceId, reason),
+        );
+      }
       setLinkPlanDialog((current) =>
         current
           ? {
@@ -1241,13 +1292,26 @@ export function OverviewPage({
     }
     const actionLabel = action === "stop" ? "停止" : "启动";
     const command = action === "stop" ? "stop_link" : "run_link";
+    const activityId =
+      recordActivity?.(linkActivityDraft(key, resource.label, action, sourceId)) ?? "";
 
     setRunningKey(`tool:${resource.key}`);
     setError("");
     setStatus("");
 
     try {
-      const report = await invoke<LinkExecutionReport>(command, { sourceId, key });
+      const report = await invoke<LinkExecutionReport>(command, {
+        sourceId,
+        key,
+        activityId: activityId || null,
+        operationOrigin: "app",
+      });
+      if (activityId) {
+        updateActivity?.(
+          activityId,
+          linkActivityResultPatch(report, action, sourceId),
+        );
+      }
       const failedStep = report.steps.find((step) => step.status === "failed");
       if (failedStep) {
         setError(`${failedStep.label} ${actionLabel}失败：${failedStep.summary}`);
@@ -1260,6 +1324,12 @@ export function OverviewPage({
         setError(`已${actionLabel}，但刷新状态失败：${String(refreshReason)}`);
       }
     } catch (reason) {
+      if (activityId) {
+        updateActivity?.(
+          activityId,
+          linkActivityFailurePatch(key, resource.label, action, sourceId, reason),
+        );
+      }
       setError(String(reason));
     } finally {
       setRunningKey("");
@@ -1507,6 +1577,7 @@ export function OverviewPage({
         description: `当前配置有未保存修改，查看“${workspaceName}”会丢弃修改。`,
         confirmLabel: "查看配置",
         tone: "danger",
+        preferenceKey: "configuration.discard",
       });
       if (!confirmed) {
         return;
@@ -1531,6 +1602,7 @@ export function OverviewPage({
       description: `删除“${workspaceName}”的工作区配置。项目代码目录不会被删除，已绑定到该工作区的代理会解除绑定。`,
       confirmLabel: "删除",
       tone: "danger",
+      preferenceKey: "destructive.delete",
     });
     if (!confirmed) {
       return;
@@ -1576,6 +1648,10 @@ export function OverviewPage({
         description: description || null,
         workspaceType: newWorkspaceType,
         rootDir: newWorkspaceIndependentDir ? newWorkspaceRootDir.trim() || null : null,
+        resourceDir: newWorkspaceResourceDir.trim() || null,
+        worklogFile: "WORKLOG.md",
+        createWorklog: createWorkspaceWorklog,
+        worklogAutoRecord: createWorkspaceWorklog && autoRecordWorkspaceWorklog,
         independentDir: newWorkspaceIndependentDir,
         copyCurrent: copyCurrentWorkspace,
         activate: false,
@@ -1586,6 +1662,9 @@ export function OverviewPage({
       setNewWorkspaceType(DEFAULT_NEW_WORKSPACE_TYPE);
       setNewWorkspaceIndependentDir(false);
       setNewWorkspaceRootDir("");
+      setNewWorkspaceResourceDir("");
+      setCreateWorkspaceWorklog(true);
+      setAutoRecordWorkspaceWorklog(true);
       setCopyCurrentWorkspace(true);
       setCreateOpen(false);
       await loadOverview();
@@ -1632,6 +1711,10 @@ export function OverviewPage({
         project: demandProjectKey.trim() || null,
         branch: demandBranch.trim() || null,
         rootDir: newWorkspaceIndependentDir ? newWorkspaceRootDir.trim() || null : null,
+        resourceDir: newWorkspaceResourceDir.trim() || null,
+        worklogFile: "WORKLOG.md",
+        createWorklog: createWorkspaceWorklog,
+        worklogAutoRecord: createWorkspaceWorklog && autoRecordWorkspaceWorklog,
         activate: false,
       });
       setNewWorkspaceName("");
@@ -1640,6 +1723,9 @@ export function OverviewPage({
       setNewWorkspaceType(DEFAULT_NEW_WORKSPACE_TYPE);
       setNewWorkspaceIndependentDir(false);
       setNewWorkspaceRootDir("");
+      setNewWorkspaceResourceDir("");
+      setCreateWorkspaceWorklog(true);
+      setAutoRecordWorkspaceWorklog(true);
       setCopyCurrentWorkspace(true);
       setDemandId("");
       setDemandRequirementDir("");
@@ -1678,6 +1764,26 @@ export function OverviewPage({
       setDemandRequirementDir(selected);
     } else {
       setDemandRepoPath(selected);
+    }
+  }
+
+  async function chooseWorkspaceResourceDirectory(target: "create" | "edit" = "create") {
+    const currentResourceDir =
+      target === "edit" ? workspaceDraft?.resourceDir ?? "" : newWorkspaceResourceDir;
+    const currentRootDir = target === "edit" ? workspaceDraft?.rootDir ?? "" : newWorkspaceRootDir;
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      defaultPath: currentResourceDir.trim() || currentRootDir.trim() || undefined,
+    });
+    if (typeof selected === "string" && selected.trim()) {
+      if (target === "edit") {
+        setWorkspaceDraft((current) =>
+          current ? { ...current, resourceDir: selected } : current,
+        );
+      } else {
+        setNewWorkspaceResourceDir(selected);
+      }
     }
   }
 
@@ -1993,6 +2099,12 @@ export function OverviewPage({
           {actions.map((item) => {
             const running = runningKey === item.action.dedupeKey;
             const updatedAt = formatUpdatedAt(item.updatedAtMs);
+            const confirmationPreferenceKey = confirmationPreferenceKeyForTrayAction(
+              item.action.kind,
+            );
+            const actionNeedsConfirmation = confirmationPreferenceKey
+              ? confirmationEnabled(confirmationPreferences, confirmationPreferenceKey)
+              : item.confirmRequired;
             const labelParams = actionLabelParams(item);
             const paramTag =
               labelParams.length > 0 ? (
@@ -2064,7 +2176,7 @@ export function OverviewPage({
                       {updatedAt}
                     </Typography>
                   ) : null}
-                  <Tooltip title={item.confirmRequired ? "确认后运行" : "运行"}>
+                  <Tooltip title={actionNeedsConfirmation ? "确认后运行" : "运行"}>
                     <span>
                       <IconButton
                         size="small"
@@ -3407,26 +3519,72 @@ export function OverviewPage({
                             sx={{ gridColumn: { xs: "auto", md: "1 / -1" } }}
                           />
                         ) : null}
+                        <TextField
+                          size="small"
+                          label="资料目录"
+                          value={newWorkspaceResourceDir}
+                          placeholder="默认：工作区目录/resources"
+                          onChange={(event) => setNewWorkspaceResourceDir(event.target.value)}
+                          disabled={creatingWorkspace}
+                          sx={{ gridColumn: { xs: "auto", md: "1 / -1" } }}
+                          InputProps={{
+                            endAdornment: (
+                              <InputAdornment position="end">
+                                <Button
+                                  size="small"
+                                  onClick={() => void chooseWorkspaceResourceDirectory()}
+                                  disabled={creatingWorkspace}
+                                >
+                                  选择
+                                </Button>
+                              </InputAdornment>
+                            ),
+                          }}
+                        />
                       </Box>
                       <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-                        {createWorkspaceMode === "basic" ? (
+                        <Stack direction="row" alignItems="center" spacing={0.8}>
+                          {createWorkspaceMode === "basic" ? (
+                            <FormControlLabel
+                              sx={{ m: 0, whiteSpace: "nowrap" }}
+                              control={
+                                <Checkbox
+                                  size="small"
+                                  checked={copyCurrentWorkspace}
+                                  onChange={(event) => setCopyCurrentWorkspace(event.target.checked)}
+                                  disabled={creatingWorkspace}
+                                />
+                              }
+                              label="复制当前配置"
+                            />
+                          ) : null}
                           <FormControlLabel
                             sx={{ m: 0, whiteSpace: "nowrap" }}
                             control={
                               <Checkbox
                                 size="small"
-                                checked={copyCurrentWorkspace}
-                                onChange={(event) => setCopyCurrentWorkspace(event.target.checked)}
+                                checked={createWorkspaceWorklog}
+                                onChange={(event) => setCreateWorkspaceWorklog(event.target.checked)}
                                 disabled={creatingWorkspace}
                               />
                             }
-                            label="复制当前配置"
+                            label="初始化工作日志"
                           />
-                        ) : (
-                          <Typography variant="caption" color="text.secondary">
-                            自动匹配项目并挂载需求目录
-                          </Typography>
-                        )}
+                          <FormControlLabel
+                            sx={{ m: 0, whiteSpace: "nowrap" }}
+                            control={
+                              <Checkbox
+                                size="small"
+                                checked={autoRecordWorkspaceWorklog}
+                                onChange={(event) =>
+                                  setAutoRecordWorkspaceWorklog(event.target.checked)
+                                }
+                                disabled={creatingWorkspace || !createWorkspaceWorklog}
+                              />
+                            }
+                            label="自动记录关键操作"
+                          />
+                        </Stack>
                         <Button
                           size="small"
                           variant="contained"
@@ -3577,6 +3735,57 @@ export function OverviewPage({
                                 ) : undefined,
                               }}
                             />
+                            <Stack direction={{ xs: "column", md: "row" }} spacing={0.75}>
+                              <TextField
+                                size="small"
+                                label="资料目录"
+                                value={workspaceDraft.resourceDir ?? ""}
+                                placeholder="默认：工作区目录/resources"
+                                onChange={(event) => updateDraft({ resourceDir: event.target.value })}
+                                disabled={workspaceSaving}
+                                sx={{ flex: 1.5 }}
+                                InputProps={{
+                                  endAdornment: (
+                                    <InputAdornment position="end">
+                                      <Tooltip title="选择资料目录">
+                                        <IconButton
+                                          size="small"
+                                          aria-label="选择资料目录"
+                                          onClick={() =>
+                                            void chooseWorkspaceResourceDirectory("edit")
+                                          }
+                                          disabled={workspaceSaving}
+                                        >
+                                          <FolderIcon fontSize="small" />
+                                        </IconButton>
+                                      </Tooltip>
+                                    </InputAdornment>
+                                  ),
+                                }}
+                              />
+                              <TextField
+                                size="small"
+                                label="工作日志文件"
+                                value={workspaceDraft.worklogFile ?? "WORKLOG.md"}
+                                onChange={(event) => updateDraft({ worklogFile: event.target.value })}
+                                disabled={workspaceSaving}
+                                sx={{ flex: 0.7 }}
+                              />
+                              <FormControlLabel
+                                sx={{ m: 0, minWidth: 176 }}
+                                control={
+                                  <Checkbox
+                                    size="small"
+                                    checked={workspaceDraft.worklogAutoRecord}
+                                    onChange={(event) =>
+                                      updateDraft({ worklogAutoRecord: event.target.checked })
+                                    }
+                                    disabled={workspaceSaving || !workspaceDraft.resourceDir}
+                                  />
+                                }
+                                label="自动记录关键操作"
+                              />
+                            </Stack>
                           </>
                         ) : null}
                         <Stack className="overview-workspace-project-dir-list" spacing={0.65}>

@@ -7,6 +7,7 @@ import type {
   ProxyRequestDiagnosisInput,
   ProxyRule,
 } from "../app-types";
+import type { ActivityRecorder, ActivityUpdater } from "../lib/activityCenter";
 
 export type ProxyDashboardLoadOptions = {
   silent?: boolean;
@@ -16,13 +17,20 @@ export type ProxyDashboardLoadOptions = {
 type UseProxyModuleOptions = {
   enabled: boolean;
   setError: (value: string) => void;
+  recordActivity?: ActivityRecorder;
+  updateActivity?: ActivityUpdater;
 };
 
 function firstProfileId(dashboard: ProxyDashboard | null) {
   return dashboard?.config.profiles[0]?.id ?? "";
 }
 
-export function useProxyModule({ enabled: _enabled, setError }: UseProxyModuleOptions) {
+export function useProxyModule({
+  enabled: _enabled,
+  setError,
+  recordActivity,
+  updateActivity,
+}: UseProxyModuleOptions) {
   const [dashboard, setDashboard] = useState<ProxyDashboard | null>(null);
   const [selectedProfileId, setSelectedProfileId] = useState("");
   const [loading, setLoading] = useState(false);
@@ -166,23 +174,175 @@ export function useProxyModule({ enabled: _enabled, setError }: UseProxyModuleOp
   );
 
   const startProxyProfile = useCallback(
-    (profileId: string, sourceId?: string) =>
-      runDashboardTask(
-        "正在启动代理服务",
-        () => invoke<ProxyDashboard>("start_proxy_profile", { sourceId: sourceId ?? null, profileId }),
-        sourceId,
-      ),
-    [runDashboardTask],
+    async (profileId: string, sourceId?: string) => {
+      const profileName = dashboard?.config.profiles.find(
+        (profile) => profile.id === profileId,
+      )?.name || profileId;
+      const activityId = recordActivity?.({
+        kind: "proxy",
+        status: "running",
+        title: "启动代理服务",
+        summary: profileName,
+        executionKey: `proxy:start:${sourceId || "default"}:${profileId}`,
+        target: { page: "proxy" },
+      }) || "";
+      try {
+        const next = await runDashboardTask(
+          "正在启动代理服务",
+          () => invoke<ProxyDashboard>("start_proxy_profile", {
+            sourceId: sourceId ?? null,
+            profileId,
+            activityId: activityId || null,
+            operationOrigin: "app",
+          }),
+          sourceId,
+        );
+        const profile = next.config.profiles.find((item) => item.id === profileId);
+        const status = next.statuses.find((item) => item.profileId === profileId);
+        const running = Boolean(status?.running);
+        if (activityId) {
+          updateActivity?.(activityId, {
+            status: running ? "success" : "failed",
+            title: running ? "代理服务已启动" : "代理服务启动失败",
+            summary: `${profile?.name || profileName} · ${running ? "已启动" : "启动后未监听"}`,
+            detail: status?.listenUrl || null,
+            diagnostics: running
+              ? []
+              : [{
+                  id: `proxy:start:${profileId}`,
+                  type: "proxy.start",
+                  label: profile?.name || profileName,
+                  status: "failed",
+                  summary: "代理启动后未监听预期地址",
+                  risks: status?.listenUrl ? [`未监听 ${status.listenUrl}`] : [],
+                }],
+            action: running
+              ? null
+              : {
+                  kind: "proxyRecover",
+                  label: "检查并重新启动",
+                  profileId,
+                  profileName: profile?.name || profileName,
+                  sourceId: sourceId || null,
+                  replayAction: "start",
+                },
+          });
+        }
+        return next;
+      } catch (reason) {
+        if (activityId) {
+          updateActivity?.(activityId, {
+            status: "failed",
+            summary: "代理服务启动失败",
+            detail: String(reason),
+            diagnostics: [{
+              id: `proxy:start:${profileId}`,
+              type: "proxy.start",
+              label: profileName,
+              status: "failed",
+              summary: "代理服务启动失败",
+              risks: [String(reason)],
+            }],
+            action: {
+              kind: "proxyRecover",
+              label: "检查并重新启动",
+              profileId,
+              profileName,
+              sourceId: sourceId || null,
+              replayAction: "start",
+            },
+          });
+        }
+        throw reason;
+      }
+    },
+    [dashboard?.config.profiles, recordActivity, runDashboardTask, updateActivity],
   );
 
   const stopProxyProfile = useCallback(
-    (profileId: string, sourceId?: string) =>
-      runDashboardTask(
-        "正在停止代理服务",
-        () => invoke<ProxyDashboard>("stop_proxy_profile", { sourceId: sourceId ?? null, profileId }),
-        sourceId,
-      ),
-    [runDashboardTask],
+    async (profileId: string, sourceId?: string) => {
+      const profileName = dashboard?.config.profiles.find(
+        (profile) => profile.id === profileId,
+      )?.name || profileId;
+      const activityId = recordActivity?.({
+        kind: "proxy",
+        status: "running",
+        title: "停止代理服务",
+        summary: profileName,
+        executionKey: `proxy:stop:${sourceId || "default"}:${profileId}`,
+        target: { page: "proxy" },
+      }) || "";
+      try {
+        const next = await runDashboardTask(
+          "正在停止代理服务",
+          () => invoke<ProxyDashboard>("stop_proxy_profile", {
+            sourceId: sourceId ?? null,
+            profileId,
+            activityId: activityId || null,
+            operationOrigin: "app",
+          }),
+          sourceId,
+        );
+        const profile = next.config.profiles.find((item) => item.id === profileId);
+        const status = next.statuses.find((item) => item.profileId === profileId);
+        const running = Boolean(status?.running);
+        if (activityId) {
+          updateActivity?.(activityId, {
+            status: running ? "failed" : "success",
+            title: running ? "代理服务停止失败" : "代理服务已停止",
+            summary: `${profile?.name || profileName} · ${running ? "停止后仍在监听" : "已停止"}`,
+            detail: status?.listenUrl || null,
+            diagnostics: running
+              ? [{
+                  id: `proxy:stop:${profileId}`,
+                  type: "proxy.stop",
+                  label: profile?.name || profileName,
+                  status: "failed",
+                  summary: "停止后仍在监听",
+                  risks: status?.listenUrl ? [`仍在监听 ${status.listenUrl}`] : [],
+                }]
+              : [],
+            action: running
+              ? {
+                  kind: "proxyRecover",
+                  label: "检查并重新停止",
+                  profileId,
+                  profileName: profile?.name || profileName,
+                  sourceId: sourceId || null,
+                  replayAction: "stop",
+                }
+              : null,
+          });
+        }
+        return next;
+      } catch (reason) {
+        if (activityId) {
+          updateActivity?.(activityId, {
+            status: "failed",
+            summary: "代理服务停止失败",
+            detail: String(reason),
+            diagnostics: [{
+              id: `proxy:stop:${profileId}`,
+              type: "proxy.stop",
+              label: profileName,
+              status: "failed",
+              summary: "代理服务停止失败",
+              risks: [String(reason)],
+            }],
+            action: {
+              kind: "proxyRecover",
+              label: "检查并重新停止",
+              profileId,
+              profileName,
+              sourceId: sourceId || null,
+              replayAction: "stop",
+            },
+          });
+        }
+        throw reason;
+      }
+    },
+    [dashboard?.config.profiles, recordActivity, runDashboardTask, updateActivity],
   );
 
   const clearProxyEvents = useCallback(

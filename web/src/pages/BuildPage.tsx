@@ -822,7 +822,17 @@ export function BuildPage({
   const targetValueInvalid = Boolean(
     target && targetOptionKeys.length > 0 && !targetOptionKeys.includes(target),
   );
-  const contextBlocked = contextLoading || contextError;
+  const planRisks = plan?.risks ?? [];
+  const planBlocked = Boolean(
+    plan &&
+      (plan.status?.success === false ||
+        planRisks.some((risk) => risk.severity.toLowerCase() === "error")),
+  );
+  const contextBlocked = contextLoading || contextError || planBlocked;
+  const planBranch =
+    plan?.params.BRANCH || plan?.params.branch || plan?.params.Branch || "";
+  const planCommit = plan?.observed?.commit ?? null;
+  const planChangedPathCount = plan?.observed?.changedPaths?.length ?? 0;
   const isLocalBuildPlan = Boolean(plan && plan.adapter !== "jenkins");
   const localBuildProjectKey = isLocalBuildPlan ? plan?.projectKey || selectedProject : "";
   const canRefreshBuild = Boolean(
@@ -1092,7 +1102,10 @@ export function BuildPage({
     setLocalBuildAction("output");
     setRuntimeLogError("");
     try {
-      await invoke("open_project_build_output", { project: localBuildProjectKey });
+      await invoke("open_project_build_output", {
+        project: localBuildProjectKey,
+        outputDir: plan?.outputDir ?? null,
+      });
     } catch (reason) {
       setRuntimeLogError(String(reason));
       setRuntimeLogOpen(true);
@@ -1393,6 +1406,42 @@ export function BuildPage({
             {visibleParams.some((param) => param.kind === "branch") ? (
               <Typography variant="caption" color="text.secondary">
                 {branchSyncText} {sourceBranchEntries.some((item) => item.updatedTs > 0) ? " · 已按最近活跃排序" : ""}
+              </Typography>
+            ) : null}
+
+            {plan ? (
+              <Stack spacing={0.25} minWidth={0} aria-label="构建计划摘要">
+                <Typography
+                  variant="caption"
+                  color="text.secondary"
+                  sx={{ overflowWrap: "anywhere" }}
+                >
+                  计划：{plan.projectName} / {targetMetaByKey.get(plan.jobKind)?.label ?? plan.jobKind}
+                  {planBranch ? ` · 分支 ${planBranch}` : ""}
+                </Typography>
+                {planBranch ? (
+                  <Typography
+                    variant="caption"
+                    color={planCommit ? "text.secondary" : "warning.main"}
+                    title={planCommit?.subject || undefined}
+                    sx={{ overflowWrap: "anywhere" }}
+                  >
+                    目标提交：{planCommit?.shortHash || "未解析"}
+                    {planChangedPathCount > 0 ? ` · 检测到 ${planChangedPathCount} 个改动文件` : ""}
+                  </Typography>
+                ) : null}
+                {planRisks.length > 0 ? (
+                  <InlineWarningNotice
+                    title={planBlocked ? "计划检查未通过" : "计划提醒"}
+                    details={planRisks.map((risk) => risk.detail)}
+                  />
+                ) : null}
+              </Stack>
+            ) : null}
+
+            {plan?.outputDir ? (
+              <Typography variant="caption" color="text.secondary" noWrap title={plan.outputDir}>
+                产物目录：{plan.outputDir}
               </Typography>
             ) : null}
 

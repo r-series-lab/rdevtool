@@ -1,0 +1,338 @@
+{
+  "$schema": "https://r.rurie.top/schemas/r-app.manifest.schema.json",
+  "schemaVersion": 1,
+  "identity": {
+    "slug": "rdevtool",
+    "repo": "rdevtool",
+    "name": "rDevTool",
+    "binary": "rdevtool",
+    "package": "rdevtool",
+    "webPackage": "rdevtool-web",
+    "coreCrate": "rdevtool-core",
+    "tauriCrate": "rdevtool-tauri",
+    "identifier": "app.rseries.rdevtool"
+  },
+  "product": {
+    "architecture": "modular-workbench",
+    "category": "本地开发工作台",
+    "tagline": "把多项目开发上下文收进一个可执行、可复核的本地工作台。",
+    "description": "围绕工作区、项目、资源入口、Git、构建、本地代理、运行时和活动记录，统一组织开发动作，并向 CLI 与 AI Agent 暴露稳定的机器接口。",
+    "stage": "开发预览",
+    "localFirst": true,
+    "nonGoals": [
+      "替代 GitLab、Jenkins 或现有 CI/CD 平台",
+      "托管团队密钥、远端凭据或业务源代码",
+      "在没有计划和确认的情况下执行高风险发布动作"
+    ]
+  },
+  "website": {
+    "publish": true,
+    "index": "04",
+    "accent": "#4f6fa6",
+    "accentSoft": "#e2e9f3",
+    "platforms": ["macOS", "Windows", "CLI"],
+    "formats": ["Tauri", "Rust", "JSON CLI", "TOML"],
+    "facts": [
+      { "label": "核心对象", "value": "Workspace / Project" },
+      { "label": "动作模型", "value": "Plan / Check / Execute / Replay" },
+      { "label": "数据边界", "value": "本地配置与 SQLite 状态" }
+    ],
+    "capabilities": [
+      {
+        "icon": "Layers3",
+        "title": "工作区上下文",
+        "body": "以 system 全局视图和需求工作区组织项目、入口、代理、实例目录与当前开发范围。"
+      },
+      {
+        "icon": "ScanSearch",
+        "title": "资源与项目入口",
+        "body": "集中搜索项目、网站、目录、应用和脚本，并保留收藏、最近使用和工作区过滤。"
+      },
+      {
+        "icon": "Waypoints",
+        "title": "Git 工作流",
+        "body": "覆盖分支同步、创建、检出、切换、合并预览、推送检查和多项目任务。"
+      },
+      {
+        "icon": "PackageOpen",
+        "title": "构建与运行时",
+        "body": "统一规划 Jenkins、本地命令和 R 系列打包任务，并监督项目运行时、日志与产物。"
+      },
+      {
+        "icon": "TerminalSquare",
+        "title": "代理与联调链",
+        "body": "组合本地代理、Mock、转发、Runtime 生命周期和页面聚焦，形成可检查的 Link。"
+      },
+      {
+        "icon": "History",
+        "title": "活动与 Agent 接口",
+        "body": "把 App、CLI 和托盘动作汇总为统一台账，保留状态、证据、风险和安全重放入口。"
+      }
+    ],
+    "workflow": [
+      {
+        "label": "进入",
+        "title": "选择当前工作区",
+        "body": "先确定需求或系统上下文，只加载当前范围内的项目、入口、代理和实例。"
+      },
+      {
+        "label": "检查",
+        "title": "读取事实与运行状态",
+        "body": "查看分支、构建目标、Runtime 观测、配置来源和受管产物，再决定下一步动作。"
+      },
+      {
+        "label": "执行",
+        "title": "先计划，再运行",
+        "body": "构建、Git、Link 与高风险操作先生成计划和风险说明，通过确认后再执行。"
+      },
+      {
+        "label": "复盘",
+        "title": "记录结果并安全重放",
+        "body": "活动中心统一保留执行来源、状态、详情、历史关联和可重放动作。"
+      }
+    ],
+    "boundary": {
+      "title": "开发事实留在本机，外部系统保持原有职责",
+      "body": "rDevTool 只保存本地配置、工作区引用和机器状态，不替代 GitLab、Jenkins 或 CI/CD。凭据通过环境变量或私有配置提供，写入、推送、构建和发布动作保持可见并优先预检。"
+    },
+    "releaseSummary": "当前预览版本已覆盖工作区、资源入口、Git、构建、代理、Link、Runtime、受管产物、统一活动台账、托盘和 AI 友好 CLI。",
+    "screenshots": []
+  },
+  "documentation": [
+    {
+      "id": "overview",
+      "label": "产品与使用概览",
+      "description": "定位、主要工作区、快速开始、数据边界和开发命令。",
+      "group": "开始使用",
+      "source": "README.md"
+    },
+    {
+      "id": "cli",
+      "label": "CLI 完整参考",
+      "description": "JSON 契约、工作区、项目、构建、Git、Link、代理、Runtime、产物和 Web Actions 命令。",
+      "group": "自动化",
+      "source": "docs/cli.md"
+    },
+    {
+      "id": "ai-agent",
+      "label": "AI Agent 使用规范",
+      "description": "上下文读取、安全动作顺序、证据要求和结果汇报规则。",
+      "group": "自动化",
+      "source": "docs/ai-agent.md"
+    },
+    {
+      "id": "config",
+      "label": "配置与数据模型",
+      "description": "项目、工作区、配置源、入口、Link、代理和运行时文件说明。",
+      "group": "配置",
+      "source": "docs/config.md"
+    },
+    {
+      "id": "r-series-integration",
+      "label": "R 系列应用接入",
+      "description": "R 系列项目、构建目标、工作区和资源入口的配置范式。",
+      "group": "开发",
+      "source": "docs/r-series-apps.md"
+    },
+    {
+      "id": "architecture",
+      "label": "架构与演进",
+      "description": "共享 Core、Adapter、操作契约、领域边界和渐进拆分顺序。",
+      "group": "架构",
+      "source": "docs/architecture.md"
+    },
+    {
+      "id": "security",
+      "label": "安全与数据边界",
+      "description": "WebView、Tauri 权限、凭据、本地状态、外部动作与预览制品边界。",
+      "group": "开发",
+      "source": "docs/security.md"
+    },
+    {
+      "id": "maintenance",
+      "label": "文档与官网维护",
+      "description": "功能、Manifest、文档、版本和官网内容的单一来源更新流程。",
+      "group": "开发",
+      "source": "docs/maintenance.md"
+    },
+    {
+      "id": "release",
+      "label": "发布与打包",
+      "description": "桌面构建目标、预览发布流程以及签名状态。",
+      "group": "版本",
+      "source": "RELEASE.md"
+    },
+    {
+      "id": "changelog",
+      "label": "更新日志",
+      "description": "按版本记录功能、修复、安全与文档变化。",
+      "group": "版本",
+      "source": "CHANGELOG.md"
+    }
+  ],
+  "localization": {
+    "defaultLocale": "zh",
+    "translations": {
+      "en": {
+        "product": {
+          "category": "Local development workbench",
+          "tagline": "Bring multi-project development context into one executable, reviewable local workbench.",
+          "description": "Organize workspaces, projects, resources, Git, builds, local proxies, runtimes, and activity history in one place, with stable machine interfaces for the CLI and AI agents.",
+          "stage": "Development preview",
+          "nonGoals": [
+            "Replace GitLab, Jenkins, or an existing CI/CD platform",
+            "Host team secrets, remote credentials, or business source code",
+            "Run high-risk release actions without a visible plan and confirmation"
+          ]
+        },
+        "website": {
+          "facts": [
+            { "label": "Core objects", "value": "Workspace / Project" },
+            { "label": "Action model", "value": "Plan / Check / Execute / Replay" },
+            { "label": "Data boundary", "value": "Local configuration and SQLite state" }
+          ],
+          "capabilities": [
+            {
+              "icon": "Layers3",
+              "title": "Workspace context",
+              "body": "Use the global system view or a scoped requirement workspace to organize projects, resources, proxies, managed instances, and the current development boundary."
+            },
+            {
+              "icon": "ScanSearch",
+              "title": "Resources and project entry points",
+              "body": "Search projects, websites, directories, apps, and scripts while preserving favorites, recents, and workspace filtering."
+            },
+            {
+              "icon": "Waypoints",
+              "title": "Git workflows",
+              "body": "Inspect branch state, sync targets, create or switch branches, preview merges, check push status, and run multi-project tasks."
+            },
+            {
+              "icon": "PackageOpen",
+              "title": "Builds and runtimes",
+              "body": "Plan Jenkins, local-command, and R Series package builds while supervising project runtimes, logs, readiness, and managed artifacts."
+            },
+            {
+              "icon": "TerminalSquare",
+              "title": "Proxy and debugging chains",
+              "body": "Compose local proxies, mocks, forwarding rules, runtime lifecycles, and page focus into inspectable Link workflows."
+            },
+            {
+              "icon": "History",
+              "title": "Activity and agent interfaces",
+              "body": "Unify desktop, CLI, and tray activity with status, evidence, risk details, and guarded replay through deterministic JSON commands."
+            }
+          ],
+          "workflow": [
+            {
+              "label": "Enter",
+              "title": "Choose the current workspace",
+              "body": "Start with the requirement or system context and load only the projects, resources, proxies, and instances relevant to that scope."
+            },
+            {
+              "label": "Inspect",
+              "title": "Read facts and runtime state",
+              "body": "Review branches, build targets, runtime observations, configuration sources, and managed artifacts before choosing an action."
+            },
+            {
+              "label": "Execute",
+              "title": "Plan first, then run",
+              "body": "Build, Git, Link, and other consequential operations expose a plan and risk summary before execution."
+            },
+            {
+              "label": "Review",
+              "title": "Record results and replay safely",
+              "body": "The activity center keeps origin, status, details, history relationships, and only the actions that can be replayed safely."
+            }
+          ],
+          "boundary": {
+            "title": "Development facts stay local while external systems keep their responsibilities",
+            "body": "rDevTool stores local configuration, workspace references, and machine state. It does not replace GitLab, Jenkins, or CI/CD. Credentials come from environment variables or private local configuration, and writes, pushes, builds, and releases remain visible and previewable."
+          },
+          "releaseSummary": "The current preview covers workspaces, resource entry points, Git, builds, proxies, Links, runtimes, managed artifacts, unified activity history, the system tray, and an agent-friendly CLI."
+        },
+        "documentation": [
+          {
+            "id": "overview",
+            "label": "Product and usage overview",
+            "description": "Purpose, main work areas, quick start, CLI, local data, privacy, and development commands.",
+            "group": "Getting started",
+            "source": "README_EN.md",
+            "reviewedForVersion": "0.1.0"
+          },
+          {
+            "id": "release",
+            "label": "Release and packaging",
+            "description": "Desktop build targets, preview release workflow, artifact evidence, and signing status.",
+            "group": "Releases",
+            "source": "RELEASE_EN.md",
+            "reviewedForVersion": "0.1.0"
+          },
+          {
+            "id": "changelog",
+            "label": "Changelog",
+            "description": "Features, fixes, security, and documentation changes by version.",
+            "group": "Releases",
+            "source": "CHANGELOG_EN.md",
+            "reviewedForVersion": "0.1.0"
+          }
+        ]
+      }
+    }
+  },
+  "cli": {
+    "contractVersion": 1,
+    "jsonFlagPosition": "global-before-command",
+    "infoCommand": ["--json", "info"],
+    "capabilitiesCommand": ["--json", "agent", "capabilities"],
+    "doctorCommand": ["--json", "doctor"],
+    "domains": [
+      "agent",
+      "app",
+      "artifacts",
+      "build",
+      "config-source",
+      "deploy",
+      "git",
+      "history",
+      "link",
+      "navigation",
+      "notes",
+      "projects",
+      "proxy",
+      "runtime",
+      "web-actions",
+      "workspace"
+    ],
+    "highRiskPolicy": "构建、部署、合并、推送、工作区复制和配置写入优先执行 plan、overview、status 或 dry-run，再由用户确认。"
+  },
+  "runtime": {
+    "configKind": "toml",
+    "configPath": "~/Library/Application Support/rDevTool/",
+    "stateKind": "sqlite",
+    "storagePath": "~/.rdevtool/rdevtool.sqlite",
+    "secretPolicy": "敏感信息使用环境变量、系统凭据或不入库的私有本地配置，不应进入仓库模板、一次性命令参数和机器可读诊断。"
+  },
+  "quality": {
+    "requiredScripts": [
+      "dev",
+      "build",
+      "manifest:check",
+      "ipc:check",
+      "rust-check",
+      "rust-test",
+      "web:build",
+      "web:test",
+      "web:test:e2e"
+    ],
+    "validationCommands": [
+      "npm run manifest:check",
+      "npm run ipc:check",
+      "npm run web:test",
+      "npm run web:test:e2e",
+      "npm run web:build",
+      "npm run rust-test",
+      "npm run rust-check"
+    ]
+  }
+}

@@ -138,6 +138,8 @@ function buildMergePageProps({
     onProjectChange: appShell.setSelectedProject,
     mode: mergeModule.mode,
     onModeChange: mergeModule.setMode,
+    syncProjects: mergeModule.syncProjects,
+    onSyncProjectsChange: mergeModule.setSyncProjects,
     syncSource: mergeModule.syncSource,
     onSyncSourceChange: mergeModule.setSyncSource,
     onClearSyncSource: () => mergeModule.setSyncSource(""),
@@ -191,6 +193,7 @@ function buildMergePageProps({
     currentBranchTaskHistoryId: mergeModule.currentBranchTaskHistoryId,
     currentBranchTaskRunningLabel: mergeModule.currentBranchTaskRunningLabel,
     branchTaskHistory: mergeModule.visibleBranchTaskHistory,
+    onPlanSync: mergeModule.handlePlanSync,
     onExecuteSync: mergeModule.handleExecuteSync,
     onExecuteCreate: mergeModule.handleExecuteCreate,
     onExecuteCheckout: mergeModule.handleExecuteCheckout,
@@ -276,6 +279,7 @@ export const APP_MODULES = [
       mergeModule,
       projectsModule,
       proxyModule,
+      activityCenter,
     }) => ({
       projectWorkspaces: appShell.projectWorkspaces,
       activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
@@ -296,6 +300,8 @@ export const APP_MODULES = [
       onStartProxyProfile: proxyModule.startProxyProfile,
       onStopProxyProfile: proxyModule.stopProxyProfile,
       onFocusProjectRuntime: projectsModule.handleFocusRuntime,
+      recordActivity: activityCenter.recordActivity,
+      updateActivity: activityCenter.updateActivity,
       onExecutePinnedAction: async (action) => {
         await executeTrayPinnedActionWorkflow(action, {
           activateWorkspace: async (workspaceKey) => {
@@ -332,7 +338,7 @@ export const APP_MODULES = [
     ),
     loadOnStartup: ({ projectsModule }) => projectsModule.loadFinderData({ force: true }),
     buildProps: (context) => {
-      const { appShell, projectsModule, workflowSignals } = context;
+      const { appShell, projectsModule, workflowSignals, activityCenter } = context;
       return {
         view: appShell.projectManagementView,
         onViewChange: appShell.setProjectManagementView,
@@ -411,6 +417,8 @@ export const APP_MODULES = [
             void projectsModule.handleFocusRuntime(projectKey, debugProfileKey),
           onOpenProjectDirectory: (projectKey) =>
             void projectsModule.handleOpenProjectDirectory(projectKey),
+          recordActivity: activityCenter.recordActivity,
+          updateActivity: activityCenter.updateActivity,
           projectConfigPanel: {
             styleMode: appShell.styleMode,
             exitRuntimePolicy: appShell.exitRuntimePolicy,
@@ -447,7 +455,7 @@ export const APP_MODULES = [
       })),
     ),
     loadOnStartup: ({ projectsModule }) => projectsModule.loadFinderData({ force: true }),
-    buildProps: ({ appShell, projectsModule }) => {
+    buildProps: ({ appShell, projectsModule, activityCenter }) => {
       const resourceFinderType =
         projectsModule.finderType === "项目" ? "网站" : projectsModule.finderType;
       return {
@@ -470,6 +478,8 @@ export const APP_MODULES = [
         onRefresh: () => void projectsModule.loadFinderData({ force: true }),
         onOpenFinderEntry: (entry) =>
           projectsModule.handleOpenFinderEntry(entry),
+        recordActivity: activityCenter.recordActivity,
+        updateActivity: activityCenter.updateActivity,
         resourceConfigOpenSignal: appShell.resourceConfigOpenSignal,
         activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
         projectWorkspaces: appShell.projectWorkspaces,

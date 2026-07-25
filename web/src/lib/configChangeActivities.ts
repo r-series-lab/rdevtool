@@ -42,6 +42,12 @@ const WORKSPACE_CONFIG_SCOPES = Object.keys(
   WORKSPACE_SCOPE_DETAILS,
 ) as WorkspaceConfigScope[];
 
+const WORKSPACE_SCOPE_LABELS: Record<WorkspaceConfigScope, string> = {
+  workspace: "工作区",
+  projects: "项目",
+  projectWorkspaces: "项目工作区",
+};
+
 function nonEmpty(value?: string | null): string | null {
   const next = value?.trim();
   return next || null;
@@ -67,35 +73,41 @@ export function workspaceStateChangedActivities(
   appInfo: ConfigChangeAppInfo,
 ): ActivityDraft[] {
   const changedScopes = new Set(payload.scopes);
+  const scopes = WORKSPACE_CONFIG_SCOPES.filter((scope) => changedScopes.has(scope));
+  if (scopes.length === 0) {
+    return [];
+  }
 
-  return WORKSPACE_CONFIG_SCOPES.flatMap((scope) => {
-    if (!changedScopes.has(scope)) {
-      return [];
-    }
+  const primaryScope = scopes[0];
+  const primaryDetails = WORKSPACE_SCOPE_DETAILS[primaryScope];
+  const combined = scopes.length > 1;
+  const key = configActivityKey(combined ? "workspace-state" : primaryScope);
+  const resource = localPathResource(
+    combined
+      ? nonEmpty(appInfo.configDir) ?? appInfo[primaryDetails.pathKey]
+      : nonEmpty(appInfo[primaryDetails.pathKey]) ?? appInfo.configDir,
+  );
 
-    const details = WORKSPACE_SCOPE_DETAILS[scope];
-    const key = configActivityKey(scope);
-    const resource = localPathResource(
-      nonEmpty(appInfo[details.pathKey]) ?? appInfo.configDir,
-    );
-    return [
-      {
-        id: key,
-        kind: "config",
-        status: "running",
-        title: details.title,
-        summary: "检测到外部修改，请重新加载最新配置",
-        executionKey: key,
-        target: { page: details.page },
-        ...(resource ? { resource } : {}),
-        action: {
-          kind: "reloadConfig",
-          label: "重新加载",
-          scope,
-        },
+  return [
+    {
+      id: key,
+      kind: "config",
+      status: "running",
+      title: combined ? "工作区相关配置已变更" : primaryDetails.title,
+      summary: "检测到外部修改，请重新加载最新配置",
+      ...(combined
+        ? { detail: `影响：${scopes.map((scope) => WORKSPACE_SCOPE_LABELS[scope]).join("、")}` }
+        : {}),
+      executionKey: key,
+      target: { page: primaryDetails.page },
+      ...(resource ? { resource } : {}),
+      action: {
+        kind: "reloadConfig",
+        label: "重新加载",
+        scope: primaryScope,
       },
-    ];
-  });
+    },
+  ];
 }
 
 export function configSourcesChangedActivities(

@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -26,11 +27,17 @@ pub struct WorktreeMergeResult {
     pub detail: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BranchCommitSummary {
     pub short_hash: String,
     pub subject: String,
     pub committed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuildChangeSnapshot {
+    pub paths: Vec<String>,
+    pub sources: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -41,8 +48,33 @@ pub struct BranchActivity {
 }
 
 #[derive(Debug, Clone)]
+pub struct BranchActivitySnapshot {
+    pub branches: Vec<BranchActivity>,
+    pub fresh: bool,
+    pub fetch_error: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub enum BranchCheckoutMode {
+    Worktree,
+    Clone,
+}
+
+impl BranchCheckoutMode {
+    pub fn key(&self) -> &'static str {
+        match self {
+            Self::Worktree => "worktree",
+            Self::Clone => "clone",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct BranchCheckoutResult {
     pub output_path: PathBuf,
+    pub checkout_mode: BranchCheckoutMode,
+    pub fallback_reason: Option<String>,
     pub detail: String,
 }
 
@@ -142,6 +174,35 @@ pub fn current_branch(repo_path: &Path) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+pub fn repository_root(repo_path: &Path) -> Result<PathBuf> {
+    let output = run_git_capture(repo_path, &["rev-parse", "--show-toplevel"])?;
+    let value = output.trim();
+    if value.is_empty() {
+        anyhow::bail!("Git repository root is empty for {}", repo_path.display());
+    }
+    Ok(PathBuf::from(value))
+}
+
+pub fn remote_urls(repo_path: &Path) -> Result<Vec<String>> {
+    let remotes = run_git_capture(repo_path, &["remote"])?;
+    let mut urls = BTreeSet::new();
+    for remote in remotes
+        .lines()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let output = run_git_capture(repo_path, &["remote", "get-url", "--all", remote])?;
+        urls.extend(
+            output
+                .lines()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string),
+        );
+    }
+    Ok(urls.into_iter().collect())
 }
 
 pub fn working_tree_status(repo_path: &Path) -> Result<WorkingTreeStatus> {
@@ -262,6 +323,17 @@ pub fn list_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeSummary>> {
     }
 
     Ok(items)
+}
+
+pub fn branch_worktree_path(repo_path: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Ok(None);
+    }
+    Ok(list_worktrees(repo_path)?
+        .into_iter()
+        .find(|item| item.branch.as_deref() == Some(branch))
+        .map(|item| item.path))
 }
 
 pub fn stale_worktrees(repo_path: &Path) -> Result<Vec<GitWorktreeSummary>> {
@@ -475,9 +547,33 @@ pub fn available_branches(repo_path: Option<&Path>, git_url: &str) -> Result<Vec
 }
 
 pub fn available_branch_activity(repo_path: &Path) -> Result<Vec<BranchActivity>> {
-    // Keep the local repo in sync so the branch picker reflects recent remote activity.
-    let _ = run_git_capture(repo_path, &["fetch", "--all", "--prune"]);
+    Ok(available_branch_activity_with_timeout(repo_path, Duration::from_secs(20))?.branches)
+}
 
+pub fn available_branch_activity_with_timeout(
+    repo_path: &Path,
+    fetch_timeout: Duration,
+) -> Result<BranchActivitySnapshot> {
+    let started = Instant::now();
+    let fetch_error = run_git_capture_with_timeout(
+        repo_path,
+        &["fetch", "--all", "--prune"],
+        "git fetch --all --prune",
+        fetch_timeout,
+    )
+    .err()
+    .map(|error| error.to_string());
+    let branches = local_branch_activity(repo_path)?;
+
+    Ok(BranchActivitySnapshot {
+        branches,
+        fresh: fetch_error.is_none(),
+        fetch_error,
+        elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+    })
+}
+
+fn local_branch_activity(repo_path: &Path) -> Result<Vec<BranchActivity>> {
     let output = git_command()
         .args(["-C"])
         .arg(repo_path)
@@ -541,6 +637,124 @@ pub fn available_branch_activity(repo_path: &Path) -> Result<Vec<BranchActivity>
             .then_with(|| a.name.cmp(&b.name))
     });
     Ok(ordered)
+}
+
+fn prepare_non_interactive_git_command(command: &mut Command) {
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GCM_INTERACTIVE", "Never")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+}
+
+fn run_git_capture_with_timeout(
+    repo_path: &Path,
+    args: &[&str],
+    operation: &str,
+    timeout: Duration,
+) -> Result<String> {
+    let mut command = git_command();
+    command.args(["-C"]).arg(repo_path).args(args);
+    prepare_non_interactive_git_command(&mut command);
+    let output = run_command_with_timeout(command, operation, timeout)?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    if !output.status.success() {
+        let detail = if stderr.trim().is_empty() {
+            stdout.trim()
+        } else {
+            stderr.trim()
+        };
+        anyhow::bail!("{operation} failed: {detail}");
+    }
+    Ok(if stderr.trim().is_empty() {
+        stdout
+    } else if stdout.trim().is_empty() {
+        stderr
+    } else {
+        format!("{stdout}\n{stderr}")
+    })
+}
+
+fn run_command_with_timeout(
+    mut command: Command,
+    operation: &str,
+    timeout: Duration,
+) -> Result<Output> {
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to start {operation}"))?;
+    let stdout = child.stdout.take().map(read_child_stream);
+    let stderr = child.stderr.take().map(read_child_stream);
+    let started = Instant::now();
+
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .with_context(|| format!("failed to wait for {operation}"))?
+        {
+            break status;
+        }
+        if started.elapsed() >= timeout {
+            terminate_timed_command(&mut child);
+            let _ = child.wait();
+            let _ = join_child_stream(stdout);
+            let _ = join_child_stream(stderr);
+            anyhow::bail!("{operation} timed out after {}ms", timeout.as_millis());
+        }
+        thread::sleep(Duration::from_millis(25));
+    };
+
+    Ok(Output {
+        status,
+        stdout: join_child_stream(stdout),
+        stderr: join_child_stream(stderr),
+    })
+}
+
+fn read_child_stream<R>(mut stream: R) -> thread::JoinHandle<Vec<u8>>
+where
+    R: Read + Send + 'static,
+{
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        let _ = stream.read_to_end(&mut output);
+        output
+    })
+}
+
+fn join_child_stream(handle: Option<thread::JoinHandle<Vec<u8>>>) -> Vec<u8> {
+    handle
+        .and_then(|handle| handle.join().ok())
+        .unwrap_or_default()
+}
+
+fn terminate_timed_command(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let process_group = format!("-{}", child.id());
+        let _ = Command::new("kill")
+            .args(["-TERM", process_group.as_str()])
+            .status();
+        let grace_started = Instant::now();
+        while grace_started.elapsed() < Duration::from_millis(150) {
+            if child.try_wait().ok().flatten().is_some() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(15));
+        }
+        let _ = Command::new("kill")
+            .args(["-KILL", process_group.as_str()])
+            .status();
+    }
+    let _ = child.kill();
 }
 
 fn merge_branch_lists(primary: Vec<String>, secondary: Vec<String>) -> Vec<String> {
@@ -869,18 +1083,18 @@ fn trim_remote_prefix(value: &str) -> &str {
 }
 
 pub fn remote_branches(git_url: &str) -> Result<Vec<String>> {
-    let output = git_command()
-        .args(["ls-remote", "--heads", git_url])
-        .output()
-        .with_context(|| format!("failed to query remote branches from {git_url}"))?;
+    remote_branches_with_timeout(git_url, Duration::from_secs(20))
+}
+
+pub fn remote_branches_with_timeout(git_url: &str, timeout: Duration) -> Result<Vec<String>> {
+    let mut command = git_command();
+    command.args(["ls-remote", "--heads", git_url]);
+    prepare_non_interactive_git_command(&mut command);
+    let output = run_command_with_timeout(command, "git ls-remote", timeout)?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "failed to query remote branches from {}: {}",
-            git_url,
-            stderr.trim()
-        );
+        anyhow::bail!("git ls-remote failed: {}", stderr.trim());
     }
 
     Ok(String::from_utf8_lossy(&output.stdout)
@@ -888,6 +1102,28 @@ pub fn remote_branches(git_url: &str) -> Result<Vec<String>> {
         .filter_map(|line| line.split_once("refs/heads/").map(|(_, branch)| branch))
         .map(str::trim)
         .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
+pub fn fetched_remote_branches(repo_path: &Path) -> Result<Vec<String>> {
+    run_git_capture(repo_path, &["fetch", "--all", "--prune"])
+        .with_context(|| "failed to fetch all remote branches".to_string())?;
+    let remote_name = preferred_remote_name(repo_path)?;
+    let remote_prefix = format!("refs/remotes/{remote_name}");
+    let output = run_git_capture(
+        repo_path,
+        &[
+            "for-each-ref",
+            "--format=%(refname:strip=3)",
+            &remote_prefix,
+        ],
+    )?;
+
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|branch| !branch.is_empty() && *branch != "HEAD")
         .map(ToString::to_string)
         .collect())
 }
@@ -1121,6 +1357,8 @@ pub fn clone_branch_to_directory(
 
     Ok(BranchCheckoutResult {
         output_path: output_path.to_path_buf(),
+        checkout_mode: BranchCheckoutMode::Clone,
+        fallback_reason: None,
         detail: if detail.is_empty() {
             format!("已克隆 {branch} 到本地目录")
         } else {
@@ -1168,18 +1406,7 @@ pub fn add_worktree_from_branch(
         let remote_ref = remote_ref
             .as_deref()
             .with_context(|| format!("远端分支不存在：{remote_name}/{branch}"))?;
-        run_git_capture_owned(
-            repo_path,
-            vec![
-                "worktree".to_string(),
-                "add".to_string(),
-                "--track".to_string(),
-                "-b".to_string(),
-                branch.to_string(),
-                output_path.display().to_string(),
-                remote_ref.to_string(),
-            ],
-        )?
+        add_remote_tracking_worktree(repo_path, branch, output_path, remote_ref)?
     } else {
         let source_ref = remote_ref
             .as_deref()
@@ -1214,8 +1441,170 @@ pub fn add_worktree_from_branch(
 
     Ok(BranchCheckoutResult {
         output_path: output_path.to_path_buf(),
+        checkout_mode: BranchCheckoutMode::Worktree,
+        fallback_reason: None,
         detail,
     })
+}
+
+pub fn add_managed_worktree_from_branch(
+    repo_path: &Path,
+    branch: &str,
+    destination_path: &Path,
+) -> Result<BranchCheckoutResult> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        anyhow::bail!("源分支不能为空");
+    }
+    let output_path = ensure_checkout_destination(destination_path)?;
+
+    run_git_capture(repo_path, &["fetch", "--all", "--prune"])?;
+    let pruned_paths = prune_stale_worktrees(repo_path)?;
+    if list_worktrees(repo_path)?
+        .into_iter()
+        .any(|item| item.branch.as_deref() == Some(branch))
+    {
+        anyhow::bail!(
+            "分支 {branch} 已被其他工作副本占用；请使用 existing 模式绑定该目录，或先释放该分支后重试"
+        );
+    }
+
+    let local_ref = format!("refs/heads/{branch}");
+    let local_exists = verify_ref(repo_path, &local_ref)?;
+    let output = if local_exists {
+        run_git_capture_owned(
+            repo_path,
+            vec![
+                "worktree".to_string(),
+                "add".to_string(),
+                output_path.display().to_string(),
+                branch.to_string(),
+            ],
+        )?
+    } else {
+        let remote_name = preferred_remote_name(repo_path)?;
+        let remote_ref = resolve_remote_branch_ref(repo_path, branch)
+            .with_context(|| format!("远端分支不存在：{remote_name}/{branch}"))?;
+        add_remote_tracking_worktree(repo_path, branch, output_path, &remote_ref)?
+    };
+
+    let mut detail = if output.trim().is_empty() {
+        format!("已创建托管工作区副本 {branch}")
+    } else {
+        output.trim().to_string()
+    };
+    if !pruned_paths.is_empty() {
+        detail.push_str(&format!(
+            "\n\n已自动清理 {} 个目录已不存在的 Git 工作副本登记。",
+            pruned_paths.len()
+        ));
+    }
+    Ok(BranchCheckoutResult {
+        output_path: output_path.to_path_buf(),
+        checkout_mode: BranchCheckoutMode::Worktree,
+        fallback_reason: None,
+        detail,
+    })
+}
+
+fn add_remote_tracking_worktree(
+    repo_path: &Path,
+    branch: &str,
+    output_path: &Path,
+    remote_ref: &str,
+) -> Result<String> {
+    let output = run_git_capture_owned(
+        repo_path,
+        vec![
+            "worktree".to_string(),
+            "add".to_string(),
+            "-b".to_string(),
+            branch.to_string(),
+            output_path.display().to_string(),
+            remote_ref.to_string(),
+        ],
+    )?;
+    let upstream = remote_ref
+        .strip_prefix("refs/remotes/")
+        .unwrap_or(remote_ref);
+    let upstream_output = run_git_capture_owned(
+        repo_path,
+        vec![
+            "branch".to_string(),
+            "--set-upstream-to".to_string(),
+            upstream.to_string(),
+            branch.to_string(),
+        ],
+    );
+
+    match upstream_output {
+        Ok(upstream_output) => Ok([output, upstream_output]
+            .into_iter()
+            .filter(|value| !value.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")),
+        Err(error) => {
+            let warning = format!("工作副本已创建，但未能设置上游分支 {upstream}：{error}");
+            Ok([output, warning]
+                .into_iter()
+                .filter(|value| !value.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n\n"))
+        }
+    }
+}
+
+pub fn is_worktree_unavailable_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    (message.contains("worktree") && message.contains("is not a git command"))
+        || message.contains("unknown subcommand 'worktree'")
+        || message.contains("unknown subcommand: worktree")
+}
+
+pub fn remove_managed_worktree(repo_path: &Path, worktree_path: &Path) -> Result<String> {
+    let registered = list_worktrees(repo_path)?
+        .into_iter()
+        .any(|item| !item.bare && same_worktree_path(&item.path, worktree_path));
+    if !registered {
+        anyhow::bail!(
+            "refusing to remove unregistered managed worktree: {}",
+            worktree_path.display()
+        );
+    }
+    let remove_result = run_git_capture_owned(
+        repo_path,
+        vec![
+            "worktree".to_string(),
+            "remove".to_string(),
+            "--force".to_string(),
+            worktree_path.display().to_string(),
+        ],
+    );
+    match remove_result {
+        Ok(output) => Ok(output),
+        Err(remove_error) => {
+            if worktree_path.exists() {
+                fs::remove_dir_all(worktree_path).with_context(|| {
+                    format!(
+                        "failed to remove managed Git worktree directory {} after git worktree remove failed: {remove_error}",
+                        worktree_path.display()
+                    )
+                })?;
+            }
+            let prune_output = run_git_capture(repo_path, &["worktree", "prune", "--verbose"])
+                .with_context(|| {
+                    format!(
+                        "failed to prune managed Git worktree registration {} after fallback removal: {remove_error}",
+                        worktree_path.display()
+                    )
+                })?;
+            Ok(if prune_output.trim().is_empty() {
+                "removed managed worktree with compatibility fallback".to_string()
+            } else {
+                prune_output
+            })
+        }
+    }
 }
 
 fn ensure_checkout_destination(destination_path: &Path) -> Result<&Path> {
@@ -1303,6 +1692,112 @@ pub fn latest_branch_commit(repo_path: &Path, branch: &str) -> Result<BranchComm
     let branch_ref = resolve_branch_ref(repo_path, branch)
         .with_context(|| format!("无法定位分支最新提交：{branch}"))?;
     latest_commit_for_ref(repo_path, branch, &branch_ref)
+}
+
+/// Reads the latest commit already available in local Git refs without fetching.
+///
+/// The cached `origin/<branch>` tracking ref is authoritative when present. A
+/// local branch is used only when that tracking ref does not exist. `None`
+/// means neither ref is available in this checkout.
+pub fn cached_branch_commit(repo_path: &Path, branch: &str) -> Result<Option<BranchCommitSummary>> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        return Ok(None);
+    }
+
+    let Some(branch_ref) = resolve_cached_branch_ref(repo_path, branch)? else {
+        return Ok(None);
+    };
+    latest_commit_for_ref(repo_path, branch, &branch_ref).map(Some)
+}
+
+/// Lists paths introduced by the cached branch tip relative to its first
+/// parent. This matches deployment branches whose tip is commonly a merge
+/// commit: only the content introduced by that merge is considered. A root
+/// commit is compared with Git's empty tree. No fetch is performed.
+pub fn cached_branch_tip_changed_paths(repo_path: &Path, branch: &str) -> Result<Vec<String>> {
+    let branch = branch.trim();
+    if branch.is_empty() {
+        anyhow::bail!("branch is required to inspect cached tip changes");
+    }
+    let branch_ref = resolve_cached_branch_ref(repo_path, branch)?
+        .with_context(|| format!("cached branch not found: {branch}"))?;
+    let revision = run_git_capture(
+        repo_path,
+        &["rev-list", "--parents", "-n", "1", &branch_ref],
+    )?;
+    let revisions = revision.split_whitespace().collect::<Vec<_>>();
+    let tip = revisions
+        .first()
+        .copied()
+        .with_context(|| format!("cached branch tip is empty: {branch}"))?;
+    let output = if let Some(first_parent) = revisions.get(1).copied() {
+        run_git_capture(repo_path, &["diff", "--name-only", first_parent, tip, "--"])?
+    } else {
+        run_git_capture(
+            repo_path,
+            &[
+                "diff-tree",
+                "--root",
+                "--no-commit-id",
+                "--name-only",
+                "-r",
+                tip,
+                "--",
+            ],
+        )?
+    };
+
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+/// Collects local paths that can affect a build-safety decision.
+///
+/// The snapshot combines every staged, unstaged, conflicted, or untracked path
+/// reported by `git status` with committed paths on `HEAD` relative to the
+/// current branch's upstream. It is deliberately read-only and does not fetch
+/// or mutate refs. `sources` records which observations were attempted so a
+/// caller can distinguish a worktree-only snapshot from one that also checked
+/// an upstream commit range.
+pub fn build_change_snapshot(repo_path: &Path) -> Result<BuildChangeSnapshot> {
+    let status = working_tree_status(repo_path)?;
+    let mut paths = status
+        .files
+        .into_iter()
+        .map(|item| item.path)
+        .filter(|path| !path.trim().is_empty())
+        .collect::<BTreeSet<_>>();
+    let mut sources = vec!["workingTree".to_string()];
+
+    if let Some(upstream) = status
+        .upstream_branch
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let range = format!("{upstream}...HEAD");
+        let output = run_git_capture(repo_path, &["diff", "--name-only", &range, "--"])?;
+        paths.extend(
+            output
+                .lines()
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(ToString::to_string),
+        );
+        sources.push(format!("committedDiff:{range}"));
+    }
+
+    Ok(BuildChangeSnapshot {
+        paths: paths.into_iter().collect(),
+        sources,
+    })
 }
 
 pub fn latest_remote_branch_commit(repo_path: &Path, branch: &str) -> Result<BranchCommitSummary> {
@@ -1490,6 +1985,18 @@ fn resolve_branch_ref(repo_path: &Path, branch: &str) -> Result<String> {
     anyhow::bail!("branch not found: {branch}")
 }
 
+fn resolve_cached_branch_ref(repo_path: &Path, branch: &str) -> Result<Option<String>> {
+    for branch_ref in [
+        format!("refs/remotes/origin/{branch}"),
+        format!("refs/heads/{branch}"),
+    ] {
+        if verify_ref(repo_path, &branch_ref)? {
+            return Ok(Some(branch_ref));
+        }
+    }
+    Ok(None)
+}
+
 fn resolve_remote_branch_ref(repo_path: &Path, branch: &str) -> Result<String> {
     let remote_name = preferred_remote_name(repo_path)?;
     let remote_ref = format!("refs/remotes/{remote_name}/{branch}");
@@ -1632,6 +2139,22 @@ fn sanitize_branch_name(value: &str) -> String {
 mod worktree_recovery_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn bounded_command_stops_the_process_group_after_timeout() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 5"]);
+        prepare_non_interactive_git_command(&mut command);
+        let started = Instant::now();
+
+        let error =
+            run_command_with_timeout(command, "test bounded command", Duration::from_millis(80))
+                .expect_err("command should time out");
+
+        assert!(error.to_string().contains("timed out after 80ms"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
     struct TestRepo {
         root: PathBuf,
         repo: PathBuf,
@@ -1708,6 +2231,340 @@ mod worktree_recovery_tests {
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    #[test]
+    fn cached_branch_commit_prefers_origin_tracking_ref_then_local_branch() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rdevtool-cached-branch-commit-{}-{suffix}",
+            std::process::id()
+        ));
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repository directory");
+        run(&repo, &["init"]);
+        run(
+            &repo,
+            &["config", "user.email", "rdevtool-test@example.com"],
+        );
+        run(&repo, &["config", "user.name", "rDevTool Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base file");
+        run(&repo, &["add", "README.md"]);
+        run(&repo, &["commit", "-m", "base"]);
+        run(&repo, &["branch", "feature/safety"]);
+        run(
+            &repo,
+            &[
+                "update-ref",
+                "refs/remotes/origin/feature/safety",
+                "refs/heads/feature/safety",
+            ],
+        );
+        let cached_hash = run_git_capture(
+            &repo,
+            &["rev-parse", "--short", "refs/remotes/origin/feature/safety"],
+        )
+        .expect("read cached tracking hash")
+        .trim()
+        .to_string();
+
+        run(&repo, &["checkout", "feature/safety"]);
+        fs::write(repo.join("README.md"), "local\n").expect("write local change");
+        run(&repo, &["commit", "-am", "local"]);
+        let local_hash = run_git_capture(
+            &repo,
+            &["rev-parse", "--short", "refs/heads/feature/safety"],
+        )
+        .expect("read local hash")
+        .trim()
+        .to_string();
+
+        let cached = cached_branch_commit(&repo, "feature/safety")
+            .expect("read cached branch")
+            .expect("cached branch should exist");
+        assert_eq!(cached.short_hash, cached_hash);
+        assert_ne!(cached.short_hash, local_hash);
+
+        run(
+            &repo,
+            &["update-ref", "-d", "refs/remotes/origin/feature/safety"],
+        );
+        let fallback = cached_branch_commit(&repo, "feature/safety")
+            .expect("read local fallback")
+            .expect("local branch should exist");
+        assert_eq!(fallback.short_hash, local_hash);
+        assert!(
+            cached_branch_commit(&repo, "missing")
+                .expect("missing branch lookup")
+                .is_none()
+        );
+        assert!(
+            cached_branch_commit(&repo, "   ")
+                .expect("blank branch lookup")
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cached_branch_tip_changed_paths_uses_first_parent_and_handles_root() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rdevtool-cached-tip-paths-{}-{suffix}",
+            std::process::id()
+        ));
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repository directory");
+        run(&repo, &["init"]);
+        run(
+            &repo,
+            &["config", "user.email", "rdevtool-test@example.com"],
+        );
+        run(&repo, &["config", "user.name", "rDevTool Test"]);
+        fs::write(repo.join("README.md"), "root\n").expect("write root file");
+        run(&repo, &["add", "README.md"]);
+        run(&repo, &["commit", "-m", "root"]);
+        run(&repo, &["branch", "root-snapshot"]);
+        run(&repo, &["branch", "feature/mobile"]);
+        run(&repo, &["branch", "deploy"]);
+
+        run(&repo, &["checkout", "feature/mobile"]);
+        fs::create_dir_all(repo.join("mobile/src")).expect("create mobile directory");
+        fs::write(repo.join("mobile/src/page.ts"), "export {};\n").expect("write mobile file");
+        run(&repo, &["add", "mobile/src/page.ts"]);
+        run(&repo, &["commit", "-m", "mobile"]);
+
+        run(&repo, &["checkout", "deploy"]);
+        fs::create_dir_all(repo.join("docs")).expect("create docs directory");
+        fs::write(repo.join("docs/deploy.md"), "deploy\n").expect("write deploy file");
+        run(&repo, &["add", "docs/deploy.md"]);
+        run(&repo, &["commit", "-m", "deploy preparation"]);
+        run(
+            &repo,
+            &["merge", "--no-ff", "feature/mobile", "-m", "merge mobile"],
+        );
+        run(
+            &repo,
+            &[
+                "update-ref",
+                "refs/remotes/origin/env-dc2-vke",
+                "refs/heads/deploy",
+            ],
+        );
+
+        run(&repo, &["checkout", "-b", "env-dc2-vke"]);
+        fs::create_dir_all(repo.join("imop-admin/src")).expect("create admin directory");
+        fs::write(repo.join("imop-admin/src/later.ts"), "export {};\n")
+            .expect("write later local file");
+        run(&repo, &["add", "imop-admin/src/later.ts"]);
+        run(&repo, &["commit", "-m", "later local commit"]);
+
+        assert_eq!(
+            cached_branch_tip_changed_paths(&repo, "env-dc2-vke").expect("read merge tip paths"),
+            vec!["mobile/src/page.ts".to_string()]
+        );
+        assert_eq!(
+            cached_branch_tip_changed_paths(&repo, "root-snapshot").expect("read root tip paths"),
+            vec!["README.md".to_string()]
+        );
+        assert!(cached_branch_tip_changed_paths(&repo, "missing").is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_change_snapshot_combines_worktree_and_upstream_committed_paths() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rdevtool-build-change-snapshot-{}-{suffix}",
+            std::process::id()
+        ));
+        let remote = root.join("remote.git");
+        let repo = root.join("repo");
+        fs::create_dir_all(&remote).expect("create remote directory");
+        fs::create_dir_all(&repo).expect("create repository directory");
+        run(&remote, &["init", "--bare"]);
+        run(&repo, &["init"]);
+        run(
+            &repo,
+            &["config", "user.email", "rdevtool-test@example.com"],
+        );
+        run(&repo, &["config", "user.name", "rDevTool Test"]);
+        fs::write(repo.join("README.md"), "base\n").expect("write base file");
+        run(&repo, &["add", "README.md"]);
+        run(&repo, &["commit", "-m", "base"]);
+        run(&repo, &["branch", "-M", "main"]);
+        run(
+            &repo,
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+        run(&repo, &["push", "-u", "origin", "main"]);
+
+        fs::create_dir_all(repo.join("mobile/src")).expect("create mobile directory");
+        fs::write(repo.join("mobile/src/page.ts"), "export {};\n")
+            .expect("write committed mobile file");
+        run(&repo, &["add", "mobile/src/page.ts"]);
+        run(&repo, &["commit", "-m", "mobile change"]);
+
+        fs::create_dir_all(repo.join("imop-admin/src")).expect("create admin directory");
+        fs::write(repo.join("imop-admin/src/local.ts"), "export {};\n")
+            .expect("write untracked admin file");
+        fs::create_dir_all(repo.join("docs")).expect("create docs directory");
+        fs::write(repo.join("docs/staged.md"), "staged\n").expect("write staged file");
+        run(&repo, &["add", "docs/staged.md"]);
+
+        let snapshot = build_change_snapshot(&repo).expect("collect build change paths");
+
+        assert_eq!(
+            snapshot.paths,
+            vec![
+                "docs/staged.md".to_string(),
+                "imop-admin/src/local.ts".to_string(),
+                "mobile/src/page.ts".to_string(),
+            ]
+        );
+        assert_eq!(
+            snapshot.sources,
+            vec![
+                "workingTree".to_string(),
+                "committedDiff:origin/main...HEAD".to_string(),
+            ]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn fetched_remote_branches_excludes_local_only_branches() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rdevtool-remote-branches-{}-{suffix}",
+            std::process::id()
+        ));
+        let remote = root.join("remote.git");
+        let repo = root.join("repo");
+        fs::create_dir_all(&remote).expect("create bare remote directory");
+        fs::create_dir_all(&repo).expect("create repository directory");
+        run(&remote, &["init", "--bare"]);
+        run(&repo, &["init"]);
+        run(
+            &repo,
+            &["config", "user.email", "rdevtool-test@example.com"],
+        );
+        run(&repo, &["config", "user.name", "rDevTool Test"]);
+        fs::write(repo.join("README.md"), "remote branches\n").expect("write test file");
+        run(&repo, &["add", "README.md"]);
+        run(&repo, &["commit", "-m", "initial"]);
+        run(&repo, &["branch", "-M", "main"]);
+        run(
+            &repo,
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+        run(&repo, &["push", "-u", "origin", "main"]);
+        run(&repo, &["branch", "local-only"]);
+        run(&repo, &["checkout", "-b", "feature/shared"]);
+        run(&repo, &["push", "-u", "origin", "feature/shared"]);
+
+        let branches = fetched_remote_branches(&repo).expect("load fetched remote branches");
+
+        assert!(branches.contains(&"main".to_string()));
+        assert!(branches.contains(&"feature/shared".to_string()));
+        assert!(!branches.contains(&"local-only".to_string()));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_branch_worktree_creation_uses_legacy_compatible_arguments() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rdevtool-worktree-compat-{}-{suffix}",
+            std::process::id()
+        ));
+        let remote = root.join("remote.git");
+        let seed = root.join("seed");
+        let source = root.join("source");
+        let worktree = root.join("worktree");
+        fs::create_dir_all(&remote).expect("create bare remote directory");
+        fs::create_dir_all(&seed).expect("create seed repository directory");
+        run(&remote, &["init", "--bare"]);
+        run(&seed, &["init"]);
+        run(
+            &seed,
+            &["config", "user.email", "rdevtool-test@example.com"],
+        );
+        run(&seed, &["config", "user.name", "rDevTool Test"]);
+        fs::write(seed.join("README.md"), "worktree compatibility\n").expect("write seed file");
+        run(&seed, &["add", "README.md"]);
+        run(&seed, &["commit", "-m", "initial"]);
+        run(
+            &seed,
+            &["remote", "add", "origin", remote.to_string_lossy().as_ref()],
+        );
+        run(&seed, &["push", "-u", "origin", "master"]);
+        run(&seed, &["checkout", "-b", "feature/compat"]);
+        fs::write(seed.join("README.md"), "feature compatibility\n").expect("update seed file");
+        run(&seed, &["commit", "-am", "feature"]);
+        run(&seed, &["push", "-u", "origin", "feature/compat"]);
+        run(
+            &root,
+            &[
+                "clone",
+                remote.to_string_lossy().as_ref(),
+                source.to_string_lossy().as_ref(),
+            ],
+        );
+
+        let result = add_worktree_from_branch(&source, "feature/compat", &worktree)
+            .expect("create worktree from remote-only branch");
+
+        assert_eq!(result.output_path, worktree);
+        assert!(matches!(result.checkout_mode, BranchCheckoutMode::Worktree));
+        assert!(result.fallback_reason.is_none());
+        assert!(worktree.join(".git").is_file());
+        assert_eq!(
+            run_git_capture(
+                &worktree,
+                &[
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
+            )
+            .expect("read worktree upstream")
+            .trim(),
+            "origin/feature/compat"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clone_fallback_is_limited_to_missing_worktree_capability() {
+        assert!(is_worktree_unavailable_error(&anyhow::anyhow!(
+            "git: 'worktree' is not a git command"
+        )));
+        assert!(is_worktree_unavailable_error(&anyhow::anyhow!(
+            "unknown subcommand: worktree"
+        )));
+        assert!(!is_worktree_unavailable_error(&anyhow::anyhow!(
+            "git fetch --all --prune failed: authentication required"
+        )));
+        assert!(!is_worktree_unavailable_error(&anyhow::anyhow!(
+            "managed project instance destination already exists"
+        )));
     }
 
     #[test]

@@ -45,6 +45,7 @@ import type {
   ProjectWorkspaceSummary,
   ProjectWorkflowAction,
   ProjectRuntimeEntry,
+  ProjectRuntimeContextSnapshot,
   ProjectRuntimeLogKind,
   ProjectRuntimeLogResponse,
   ProjectRuntimeLogSessionSummary,
@@ -80,6 +81,7 @@ import {
 import { AppEmptyState } from "../components/AppEmptyState";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import { AppListEndState } from "../components/AppListEndState";
+import { RuntimeContextCard } from "../components/RuntimeContextCard";
 import {
   LinkPlanDialog,
   type LinkPlanDialogAction,
@@ -114,6 +116,12 @@ import {
 import { useConfigSource } from "../hooks/useConfigSource";
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 import { useRuntimeProfiles } from "../hooks/useRuntimeProfiles";
+import type { ActivityRecorder, ActivityUpdater } from "../lib/activityCenter";
+import {
+  linkActivityDraft,
+  linkActivityFailurePatch,
+  linkActivityResultPatch,
+} from "../lib/linkActivities";
 
 type FinderType = "项目" | "网站" | "目录" | "工具";
 type ProjectsPageMode = "projectManagement" | "resources";
@@ -164,6 +172,7 @@ type RuntimePreflightState = {
   projectKey: string;
   debugProfileKey: string;
   response: ProjectRuntimePreflightResponse | null;
+  context: ProjectRuntimeContextSnapshot | null;
   loading: boolean;
   error: string;
 };
@@ -257,6 +266,8 @@ export type ProjectsPageProps = {
   onFocusRuntime: (projectKey: string, debugProfileKey?: string) => void;
   onOpenProjectDirectory: (projectKey: string) => void;
   onOpenResourceConfig?: () => void;
+  recordActivity?: ActivityRecorder;
+  updateActivity?: ActivityUpdater;
   configWorkspaceKey?: string;
   projectConfigPanel?: ProjectConfigPanelProps;
 };
@@ -886,6 +897,8 @@ function finderEntryKindLabel(kind: string): string {
       return "工具";
     case "directory":
       return "目录";
+    case "file":
+      return "文件";
     default:
       return "网站";
   }
@@ -907,7 +920,7 @@ function finderEntryIconVariant(entry: FinderEntry): string {
     }
     return "tool";
   }
-  if (kind === "directory") {
+  if (kind === "directory" || kind === "file") {
     return "directory";
   }
   if (kind === "app") {
@@ -1079,7 +1092,7 @@ function navigationEditorEntryMatchesShortcut(
       (entry.appName ?? "").trim() === (item.entry.appName ?? "").trim()
     );
   }
-  if (item.entry.kind === "directory") {
+  if (item.entry.kind === "directory" || item.entry.kind === "file") {
     return (entry.path ?? "").trim() === (item.entry.path ?? "").trim();
   }
   if (item.entry.kind === "tool") {
@@ -1360,6 +1373,8 @@ export function ProjectsPage({
   onFocusRuntime,
   onOpenProjectDirectory,
   onOpenResourceConfig,
+  recordActivity,
+  updateActivity,
   configWorkspaceKey,
   projectConfigPanel,
 }: ProjectsPageProps) {
@@ -1434,6 +1449,7 @@ export function ProjectsPage({
       projectKey: "",
       debugProfileKey: "",
       response: null,
+      context: null,
       loading: false,
       error: "",
     });
@@ -1917,6 +1933,7 @@ export function ProjectsPage({
         projectKey: "",
         debugProfileKey: "",
         response: null,
+        context: null,
         loading: false,
         error: "",
       });
@@ -1929,14 +1946,23 @@ export function ProjectsPage({
       ...current,
       projectKey: detailsProjectEntry.key,
       debugProfileKey: profileKey,
+      response: null,
+      context: null,
       loading: true,
       error: "",
     }));
-    void invoke<ProjectRuntimePreflightResponse>("preflight_project_runtime", {
-      project: detailsProjectEntry.key,
-      debugProfile: profileKey || null,
-    })
-      .then((response) => {
+    void Promise.all([
+      invoke<ProjectRuntimePreflightResponse>("preflight_project_runtime", {
+        project: detailsProjectEntry.key,
+        debugProfile: profileKey || null,
+      }),
+      invoke<ProjectRuntimeContextSnapshot>("get_project_runtime_context", {
+        project: detailsProjectEntry.key,
+        debugProfile: profileKey || null,
+        runtimeProfile: null,
+      }),
+    ])
+      .then(([response, context]) => {
         if (cancelled) {
           return;
         }
@@ -1944,6 +1970,7 @@ export function ProjectsPage({
           projectKey: detailsProjectEntry.key,
           debugProfileKey: profileKey,
           response,
+          context,
           loading: false,
           error: "",
         });
@@ -1956,6 +1983,7 @@ export function ProjectsPage({
           projectKey: detailsProjectEntry.key,
           debugProfileKey: profileKey,
           response: null,
+          context: null,
           loading: false,
           error: String(reason),
         });
@@ -2426,6 +2454,7 @@ export function ProjectsPage({
       description: "当前工作区的 runtime_overrides.toml 会被删除，并立即改用全局运行配置。",
       confirmLabel: "恢复继承",
       tone: "danger",
+      preferenceKey: "destructive.delete",
     });
     if (!accepted) return;
     const restored = await restoreRuntimeProfilesInheritance();
@@ -2616,6 +2645,11 @@ export function ProjectsPage({
     const command =
       action === "check" ? "check_link" : action === "run" ? "run_link" : "stop_link";
     const sourceId = linkPlanDialog?.sourceId ?? linkConfigSourceId;
+    const linkName = linkPlanDialog?.entryName.trim() || key;
+    const activityId =
+      action === "check"
+        ? ""
+        : recordActivity?.(linkActivityDraft(key, linkName, action, sourceId)) ?? "";
     setLinkPlanDialog((current) =>
       current
         ? {
@@ -2626,10 +2660,20 @@ export function ProjectsPage({
         : current,
     );
     try {
-      const report = await invoke<LinkExecutionReport>(command, {
-        sourceId,
-        key,
-      });
+      const report = await invoke<LinkExecutionReport>(
+        command,
+        action === "check"
+          ? { sourceId, key }
+          : {
+              sourceId,
+              key,
+              activityId: activityId || null,
+              operationOrigin: "app",
+            },
+      );
+      if (activityId && action !== "check") {
+        updateActivity?.(activityId, linkActivityResultPatch(report, action, sourceId));
+      }
       setLinkPlanDialog((current) =>
         current
           ? {
@@ -2651,6 +2695,12 @@ export function ProjectsPage({
         }
       }
     } catch (reason) {
+      if (activityId && action !== "check") {
+        updateActivity?.(
+          activityId,
+          linkActivityFailurePatch(key, linkName, action, sourceId, reason),
+        );
+      }
       setLinkPlanDialog((current) =>
         current
           ? {
@@ -3931,6 +3981,12 @@ export function ProjectsPage({
                               </Box>
                             );
                           })()}
+                          <RuntimeContextCard
+                            title="运行目标与 daemon 观测"
+                            context={runtimePreflight.context}
+                            loading={runtimePreflight.loading}
+                            error={runtimePreflight.error}
+                          />
                           <Box
                             sx={{
                               display: "grid",

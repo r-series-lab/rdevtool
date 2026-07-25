@@ -9,6 +9,7 @@ import {
   Typography,
 } from "@mui/material";
 import type { BranchTaskHistoryEntry } from "../../app-types";
+import { branchTaskDisplayDetail } from "../../lib/branchTaskDetails";
 import type { TrayPinnedAction } from "../../lib/trayPins";
 import { AppEmptyState } from "../AppEmptyState";
 import { AppListEndState } from "../AppListEndState";
@@ -661,7 +662,7 @@ export function BranchHistoryPanel({
                             ) : null}
                           </Stack>
                         }
-                        detail={item.detail}
+                        detail={branchTaskDisplayDetail(item)}
                         meta={[
                           isGrouped ? `连续 ${group.items.length} 次` : "",
                           `${item.items.length} 项`,
@@ -722,6 +723,20 @@ export function BranchHistoryPanel({
                                       {formatRelativeTime(historyItem.createdAt)}
                                     </Typography>
                                   </Stack>
+                                  {!historyItem.success ? (
+                                    <Typography
+                                      variant="caption"
+                                      color="error"
+                                      sx={{
+                                        display: "block",
+                                        mt: 0.45,
+                                        overflowWrap: "anywhere",
+                                        whiteSpace: "pre-line",
+                                      }}
+                                    >
+                                      {branchTaskDisplayDetail(historyItem)}
+                                    </Typography>
+                                  ) : null}
                                 </Box>
                               ))}
                             </Stack>

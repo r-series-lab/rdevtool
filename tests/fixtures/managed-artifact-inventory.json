@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "requested": {
+    "workspace": "feature-a",
+    "allWorkspaces": false,
+    "project": "demo",
+    "kinds": [
+      "runtimeState"
+    ]
+  },
+  "effective": {
+    "workspaceKeys": [
+      "feature-a"
+    ],
+    "project": "demo",
+    "kinds": [
+      "runtimestate"
+    ],
+    "collectors": [
+      "workspaceConfig",
+      "runtimeDaemon"
+    ]
+  },
+  "observed": {
+    "artifacts": [
+      {
+        "id": "artifact-demo",
+        "source": "runtimeDaemon",
+        "artifact": {
+          "kind": "runtimeState",
+          "path": "/config/runtime-daemon/demo.state.json",
+          "ownership": "rdevtool",
+          "lifecycle": "runtimeSession"
+        },
+        "workspaceKey": "feature-a",
+        "projectKey": "demo",
+        "runId": "run-1",
+        "scopePath": "/workspace/demo",
+        "exists": true,
+        "objectType": "file",
+        "active": false,
+        "ownershipVerified": true,
+        "detail": "stopped runtime state"
+      }
+    ],
+    "references": [
+      {
+        "kind": "workspaceRoot",
+        "path": "/workspace",
+        "source": "workspaceConfig",
+        "workspaceKey": "feature-a",
+        "projectKey": null,
+        "exists": true,
+        "ownership": "referenced",
+        "reason": "creation ownership is not persisted"
+      }
+    ],
+    "summary": {
+      "artifactCount": 1,
+      "existingCount": 1,
+      "missingCount": 0,
+      "activeCount": 0,
+      "referenceCount": 1
+    }
+  },
+  "status": {
+    "key": "observed",
+    "label": "托管产物已盘点",
+    "success": true,
+    "terminal": true,
+    "detail": "发现 1 条托管产物和 1 条非托管引用"
+  },
+  "evidence": [
+    {
+      "kind": "runtime",
+      "source": "runtimeDaemon.state",
+      "detail": "state ownership verified"
+    }
+  ],
+  "risks": [
+    {
+      "code": "unmanaged_references_present",
+      "severity": "info",
+      "detail": "1 reference is not managed"
+    }
+  ],
+  "managedArtifacts": [
+    {
+      "kind": "runtimeState",
+      "path": "/config/runtime-daemon/demo.state.json",
+      "ownership": "rdevtool",
+      "lifecycle": "runtimeSession"
+    }
+  ],
+  "recommendedActions": [
+    {
+      "command": "rdevtool --json artifacts cleanup-plan --workspace feature-a --project demo --kind runtimeState",
+      "reason": "generate a read-only plan",
+      "risk": "readOnly"
+    }
+  ]
+}

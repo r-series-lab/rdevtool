@@ -7,7 +7,7 @@ import {
   type SetStateAction,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { BranchOption } from "../app-types";
+import type { BranchCatalogResponse, BranchOption } from "../app-types";
 
 export type ProjectSummary = {
   key: string;
@@ -31,6 +31,9 @@ export type ProjectSummary = {
 export type BranchCacheEntry = {
   branches: BranchOption[];
   syncedAt: number;
+  source?: string;
+  freshness?: string;
+  elapsedMs?: number;
 };
 
 export type BranchCacheMap = Record<string, BranchCacheEntry>;
@@ -54,7 +57,7 @@ const LEGACY_BRANCH_CACHE_STORAGE_KEY = "ruritool.branch-cache.v1";
 const LEGACY_PROJECT_SELECTION_STORAGE_KEY = "ruritool.project-selection.v1";
 export const DEFAULT_SOURCE_BRANCH_KEYWORDS = ["release", "feature"];
 export const DEFAULT_TARGET_BRANCH_KEYWORDS = ["variant", "pre", "master", "release"];
-const BRANCH_SYNC_TIMEOUT_MS = 12000;
+const BRANCH_SYNC_TIMEOUT_MS = 30000;
 
 export class BranchSyncRequestTracker {
   private readonly inFlight = new Map<string, Promise<void>>();
@@ -129,6 +132,68 @@ export function branchOptionNames(branches: BranchOption[]): string[] {
   return branches.map((item) => item.name);
 }
 
+export function normalizeBranchCatalogResponse(
+  value: BranchCatalogResponse | BranchOption[],
+  project: string,
+): BranchCatalogResponse {
+  if (Array.isArray(value)) {
+    const branches = normalizeBranchOptions(value);
+    return {
+      requested: { project },
+      effective: {
+        repoPath: null,
+        strategy: ["legacy"],
+        localFetchTimeoutMs: 0,
+        gitlabTimeoutMs: 0,
+        remoteTimeoutMs: 0,
+      },
+      observed: {
+        source: "legacy",
+        freshness: "unknown",
+        branchCount: branches.length,
+        elapsedMs: 0,
+        attempts: [],
+      },
+      status: {
+        key: "ready",
+        label: "同步完成",
+        success: true,
+        terminal: true,
+        detail: `已获取 ${branches.length} 个分支。`,
+      },
+      evidence: [],
+      risks: [],
+      recommendedActions: [],
+      branches,
+    };
+  }
+
+  return {
+    ...value,
+    branches: normalizeBranchOptions(value.branches ?? []),
+  };
+}
+
+function branchSourceLabel(source?: string, freshness?: string): string {
+  if (source === "localRepository") {
+    return freshness === "cached" ? "本地引用（远端刷新失败）" : "本地仓库";
+  }
+  if (source === "gitlabApi") {
+    return "GitLab API";
+  }
+  if (source === "gitRemote") {
+    return "Git remote";
+  }
+  return "兼容模式";
+}
+
+function formatBranchSyncDuration(elapsedMs?: number): string {
+  if (typeof elapsedMs !== "number" || elapsedMs <= 0) {
+    return "";
+  }
+  return ` · ${(elapsedMs / 1000).toFixed(elapsedMs < 1000 ? 2 : 1)}s`;
+}
+
 export function loadLegacyBranchCache(): BranchCacheMap {
   if (typeof window === "undefined") {
     return {};
@@ -138,7 +203,16 @@ export function loadLegacyBranchCache(): BranchCacheMap {
     if (!raw) {
       return {};
     }
-    const parsed = JSON.parse(raw) as Record<string, { branches?: unknown; syncedAt?: unknown }>;
+    const parsed = JSON.parse(raw) as Record<
+      string,
+      {
+        branches?: unknown;
+        syncedAt?: unknown;
+        source?: unknown;
+        freshness?: unknown;
+        elapsedMs?: unknown;
+      }
+    >;
     const next: BranchCacheMap = {};
     for (const [project, value] of Object.entries(parsed)) {
       if (!value || !Array.isArray(value.branches)) {
@@ -152,7 +226,16 @@ export function loadLegacyBranchCache(): BranchCacheMap {
         typeof value.syncedAt === "number" && Number.isFinite(value.syncedAt)
           ? value.syncedAt
           : 0;
-      next[project] = { branches, syncedAt };
+      next[project] = {
+        branches,
+        syncedAt,
+        source: typeof value.source === "string" ? value.source : undefined,
+        freshness: typeof value.freshness === "string" ? value.freshness : undefined,
+        elapsedMs:
+          typeof value.elapsedMs === "number" && Number.isFinite(value.elapsedMs)
+            ? value.elapsedMs
+            : undefined,
+      };
     }
     return next;
   } catch {
@@ -358,13 +441,20 @@ export function useBranchContext({
           setError("");
         }
         try {
-          const branches = normalizeBranchOptions(
+          const catalog = normalizeBranchCatalogResponse(
             await withTimeout(
-              invoke<BranchOption[]>("get_project_branches", { project: projectKey }),
+              invoke<BranchCatalogResponse | BranchOption[]>("get_project_branches", {
+                project: projectKey,
+              }),
               BRANCH_SYNC_TIMEOUT_MS,
-              "同步分支超时，请检查 Git 网络后重试",
+              "分支同步超过 30 秒，rDevTool 后端未在约定时间内返回；已有缓存不会被覆盖",
             ),
+            projectKey,
           );
+          if (!catalog.status.success) {
+            throw new Error(catalog.status.detail || "分支同步失败");
+          }
+          const branches = catalog.branches;
           const syncedAt = Date.now();
           setBranchCache((current) => {
             const next = {
@@ -372,6 +462,9 @@ export function useBranchContext({
               [projectKey]: {
                 branches,
                 syncedAt,
+                source: catalog.observed.source,
+                freshness: catalog.observed.freshness,
+                elapsedMs: catalog.observed.elapsedMs,
               },
             };
             return next;
@@ -410,7 +503,12 @@ export function useBranchContext({
     selectedProjectSelection,
     handleSyncBranches,
     branchSyncText: selectedBranchCache
-      ? `最近同步于 ${formatBranchSyncTime(selectedBranchCache.syncedAt)}；进入 Git 或切换项目会自动刷新`
+      ? `最近同步于 ${formatBranchSyncTime(selectedBranchCache.syncedAt)} · ${branchSourceLabel(
+          selectedBranchCache.source,
+          selectedBranchCache.freshness,
+        )} · ${selectedBranchCache.branches.length} 个分支${formatBranchSyncDuration(
+          selectedBranchCache.elapsedMs,
+        )}；进入 Git 或切换项目会自动刷新`
       : "进入 Git 或切换项目时会自动拉取远程分支，也可点右侧刷新图标重试",
   };
 }

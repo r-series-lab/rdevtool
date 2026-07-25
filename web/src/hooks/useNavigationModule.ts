@@ -32,7 +32,7 @@ type NavigationData = {
   categories: NavigationCategory[];
 };
 
-const NAVIGATION_TYPE_OPTIONS = ["全部", "网站", "目录", "工具"] as const;
+const NAVIGATION_TYPE_OPTIONS = ["全部", "网站", "目录", "文件", "工具"] as const;
 type NavigationTypeFilter = (typeof NAVIGATION_TYPE_OPTIONS)[number];
 
 function matchesNavigationType(entry: NavigationEntry, filter: NavigationTypeFilter) {
@@ -41,6 +41,8 @@ function matchesNavigationType(entry: NavigationEntry, filter: NavigationTypeFil
       return entry.kind === "url";
     case "目录":
       return entry.kind === "directory";
+    case "文件":
+      return entry.kind === "file";
     case "工具":
       return entry.kind === "app" || entry.kind === "script" || entry.kind === "tool";
     default:
@@ -90,6 +92,7 @@ export function useNavigationModule({
       全部: 0,
       网站: 0,
       目录: 0,
+      文件: 0,
       工具: 0,
     };
     for (const category of allNavigationCategories) {
@@ -99,6 +102,8 @@ export function useNavigationModule({
           counts["网站"] += 1;
         } else if (entry.kind === "directory") {
           counts["目录"] += 1;
+        } else if (entry.kind === "file") {
+          counts["文件"] += 1;
         } else if (entry.kind === "app") {
           counts["工具"] += 1;
         } else if (entry.kind === "script") {

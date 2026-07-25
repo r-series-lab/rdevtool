@@ -1,7 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { ConfigSource } from "../app-types";
+import type {
+  BuildHistoryEntry,
+  ConfigSource,
+  MergeHistoryEntry,
+  OperationEventEntry,
+} from "../app-types";
 import { deleteStoredJson, getStoredJson, setStoredJson } from "../lib/storage";
 import {
   configSourcesChangedActivities,
@@ -19,9 +24,12 @@ import {
 import { disposeTauriListener } from "../lib/tauriEvents";
 import {
   BUILD_STATUS_SYNC_MAX_FAILURES,
+  activityRequiresAttention,
   createActivityEntry,
+  enrichBranchActivityFailureDetails,
   isBuildActivityKind,
   normalizeActivityEntries,
+  stableActivityJson,
   type ActivityBulkUpdater,
   type ActivityDraft,
   type ActivityEntry,
@@ -29,11 +37,20 @@ import {
   type ActivityPatch,
   type ActivityStatus,
 } from "../lib/activityCenter";
+import {
+  activityVisibleWithPreferences,
+  type ConfigActivityVisibility,
+} from "../lib/activityPreferences";
+import { reconcileHistoryActivities } from "../lib/historyActivities";
 
 const ACTIVITY_STORAGE_NAMESPACE = "activity-center";
 const ACTIVITY_STORAGE_KEY = "items";
+const ACTIVITY_HISTORY_CURSOR_KEY = "history-cursor";
+const BRANCH_WORKFLOW_STORAGE_NAMESPACE = "branch-workflow";
+const BRANCH_WORKFLOW_HISTORY_KEY = "history";
 const MAX_ACTIVITY_ITEMS = 60;
 const BUILD_STATUS_SYNC_LIMIT = 5;
+const HISTORY_ACTIVITY_SYNC_INTERVAL_MS = 5_000;
 const URL_LIKE_PATTERN = /^https?:\/\//i;
 const JENKINS_QUEUE_PATTERN = /\/queue\/item\//i;
 
@@ -41,6 +58,7 @@ type UseActivityCenterOptions = {
   setError: (value: string) => void;
   projectKeys?: string[];
   includeAllProjects?: boolean;
+  configActivityVisibility?: ConfigActivityVisibility;
 };
 
 type BuildStatusResponse = {
@@ -58,6 +76,35 @@ type BuildStatusSyncOptions = {
 type ActivityNormalizeOptions = {
   expireStaleRunning?: boolean;
 };
+
+function historyActivityTimestamp(value?: string | null) {
+  const normalized = value?.trim() ?? "";
+  if (!normalized) {
+    return 0;
+  }
+  const timestamp = Date.parse(
+    /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(normalized)
+      ? `${normalized.replace(" ", "T")}Z`
+      : normalized,
+  );
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function normalizedHistoryCursor(value: unknown) {
+  const cursor = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(cursor) && cursor > 0 ? cursor : 0;
+}
+
+function latestHistoryTimestamp(
+  buildHistory: BuildHistoryEntry[],
+  mergeHistory: MergeHistoryEntry[],
+) {
+  return Math.max(
+    0,
+    ...buildHistory.map((item) => historyActivityTimestamp(item.updatedAt)),
+    ...mergeHistory.map((item) => historyActivityTimestamp(item.createdAt)),
+  );
+}
 
 function normalizedActivityLink(value?: string | null) {
   return value?.trim() ?? "";
@@ -326,7 +373,7 @@ function activityMatchesScope(
   projectKeys: Set<string>,
   includeAllProjects: boolean,
 ) {
-  if (includeAllProjects || item.kind === "config") {
+  if (includeAllProjects || item.kind === "config" || item.kind === "link") {
     return true;
   }
   const projectKey = activityProjectKey(item);
@@ -345,8 +392,13 @@ function sameActivityAction(left: ActivityEntry["action"], right: ActivityEntry[
   return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
 }
 
+function sameActivityValue(left: unknown, right: unknown) {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
 function shouldApplyActivityPatch(item: ActivityEntry, patch: ActivityPatch) {
   if (patch.kind !== undefined && patch.kind !== item.kind) return true;
+  if (patch.origin !== undefined && patch.origin !== item.origin) return true;
   if (patch.status !== undefined && patch.status !== item.status) return true;
   if (patch.title !== undefined && patch.title !== item.title) return true;
   if (patch.summary !== undefined && patch.summary !== item.summary) return true;
@@ -358,6 +410,18 @@ function shouldApplyActivityPatch(item: ActivityEntry, patch: ActivityPatch) {
   if (patch.chainLabel !== undefined && patch.chainLabel !== item.chainLabel) return true;
   if (patch.projectKey !== undefined && patch.projectKey !== item.projectKey) return true;
   if (patch.projectName !== undefined && patch.projectName !== item.projectName) return true;
+  if (patch.parameters !== undefined && !sameActivityValue(patch.parameters, item.parameters)) {
+    return true;
+  }
+  if (patch.diagnostics !== undefined && !sameActivityValue(patch.diagnostics, item.diagnostics)) {
+    return true;
+  }
+  if (patch.warnings !== undefined && !sameActivityValue(patch.warnings, item.warnings)) {
+    return true;
+  }
+  if (patch.target !== undefined && !sameActivityValue(patch.target, item.target)) {
+    return true;
+  }
   if (
     patch.syncFailureCount !== undefined &&
     patch.syncFailureCount !== item.syncFailureCount
@@ -376,34 +440,36 @@ function shouldApplyActivityPatch(item: ActivityEntry, patch: ActivityPatch) {
   return false;
 }
 
-function acknowledgedRunningSummary(item: ActivityEntry) {
-  const originalSummary = item.summary.trim();
-  return originalSummary
-    ? `已结束关注 · 原状态：${originalSummary}`
-    : "已结束关注";
-}
-
 export function useActivityCenter({
   setError,
   projectKeys = [],
   includeAllProjects = true,
+  configActivityVisibility = "actionable",
 }: UseActivityCenterOptions) {
   const [allItems, setAllItems] = useState<ActivityEntry[]>([]);
   const [activityStorageHydrated, setActivityStorageHydrated] = useState(false);
   const itemsRef = useRef<ActivityEntry[]>([]);
+  const historyCursorRef = useRef(0);
   const persistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const buildStatusSyncInFlightRef = useRef(false);
   const projectKeySet = useMemo(() => new Set(projectKeys), [projectKeys]);
 
   const scopedItems = useMemo(
     () =>
-      allItems.filter((item) =>
-        activityMatchesScope(item, projectKeySet, includeAllProjects),
+      allItems.filter(
+        (item) =>
+          activityMatchesScope(item, projectKeySet, includeAllProjects) &&
+          activityVisibleWithPreferences(item, {
+            version: 1,
+            configActivityVisibility,
+          }),
       ),
-    [allItems, includeAllProjects, projectKeySet],
+    [allItems, configActivityVisibility, includeAllProjects, projectKeySet],
   );
 
   const stats = useMemo(
     () => ({
+      attention: scopedItems.filter(activityRequiresAttention).length,
       running: scopedItems.filter(
         (item) => item.status === "running" && !isBuildStatusSyncNotice(item),
       ).length,
@@ -470,6 +536,9 @@ export function useActivityCenter({
     sourceItems: ActivityEntry[],
     options: BuildStatusSyncOptions = {},
   ) => {
+    if (buildStatusSyncInFlightRef.current) {
+      return;
+    }
     const targets = sourceItems
       .map((item) => ({
         item,
@@ -485,33 +554,38 @@ export function useActivityCenter({
       return;
     }
 
-    for (const { item, request } of targets) {
-      try {
-        const result = await invoke<BuildStatusResponse>("refresh_build_status", {
-          request,
-        });
-        patchStoredActivity(item.id, {
-          status: activityStatusFromBuildState(result.stateKey),
-          summary: `${result.stateLabel} · ${result.detail}`,
-          detail: result.buildUrl || result.queueUrl || item.detail || null,
-          resource: buildRecordResource(result) || item.resource || null,
-          syncFailureCount: 0,
-          acknowledgedAt: null,
-        });
-      } catch (reason) {
-        const failureCount = Math.min(
-          buildSyncFailureCount(item) + 1,
-          BUILD_STATUS_SYNC_MAX_FAILURES,
-        );
-        patchStoredActivity(item.id, {
-          status: "failed",
-          summary: syncFailureSummary(failureCount),
-          detail: compactSyncError(reason),
-          resource: item.resource ?? null,
-          syncFailureCount: failureCount,
-          acknowledgedAt: item.acknowledgedAt || new Date().toISOString(),
-        });
+    buildStatusSyncInFlightRef.current = true;
+    try {
+      for (const { item, request } of targets) {
+        try {
+          const result = await invoke<BuildStatusResponse>("refresh_build_status", {
+            request,
+          });
+          patchStoredActivity(item.id, {
+            status: activityStatusFromBuildState(result.stateKey),
+            summary: `${result.stateLabel} · ${result.detail}`,
+            detail: result.buildUrl || result.queueUrl || item.detail || null,
+            resource: buildRecordResource(result) || item.resource || null,
+            syncFailureCount: 0,
+            acknowledgedAt: null,
+          });
+        } catch (reason) {
+          const failureCount = Math.min(
+            buildSyncFailureCount(item) + 1,
+            BUILD_STATUS_SYNC_MAX_FAILURES,
+          );
+          patchStoredActivity(item.id, {
+            status: "failed",
+            summary: syncFailureSummary(failureCount),
+            detail: compactSyncError(reason),
+            resource: item.resource ?? null,
+            syncFailureCount: failureCount,
+            acknowledgedAt: item.acknowledgedAt || new Date().toISOString(),
+          });
+        }
       }
+    } finally {
+      buildStatusSyncInFlightRef.current = false;
     }
   }, [patchStoredActivity]);
 
@@ -519,26 +593,131 @@ export function useActivityCenter({
     await syncStoredBuildStatuses(scopedItems, options);
   }, [scopedItems, syncStoredBuildStatuses]);
 
+  const syncPersistedHistoryActivities = useCallback(async () => {
+    const [buildHistory, mergeHistory, branchHistory, operationHistory] =
+      await Promise.all([
+        invoke<BuildHistoryEntry[]>("list_build_history").catch(() => []),
+        invoke<MergeHistoryEntry[]>("list_merge_history").catch(() => []),
+        getStoredJson<unknown>(
+          BRANCH_WORKFLOW_STORAGE_NAMESPACE,
+          BRANCH_WORKFLOW_HISTORY_KEY,
+        ).catch(() => []),
+        invoke<OperationEventEntry[]>("list_operation_event_history").catch(
+          () => [],
+        ),
+      ]);
+    const cursor = historyCursorRef.current;
+    const nextBuildHistory = buildHistory.filter(
+      (item) => historyActivityTimestamp(item.updatedAt) > cursor,
+    );
+    const nextMergeHistory = mergeHistory.filter(
+      (item) => historyActivityTimestamp(item.createdAt) > cursor,
+    );
+    const next = normalizeActivityList(
+      reconcileHistoryActivities(
+        itemsRef.current,
+        nextBuildHistory,
+        nextMergeHistory,
+        branchHistory,
+        operationHistory,
+      ),
+    );
+    if (stableActivityJson(next) !== stableActivityJson(itemsRef.current)) {
+      persist(next);
+    }
+    const latestTimestamp = latestHistoryTimestamp(buildHistory, mergeHistory);
+    if (latestTimestamp > cursor) {
+      historyCursorRef.current = latestTimestamp;
+      await enqueueStorageOperation(() =>
+        setStoredJson(
+          ACTIVITY_STORAGE_NAMESPACE,
+          ACTIVITY_HISTORY_CURSOR_KEY,
+          latestTimestamp,
+        ),
+      );
+    }
+    await syncStoredBuildStatuses(next);
+    return next;
+  }, [enqueueStorageOperation, persist, syncStoredBuildStatuses]);
+
   useEffect(() => {
     let cancelled = false;
-    void getStoredJson<unknown>(ACTIVITY_STORAGE_NAMESPACE, ACTIVITY_STORAGE_KEY)
-      .then((stored) => {
-        if (cancelled) {
-          return;
-        }
-        const normalized = normalizeActivityList(stored, { expireStaleRunning: true });
-        itemsRef.current = normalized;
-        setAllItems(normalized);
-        void enqueueStorageOperation(() =>
-          setStoredJson(
-            ACTIVITY_STORAGE_NAMESPACE,
-            ACTIVITY_STORAGE_KEY,
-            normalized,
-          ),
-        );
-        void syncStoredBuildStatuses(normalized);
-        setActivityStorageHydrated(true);
-      })
+    void Promise.all([
+      getStoredJson<unknown>(ACTIVITY_STORAGE_NAMESPACE, ACTIVITY_STORAGE_KEY),
+      getStoredJson<unknown>(
+        ACTIVITY_STORAGE_NAMESPACE,
+        ACTIVITY_HISTORY_CURSOR_KEY,
+      ).catch(() => 0),
+      getStoredJson<unknown>(
+        BRANCH_WORKFLOW_STORAGE_NAMESPACE,
+        BRANCH_WORKFLOW_HISTORY_KEY,
+      ).catch(() => null),
+      invoke<BuildHistoryEntry[]>("list_build_history").catch(() => []),
+      invoke<MergeHistoryEntry[]>("list_merge_history").catch(() => []),
+      invoke<OperationEventEntry[]>("list_operation_event_history").catch(
+        () => [],
+      ),
+    ])
+      .then(
+        ([
+          stored,
+          storedCursor,
+          branchHistory,
+          buildHistory,
+          mergeHistory,
+          operationHistory,
+        ]) => {
+          if (cancelled) {
+            return;
+          }
+          const cursor = normalizedHistoryCursor(storedCursor);
+          const nextBuildHistory = cursor
+            ? buildHistory.filter(
+                (item) => historyActivityTimestamp(item.updatedAt) > cursor,
+              )
+            : buildHistory;
+          const nextMergeHistory = cursor
+            ? mergeHistory.filter(
+                (item) => historyActivityTimestamp(item.createdAt) > cursor,
+              )
+            : mergeHistory;
+          const normalized = enrichBranchActivityFailureDetails(
+            normalizeActivityList(
+              reconcileHistoryActivities(
+                normalizeActivityList(stored, { expireStaleRunning: true }),
+                nextBuildHistory,
+                nextMergeHistory,
+                branchHistory,
+                operationHistory,
+              ),
+              { expireStaleRunning: true },
+            ),
+            branchHistory,
+          );
+          itemsRef.current = normalized;
+          historyCursorRef.current = Math.max(
+            cursor,
+            latestHistoryTimestamp(buildHistory, mergeHistory),
+          );
+          setAllItems(normalized);
+          void enqueueStorageOperation(() =>
+            Promise.all([
+              setStoredJson(
+                ACTIVITY_STORAGE_NAMESPACE,
+                ACTIVITY_STORAGE_KEY,
+                normalized,
+              ),
+              setStoredJson(
+                ACTIVITY_STORAGE_NAMESPACE,
+                ACTIVITY_HISTORY_CURSOR_KEY,
+                historyCursorRef.current,
+              ),
+            ]).then(() => undefined),
+          );
+          void syncStoredBuildStatuses(normalized);
+          setActivityStorageHydrated(true);
+        },
+      )
       .catch((reason) => {
         if (!cancelled) {
           setError(String(reason));
@@ -551,8 +730,51 @@ export function useActivityCenter({
     };
   }, [enqueueStorageOperation, setError, syncStoredBuildStatuses]);
 
+  useEffect(() => {
+    if (!activityStorageHydrated) {
+      return;
+    }
+    let disposed = false;
+    let syncInFlight = false;
+
+    const sync = () => {
+      if (disposed || syncInFlight || document.visibilityState === "hidden") {
+        return;
+      }
+      syncInFlight = true;
+      void syncPersistedHistoryActivities()
+        .catch((reason) => {
+          if (!disposed) {
+            setError(`同步操作历史失败：${String(reason)}`);
+          }
+        })
+        .finally(() => {
+          syncInFlight = false;
+        });
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        sync();
+      }
+    };
+
+    sync();
+    const timer = window.setInterval(sync, HISTORY_ACTIVITY_SYNC_INTERVAL_MS);
+    window.addEventListener("focus", sync);
+    document.addEventListener("visibilitychange", handleVisibilityChange);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", sync);
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+    };
+  }, [activityStorageHydrated, setError, syncPersistedHistoryActivities]);
+
   const recordActivity = useCallback((draft: ActivityDraft) => {
-    const entry = createActivityEntry(draft);
+    const entry = createActivityEntry({
+      ...draft,
+      origin: draft.origin ?? "app",
+    });
     persist([entry, ...itemsRef.current.filter((item) => item.id !== entry.id)]);
     return entry.id;
   }, [persist]);
@@ -722,15 +944,6 @@ export function useActivityCenter({
             acknowledgedAt: item.acknowledgedAt || now,
           };
         }
-        if (item.status === "running") {
-          return {
-            ...item,
-            status: "info" as ActivityStatus,
-            summary: acknowledgedRunningSummary(item),
-            acknowledgedAt: item.acknowledgedAt || now,
-            updatedAt: now,
-          };
-        }
         return item;
       }),
     );
@@ -741,6 +954,15 @@ export function useActivityCenter({
   }, [acknowledgeActivities]);
 
   const clearActivities = useCallback(async () => {
+    const clearedAt = Date.now();
+    historyCursorRef.current = Math.max(historyCursorRef.current, clearedAt);
+    await enqueueStorageOperation(() =>
+      setStoredJson(
+        ACTIVITY_STORAGE_NAMESPACE,
+        ACTIVITY_HISTORY_CURSOR_KEY,
+        historyCursorRef.current,
+      ),
+    );
     if (includeAllProjects) {
       itemsRef.current = [];
       setAllItems([]);

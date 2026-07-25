@@ -1,9 +1,5 @@
 import { useEffect, useState, type MouseEvent, type ReactNode } from "react";
-import {
-  Button,
-  Menu,
-  MenuItem,
-} from "@mui/material";
+import { Button } from "@mui/material";
 import type { PageKey } from "../app-shell";
 import type {
   AppExitRuntimePolicy,
@@ -14,7 +10,6 @@ import type {
 import type { ActivityEntry } from "../lib/activityCenter";
 import type { AppStyleMode } from "../theme";
 import {
-  CheckIcon,
   CollapseIcon,
   ExpandIcon,
   FolderIcon,
@@ -29,6 +24,10 @@ import { ActivityCenter } from "./ActivityCenter";
 import { AppToast } from "./AppToast";
 import { SettingsPanel, type SettingsSection } from "./SettingsPanel";
 import { OPEN_SETTINGS_EVENT } from "./settingsEvents";
+import {
+  WorkspaceSwitcherMenu,
+  workspaceDisplayName,
+} from "./WorkspaceSwitcherMenu";
 
 type NavItem = {
   key: PageKey;
@@ -442,7 +441,7 @@ export function AppShellLayout({
               onClick={openWorkspaceMenu}
               title={
                 activeProjectWorkspace
-                  ? `${activeProjectWorkspace.name} · 切换工作区`
+                  ? `${workspaceDisplayName(activeProjectWorkspace)} · 切换工作区`
                   : "切换工作区"
               }
             >
@@ -450,60 +449,19 @@ export function AppShellLayout({
                 <AppWindowIcon fontSize="small" />
               </span>
               <span className="workspace-switcher-name">
-                {activeProjectWorkspace?.name ?? "工作区"}
+                {workspaceDisplayName(activeProjectWorkspace)}
               </span>
               <ExpandIcon className="workspace-switcher-chevron" fontSize="small" />
             </button>
-            <Menu
+            <WorkspaceSwitcherMenu
               anchorEl={workspaceMenuAnchor}
-              open={workspaceMenuOpen}
+              workspaces={projectWorkspaces}
+              activeWorkspaceKey={activeProjectWorkspaceKey}
+              switchingWorkspaceKey={workspaceSwitchingKey}
               onClose={closeWorkspaceMenu}
-              anchorOrigin={{ vertical: "top", horizontal: "left" }}
-              transformOrigin={{ vertical: "bottom", horizontal: "left" }}
-              MenuListProps={{
-                "aria-label": "切换工作区",
-                className: "workspace-menu-list",
-              }}
-              slotProps={{
-                paper: {
-                  className: "workspace-menu-paper",
-                },
-              }}
-            >
-              {projectWorkspaces.map((workspace) => {
-                const selected = workspace.key === activeProjectWorkspaceKey;
-                const switching = workspace.key === workspaceSwitchingKey;
-                return (
-                  <MenuItem
-                    key={workspace.key}
-                    className={`workspace-menu-item${selected ? " is-active" : ""}`}
-                    selected={selected}
-                    disabled={switching}
-                    onClick={() => void selectProjectWorkspace(workspace.key)}
-                  >
-                    <span className="workspace-menu-item-copy">
-                      <span className="workspace-menu-item-name">{workspace.name}</span>
-                      <span className="workspace-menu-item-meta">
-                        {workspace.projectScopeLabel}
-                      </span>
-                    </span>
-                    {selected ? (
-                      <CheckIcon className="workspace-menu-item-check" fontSize="small" />
-                    ) : null}
-                  </MenuItem>
-                );
-              })}
-              <MenuItem
-                className="workspace-menu-item workspace-menu-item--manage"
-                onClick={openWorkspaceWorkbenchFromMenu}
-              >
-                <span className="workspace-menu-item-copy">
-                  <span className="workspace-menu-item-name">工作区设置...</span>
-                  <span className="workspace-menu-item-meta">范围、目录与入口配置</span>
-                </span>
-                <SettingsIcon className="workspace-menu-item-check" fontSize="small" />
-              </MenuItem>
-            </Menu>
+              onSelect={(workspaceKey) => void selectProjectWorkspace(workspaceKey)}
+              onManage={openWorkspaceWorkbenchFromMenu}
+            />
           </div>
         ) : null}
       </aside>

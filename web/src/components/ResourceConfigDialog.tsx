@@ -50,6 +50,7 @@ const NAVIGATION_ENTRY_KIND_OPTIONS: Array<{
 }> = [
   { value: "url", label: "网站" },
   { value: "directory", label: "目录" },
+  { value: "file", label: "文件" },
   { value: "app", label: "应用" },
   { value: "script", label: "脚本" },
   { value: "tool", label: "工具" },
@@ -670,10 +671,10 @@ export function ResourceConfigDialog({
     }
   }
 
-  async function chooseDirectory(categoryIndex: number, entryIndex: number) {
+  async function choosePath(categoryIndex: number, entryIndex: number, directory: boolean) {
     const entry = editor?.categories[categoryIndex]?.entries[entryIndex];
     const selected = await openDialog({
-      directory: true,
+      directory,
       multiple: false,
       defaultPath: entry?.path ?? undefined,
     });
@@ -1045,12 +1046,13 @@ export function ResourceConfigDialog({
       );
     }
 
-    if (entry.kind === "directory") {
+    if (entry.kind === "directory" || entry.kind === "file") {
+      const directory = entry.kind === "directory";
       return (
         <div className="settings-path-field settings-form-grid-wide">
           <TextField
             size="small"
-            label="目录路径"
+            label={directory ? "目录路径" : "文件路径"}
             value={entry.path ?? ""}
             onChange={(event) =>
               updateEntryAt(categoryIndex, entryIndex, { path: event.target.value })
@@ -1060,7 +1062,7 @@ export function ResourceConfigDialog({
             variant="outlined"
             color="inherit"
             startIcon={<FolderIcon fontSize="small" />}
-            onClick={() => void chooseDirectory(categoryIndex, entryIndex)}
+            onClick={() => void choosePath(categoryIndex, entryIndex, directory)}
             disabled={saving}
           >
             选择
@@ -1276,8 +1278,8 @@ export function ResourceConfigDialog({
   }
 
   function navigationEntryTargetSummary(entry: NavigationEditorEntry) {
-    if (entry.kind === "directory") {
-      return entry.path?.trim() || "未配置目录路径";
+    if (entry.kind === "directory" || entry.kind === "file") {
+      return entry.path?.trim() || (entry.kind === "directory" ? "未配置目录路径" : "未配置文件路径");
     }
     if (entry.kind === "app") {
       return entry.bundleId?.trim() || entry.appName?.trim() || "未配置应用";
@@ -1299,7 +1301,7 @@ export function ResourceConfigDialog({
     if (!entry.name.trim()) {
       return false;
     }
-    if (entry.kind === "directory") {
+    if (entry.kind === "directory" || entry.kind === "file") {
       return Boolean(entry.path?.trim());
     }
     if (entry.kind === "app") {
@@ -1347,6 +1349,8 @@ export function ResourceConfigDialog({
             ? "网"
             : entry.kind === "directory"
               ? "目"
+              : entry.kind === "file"
+                ? "文"
               : entry.kind === "app"
                 ? "应"
                 : entry.kind === "script"

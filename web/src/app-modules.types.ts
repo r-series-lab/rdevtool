@@ -10,6 +10,7 @@ import type {
   BranchPushStatus,
   BranchTaskHistoryEntry,
   BranchTaskReplayRequest,
+  BranchTaskResponse,
   BranchWorkflowMode,
   BranchWorktreeSummary,
   AppExitRuntimePolicy,
@@ -26,6 +27,7 @@ import type {
 import type { BuildRequest } from "./hooks/useBuildContext";
 import type { BuildReplayOptions } from "./hooks/useBuildHistoryState";
 import type { WorkflowSignalsState } from "./hooks/useWorkflowSignals";
+import type { ActivityRecorder, ActivityUpdater } from "./lib/activityCenter";
 import type { WorkflowProjectReplay } from "./lib/workflowSignals";
 import type { AppStyleMode } from "./theme";
 import type { BuildPageProps } from "./pages/BuildPage";
@@ -142,6 +144,8 @@ export type MergeModuleContext = {
   mode: BranchWorkflowMode;
   setMode: Dispatch<SetStateAction<BranchWorkflowMode>>;
   projectOptions: Array<{ key: string; name: string }>;
+  syncProjects: string[];
+  setSyncProjects: Dispatch<SetStateAction<string[]>>;
   syncSource: string;
   setSyncSource: Dispatch<SetStateAction<string>>;
   syncTargets: string[];
@@ -188,6 +192,7 @@ export type MergeModuleContext = {
   handleChooseCheckoutDirectory: () => Promise<void>;
   handleChooseWorktreeDirectory: () => Promise<void>;
   handleRepairWorktree: (repoPath?: string) => Promise<void>;
+  handlePlanSync: () => Promise<BranchTaskResponse | null>;
   handleExecuteSync: () => Promise<void>;
   handleExecuteCreate: () => Promise<void>;
   handleExecuteCheckout: () => Promise<void>;
@@ -240,8 +245,8 @@ export type ProjectsModuleContext = {
     projectKey: string,
     debugProfileKey?: string,
     envOverrides?: Record<string, string>,
-  ) => Promise<void>;
-  handleStopRuntime: (projectKey: string) => Promise<void>;
+  ) => Promise<boolean>;
+  handleStopRuntime: (projectKey: string) => Promise<boolean>;
   handleAdoptRuntime: (projectKey: string, debugProfileKey?: string) => Promise<void>;
   handleRunBuild: (projectKey: string) => Promise<void>;
   handleStopBuild: (projectKey: string) => Promise<void>;
@@ -255,7 +260,7 @@ export type ProjectsModuleContext = {
       parentId?: string | null;
       stepLabel?: string | null;
     },
-  ) => Promise<void>;
+  ) => Promise<boolean>;
 };
 
 export type ProxyModuleContext = {
@@ -287,6 +292,10 @@ export type BuildModulePropsContext = {
   projectsModule: ProjectsModuleContext;
   proxyModule: ProxyModuleContext;
   workflowSignals: WorkflowSignalsState;
+  activityCenter: {
+    recordActivity: ActivityRecorder;
+    updateActivity: ActivityUpdater;
+  };
   busy: string;
 };
 

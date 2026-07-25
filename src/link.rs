@@ -11,6 +11,9 @@ use crate::config::{
 };
 use crate::config_store::write_config_text_atomic;
 use crate::proxy::{ProxyConfig, ProxyProfile};
+use crate::runtime::{
+    ProjectRuntimeContextSnapshot, ProjectRuntimeLaunchOptions, project_runtime_context_snapshot,
+};
 use crate::ui_profiles::{DEFAULT_LINK_UI_PROFILE, ui_profile_kind};
 
 pub fn default_links_path() -> PathBuf {
@@ -128,8 +131,22 @@ pub struct LinkPlan {
     pub schema_version: u32,
     pub workspace_key: Option<String>,
     pub project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_context: Option<LinkSourceContext>,
     pub steps: Vec<LinkPlanStep>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkSourceContext {
+    pub link_source_id: String,
+    pub link_source_name: String,
+    pub proxy_source_id: String,
+    pub proxy_source_name: String,
+    pub runtime_source_id: String,
+    pub runtime_source_name: String,
+    pub aligned: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -142,6 +159,8 @@ pub struct LinkPlanStep {
     pub summary: String,
     pub status: String,
     pub risks: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<ProjectRuntimeContextSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -452,13 +471,6 @@ pub fn plan_link_config(
         .iter()
         .map(|workspace| workspace.key.as_str())
         .collect::<BTreeSet<_>>();
-    let runtime_profile_keys = app_config
-        .defaults
-        .runtime_profiles
-        .iter()
-        .map(|profile| profile.key.as_str())
-        .collect::<BTreeSet<_>>();
-
     let mut warnings = Vec::new();
     if link.key.trim().is_empty() {
         warnings.push("Link key 为空，建议在 links.toml 中补充唯一 key。".to_string());
@@ -492,17 +504,7 @@ pub fn plan_link_config(
         .steps
         .iter()
         .enumerate()
-        .map(|(index, step)| {
-            plan_step(
-                link,
-                step,
-                index,
-                app_config,
-                proxy_config,
-                &project_keys,
-                &runtime_profile_keys,
-            )
-        })
+        .map(|(index, step)| plan_step(link, step, index, app_config, proxy_config, &project_keys))
         .collect::<Vec<_>>();
 
     LinkPlan {
@@ -513,9 +515,21 @@ pub fn plan_link_config(
         schema_version: link.schema_version.unwrap_or(1),
         workspace_key: link.workspace_key.clone(),
         project: link.project.clone(),
+        source_context: None,
         steps,
         warnings,
     }
+}
+
+pub fn link_proxy_check_status(step_type: &str, running: bool, managed: bool) -> &'static str {
+    if !running {
+        return if step_type == "proxy.start" {
+            "ready"
+        } else {
+            "blocked"
+        };
+    }
+    if managed { "checked" } else { "blocked" }
 }
 
 fn link_summary(
@@ -564,155 +578,199 @@ fn plan_step(
     app_config: &AppConfig,
     proxy_config: &ProxyConfig,
     project_keys: &BTreeSet<&str>,
-    runtime_profile_keys: &BTreeSet<&str>,
 ) -> LinkPlanStep {
     let id = normalize_text(step.id.as_str()).unwrap_or_else(|| format!("step-{}", index + 1));
     let step_type = normalize_text(step.step_type.as_str()).unwrap_or_default();
     let label = step.label.as_deref().and_then(normalize_text);
     let mut risks = Vec::new();
+    let mut runtime = None;
 
-    let (default_label, summary) = match step_type.as_str() {
-        "localFile.ensure" => {
-            let project_key = step
-                .project
-                .as_deref()
-                .and_then(normalize_text)
-                .or_else(|| link.project.as_deref().and_then(normalize_text));
-            let path = step.path.as_deref().and_then(normalize_text);
-            if let Some(project_key) = project_key.as_deref() {
-                if !project_keys.contains(project_key) {
-                    risks.push(format!("项目不存在：{project_key}"));
-                }
-            } else {
-                risks.push("缺少 project，无法确认本地覆盖文件属于哪个项目。".to_string());
-            }
-            if path.is_none() {
-                risks.push("缺少 path，无法定位本地覆盖文件。".to_string());
-            }
-            (
-                "本地覆盖文件".to_string(),
-                match (project_key, path) {
-                    (Some(project_key), Some(path)) => {
-                        format!("确认项目 {project_key} 使用 {path} 作为本地覆盖文件")
+    let (default_label, summary) =
+        match step_type.as_str() {
+            "localFile.ensure" => {
+                let project_key = step
+                    .project
+                    .as_deref()
+                    .and_then(normalize_text)
+                    .or_else(|| link.project.as_deref().and_then(normalize_text));
+                let path = step.path.as_deref().and_then(normalize_text);
+                if let Some(project_key) = project_key.as_deref() {
+                    if !project_keys.contains(project_key) {
+                        risks.push(format!("项目不存在：{project_key}"));
                     }
-                    (_, Some(path)) => format!("确认本地覆盖文件 {path}"),
-                    _ => "确认本地覆盖文件".to_string(),
-                },
-            )
-        }
-        "proxy.start" => {
-            let profile_key = step.profile.as_deref().and_then(normalize_text);
-            let summary = if let Some(profile_key) = profile_key.as_deref() {
-                if let Some(profile) = find_proxy_profile(proxy_config, profile_key) {
-                    format!(
-                        "计划启动代理 {}，监听 {}",
-                        profile.name,
-                        profile.listen_url()
-                    )
                 } else {
-                    risks.push(format!("代理 profile 不存在：{profile_key}"));
-                    format!("计划启动代理 {profile_key}")
+                    risks.push("缺少 project，无法确认本地覆盖文件属于哪个项目。".to_string());
                 }
-            } else {
-                risks.push("缺少 profile，无法定位代理服务。".to_string());
-                "计划启动代理服务".to_string()
-            };
-            ("代理服务".to_string(), summary)
-        }
-        "proxy.check" => {
-            let profile_key = step.profile.as_deref().and_then(normalize_text);
-            if let Some(profile_key) = profile_key.as_deref() {
-                if find_proxy_profile(proxy_config, profile_key).is_none() {
-                    risks.push(format!("代理 profile 不存在：{profile_key}"));
+                if path.is_none() {
+                    risks.push("缺少 path，无法定位本地覆盖文件。".to_string());
                 }
-            } else {
-                risks.push("缺少 profile，无法检查代理服务。".to_string());
+                (
+                    "本地覆盖文件".to_string(),
+                    match (project_key, path) {
+                        (Some(project_key), Some(path)) => {
+                            format!("确认项目 {project_key} 使用 {path} 作为本地覆盖文件")
+                        }
+                        (_, Some(path)) => format!("确认本地覆盖文件 {path}"),
+                        _ => "确认本地覆盖文件".to_string(),
+                    },
+                )
             }
-            ("代理检查".to_string(), "检查代理监听与规则命中".to_string())
-        }
-        "runtime.start" => {
-            let project_key = step
-                .project
-                .as_deref()
-                .and_then(normalize_text)
-                .or_else(|| link.project.as_deref().and_then(normalize_text));
-            let debug_profile = step.debug_profile.as_deref().and_then(normalize_text);
-            let runtime_profile = step.runtime_profile.as_deref().and_then(normalize_text);
+            "proxy.start" => {
+                let profile_key = step.profile.as_deref().and_then(normalize_text);
+                let summary = if let Some(profile_key) = profile_key.as_deref() {
+                    if let Some(profile) = find_proxy_profile(proxy_config, profile_key) {
+                        format!(
+                            "计划启动代理 {}，监听 {}",
+                            profile.name,
+                            profile.listen_url()
+                        )
+                    } else {
+                        risks.push(format!("代理 profile 不存在：{profile_key}"));
+                        format!("计划启动代理 {profile_key}")
+                    }
+                } else {
+                    risks.push("缺少 profile，无法定位代理服务。".to_string());
+                    "计划启动代理服务".to_string()
+                };
+                ("代理服务".to_string(), summary)
+            }
+            "proxy.check" => {
+                let profile_key = step.profile.as_deref().and_then(normalize_text);
+                if let Some(profile_key) = profile_key.as_deref() {
+                    if find_proxy_profile(proxy_config, profile_key).is_none() {
+                        risks.push(format!("代理 profile 不存在：{profile_key}"));
+                    }
+                } else {
+                    risks.push("缺少 profile，无法检查代理服务。".to_string());
+                }
+                ("代理检查".to_string(), "检查代理监听与规则命中".to_string())
+            }
+            "runtime.start" => {
+                let project_key = step
+                    .project
+                    .as_deref()
+                    .and_then(normalize_text)
+                    .or_else(|| link.project.as_deref().and_then(normalize_text));
+                let debug_profile = step.debug_profile.as_deref().and_then(normalize_text);
+                let runtime_profile = step.runtime_profile.as_deref().and_then(normalize_text);
 
-            if let Some(project_key) = project_key.as_deref() {
-                if !project_keys.contains(project_key) {
-                    risks.push(format!("项目不存在：{project_key}"));
-                } else if let Some(debug_profile) = debug_profile.as_deref() {
-                    validate_debug_profile(app_config, project_key, debug_profile, &mut risks);
+                if let Some(project_key) = project_key.as_deref() {
+                    if !project_keys.contains(project_key) {
+                        risks.push(format!("项目不存在：{project_key}"));
+                    }
+                } else {
+                    risks.push("缺少 project，无法定位运行项目。".to_string());
                 }
-            } else {
-                risks.push("缺少 project，无法定位运行项目。".to_string());
-            }
-            if let Some(runtime_profile) = runtime_profile.as_deref() {
-                if !runtime_profile_keys.contains(runtime_profile) {
-                    risks.push(format!("运行配置不存在：{runtime_profile}"));
-                }
-            }
 
-            (
+                if let Some(project_key) = project_key.as_deref()
+                    && project_keys.contains(project_key)
+                {
+                    runtime =
+                        resolve_link_runtime_context(app_config, project_key, step, &mut risks);
+                }
+
+                (
                 "运行配置".to_string(),
-                match (project_key, debug_profile, runtime_profile) {
-                    (Some(project_key), Some(debug_profile), _) => {
+                match (project_key, debug_profile, runtime_profile, runtime.as_ref()) {
+                    (Some(project_key), Some(debug_profile), _, Some(context)) => context
+                        .effective
+                        .target
+                        .as_ref()
+                        .map(|target| {
+                            format!(
+                                "计划用调试配置 {debug_profile} 启动项目 {project_key}，cwd={}",
+                                target.cwd
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            format!("计划用调试配置 {debug_profile} 启动项目 {project_key}")
+                        }),
+                    (Some(project_key), _, Some(runtime_profile), Some(context)) => context
+                        .effective
+                        .target
+                        .as_ref()
+                        .map(|target| {
+                            format!(
+                                "计划用运行配置 {runtime_profile} 启动项目 {project_key}，cwd={}",
+                                target.cwd
+                            )
+                        })
+                        .unwrap_or_else(|| {
+                            format!("计划用运行配置 {runtime_profile} 启动项目 {project_key}")
+                        }),
+                    (Some(project_key), _, _, Some(context)) => context
+                        .effective
+                        .target
+                        .as_ref()
+                        .map(|target| format!("计划启动项目 {project_key}，cwd={}", target.cwd))
+                        .unwrap_or_else(|| format!("计划启动项目 {project_key}")),
+                    (Some(project_key), Some(debug_profile), _, _) => {
                         format!("计划用调试配置 {debug_profile} 启动项目 {project_key}")
                     }
-                    (Some(project_key), _, Some(runtime_profile)) => {
+                    (Some(project_key), _, Some(runtime_profile), _) => {
                         format!("计划用运行配置 {runtime_profile} 启动项目 {project_key}")
                     }
-                    (Some(project_key), _, _) => format!("计划启动项目 {project_key}"),
+                    (Some(project_key), _, _, _) => format!("计划启动项目 {project_key}"),
                     _ => "计划启动项目运行配置".to_string(),
                 },
             )
-        }
-        "runtime.focus" => {
-            let project_key = step
-                .project
-                .as_deref()
-                .and_then(normalize_text)
-                .or_else(|| link.project.as_deref().and_then(normalize_text));
-            if let Some(project_key) = project_key.as_deref() {
-                if !project_keys.contains(project_key) {
-                    risks.push(format!("项目不存在：{project_key}"));
+            }
+            "runtime.focus" => {
+                let project_key = step
+                    .project
+                    .as_deref()
+                    .and_then(normalize_text)
+                    .or_else(|| link.project.as_deref().and_then(normalize_text));
+                if let Some(project_key) = project_key.as_deref() {
+                    if !project_keys.contains(project_key) {
+                        risks.push(format!("项目不存在：{project_key}"));
+                    } else {
+                        runtime =
+                            resolve_link_runtime_context(app_config, project_key, step, &mut risks);
+                    }
+                } else {
+                    risks.push("缺少 project，无法定位要聚焦的项目。".to_string());
                 }
-            } else {
-                risks.push("缺少 project，无法定位要聚焦的项目。".to_string());
+                (
+                    "打开页面".to_string(),
+                    runtime
+                        .as_ref()
+                        .and_then(|context| context.effective.target.as_ref())
+                        .and_then(|target| target.focus_url.as_ref())
+                        .map(|url| format!("计划打开项目调试页面 {url}"))
+                        .unwrap_or_else(|| "计划打开项目调试页面".to_string()),
+                )
             }
-            ("打开页面".to_string(), "计划打开项目调试页面".to_string())
-        }
-        "webAction.open" | "webAction.run" | "webAction.check" => {
-            let action = step
-                .extra
-                .get("action")
-                .and_then(|value| value.as_str())
-                .and_then(normalize_text);
-            if action.is_none() {
-                risks.push("缺少 action，无法定位网页动作。".to_string());
+            "webAction.open" | "webAction.run" | "webAction.check" => {
+                let action = step
+                    .extra
+                    .get("action")
+                    .and_then(|value| value.as_str())
+                    .and_then(normalize_text);
+                if action.is_none() {
+                    risks.push("缺少 action，无法定位网页动作。".to_string());
+                }
+                let default_label = match step_type.as_str() {
+                    "webAction.open" => "打开网页动作",
+                    "webAction.check" => "检查网页动作",
+                    _ => "执行网页动作",
+                };
+                (
+                    default_label.to_string(),
+                    action
+                        .map(|action| format!("计划处理网页动作 {action}"))
+                        .unwrap_or_else(|| "计划处理网页动作".to_string()),
+                )
             }
-            let default_label = match step_type.as_str() {
-                "webAction.open" => "打开网页动作",
-                "webAction.check" => "检查网页动作",
-                _ => "执行网页动作",
-            };
-            (
-                default_label.to_string(),
-                action
-                    .map(|action| format!("计划处理网页动作 {action}"))
-                    .unwrap_or_else(|| "计划处理网页动作".to_string()),
-            )
-        }
-        "" => {
-            risks.push("缺少 type，无法识别步骤类型。".to_string());
-            ("未命名步骤".to_string(), "缺少步骤类型".to_string())
-        }
-        other => {
-            risks.push(format!("暂不支持的步骤类型：{other}"));
-            ("扩展步骤".to_string(), format!("保留扩展步骤 {other}"))
-        }
-    };
+            "" => {
+                risks.push("缺少 type，无法识别步骤类型。".to_string());
+                ("未命名步骤".to_string(), "缺少步骤类型".to_string())
+            }
+            other => {
+                risks.push(format!("暂不支持的步骤类型：{other}"));
+                ("扩展步骤".to_string(), format!("保留扩展步骤 {other}"))
+            }
+        };
 
     LinkPlanStep {
         id,
@@ -725,30 +783,38 @@ fn plan_step(
             "invalid".to_string()
         },
         risks,
+        runtime,
     }
 }
 
-fn validate_debug_profile(
+fn resolve_link_runtime_context(
     app_config: &AppConfig,
     project_key: &str,
-    debug_profile_key: &str,
+    step: &LinkStepConfig,
     risks: &mut Vec<String>,
-) {
-    let Some(project) = app_config
-        .projects
-        .iter()
-        .find(|project| project.key == project_key)
-    else {
-        return;
+) -> Option<ProjectRuntimeContextSnapshot> {
+    let options = ProjectRuntimeLaunchOptions {
+        debug_profile: step.debug_profile.clone(),
+        runtime_profile: step.runtime_profile.clone(),
+        command: step.command.clone(),
+        expected_port: step.expected_port,
+        env: step.env.clone(),
     };
-    if !project
-        .debug_profiles
-        .iter()
-        .any(|profile| profile.key == debug_profile_key)
-    {
-        risks.push(format!(
-            "项目 {project_key} 缺少调试配置：{debug_profile_key}"
-        ));
+    match project_runtime_context_snapshot(app_config, project_key, &options) {
+        Ok(context) => {
+            if !context.status.success {
+                for risk in context.risks.iter().filter(|risk| risk.severity == "error") {
+                    if !risks.contains(&risk.detail) {
+                        risks.push(risk.detail.clone());
+                    }
+                }
+            }
+            Some(context)
+        }
+        Err(error) => {
+            risks.push(error);
+            None
+        }
     }
 }
 
@@ -945,5 +1011,105 @@ mod tests {
         assert_eq!(get_link_from_path(&path, "first").unwrap().name, "First");
         assert_eq!(get_link_from_path(&path, "second").unwrap().name, "Second");
         cleanup(&path);
+    }
+
+    #[test]
+    fn classifies_proxy_start_as_ready_before_the_daemon_is_started() {
+        assert_eq!(
+            link_proxy_check_status("proxy.start", false, false),
+            "ready"
+        );
+    }
+
+    #[test]
+    fn classifies_missing_proxy_check_and_external_listeners_as_blocked() {
+        assert_eq!(
+            link_proxy_check_status("proxy.check", false, false),
+            "blocked"
+        );
+        assert_eq!(
+            link_proxy_check_status("proxy.start", true, false),
+            "blocked"
+        );
+        assert_eq!(
+            link_proxy_check_status("proxy.check", true, false),
+            "blocked"
+        );
+    }
+
+    #[test]
+    fn classifies_managed_proxy_listeners_as_checked() {
+        assert_eq!(
+            link_proxy_check_status("proxy.start", true, true),
+            "checked"
+        );
+        assert_eq!(
+            link_proxy_check_status("proxy.check", true, true),
+            "checked"
+        );
+    }
+
+    #[test]
+    fn runtime_plan_step_exposes_effective_target_and_observed_boundary() {
+        let repo = std::env::temp_dir().join(format!(
+            "rdevtool-link-runtime-context-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&repo).unwrap();
+        let project_key = format!("link-runtime-{}", uuid::Uuid::new_v4());
+        let config: AppConfig = serde_json::from_value(serde_json::json!({
+            "defaults": {},
+            "projects": [{
+                "key": project_key,
+                "name": "Link Runtime",
+                "git_url": "",
+                "repo_path": repo,
+                "dev": { "command": "npm run dev" },
+                "debug_profiles": [{
+                    "key": "h5",
+                    "label": "H5",
+                    "focus_url": "http://127.0.0.1:4173/h5",
+                    "ready_probe": { "path": "/health" }
+                }]
+            }]
+        }))
+        .unwrap();
+        let link = LinkConfig {
+            key: "runtime-link".to_string(),
+            name: "Runtime Link".to_string(),
+            kind: Some("runtime".to_string()),
+            ui_profile: None,
+            schema_version: Some(1),
+            workspace_key: None,
+            project: Some(project_key.clone()),
+            steps: vec![LinkStepConfig {
+                id: "runtime".to_string(),
+                step_type: "runtime.start".to_string(),
+                debug_profile: Some("h5".to_string()),
+                ..LinkStepConfig::default()
+            }],
+        };
+
+        let plan = plan_link_config(&link, &config, &[], &ProxyConfig::default());
+        let step = &plan.steps[0];
+        assert_eq!(step.status, "planned");
+        let runtime = step.runtime.as_ref().expect("runtime context");
+        assert_eq!(runtime.requested.debug_profile_key.as_deref(), Some("h5"));
+        assert_eq!(runtime.status.key, "configured");
+        assert!(runtime.observed.available);
+        let target = runtime.effective.target.as_ref().expect("runtime target");
+        assert_eq!(
+            target.focus_url.as_deref(),
+            Some("http://127.0.0.1:4173/h5")
+        );
+        assert_eq!(
+            target
+                .ready_probe
+                .as_ref()
+                .and_then(|probe| probe.path.as_deref()),
+            Some("/health")
+        );
+
+        std::fs::remove_dir_all(repo).unwrap();
     }
 }

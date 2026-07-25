@@ -24,6 +24,7 @@ const DEFAULT_PROXY_PORT: u16 = 8787;
 const DEFAULT_CAPTURE_BYTES: usize = 4096;
 const PROXY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const PROXY_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+pub const PROXY_VERIFY_ID_HEADER: &str = "x-rdevtool-verify-id";
 
 fn default_profile_id() -> String {
     "default".to_string()
@@ -1084,9 +1085,16 @@ fn handle_proxy_connection(
             .map(|query| format!("?{query}"))
             .as_deref()
             .unwrap_or("");
-    let matched_rule = profile_rules
-        .iter()
-        .find(|rule| rule_matches(rule, &method, target_url.as_str(), &target_url, &headers));
+    let rule_headers = headers_for_rule_match(&headers);
+    let matched_rule = profile_rules.iter().find(|rule| {
+        rule_matches(
+            rule,
+            &method,
+            target_url.as_str(),
+            &target_url,
+            &rule_headers,
+        )
+    });
 
     if let Some(rule) = matched_rule {
         if rule.action.delay_ms() > 0 {
@@ -1260,10 +1268,11 @@ fn handle_connect_tunnel(
     let mut request_headers = headers_to_map(&headers);
     request_headers.insert(":authority".to_string(), target.clone());
     let target_url = Url::parse(&format!("https://{target}/")).ok();
+    let rule_headers = headers_for_rule_match(&headers);
     let matched_rule = target_url.as_ref().and_then(|url| {
         profile_rules
             .iter()
-            .find(|rule| rule_matches(rule, "CONNECT", url.as_str(), url, &headers))
+            .find(|rule| rule_matches(rule, "CONNECT", url.as_str(), url, &rule_headers))
     });
 
     if let Some(rule) = matched_rule {
@@ -1679,6 +1688,14 @@ fn header_value(headers: &[(String, String)], name: &str) -> Option<String> {
         .iter()
         .find(|(header_name, _)| header_name.eq_ignore_ascii_case(name))
         .map(|(_, value)| value.clone())
+}
+
+fn headers_for_rule_match(headers: &[(String, String)]) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter(|(name, _)| !name.eq_ignore_ascii_case(PROXY_VERIFY_ID_HEADER))
+        .cloned()
+        .collect()
 }
 
 fn headers_to_map(headers: &[(String, String)]) -> BTreeMap<String, String> {
@@ -2116,6 +2133,9 @@ fn rewrite_destination_url(target_url: &Url, rule: Option<&ProxyRule>) -> Result
 }
 
 fn should_forward_header(name: &str) -> bool {
+    if name.eq_ignore_ascii_case(PROXY_VERIFY_ID_HEADER) {
+        return false;
+    }
     !matches!(
         name.to_ascii_lowercase().as_str(),
         "host"
@@ -2332,5 +2352,127 @@ mod tests {
 
         assert!(first_status[0].running);
         assert!(!second_status[0].running);
+    }
+
+    #[test]
+    fn verification_header_is_observable_but_does_not_change_rule_matching_or_upstream() {
+        let headers = vec![
+            ("host".to_string(), "example.test".to_string()),
+            (
+                PROXY_VERIFY_ID_HEADER.to_string(),
+                "verification-1".to_string(),
+            ),
+        ];
+        let rule_headers = headers_for_rule_match(&headers);
+        let event_headers = headers_to_map(&headers);
+
+        assert_eq!(rule_headers.len(), 1);
+        assert!(header_value(&rule_headers, PROXY_VERIFY_ID_HEADER).is_none());
+        assert_eq!(
+            event_headers
+                .get(PROXY_VERIFY_ID_HEADER)
+                .map(String::as_str),
+            Some("verification-1")
+        );
+        assert!(!should_forward_header(PROXY_VERIFY_ID_HEADER));
+    }
+
+    #[test]
+    fn live_proxy_records_verification_header_without_matching_it() {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("reserve port")
+            .local_addr()
+            .expect("read port")
+            .port();
+        let dir = std::env::temp_dir().join(format!(
+            "rdevtool-proxy-verification-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create temp config dir");
+        let config_path = dir.join("proxy.toml");
+        let profile = ProxyProfile {
+            id: "verify".to_string(),
+            name: "Verify".to_string(),
+            listen_port: port,
+            ..ProxyProfile::default()
+        };
+        let mock = |name: &str, status: u16| ProxyRuleAction::Mock {
+            status,
+            content_type: "text/plain".to_string(),
+            body: name.to_string(),
+            headers: BTreeMap::new(),
+            delay_ms: 0,
+        };
+        save_proxy_config(
+            &config_path,
+            &ProxyConfig {
+                profiles: vec![profile.clone()],
+                rules: vec![
+                    ProxyRule {
+                        id: "internal-header".to_string(),
+                        profile_id: profile.id.clone(),
+                        enabled: true,
+                        name: "Internal Header".to_string(),
+                        priority: 0,
+                        method: String::new(),
+                        url_contains: String::new(),
+                        path_prefix: String::new(),
+                        header_name: PROXY_VERIFY_ID_HEADER.to_string(),
+                        header_contains: "verification-1".to_string(),
+                        action: mock("header", 418),
+                    },
+                    ProxyRule {
+                        id: "path-rule".to_string(),
+                        profile_id: profile.id.clone(),
+                        enabled: true,
+                        name: "Path Rule".to_string(),
+                        priority: 10,
+                        method: String::new(),
+                        url_contains: String::new(),
+                        path_prefix: "/check".to_string(),
+                        header_name: String::new(),
+                        header_contains: String::new(),
+                        action: mock("path", 204),
+                    },
+                ],
+            },
+        )
+        .expect("save proxy config");
+        let runtime = ProxyRuntimeState::default();
+        runtime
+            .start_profile(config_path.clone(), profile.id.clone())
+            .expect("start proxy");
+
+        let response = reqwest::blocking::Client::new()
+            .get(format!("{}/check", profile.listen_url()))
+            .header(PROXY_VERIFY_ID_HEADER, "verification-1")
+            .send()
+            .expect("send verification request");
+        assert_eq!(response.status().as_u16(), 204);
+
+        let started = Instant::now();
+        let event = loop {
+            if let Some(event) = runtime.events(&config_path, Some(&profile.id)).first() {
+                break event.clone();
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "proxy event was not recorded"
+            );
+            thread::sleep(Duration::from_millis(20));
+        };
+        assert_eq!(event.matched_rule_id.as_deref(), Some("path-rule"));
+        assert_eq!(
+            event
+                .request_headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(PROXY_VERIFY_ID_HEADER))
+                .map(|(_, value)| value.as_str()),
+            Some("verification-1")
+        );
+
+        runtime.stop_profile(&config_path, &profile.id);
+        runtime.clear_events(&config_path, None);
+        fs::remove_dir_all(dir).expect("remove temp proxy config");
     }
 }

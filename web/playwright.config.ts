@@ -14,7 +14,7 @@ export default defineConfig({
   use: {
     baseURL: `http://127.0.0.1:${smokePort}`,
     browserName: "chromium",
-    channel: "chrome",
+    channel: process.env.CI ? undefined : "chrome",
     headless: true,
     viewport: { width: 1280, height: 900 },
     trace: "retain-on-failure",

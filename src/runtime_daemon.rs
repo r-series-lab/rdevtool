@@ -37,6 +37,7 @@ pub struct RuntimeDaemonStartRequest {
     pub runtime_profile: Option<String>,
     pub expected_port: Option<u16>,
     pub ready: RuntimeDaemonReadyConfig,
+    pub ready_probe: Option<RuntimeDaemonHttpReadyConfig>,
     pub log_path: PathBuf,
     pub local_proxy: Option<RuntimeLocalProxySpec>,
 }
@@ -48,6 +49,15 @@ pub struct RuntimeDaemonReadyConfig {
     pub url_patterns: Vec<String>,
     pub success_markers: Vec<String>,
     pub fallback_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeDaemonHttpReadyConfig {
+    pub url: Option<String>,
+    pub path: Option<String>,
+    pub expected_statuses: Vec<u16>,
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -90,6 +100,8 @@ pub struct RuntimeDaemonState {
     pub debug_profile: Option<String>,
     pub runtime_profile: Option<String>,
     pub expected_port: Option<u16>,
+    #[serde(default)]
+    pub ready_probe: Option<RuntimeDaemonHttpReadyConfig>,
     pub ready_url: Option<String>,
     pub daemon_pid: u32,
     pub worker_pid: Option<u32>,
@@ -197,6 +209,8 @@ struct StoredRuntimeDaemonRequest {
     runtime_profile: Option<String>,
     expected_port: Option<u16>,
     ready: RuntimeDaemonReadyConfig,
+    #[serde(default)]
+    ready_probe: Option<RuntimeDaemonHttpReadyConfig>,
     log_path: String,
     local_proxy: Option<RuntimeLocalProxySpec>,
     #[serde(default)]
@@ -399,6 +413,19 @@ pub fn list() -> Result<Vec<RuntimeDaemonStatus>> {
     Ok(statuses)
 }
 
+pub fn find(project_key: &str, run_id: Option<&str>) -> Result<Option<RuntimeDaemonStatus>> {
+    let run_id = run_id.map(str::trim).filter(|value| !value.is_empty());
+    Ok(list()?.into_iter().find(|status| {
+        status.project_key == project_key
+            && run_id.is_none_or(|expected| {
+                status
+                    .state
+                    .as_ref()
+                    .is_some_and(|state| state.run_id == expected)
+            })
+    }))
+}
+
 pub fn stop(project_key: &str, cwd: &Path) -> Result<RuntimeDaemonStatus> {
     let canonical_cwd = canonical_cwd_for_lookup(cwd)?;
     let state_path = runtime_daemon_state_path(project_key, &canonical_cwd);
@@ -533,6 +560,7 @@ pub fn adopt(request: RuntimeDaemonAdoptRequest) -> Result<RuntimeDaemonAdoptRes
                     .map(|port| format!("http://127.0.0.1:{port}"))
             }),
         },
+        ready_probe: None,
         log_path,
         local_proxy: None,
         adopted_process: Some(identity.clone()),
@@ -591,6 +619,7 @@ fn prepare_stored_request(
         runtime_profile: request.runtime_profile,
         expected_port: request.expected_port,
         ready: request.ready,
+        ready_probe: request.ready_probe,
         log_path,
         local_proxy: request.local_proxy,
         adopted_process: None,
@@ -614,6 +643,7 @@ fn run_runtime_daemon_serve(args: RuntimeDaemonServeArgs) -> Result<()> {
         debug_profile: request.debug_profile.clone(),
         runtime_profile: request.runtime_profile.clone(),
         expected_port: request.expected_port,
+        ready_probe: request.ready_probe.clone(),
         ready_url: None,
         daemon_pid: std::process::id(),
         worker_pid: None,
@@ -2024,15 +2054,16 @@ impl Drop for RuntimeDaemonOperationLock {
 mod tests {
     use super::{
         APP_VERSION, DAEMON_MARKER, DAEMON_PROTOCOL_VERSION, ReadyTracker,
-        RuntimeDaemonAdoptRequest, RuntimeDaemonPhase, RuntimeDaemonReadyConfig,
-        RuntimeDaemonServeArgs, RuntimeDaemonStartRequest, RuntimeDaemonStopRequest,
-        STATE_SCHEMA_VERSION, STOP_TIMEOUT, adopt, diagnose, extract_url_with_pattern,
-        inspect_process_identity, list, listening_process, parse_runtime_daemon_args,
-        prepare_stored_request, process_group_is_alive, process_is_alive, read_state,
-        remove_file_if_exists, run_runtime_daemon_serve, runtime_daemon_lock_path,
-        runtime_daemon_log_path, runtime_daemon_request_path, runtime_daemon_state_path,
-        runtime_daemon_stop_path, runtime_status_key, stable_runtime_hash, status, stop,
-        terminate_adopted_process_tree, terminate_groups, write_json_atomic,
+        RuntimeDaemonAdoptRequest, RuntimeDaemonHttpReadyConfig, RuntimeDaemonPhase,
+        RuntimeDaemonReadyConfig, RuntimeDaemonServeArgs, RuntimeDaemonStartRequest,
+        RuntimeDaemonStopRequest, STATE_SCHEMA_VERSION, STOP_TIMEOUT, adopt, diagnose,
+        extract_url_with_pattern, inspect_process_identity, list, listening_process,
+        parse_runtime_daemon_args, prepare_stored_request, process_group_is_alive,
+        process_is_alive, read_state, remove_file_if_exists, run_runtime_daemon_serve,
+        runtime_daemon_lock_path, runtime_daemon_log_path, runtime_daemon_request_path,
+        runtime_daemon_state_path, runtime_daemon_stop_path, runtime_status_key,
+        stable_runtime_hash, status, stop, terminate_adopted_process_tree, terminate_groups,
+        write_json_atomic,
     };
     use crate::config::ProjectLocalProxyConfig;
     use crate::runtime_local_proxy::RuntimeLocalProxySpec;
@@ -2105,6 +2136,12 @@ mod tests {
                 success_markers: Vec::new(),
                 fallback_url: None,
             },
+            ready_probe: Some(RuntimeDaemonHttpReadyConfig {
+                url: Some("http://127.0.0.1:5173/health".to_string()),
+                path: Some("/health".to_string()),
+                expected_statuses: vec![204],
+                timeout_ms: Some(90_000),
+            }),
             log_path: cwd.join("runtime.log"),
             local_proxy: None,
         })
@@ -2116,6 +2153,13 @@ mod tests {
         assert_eq!(
             stored.status_key,
             runtime_status_key("sample", &stored.canonical_cwd)
+        );
+        assert_eq!(
+            stored
+                .ready_probe
+                .as_ref()
+                .map(|probe| probe.expected_statuses.as_slice()),
+            Some([204].as_slice())
         );
         assert!(
             runtime_daemon_state_path("sample", &stored.canonical_cwd)
@@ -2233,6 +2277,7 @@ mod tests {
                 success_markers: Vec::new(),
                 fallback_url: Some(format!("http://127.0.0.1:{port}")),
             },
+            ready_probe: None,
             log_path: cwd.join("dev.log"),
             local_proxy: None,
         })
@@ -2387,6 +2432,7 @@ mod tests {
                 success_markers: Vec::new(),
                 fallback_url: None,
             },
+            ready_probe: None,
             log_path: cwd.join("dev.log"),
             local_proxy: Some(RuntimeLocalProxySpec {
                 project_key: project_key.clone(),

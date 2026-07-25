@@ -74,6 +74,8 @@ function shortcutKindLabel(kind: string) {
       return "工具";
     case "directory":
       return "目录";
+    case "file":
+      return "文件";
     default:
       return "入口";
   }
@@ -83,7 +85,7 @@ function shortcutIcon(kind: string) {
   if (kind === "url") {
     return <WebsiteIcon fontSize="small" />;
   }
-  if (kind === "directory") {
+  if (kind === "directory" || kind === "file") {
     return <FolderIcon fontSize="small" />;
   }
   if (kind === "script") {

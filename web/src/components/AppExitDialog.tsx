@@ -41,7 +41,7 @@ export function AppExitDialog({ onError }: AppExitDialogProps) {
     let unlistenRequested: (() => void) | undefined;
     let unlistenFailed: (() => void) | undefined;
 
-    void Promise.all([
+    void Promise.allSettled([
       listen<AppExitRequestedPayload>(APP_EXIT_REQUESTED_EVENT, (event) => {
         setRequest(event.payload);
         setRemember(false);
@@ -52,14 +52,29 @@ export function AppExitDialog({ onError }: AppExitDialogProps) {
         setBusyPolicy(null);
         onError(event.payload.message);
       }),
-    ]).then(([nextUnlistenRequested, nextUnlistenFailed]) => {
-      if (disposed) {
-        disposeTauriListener(nextUnlistenRequested);
-        disposeTauriListener(nextUnlistenFailed);
-        return;
+    ]).then(([requestedResult, failedResult]) => {
+      const registeredListeners = [
+        [requestedResult, "退出确认"],
+        [failedResult, "退出失败"],
+      ] as const;
+
+      for (const [result, label] of registeredListeners) {
+        if (result.status === "rejected") {
+          if (!disposed) {
+            onError(`监听${label}事件失败：${String(result.reason)}`);
+          }
+          continue;
+        }
+        if (disposed) {
+          disposeTauriListener(result.value);
+          continue;
+        }
+        if (label === "退出确认") {
+          unlistenRequested = result.value;
+        } else {
+          unlistenFailed = result.value;
+        }
       }
-      unlistenRequested = nextUnlistenRequested;
-      unlistenFailed = nextUnlistenFailed;
     });
 
     return () => {

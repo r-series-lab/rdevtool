@@ -380,7 +380,7 @@ function entry_matches_finder_type(entry: NavigationEntry, value: FinderType) {
     case "网站":
       return entry.kind === "url";
     case "目录":
-      return entry.kind === "directory";
+      return entry.kind === "directory" || entry.kind === "file";
     case "工具":
       return entry.kind === "app" || entry.kind === "script" || entry.kind === "tool";
     default:
@@ -528,8 +528,8 @@ export type ProjectsModuleState = {
     projectKey: string,
     debugProfileKey?: string,
     envOverrides?: Record<string, string>,
-  ) => Promise<void>;
-  handleStopRuntime: (projectKey: string) => Promise<void>;
+  ) => Promise<boolean>;
+  handleStopRuntime: (projectKey: string) => Promise<boolean>;
   handleAdoptRuntime: (projectKey: string, debugProfileKey?: string) => Promise<void>;
   handleRunBuild: (projectKey: string) => Promise<void>;
   handleStopBuild: (projectKey: string) => Promise<void>;
@@ -539,7 +539,7 @@ export type ProjectsModuleState = {
   handleReplayProjectWorkflow: (
     replay: WorkflowProjectReplay,
     options?: ProjectWorkflowReplayOptions,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
 };
 
 export function useProjectsModule({
@@ -571,6 +571,9 @@ export function useProjectsModule({
   const finderDataSourceIdRef = useRef("");
   const finderDataPromiseRef = useRef<Promise<void> | null>(null);
   const activeRuntimeKeysRef = useRef<string[]>([]);
+  const runtimeRefreshInFlightRef = useRef(false);
+  const runtimeRefreshRequestIdRef = useRef(0);
+  const runtimeRefreshScopeRef = useRef("");
   const activeBuildActivityIdsRef = useRef<Record<string, string>>({});
   const projectWorkflowReplayOptionsRef = useRef<ProjectWorkflowReplayOptions | null>(null);
   const previousRuntimeStatesRef = useRef<
@@ -584,6 +587,12 @@ export function useProjectsModule({
     () => (Array.isArray(navigationData?.categories) ? navigationData.categories : []),
     [navigationData?.categories],
   );
+
+  useEffect(() => {
+    runtimeRefreshScopeRef.current = `${enabled}:${activeProjectWorkspaceKey}:${navigationConfigSourceId}`;
+    runtimeRefreshRequestIdRef.current += 1;
+    runtimeRefreshInFlightRef.current = false;
+  }, [activeProjectWorkspaceKey, enabled, navigationConfigSourceId]);
 
   const favoriteProjectKeySet = useMemo(
     () => new Set(preferences.favoriteProjectKeys),
@@ -620,7 +629,10 @@ export function useProjectsModule({
       ),
       目录: navigationCategories.reduce(
         (count, category) =>
-          count + category.entries.filter((entry) => entry.kind === "directory").length,
+          count +
+          category.entries.filter(
+            (entry) => entry.kind === "directory" || entry.kind === "file",
+          ).length,
         0,
       ),
       工具: navigationCategories.reduce(
@@ -954,6 +966,15 @@ export function useProjectsModule({
       return;
     }
 
+    if (options?.silent && runtimeRefreshInFlightRef.current) {
+      return;
+    }
+
+    const requestId = runtimeRefreshRequestIdRef.current + 1;
+    const requestScope = `${enabled}:${activeProjectWorkspaceKey}:${navigationConfigSourceId}`;
+    runtimeRefreshRequestIdRef.current = requestId;
+    runtimeRefreshInFlightRef.current = true;
+
     if (!options?.silent) {
       setError("");
     }
@@ -962,14 +983,38 @@ export function useProjectsModule({
         const items = await invoke<unknown>("list_selected_project_runtimes", {
           projects: options.projectKeys,
         });
+        if (
+          requestId !== runtimeRefreshRequestIdRef.current ||
+          requestScope !== runtimeRefreshScopeRef.current
+        ) {
+          return;
+        }
         mergeRuntimeEntries(items);
       } else {
         const items = await invoke<unknown>("list_project_runtimes");
+        if (
+          requestId !== runtimeRefreshRequestIdRef.current ||
+          requestScope !== runtimeRefreshScopeRef.current
+        ) {
+          return;
+        }
         setRuntimeEntries(normalizeRuntimeEntries(items));
       }
-      setError("");
+      if (!options?.silent) {
+        setError("");
+      }
     } catch (reason) {
-      setError(String(reason));
+      if (
+        !options?.silent &&
+        requestId === runtimeRefreshRequestIdRef.current &&
+        requestScope === runtimeRefreshScopeRef.current
+      ) {
+        setError(String(reason));
+      }
+    } finally {
+      if (requestId === runtimeRefreshRequestIdRef.current) {
+        runtimeRefreshInFlightRef.current = false;
+      }
     }
   }
 
@@ -1146,14 +1191,27 @@ export function useProjectsModule({
       });
     }
 
-    const timer = window.setInterval(() => {
-      void refreshProjectRuntimes({
-        silent: true,
-        projectKeys: activeRuntimeKeysRef.current,
-      });
-    }, intervalMs);
+    let disposed = false;
+    let timer: number | undefined;
+    const scheduleNextRefresh = () => {
+      timer = window.setTimeout(async () => {
+        await refreshProjectRuntimes({
+          silent: true,
+          projectKeys: activeRuntimeKeysRef.current,
+        });
+        if (!disposed) {
+          scheduleNextRefresh();
+        }
+      }, intervalMs);
+    };
+    scheduleNextRefresh();
 
-    return () => window.clearInterval(timer);
+    return () => {
+      disposed = true;
+      if (timer !== undefined) {
+        window.clearTimeout(timer);
+      }
+    };
   }, [activeRuntimePollingKey, documentHidden, enabled]);
 
   useEffect(() => {
@@ -1303,7 +1361,7 @@ export function useProjectsModule({
     envOverrides?: Record<string, string>,
   ) {
     if (!projectRuntimePreferencesAllowStart(enabled, preferencesHydrated)) {
-      return;
+      return false;
     }
     const launchPlan = buildProjectRuntimeLaunchPlan({
       projectKey,
@@ -1353,13 +1411,36 @@ export function useProjectsModule({
             status: "failed",
             title: "启动前检查未通过",
             summary: detail,
+            diagnostics: preflight.checks.map((check) => ({
+              id: check.key,
+              type: `runtime.preflight.${check.category || "check"}`,
+              label: check.title,
+              status: check.statusKey === "error" ? "failed" : "checked",
+              summary: check.detail || check.statusLabel,
+              risks: check.statusKey === "error" && check.detail
+                ? [check.detail]
+                : [],
+            })),
+            action: {
+              kind: "runtimeRecover",
+              label: "检查并重新启动",
+              projectKey,
+              projectName: runtimeProjectName(projectKey),
+              debugProfileKey: selectedDebugProfile || null,
+              envOverrides: hasExplicitEnvOverrides
+                ? normalizedEnvOverrides
+                : null,
+              replayAction: "start",
+            },
           });
         }
         setError(detail);
-        return;
+        return false;
       }
       const updated = await invoke<ProjectRuntimeEntry>("start_project_runtime", {
         ...launchPlan.startArgs,
+        activityId: activityId || null,
+        operationOrigin: "app",
       });
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
@@ -1373,25 +1454,60 @@ export function useProjectsModule({
         },
       );
       if (activityId) {
+        const status = runtimeStartActivityStatus(updated.statusKey);
         updateActivity?.(activityId, {
-          status: runtimeStartActivityStatus(updated.statusKey),
+          status,
           title: runtimeStartActivityTitle(updated.statusKey),
           summary: runtimeStartActivitySummary(updated),
           detail: updated.logPath || null,
           projectName: updated.name,
           resource: localPathResource("打开日志", updated.logPath),
+          action: status === "failed"
+            ? {
+                kind: "runtimeRecover",
+                label: "检查并重新启动",
+                projectKey,
+                projectName: updated.name,
+                debugProfileKey: selectedDebugProfile || null,
+                envOverrides: hasExplicitEnvOverrides
+                  ? normalizedEnvOverrides
+                  : null,
+                replayAction: "start",
+              }
+            : null,
         });
       }
+      return runtimeStartActivityStatus(updated.statusKey) === "success";
     } catch (reason) {
       if (activityId) {
         updateActivity?.(activityId, {
           status: "failed",
           summary: "dev 服务启动失败",
           detail: String(reason),
+          diagnostics: [{
+            id: `runtime:start:${projectKey}`,
+            type: "runtime.start",
+            label: runtimeProjectName(projectKey),
+            status: "failed",
+            summary: "dev 服务启动失败",
+            risks: [String(reason)],
+          }],
+          action: {
+            kind: "runtimeRecover",
+            label: "检查并重新启动",
+            projectKey,
+            projectName: runtimeProjectName(projectKey),
+            debugProfileKey: selectedDebugProfile || null,
+            envOverrides: hasExplicitEnvOverrides
+              ? normalizedEnvOverrides
+              : null,
+            replayAction: "start",
+          },
         });
       }
       setError(String(reason));
       await loadProjectRuntimes();
+      return false;
     } finally {
       setBusy("");
     }
@@ -1399,7 +1515,7 @@ export function useProjectsModule({
 
   async function handleStopRuntime(projectKey: string) {
     if (!enabled) {
-      return;
+      return false;
     }
 
     setBusy("正在停止 dev 服务");
@@ -1419,6 +1535,8 @@ export function useProjectsModule({
     try {
       const updated = await invoke<ProjectRuntimeEntry>("stop_project_runtime", {
         project: projectKey,
+        activityId: activityId || null,
+        operationOrigin: "app",
       });
       replaceRuntimeEntry(projectKey, updated);
       syncActivities?.(
@@ -1442,18 +1560,36 @@ export function useProjectsModule({
           detail: updated.logPath || null,
           projectName: updated.name,
           resource: localPathResource("打开日志", updated.logPath),
+          action: null,
         });
       }
+      return true;
     } catch (reason) {
       if (activityId) {
         updateActivity?.(activityId, {
           status: "failed",
           summary: "dev 服务停止失败",
           detail: String(reason),
+          diagnostics: [{
+            id: `runtime:stop:${projectKey}`,
+            type: "runtime.stop",
+            label: runtimeProjectName(projectKey),
+            status: "failed",
+            summary: "dev 服务停止失败",
+            risks: [String(reason)],
+          }],
+          action: {
+            kind: "runtimeRecover",
+            label: "检查并重新停止",
+            projectKey,
+            projectName: runtimeProjectName(projectKey),
+            replayAction: "stop",
+          },
         });
       }
       setError(String(reason));
       await loadProjectRuntimes();
+      return false;
     } finally {
       setBusy("");
     }
@@ -1488,6 +1624,8 @@ export function useProjectsModule({
         project: projectKey,
         pid: runtime.pid,
         debugProfile: selectedDebugProfile || null,
+        activityId: activityId || null,
+        operationOrigin: "app",
       });
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
@@ -1677,6 +1815,7 @@ export function useProjectsModule({
     try {
       const updated = await invoke<ProjectRuntimeEntry>("open_project_build_output", {
         project: projectKey,
+        outputDir: null,
       });
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
@@ -1859,23 +1998,21 @@ export function useProjectsModule({
     try {
       if (replay.action === "finder.shortcut.open") {
         if (replay.shortcut) {
-          await handleOpenFinderEntry(replay.shortcut.entry);
+          return await handleOpenFinderEntry(replay.shortcut.entry);
         }
-        return;
+        return false;
       }
 
       const projectKey = replay.projectKey ?? "";
       if (!projectKey) {
-        return;
+        return false;
       }
 
       switch (replay.action) {
         case "project.runtime.start":
-          await handleStartRuntime(projectKey);
-          break;
+          return await handleStartRuntime(projectKey);
         case "project.runtime.stop":
-          await handleStopRuntime(projectKey);
-          break;
+          return await handleStopRuntime(projectKey);
         case "project.build.run":
           await handleRunBuild(projectKey);
           break;
@@ -1892,6 +2029,7 @@ export function useProjectsModule({
           await handleOpenProjectDirectory(projectKey);
           break;
       }
+      return true;
     } finally {
       projectWorkflowReplayOptionsRef.current = previousOptions;
     }

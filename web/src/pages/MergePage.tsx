@@ -20,6 +20,7 @@ import type {
   BranchPushAction,
   BranchPushStatus,
   BranchTaskHistoryEntry,
+  BranchTaskResponse,
   BranchWorkflowMode,
   BranchWorktreeSummary,
   ProjectWorkspaceSummary,
@@ -67,6 +68,8 @@ export type MergePageProps = {
   onProjectChange: (projectKey: string) => void;
   mode: BranchWorkflowMode;
   onModeChange: (mode: BranchWorkflowMode) => void;
+  syncProjects: string[];
+  onSyncProjectsChange: (values: string[]) => void;
   syncSource: string;
   onSyncSourceChange: (value: string) => void;
   onClearSyncSource: () => void;
@@ -118,6 +121,7 @@ export type MergePageProps = {
   currentBranchTaskHistoryId: string;
   currentBranchTaskRunningLabel: string;
   branchTaskHistory: BranchTaskHistoryEntry[];
+  onPlanSync: () => Promise<BranchTaskResponse | null>;
   onExecuteSync: () => void;
   onExecuteCreate: () => void;
   onExecuteCheckout: () => void;
@@ -162,6 +166,16 @@ function formatBranchUpdatedAt(item?: BranchOption) {
 
 function normalizeBranchValues(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+}
+
+export function branchSyncPlanCounts(plan: BranchTaskResponse) {
+  return {
+    ready: plan.items.filter((item) => item.statusKey === "ready").length,
+    failed: plan.items.filter((item) => !item.success).length,
+    skipped: plan.items.filter(
+      (item) => item.success && item.statusKey !== "ready",
+    ).length,
+  };
 }
 
 function branchPushFileStatusLabel(item: BranchPushFileStatusItem) {
@@ -712,6 +726,8 @@ export function MergePage({
   onProjectChange,
   mode,
   onModeChange,
+  syncProjects,
+  onSyncProjectsChange,
   syncSource,
   onSyncSourceChange,
   onClearSyncSource,
@@ -763,6 +779,7 @@ export function MergePage({
   currentBranchTaskHistoryId,
   currentBranchTaskRunningLabel,
   branchTaskHistory,
+  onPlanSync,
   onExecuteSync,
   onExecuteCreate,
   onExecuteCheckout,
@@ -808,11 +825,15 @@ export function MergePage({
     () => projects.filter((project) => createProjects.includes(project.key)),
     [createProjects, projects],
   );
+  const selectedSyncProjectOptions = useMemo(
+    () => projects.filter((project) => syncProjects.includes(project.key)),
+    [projects, syncProjects],
+  );
   const pushStatusStale = Boolean(
     pushStatusUpdatedAtMs && nowMs - pushStatusUpdatedAtMs > PUSH_STATUS_STALE_MS,
   );
   const syncReady =
-    Boolean(selectedProject) &&
+    syncProjects.length > 0 &&
     hasExplicitBranchValues({
       sourceBranch: syncSource,
       targetBranches: syncTargets,
@@ -987,7 +1008,7 @@ export function MergePage({
     }
     event.preventDefault();
     if (mode === "sync") {
-      onExecuteSync();
+      void handleExecuteSyncClick();
     } else if (mode === "create") {
       onExecuteCreate();
     } else if (mode === "checkout") {
@@ -1000,6 +1021,74 @@ export function MergePage({
       }
     } else {
       onExecutePush();
+    }
+  }
+
+  async function handleExecuteSyncClick() {
+    const plan = await onPlanSync();
+    if (!plan) {
+      return;
+    }
+
+    const counts = branchSyncPlanCounts(plan);
+    const visibleItems = plan.items.slice(0, 12);
+    const hiddenCount = Math.max(0, plan.items.length - visibleItems.length);
+    const confirmed = await confirm({
+      title:
+        counts.ready > 0
+          ? `确认合并 ${counts.ready} 项？`
+          : "没有可执行的合并项",
+      description: (
+        <Stack spacing={1.1}>
+          <Typography variant="body2">
+            可合并 {counts.ready} 项
+            {counts.skipped > 0 ? ` · 跳过 ${counts.skipped} 项` : ""}
+            {counts.failed > 0 ? ` · 阻止 ${counts.failed} 项` : ""}
+          </Typography>
+          <Stack spacing={0}>
+            {visibleItems.map((item, index) => (
+              <Box
+                key={`${item.projectKey}-${item.targetBranch ?? "-"}-${index}`}
+                sx={{
+                  display: "grid",
+                  gridTemplateColumns: "minmax(0, 1fr) auto",
+                  gap: 0.8,
+                  alignItems: "center",
+                  py: 0.75,
+                  borderBottom: index < visibleItems.length - 1 ? "1px solid" : "none",
+                  borderColor: "divider",
+                }}
+              >
+                <Box minWidth={0}>
+                  <Typography variant="body2" fontWeight={700} noWrap>
+                    {item.projectName}
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
+                    {item.sourceBranch} → {item.targetBranch || "-"} · {item.summary}
+                  </Typography>
+                </Box>
+                <Chip
+                  size="small"
+                  label={item.statusLabel}
+                  color={item.statusKey === "ready" ? "success" : item.success ? "default" : "error"}
+                  variant="outlined"
+                />
+              </Box>
+            ))}
+          </Stack>
+          {hiddenCount > 0 ? (
+            <Typography variant="caption" color="text.secondary">
+              另有 {hiddenCount} 项结果
+            </Typography>
+          ) : null}
+        </Stack>
+      ),
+      confirmLabel: counts.ready > 0 ? "开始合并" : "知道了",
+      cancelLabel: counts.ready > 0 ? "取消" : "关闭",
+      preferenceKey: counts.ready > 0 ? "branch.mutate" : undefined,
+    });
+    if (confirmed && counts.ready > 0) {
+      onExecuteSync();
     }
   }
 
@@ -1084,6 +1173,7 @@ export function MergePage({
       confirmLabel: partial
         ? `提交 ${pushCommitPreviewFiles.length} 个文件并推送`
         : "提交全部并推送",
+      preferenceKey: "branch.mutate",
     });
     if (confirmed) {
       onExecutePush();
@@ -1100,20 +1190,21 @@ export function MergePage({
 
             {mode === "sync" ? (
               <Stack spacing={0.85}>
-                <FormControl fullWidth>
-                  <InputLabel>项目</InputLabel>
-                  <Select
-                    value={selectedProject}
-                    label="项目"
-                    onChange={(event: SelectChangeEvent<string>) => onProjectChange(event.target.value)}
-                  >
-                    {projects.map((project) => (
-                      <MenuItem key={project.key} value={project.key}>
-                        {project.name} ({project.key})
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
+                <Autocomplete<ProjectOption, true, false, false>
+                  multiple
+                  fullWidth
+                  disableCloseOnSelect
+                  options={projects}
+                  value={selectedSyncProjectOptions}
+                  getOptionLabel={(option) => `${option.name} (${option.key})`}
+                  isOptionEqualToValue={(option, value) => option.key === value.key}
+                  onChange={(_, values) => onSyncProjectsChange(values.map((item) => item.key))}
+                  renderInput={(params) => {
+                    const { ref: inputRef, ...inputProps } = params.inputProps;
+
+                    return <TextField {...params} inputRef={inputRef} inputProps={inputProps} label="项目" />;
+                  }}
+                />
                 <BranchInput
                   label="源分支"
                   value={syncSource}
@@ -1147,7 +1238,7 @@ export function MergePage({
                         inputRef={inputRef}
                         inputProps={inputProps}
                         label="目标分支"
-                        helperText="合并模式不会自动创建缺失目标分支"
+                        helperText="执行前会逐项目校验远端源分支和目标分支"
                         sx={{
                           "& .MuiOutlinedInput-root": {
                             pr: 9.5,
@@ -1240,11 +1331,11 @@ export function MergePage({
                 />
                 <Button
                   variant="contained"
-                  onClick={onExecuteSync}
+                  onClick={() => void handleExecuteSyncClick()}
                   disabled={actionDisabled}
                   sx={{ minHeight: 34, borderRadius: "11px" }}
                 >
-                  执行合并
+                  批量合并
                 </Button>
               </Stack>
             ) : null}

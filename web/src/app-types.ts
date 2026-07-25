@@ -35,6 +35,24 @@ export type BuildHistoryEntry = {
 
 export type DeployHistoryEntry = BuildHistoryEntry;
 
+export type MergeHistoryEntry = {
+  historyKey: string;
+  workspaceKey?: string | null;
+  projectInstancePath?: string | null;
+  projectKey: string;
+  projectName: string;
+  sourceBranch: string;
+  targetBranch: string;
+  success: boolean;
+  remote: boolean;
+  summary: string;
+  detail: string;
+  mergedCommit?: string | null;
+  sourceCommit?: CommitInfo | null;
+  targetCommit?: CommitInfo | null;
+  createdAt: string;
+};
+
 export type BranchWorkflowMode = "sync" | "create" | "checkout" | "switch" | "push";
 
 export type BranchPushAction = "pushOnly" | "commitAndPush";
@@ -105,6 +123,8 @@ export type BranchTaskItemResult = {
   sourceBranch: string;
   targetBranch?: string | null;
   outputPath?: string | null;
+  checkoutMode?: "worktree" | "clone" | null;
+  fallbackReason?: string | null;
   success: boolean;
   statusKey: string;
   statusLabel: string;
@@ -144,6 +164,25 @@ export type BranchTaskHistoryEntry = BranchTaskResponse & {
   replay?: BranchTaskReplayRequest | null;
 };
 
+export type OperationEventEntry = {
+  version: number;
+  id: string;
+  origin: "app" | "cli" | "tray";
+  workspaceKey: string;
+  domain: string;
+  action: string;
+  state: "running" | "success" | "failed" | "info";
+  title: string;
+  summary: string;
+  detail: string;
+  projectKey?: string | null;
+  projectName?: string | null;
+  relatedHistoryKeys: string[];
+  payload?: unknown;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type WorkspaceAppPreferences = {
   styleMode: string;
   defaultPage?: PageKey | null;
@@ -166,6 +205,10 @@ export type ProjectWorkspaceSummary = {
   includeAllProjects: boolean;
   includeAllNavigation: boolean;
   rootDir?: string | null;
+  resourceDir?: string | null;
+  worklogPath?: string | null;
+  worklogExists: boolean;
+  worklogAutoRecord: boolean;
   workspaceKind: string;
   projectScopeLabel: string;
   navigationScopeLabel: string;
@@ -183,6 +226,10 @@ export type CreateProjectWorkspacePayload = {
   description?: string | null;
   workspaceType?: string | null;
   rootDir?: string | null;
+  resourceDir?: string | null;
+  worklogFile?: string | null;
+  createWorklog: boolean;
+  worklogAutoRecord: boolean;
   independentDir: boolean;
   copyCurrent: boolean;
   copyFromWorkspaceKey?: string | null;
@@ -200,6 +247,10 @@ export type InitDemandWorkspacePayload = {
   project?: string | null;
   branch?: string | null;
   rootDir?: string | null;
+  resourceDir?: string | null;
+  worklogFile?: string | null;
+  createWorklog: boolean;
+  worklogAutoRecord: boolean;
   requirementCategory?: string | null;
   requirementShortLabel?: string | null;
   requirementEntryName?: string | null;
@@ -220,6 +271,16 @@ export type InitDemandWorkspaceResult = {
     shortLabel: string;
     name: string;
     path: string;
+  };
+  resources: {
+    workspaceKey: string;
+    workspaceName: string;
+    resourceDir: string;
+    worklogFile: string;
+    worklogPath: string;
+    worklogExists: boolean;
+    worklogCreated: boolean;
+    autoRecordEnabled: boolean;
   };
   branch: {
     expected?: string | null;
@@ -244,6 +305,9 @@ export type ProjectWorkspaceEditorDraft = {
   workspaceType: string;
   workspaceTypeLabel: string;
   rootDir?: string | null;
+  resourceDir?: string | null;
+  worklogFile?: string | null;
+  worklogAutoRecord: boolean;
   includeAllProjects: boolean;
   includeAllNavigation: boolean;
   projects: string[];
@@ -568,7 +632,10 @@ export type ProjectDebugProfileDraft = {
   key: string;
   label: string;
   command?: string | null;
+  cwd?: string | null;
   expectedPort?: number | null;
+  focusUrl?: string | null;
+  readyProbe?: ProjectDebugReadyProbeDraft | null;
   runtimeProfile?: string | null;
   envText: string;
   localFiles: ProjectDebugLocalFileDraft[];
@@ -578,6 +645,13 @@ export type ProjectDebugProfileDraft = {
   browserArgsText: string;
   networkProxy: ProjectNetworkProxyDraft;
   localProxy: ProjectLocalProxyDraft;
+};
+
+export type ProjectDebugReadyProbeDraft = {
+  url?: string | null;
+  path?: string | null;
+  expectedStatuses: number[];
+  timeoutMs?: number | null;
 };
 
 export type DeployParamConfigKind = "select" | "boolean" | "branch" | "text" | "hidden";
@@ -591,6 +665,7 @@ export type DeployParamConfigSummary = {
   required: boolean;
   trueValue?: string | null;
   falseValue?: string | null;
+  impactPaths: string[];
 };
 
 export type DeployTargetConfigSummary = {
@@ -600,6 +675,7 @@ export type DeployTargetConfigSummary = {
   actionKind: "build" | "deploy" | "package" | "release";
   jenkinsProfile: string;
   jobName: string;
+  artifactOutputDir?: string | null;
   params: DeployParamConfigSummary[];
 };
 
@@ -631,7 +707,10 @@ export type ProjectDebugProfileSummary = {
   key: string;
   label: string;
   command?: string | null;
+  cwd?: string | null;
   expectedPort?: number | null;
+  focusUrl?: string | null;
+  readyProbe?: ProjectDebugReadyProbeDraft | null;
   runtimeProfile?: string | null;
   env: Record<string, string>;
   envCount: number;
@@ -728,6 +807,194 @@ export type ProjectRuntimePreflightCheck = {
   action?: string | null;
 };
 
+export type OperationStatus = {
+  key: string;
+  label: string;
+  success: boolean;
+  terminal: boolean;
+  detail: string;
+};
+
+export type OperationEvidence = {
+  kind: string;
+  source: string;
+  detail: string;
+};
+
+export type OperationRisk = {
+  code: string;
+  severity: string;
+  detail: string;
+};
+
+export type BranchCatalogResponse = {
+  requested: {
+    project: string;
+  };
+  effective: {
+    repoPath?: string | null;
+    strategy: string[];
+    localFetchTimeoutMs: number;
+    gitlabTimeoutMs: number;
+    remoteTimeoutMs: number;
+  };
+  observed: {
+    source: string;
+    freshness: string;
+    branchCount: number;
+    elapsedMs: number;
+    attempts: Array<{
+      source: string;
+      status: string;
+      elapsedMs: number;
+      detail: string;
+    }>;
+  };
+  status: OperationStatus;
+  evidence: OperationEvidence[];
+  risks: OperationRisk[];
+  recommendedActions: RecommendedAction[];
+  branches: BranchOption[];
+};
+
+export type ManagedArtifact = {
+  kind: string;
+  path: string;
+  ownership: string;
+  lifecycle: string;
+};
+
+export type ManagedArtifactRecord = {
+  id: string;
+  source: string;
+  artifact: ManagedArtifact;
+  workspaceKey?: string | null;
+  projectKey?: string | null;
+  runId?: string | null;
+  scopePath?: string | null;
+  exists: boolean;
+  objectType: string;
+  active: boolean;
+  ownershipVerified: boolean;
+  detail: string;
+};
+
+export type ManagedArtifactReference = {
+  kind: string;
+  path: string;
+  source: string;
+  workspaceKey?: string | null;
+  projectKey?: string | null;
+  exists: boolean;
+  ownership: string;
+  reason: string;
+};
+
+export type ManagedArtifactInventoryResponse = {
+  schemaVersion: number;
+  requested: {
+    workspace?: string | null;
+    allWorkspaces: boolean;
+    project?: string | null;
+    kinds: string[];
+  };
+  effective: {
+    workspaceKeys: string[];
+    project?: string | null;
+    kinds: string[];
+    collectors: string[];
+  };
+  observed: {
+    artifacts: ManagedArtifactRecord[];
+    references: ManagedArtifactReference[];
+    summary: {
+      artifactCount: number;
+      existingCount: number;
+      missingCount: number;
+      activeCount: number;
+      referenceCount: number;
+    };
+  };
+  status: OperationStatus;
+  evidence: OperationEvidence[];
+  risks: OperationRisk[];
+  managedArtifacts: ManagedArtifact[];
+  recommendedActions: RecommendedAction[];
+};
+
+export type RecommendedAction = {
+  command: string;
+  reason: string;
+  risk: string;
+};
+
+export type ProjectRuntimeReadyProbeSummary = {
+  url?: string | null;
+  path?: string | null;
+  expectedStatuses: number[];
+  timeoutMs?: number | null;
+};
+
+export type ProjectRuntimeTargetSummary = {
+  command: string;
+  commandSource: string;
+  cwd: string;
+  cwdSource: string;
+  expectedPort?: number | null;
+  expectedPortSource?: string | null;
+  focusUrl?: string | null;
+  focusUrlSource?: string | null;
+  readyProbe?: ProjectRuntimeReadyProbeSummary | null;
+};
+
+export type ProjectRuntimeContextRequest = {
+  projectKey: string;
+  debugProfileKey?: string | null;
+  runtimeProfileKey?: string | null;
+  command?: string | null;
+  expectedPort?: number | null;
+  envKeys: string[];
+};
+
+export type ProjectRuntimeContextEffective = {
+  debugProfileKey?: string | null;
+  debugProfileLabel?: string | null;
+  runtimeProfileKey?: string | null;
+  runtimeProfileLabel?: string | null;
+  target?: ProjectRuntimeTargetSummary | null;
+};
+
+export type ProjectRuntimeSessionObservation = {
+  runId?: string | null;
+  phase: string;
+  running: boolean;
+  managed: boolean;
+  adopted: boolean;
+  cwd: string;
+  expectedPort?: number | null;
+  readyUrl?: string | null;
+  readyProbe?: ProjectRuntimeReadyProbeSummary | null;
+  daemonPid?: number | null;
+  workerPid?: number | null;
+  startedAtMs?: number | null;
+  logPath?: string | null;
+};
+
+export type ProjectRuntimeContextSnapshot = {
+  schemaVersion: number;
+  requested: ProjectRuntimeContextRequest;
+  effective: ProjectRuntimeContextEffective;
+  observed: {
+    available: boolean;
+    sessions: ProjectRuntimeSessionObservation[];
+  };
+  status: OperationStatus;
+  evidence: OperationEvidence[];
+  risks: OperationRisk[];
+  managedArtifacts: ManagedArtifact[];
+  recommendedActions: RecommendedAction[];
+};
+
 export type ProjectRuntimePreflightResponse = {
   projectKey: string;
   projectName: string;
@@ -738,6 +1005,7 @@ export type ProjectRuntimePreflightResponse = {
   statusKey: "ok" | "warning" | "error" | string;
   statusLabel: string;
   summary: string;
+  target?: ProjectRuntimeTargetSummary | null;
   checks: ProjectRuntimePreflightCheck[];
 };
 
@@ -752,6 +1020,39 @@ export type ProjectRuntimeInspectResponse = {
   statusKey: string;
   statusLabel: string;
   summary: string;
+  target?: ProjectRuntimeTargetSummary | null;
+  environment: {
+    statusKey: "detected" | "partial" | "unavailable" | string;
+    cwd?: string | null;
+    packageJson?: {
+      path: string;
+      name?: string | null;
+      packageManager?: string | null;
+    } | null;
+    nodeVersion?: {
+      value: string;
+      source: string;
+      path?: string | null;
+    } | null;
+    dev: {
+      configuredCommand?: string | null;
+      scriptName?: string | null;
+      scriptCommand?: string | null;
+      packageManager?: string | null;
+      vite: boolean;
+    };
+    port: {
+      effectivePort?: number | null;
+      source?: string | null;
+      confidence: string;
+      suggestedPort?: number | null;
+    };
+    viteConfig?: {
+      path: string;
+      evaluated: boolean;
+    } | null;
+    diagnostics: string[];
+  };
   envPreview: Array<{
     key: string;
     value: string;
@@ -1060,6 +1361,15 @@ export type LinkPlan = {
   schemaVersion: number;
   workspaceKey?: string | null;
   project?: string | null;
+  sourceContext?: {
+    linkSourceId: string;
+    linkSourceName: string;
+    proxySourceId: string;
+    proxySourceName: string;
+    runtimeSourceId: string;
+    runtimeSourceName: string;
+    aligned: boolean;
+  } | null;
   steps: LinkPlanStep[];
   warnings: string[];
 };
@@ -1071,6 +1381,7 @@ export type LinkPlanStep = {
   summary: string;
   status: "planned" | "invalid" | string;
   risks: string[];
+  runtime?: ProjectRuntimeContextSnapshot | null;
 };
 
 export type LinkExecutionReport = {
@@ -1086,13 +1397,21 @@ export type LinkExecutionStepReport = {
   id: string;
   type: string;
   label: string;
-  status: "checked" | "started" | "stopped" | "skipped" | "failed" | string;
+  status:
+    | "ready"
+    | "blocked"
+    | "checked"
+    | "started"
+    | "stopped"
+    | "skipped"
+    | "failed"
+    | string;
   summary: string;
   detail?: unknown;
   risks: string[];
 };
 
-export type NavigationEditorEntryKind = "url" | "directory" | "app" | "script" | "tool";
+export type NavigationEditorEntryKind = "url" | "directory" | "file" | "app" | "script" | "tool";
 
 export type NavigationEditorEntry = {
   name: string;

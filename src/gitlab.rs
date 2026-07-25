@@ -6,7 +6,7 @@ use reqwest::Url;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone)]
 pub struct ApiMergeResult {
@@ -263,6 +263,21 @@ pub fn available_branch_activity(
     api_base_override: Option<&str>,
     token: &str,
 ) -> Result<Vec<git::BranchActivity>> {
+    available_branch_activity_with_timeout(
+        project_git_url,
+        api_base_override,
+        token,
+        Duration::from_secs(20),
+    )
+}
+
+pub fn available_branch_activity_with_timeout(
+    project_git_url: &str,
+    api_base_override: Option<&str>,
+    token: &str,
+    total_timeout: Duration,
+) -> Result<Vec<git::BranchActivity>> {
+    let started = Instant::now();
     let token = token.trim();
     if token.is_empty() {
         bail!("GitLab token 为空");
@@ -278,7 +293,7 @@ pub fn available_branch_activity(
     let project_path = project_path_from_git_url(project_git_url)?;
     let encoded_project = encode_project_path(&project_path);
     let client = Client::builder()
-        .timeout(Duration::from_secs(20))
+        .connect_timeout(total_timeout.min(Duration::from_secs(4)))
         .build()
         .context("failed to build GitLab HTTP client")?;
 
@@ -287,11 +302,19 @@ pub fn available_branch_activity(
     let mut branches = Vec::new();
 
     loop {
+        let remaining = total_timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            bail!(
+                "GitLab branch listing timed out after {}ms",
+                total_timeout.as_millis()
+            );
+        }
         let page_value = page.to_string();
         let response = client
             .get(&url)
             .header("PRIVATE-TOKEN", token)
             .query(&[("per_page", "100"), ("page", page_value.as_str())])
+            .timeout(remaining)
             .send()
             .with_context(|| format!("failed to query GitLab branches: {url}"))?;
 

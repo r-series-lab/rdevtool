@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { BranchOption } from "../app-types";
+import type { BranchOption, CommitInfo } from "../app-types";
 
 export type BuildContextStatus = "idle" | "loading" | "ready" | "error";
 
@@ -44,11 +44,34 @@ export type BuildPlan = {
   command?: string | null;
   cwd?: string | null;
   outputDir?: string | null;
+  requested?: Record<string, unknown>;
+  effective?: Record<string, unknown>;
+  observed?: {
+    commit?: CommitInfo | null;
+    changedPaths?: string[];
+  };
+  ignoredInputs?: unknown[];
+  status?: {
+    key: string;
+    label: string;
+    success: boolean;
+    terminal: boolean;
+    detail: string;
+  };
+  risks?: Array<{
+    code: string;
+    severity: string;
+    detail: string;
+  }>;
 };
 
 export type BuildRequest = {
   project: string;
   target: string | null;
+  variant?: boolean;
+  env?: string | null;
+  branch?: string | null;
+  extraParams?: Record<string, string>;
   params: Record<string, string>;
 };
 

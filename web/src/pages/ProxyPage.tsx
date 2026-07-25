@@ -976,6 +976,7 @@ export function ProxyPage({
       description: `删除“${profile.name}”后，相关规则和记录也会被移除。`,
       confirmLabel: "删除",
       tone: "danger",
+      preferenceKey: "destructive.delete",
     });
     if (!confirmed) {
       return;
@@ -1054,6 +1055,7 @@ export function ProxyPage({
       description: `删除“${rule.name}”？`,
       confirmLabel: "删除",
       tone: "danger",
+      preferenceKey: "destructive.delete",
     });
     if (!confirmed) {
       return;
@@ -1079,6 +1081,7 @@ export function ProxyPage({
         title: "导入代理包",
         description: "导入会创建一个新的代理服务，并把包内规则归属到新服务，不会覆盖现有服务。",
         confirmLabel: "导入",
+        preferenceKey: "configuration.import",
       });
       if (!confirmed) {
         return;

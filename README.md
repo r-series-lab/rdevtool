@@ -1,7 +1,7 @@
 # rDevTool
 
 <p align="center">
-  <a href="#中文">中文</a> · <a href="#english">English</a>
+  <a href="#中文">中文</a> · <a href="README_EN.md">English</a>
 </p>
 
 ---
@@ -21,8 +21,9 @@
 - **Git 工作流**：查看分支、同步多目标分支、创建分支、切换分支、检出到目录、合并预览、合并、推送前检查和推送。
 - **构建任务**：从项目配置生成构建计划，支持 Jenkins、本地命令和 R 系列桌面应用打包 adapter，并保留构建历史与重放入口。
 - **本地代理**：维护代理 profile、规则、Mock、转发、阻断和导入导出，可绑定到运行时 profile。
-- **项目运行时**：检查、预检、启动、查看、停止、重启和诊断由 App 与 CLI 共享 daemon 托管的项目运行时，支持状态恢复、外部进程检测、受限认领评估、进程归属校验、聚焦页面与读取运行日志。
-- **活动中心**：集中显示构建、Git、运行时和外部配置变更；连续执行按最新一次结果呈现外层状态，同时保留每次明细、页面记录和安全重放入口。
+- **项目运行时**：检查、预检、启动、查看、停止、重启和诊断由 App 与 CLI 共享 daemon 托管的项目运行时；项目详情和 Link 计划/检查会直接展示有效运行目标与当前 daemon 观测，支持状态恢复、外部进程检测、受限认领评估、进程归属校验、聚焦页面与读取运行日志。
+- **托管产物**：按工作区和项目盘点 rDevTool 明确拥有的工作区实例、Runtime 状态与日志，并把仅被配置引用的路径单独列出；可生成带活动状态、Git 工作树和目录边界检查的只读清理计划。
+- **活动中心**：集中显示构建、Git、Runtime、代理、Link 和外部配置变更；连续执行按最新一次结果呈现外层状态，同时保留每次明细、结构化诊断和“检查并重试”入口。
 - **系统托盘**：以工作区作为一级菜单，按入口、项目、代理、Link、构建和 Git 组织二级/三级快捷动作；支持打开工作区、固定动作和重复上次操作。
 - **命令面板**：使用 `Cmd/Ctrl + K` 快速搜索项目、入口和常用动作。
 - **工作流信号**：把分支、构建、运行时等动作串起来，用规则接收或广播可重放的工作流。
@@ -38,8 +39,10 @@ npm run dev
 常用检查：
 
 ```bash
-npm run rust-check
-npm run web:build
+npm run manifest:check
+npm run ipc:check
+npm run check
+npm run check:full
 cargo run --quiet -- --json doctor
 ```
 
@@ -48,6 +51,8 @@ cargo run --quiet -- --json doctor
 ```bash
 npm run build
 ```
+
+macOS 打包会在 Tauri 构建后编译 Icon Composer 资源并重建 DMG，本机需要完整 Xcode；GitHub 发布工作流使用相同根构建命令。
 
 清理：
 
@@ -62,18 +67,17 @@ npm run clean:all
 
 ```bash
 cargo run --quiet -- --json info
-cargo run --quiet -- --json doctor
-cargo run --quiet -- --json agent context --limit 6
+cargo run --quiet -- --json agent context --for workspace --compact
 ```
 
 安装或放入 `PATH` 后：
 
 ```bash
 rdevtool --json info
-rdevtool --json doctor
 rdevtool --json agent capabilities
-rdevtool --json agent context --limit 6
+rdevtool --json agent context --project <project> --for runtime --compact --debug-profile <profile>
 rdevtool --json workspace list
+rdevtool --json workspace init-demand --name "需求" --project <project> --branch <branch> --requirement-dir /path/to/requirement --root-dir /path/to/workspace --copy-mode worktree --dry-run
 rdevtool --json projects list
 rdevtool --json navigation search Jenkins
 rdevtool --json config-source list
@@ -82,7 +86,10 @@ rdevtool --json link list
 rdevtool --json link plan <link-key>
 rdevtool --json proxy list
 rdevtool --json runtime status --project <project>
+rdevtool --json runtime inspect --project <project> --debug-profile <profile>
 rdevtool --json runtime list --running-only
+rdevtool --json runtime log --project <project> --current
+rdevtool --json runtime wait --project <project> --run-id <run-id> --until http-verified
 rdevtool --json history replay-plan <action-id>
 ```
 
@@ -103,6 +110,8 @@ rDevTool 首次运行会在本机配置目录生成默认配置：
 - macOS: `~/Library/Application Support/rDevTool/`
 - Linux: `~/.config/rDevTool/`
 - 本地历史数据库：`~/.rdevtool/rdevtool.sqlite`
+
+SQLite 使用 `PRAGMA user_version` 执行只向前迁移；新版本不会尝试打开比自身更新的数据库结构。
 
 主要配置文件：
 
@@ -156,6 +165,11 @@ rdevtool --json agent context --limit 6
 - [docs/config.md](docs/config.md)：本地配置文件和工作区模型。
 - [docs/r-series-apps.md](docs/r-series-apps.md)：R 系列应用开发配置范式。
 - [docs/ai-agent.md](docs/ai-agent.md)：AI Agent 使用方式和安全规则。
+- [docs/architecture.md](docs/architecture.md)：共享 Core、领域边界与渐进拆分路线。
+- [docs/security.md](docs/security.md)：信任边界、CSP、凭据、本地数据与发布安全。
+- [docs/maintenance.md](docs/maintenance.md)：功能、Manifest、文档和官网的同步维护流程。
+- [RELEASE.md](RELEASE.md)：CI、桌面制品、签名状态和发布步骤。
+- [CHANGELOG.md](CHANGELOG.md)：按版本记录的功能与文档变化。
 
 ### 隐私与安全
 
@@ -164,6 +178,8 @@ rdevtool --json agent context --limit 6
 - 工作区只保存引用范围，不复制项目配置、私有模板或业务内容。
 - CLI 的 `--json` 输出保持机器友好，不混入解释性文字。
 - 合并、推送、构建、部署等动作建议先运行 `plan` / `overview` / `push-status`。
+- Tauri WebView 启用 CSP 和冻结原型，主窗口只授予窗口拖动与确认对话框所需权限。
+- SQLite 未做应用层加密；活动和构建历史可能包含路径、分支、URL 与非敏感参数，不要把 token、密码或 cookie 作为一次性命令参数传入。
 
 ### 开发命令
 
@@ -172,183 +188,16 @@ npm run dev                # Tauri 桌面开发
 npm run web:install        # 安装前端依赖
 npm run web:dev            # 仅启动前端
 npm run web:build          # 前端构建
+npm run web:test           # 前端单元测试
+npm run web:test:e2e       # 浏览器流程测试
 npm run rust-check         # Rust/Tauri 检查
+npm run rust-test          # Core 与 Tauri 测试
+npm run manifest:check     # 产品、版本、文档与安全契约
+npm run ipc:check          # UI invoke 与 Rust command 契约
+npm run check              # 快速完整检查
+npm run check:full         # 再包含浏览器流程
 npm run build              # 打包桌面应用
 npm run size               # 查看构建缓存和产物体积
 npm run clean              # 清理常规构建产物
 npm run clean:all          # 连依赖一起清理
-```
-
----
-
-## English
-
-`rDevTool` is a local desktop workbench for day-to-day multi-project development. It brings workspaces, resource shortcuts, Git branch workflows, build tasks, local proxy rules, runtime debugging, activity history, and AI-readable context into one Tauri app.
-
-It is not a replacement for GitLab, Jenkins, or a CI/CD platform. It is a local control surface for the questions developers answer constantly: which requirement context am I in, which project should I open, which resource should I search, which branch should I compare or switch, and where should this build go?
-
-Stack: `Tauri 2 + Rust + React + Vite + TypeScript + Material UI`.
-
-### Interface And Features
-
-- **Workbench**: groups projects, shortcuts, proxy profiles, Links, build/Git actions, and recent activity by workspace; supports the global `system` workspace, scoped requirement workspaces, and incremental refresh after external config changes.
-- **Resource Finder**: manages projects, websites, directories, apps, and scripts with search, favorites, recents, and workspace filtering.
-- **Configuration Sources**: selects resource, Link, proxy, and runtime sources independently per workspace, with capability scoping, comparison, copying, and external-change notifications.
-- **Link Chains**: composes local-file checks, proxy lifecycle, runtime lifecycle, and page focus into previewable, checkable, runnable, stoppable workspace tools.
-- **Git Workflow**: branch listing, multi-target sync, branch creation, checkout, switch, merge preview, merge, push status, and push.
-- **Build Tasks**: creates executable build plans from project config; supports Jenkins, local commands, and the R-series packaging adapter.
-- **Local Proxy**: manages proxy profiles, forwarding, mocks, blocking rules, diagnostics, import/export, and runtime binding.
-- **Project Runtime**: inspects, preflights, starts, lists, stops, restarts, and diagnoses project runtimes supervised by the App/CLI shared daemon, including state recovery, external-process detection, bounded adoption evaluation, and process ownership checks.
-- **Activity Center**: centralizes build, Git, runtime, and external-config activity; grouped status follows the latest run while preserving every execution detail and safe replay path.
-- **System Tray**: uses workspaces as first-level menus, then organizes resource, project, proxy, Link, build, and Git actions into nested shortcuts with pinning and repeat-last support.
-- **Command Palette**: press `Cmd/Ctrl + K` to search projects, resources, and actions.
-- **Workflow Signals**: connects branch, build, and runtime actions through replayable broadcast/receive rules.
-- **AI / CLI**: all important read and action surfaces expose stable JSON output so AI agents can use the CLI instead of GUI automation.
-
-### Quick Start
-
-```bash
-npm run web:install
-npm run dev
-```
-
-Useful checks:
-
-```bash
-npm run rust-check
-npm run web:build
-cargo run --quiet -- --json doctor
-```
-
-Package the desktop app:
-
-```bash
-npm run build
-```
-
-Clean outputs:
-
-```bash
-npm run clean
-npm run clean:all
-```
-
-### CLI Quick Start
-
-From a source checkout:
-
-```bash
-cargo run --quiet -- --json info
-cargo run --quiet -- --json doctor
-cargo run --quiet -- --json agent context --limit 6
-```
-
-After installing or putting `rdevtool` on `PATH`:
-
-```bash
-rdevtool --json info
-rdevtool --json doctor
-rdevtool --json agent capabilities
-rdevtool --json agent context --limit 6
-rdevtool --json workspace list
-rdevtool --json projects list
-rdevtool --json navigation search Jenkins
-rdevtool --json config-source list
-rdevtool --json link list
-rdevtool --json link plan <link-key>
-rdevtool --json proxy list
-rdevtool --json runtime list --running-only
-```
-
-Preview risky operations before running them:
-
-```bash
-rdevtool --json build plan <project> --target <target> --env <env> --branch <branch>
-rdevtool --json git overview --project <project> --source <source> --target <target>
-rdevtool --json git push-status --project <project>
-```
-
-See [docs/cli.md](docs/cli.md) for the full CLI reference.
-
-### Configuration And Data
-
-rDevTool creates default local configuration on first run:
-
-- macOS: `~/Library/Application Support/rDevTool/`
-- Linux: `~/.config/rDevTool/`
-- Local history database: `~/.rdevtool/rdevtool.sqlite`
-
-Main files:
-
-| File | Purpose |
-| --- | --- |
-| `projects.toml` | Project source of truth: repos, build adapters, Jenkins, dev/build commands, debug profiles, branch rules |
-| `workspace.toml` | App preferences, enabled pages, default page, active workspace |
-| `workspaces/*.toml` | Scoped requirement workspaces; stores only project, shortcut, and proxy references |
-| `config_sources.toml` | Custom config sources and resource, link, proxy, and runtime file mappings |
-| `sources/workspaces/<key>/` | Per-workspace generated configuration directories |
-| `navigation.toml` | Websites, directories, apps, and scripts |
-| `links.toml` | Composable local-debug chains and their execution steps |
-| `proxy.toml` | Local proxy profiles, rules, and workspace ownership |
-| `runtime_overrides.toml` | Runtime profile overrides supplied by a configuration source |
-| `web_actions.toml` | Chrome DevTools Protocol web actions |
-
-See [docs/config.md](docs/config.md) for details.
-
-### Product Model
-
-- **Workspace**: a requirement or project context. `system` shows everything; scoped workspaces reference only the relevant projects, resources, and proxies.
-- **Project**: repository path, Git URL, dev/build commands, focus behavior, debug profiles, build targets, and branch rules.
-- **Build Target**: one of `jenkins`, `local_command`, or `r_series_package`.
-- **Runtime Profile**: browser, proxy, environment, and local debugging setup.
-- **Navigation Entry**: URL, directory, app, or script shortcut.
-- **Proxy Profile**: forwarding, mock, block, and diagnosis rules for local development.
-- **Config Source**: a selectable, comparable, and copyable file source for resource, Link, proxy, and runtime capabilities.
-- **Link**: a reusable local-debug chain composed from local-file, proxy, runtime, and page actions.
-
-### AI Usage
-
-Install the rDevTool skill under your local Codex skills directory, for example:
-
-```text
-~/.codex/skills/rdevtool
-```
-
-An AI agent should read the current state first:
-
-```bash
-rdevtool --json info
-rdevtool --json doctor
-rdevtool --json agent context --limit 6
-```
-
-Then it should act through workspace-aware previews and CLI commands. See [docs/ai-agent.md](docs/ai-agent.md).
-
-### Documentation
-
-- [docs/cli.md](docs/cli.md): CLI commands, JSON contract, and examples.
-- [docs/config.md](docs/config.md): local config files and workspace model.
-- [docs/r-series-apps.md](docs/r-series-apps.md): R-series app registration pattern.
-- [docs/ai-agent.md](docs/ai-agent.md): AI agent workflow and safety rules.
-
-### Privacy And Safety
-
-- Repository templates should contain only sample paths, sample URLs, and placeholder config.
-- Jenkins, GitLab, proxy, and auth values should come from environment variables or local config, not committed tokens, passwords, or cookies.
-- Workspaces store scoped references; they do not copy project config, private templates, or business content.
-- `--json` output stays machine-friendly and does not mix in prose.
-- Run `plan`, `overview`, or `push-status` before merge, push, build, or deploy operations.
-
-### Development Commands
-
-```bash
-npm run dev                # Tauri desktop development
-npm run web:install        # Install frontend dependencies
-npm run web:dev            # Frontend only
-npm run web:build          # Build frontend
-npm run rust-check         # Rust/Tauri check
-npm run build              # Package desktop app
-npm run size               # Inspect build cache and outputs
-npm run clean              # Clean normal build outputs
-npm run clean:all          # Clean outputs and dependencies
 ```

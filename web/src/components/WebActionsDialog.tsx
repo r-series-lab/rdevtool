@@ -11,6 +11,9 @@ import {
   Chip,
   Dialog,
   IconButton,
+  ListItemIcon,
+  ListItemText,
+  Menu,
   MenuItem,
   Stack,
   Tab,
@@ -34,11 +37,25 @@ import {
   CopyIcon,
   OpenExternalIcon,
   PlayIcon,
+  PlusIcon,
   RefreshIcon,
+  TerminalIcon,
+  UploadIcon,
   WebsiteIcon,
 } from "./AppIcons";
+import { parseChromeFetch } from "../lib/fetchImport";
+import {
+  buildBrowserHttpRequestScript,
+  buildHttpRequestUrl,
+  createEditableHttpRequest,
+  formatHttpRequestJsonBody,
+  validateHttpRequest,
+  type EditableHttpRequest,
+} from "../lib/httpRequest";
+import { FetchImportDialog, HttpRequestDraftEditor } from "./web-actions/FetchImportEditor";
 
-const TEMPORARY_ACTION_KEY = "__temporary__";
+const SCRIPT_DRAFT_ACTION_KEY = "__script_draft__";
+const HTTP_REQUEST_DRAFT_ACTION_KEY = "__http_request_draft__";
 const DEFAULT_TEMPORARY_SCRIPT = `return {
   title: document.title,
   url: location.href,
@@ -275,6 +292,11 @@ function formatActionOption(action: WebActionSummary) {
   }`;
 }
 
+function formatHttpRequestDraftOption(request: EditableHttpRequest) {
+  const requestUrl = buildHttpRequestUrl(request).trim();
+  return `草稿 · ${request.method.toUpperCase()} ${requestUrl || "未设置 URL"}`;
+}
+
 function formatRequestPreview(action: WebActionSummary | null) {
   const request = action?.request;
   if (!request) {
@@ -337,7 +359,7 @@ function webActionCliCommand(options: {
     return `rdevtool --json web-actions open --url ${shellQuote(context.url)}`;
   }
 
-  if (selectedActionKey === TEMPORARY_ACTION_KEY) {
+  if (selectedActionKey === SCRIPT_DRAFT_ACTION_KEY) {
     const parts = ["rdevtool", "--json", "web-actions", "script"];
     appendCliFlag(parts, "--target", selectedTargetId);
     appendCliFlag(parts, "--script", temporaryScript);
@@ -584,6 +606,12 @@ export function WebActionsPanel({
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [temporaryScript, setTemporaryScript] = useState(DEFAULT_TEMPORARY_SCRIPT);
   const [temporaryParamsText, setTemporaryParamsText] = useState("{}");
+  const [scriptDraftActive, setScriptDraftActive] = useState(false);
+  const [newActionMenuAnchor, setNewActionMenuAnchor] = useState<HTMLElement | null>(null);
+  const [fetchImportOpen, setFetchImportOpen] = useState(false);
+  const [fetchImportSource, setFetchImportSource] = useState("");
+  const [fetchImportError, setFetchImportError] = useState("");
+  const [httpRequestDraft, setHttpRequestDraft] = useState<EditableHttpRequest | null>(null);
   const [result, setResult] = useState<WebActionRunResult | null>(null);
   const [copiedCliCommand, setCopiedCliCommand] = useState(false);
 
@@ -591,27 +619,42 @@ export function WebActionsPanel({
     () => actions.find((item) => item.key === selectedActionKey) ?? null,
     [actions, selectedActionKey],
   );
-  const isTemporaryAction = selectedActionKey === TEMPORARY_ACTION_KEY;
+  const isScriptDraft = selectedActionKey === SCRIPT_DRAFT_ACTION_KEY;
+  const isHttpRequestDraft = selectedActionKey === HTTP_REQUEST_DRAFT_ACTION_KEY;
   const selectedActionNeedsTarget =
-    isTemporaryAction || selectedAction?.kind !== "request";
-  const scriptValue = isTemporaryAction
+    isScriptDraft || isHttpRequestDraft || selectedAction?.kind !== "request";
+  const httpRequestValidationErrors = useMemo(
+    () => (httpRequestDraft ? validateHttpRequest(httpRequestDraft) : []),
+    [httpRequestDraft],
+  );
+  const httpRequestScript = useMemo(
+    () =>
+      httpRequestDraft && httpRequestValidationErrors.length === 0
+        ? buildBrowserHttpRequestScript(httpRequestDraft)
+        : "",
+    [httpRequestDraft, httpRequestValidationErrors],
+  );
+  const scriptValue = isScriptDraft
     ? temporaryScript
     : selectedAction?.kind === "request"
       ? formatRequestPreview(selectedAction)
       : selectedAction?.script ?? "";
   const cliCommand = useMemo(
     () =>
-      webActionCliCommand({
-        context,
-        selectedAction,
-        selectedActionKey,
-        selectedTargetId,
-        selectedActionNeedsTarget,
-        paramValues,
-        temporaryScript,
-      }),
+      isHttpRequestDraft
+        ? ""
+        : webActionCliCommand({
+            context,
+            selectedAction,
+            selectedActionKey,
+            selectedTargetId,
+            selectedActionNeedsTarget,
+            paramValues,
+            temporaryScript,
+          }),
     [
       context,
+      isHttpRequestDraft,
       selectedAction,
       selectedActionKey,
       selectedTargetId,
@@ -643,12 +686,16 @@ export function WebActionsPanel({
       setActions(nextActions);
       setTargets(nextTargets);
       setSelectedTargetId(matchingTarget?.id ?? "");
-      setSelectedActionKey((current) =>
-        current === TEMPORARY_ACTION_KEY ||
-        nextActions.some((item) => item.key === current)
-          ? current
-          : nextActions[0]?.key ?? TEMPORARY_ACTION_KEY,
-      );
+      setSelectedActionKey((current) => {
+        if (
+          nextActions.some((item) => item.key === current) ||
+          (current === SCRIPT_DRAFT_ACTION_KEY && scriptDraftActive) ||
+          (current === HTTP_REQUEST_DRAFT_ACTION_KEY && httpRequestDraft)
+        ) {
+          return current;
+        }
+        return nextActions[0]?.key ?? "";
+      });
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -657,20 +704,25 @@ export function WebActionsPanel({
   }
 
   useEffect(() => {
-    if (!context) {
-      setActions([]);
-      setTargets([]);
-      setSelectedActionKey("");
-      setSelectedTargetId("");
-      setParamValues({});
-      setResult(null);
-      setError("");
-      return;
+    setActions([]);
+    setTargets([]);
+    setSelectedActionKey("");
+    setSelectedTargetId("");
+    setParamValues({});
+    setScriptDraftActive(false);
+    setHttpRequestDraft(null);
+    setNewActionMenuAnchor(null);
+    setFetchImportSource("");
+    setFetchImportError("");
+    setFetchImportOpen(false);
+    setResult(null);
+    setError("");
+  }, [context?.scope, context?.url]);
+
+  useEffect(() => {
+    if (context && active) {
+      void loadPanelData(context);
     }
-    if (!active) {
-      return;
-    }
-    void loadPanelData(context);
   }, [active, context?.scope, context?.url]);
 
   useEffect(() => {
@@ -753,6 +805,75 @@ export function WebActionsPanel({
     window.setTimeout(() => setCopiedCliCommand(false), 1200);
   }
 
+  function openFetchImporter() {
+    setNewActionMenuAnchor(null);
+    setFetchImportError("");
+    setFetchImportOpen(true);
+  }
+
+  function createBlankHttpRequest() {
+    setNewActionMenuAnchor(null);
+    setHttpRequestDraft(createEditableHttpRequest());
+    setSelectedActionKey(HTTP_REQUEST_DRAFT_ACTION_KEY);
+    setResult(null);
+    setError("");
+  }
+
+  function createScriptDraft() {
+    setNewActionMenuAnchor(null);
+    setScriptDraftActive(true);
+    setSelectedActionKey(SCRIPT_DRAFT_ACTION_KEY);
+    setResult(null);
+    setError("");
+  }
+
+  function closeFetchImporter() {
+    setFetchImportOpen(false);
+    setFetchImportSource("");
+    setFetchImportError("");
+  }
+
+  function importFetchSource() {
+    try {
+      const request = parseChromeFetch(fetchImportSource);
+      setHttpRequestDraft(request);
+      setSelectedActionKey(HTTP_REQUEST_DRAFT_ACTION_KEY);
+      setFetchImportSource("");
+      setFetchImportError("");
+      setFetchImportOpen(false);
+      setResult(null);
+      setError("");
+    } catch (reason) {
+      setFetchImportError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  function updateHttpRequestDraft(request: EditableHttpRequest) {
+    setHttpRequestDraft(request);
+    setResult(null);
+    setError("");
+  }
+
+  function formatHttpRequestBody() {
+    if (!httpRequestDraft) {
+      return;
+    }
+    try {
+      updateHttpRequestDraft({
+        ...httpRequestDraft,
+        body: formatHttpRequestJsonBody(httpRequestDraft.body),
+      });
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }
+
+  function selectAction(actionKey: string) {
+    setSelectedActionKey(actionKey);
+    setResult(null);
+    setError("");
+  }
+
   function parseTemporaryParams() {
     try {
       const parsed = JSON.parse(temporaryParamsText.trim() || "{}") as unknown;
@@ -778,18 +899,18 @@ export function WebActionsPanel({
     if (selectedActionNeedsTarget && !selectedTargetId) {
       return;
     }
-    if (!isTemporaryAction && !selectedAction) {
+    if (!isScriptDraft && !isHttpRequestDraft && !selectedAction) {
       return;
     }
-    const temporaryParams = isTemporaryAction ? parseTemporaryParams() : {};
-    if (isTemporaryAction && !temporaryParams) {
+    const temporaryParams = isScriptDraft ? parseTemporaryParams() : {};
+    if (isScriptDraft && !temporaryParams) {
       return;
     }
     setRunning(true);
     setError("");
     setResult(null);
     try {
-      const response = isTemporaryAction
+      const response = isScriptDraft || isHttpRequestDraft
         ? await invoke<WebActionRunResult>(
             context.entry
               ? "run_web_action_navigation_script"
@@ -798,7 +919,7 @@ export function WebActionsPanel({
               ...(context.entry ? { entry: context.entry } : {}),
               request: {
                 targetId: selectedTargetId,
-                script: temporaryScript,
+                script: isHttpRequestDraft ? httpRequestScript : temporaryScript,
                 params: temporaryParams,
               },
             },
@@ -831,7 +952,11 @@ export function WebActionsPanel({
   const canRun = Boolean(
     context?.url &&
       (!selectedActionNeedsTarget || selectedTargetId) &&
-      (isTemporaryAction ? temporaryScript.trim() : selectedAction),
+      (isScriptDraft
+        ? temporaryScript.trim()
+        : isHttpRequestDraft
+          ? httpRequestScript
+          : selectedAction),
   );
   const resultText = formatResult(result);
   const resultFailed = Boolean(error || (result && !result.success));
@@ -936,118 +1061,207 @@ export function WebActionsPanel({
         }}
       >
         <Stack spacing={1}>
-          <Typography
-            variant="caption"
-            sx={{ color: "var(--muted)", fontWeight: 850 }}
-          >
-            动作脚本
-            {selectedAction?.kind === "request" ? " / 请求" : ""}
-          </Typography>
+          <Stack direction="row" alignItems="center" spacing={0.65}>
+            <Typography variant="caption" sx={{ color: "var(--muted)", fontWeight: 850 }}>
+              网页动作
+            </Typography>
+            <Box sx={{ flex: 1 }} />
+            <Button
+              size="small"
+              color="inherit"
+              startIcon={<PlusIcon fontSize="small" />}
+              disabled={loading || running || !context}
+              aria-controls={newActionMenuAnchor ? "web-action-create-menu" : undefined}
+              aria-haspopup="menu"
+              aria-expanded={newActionMenuAnchor ? "true" : undefined}
+              onClick={(event) => setNewActionMenuAnchor(event.currentTarget)}
+              sx={{ minWidth: 0, px: 1 }}
+            >
+              新建动作
+            </Button>
+            <Menu
+              id="web-action-create-menu"
+              anchorEl={newActionMenuAnchor}
+              open={Boolean(newActionMenuAnchor)}
+              onClose={() => setNewActionMenuAnchor(null)}
+              anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+              transformOrigin={{ vertical: "top", horizontal: "right" }}
+              slotProps={{
+                paper: {
+                  sx: {
+                    mt: 0.55,
+                    minWidth: 208,
+                    border: "1px solid var(--line-soft)",
+                    backgroundImage: "none",
+                    "& .MuiMenu-list": { py: 0.5 },
+                    "& .MuiMenuItem-root": { minHeight: 36, mx: 0.45, borderRadius: "8px" },
+                  },
+                },
+              }}
+            >
+              <MenuItem onClick={openFetchImporter}>
+                <ListItemIcon sx={{ minWidth: 32, color: "inherit" }}>
+                  <UploadIcon fontSize="small" />
+                </ListItemIcon>
+                <ListItemText
+                  primary="导入 Fetch"
+                  secondary="Chrome Copy as fetch"
+                  primaryTypographyProps={{ fontSize: "0.82rem", fontWeight: 700 }}
+                  secondaryTypographyProps={{ fontSize: "0.68rem" }}
+                />
+              </MenuItem>
+              <MenuItem onClick={createBlankHttpRequest}>
+                <ListItemIcon sx={{ minWidth: 32, color: "inherit" }}>
+                  <WebsiteIcon fontSize="small" />
+                </ListItemIcon>
+                <ListItemText
+                  primary="空白 HTTP 请求"
+                  primaryTypographyProps={{ fontSize: "0.82rem", fontWeight: 700 }}
+                />
+              </MenuItem>
+              <MenuItem onClick={createScriptDraft}>
+                <ListItemIcon sx={{ minWidth: 32, color: "inherit" }}>
+                  <TerminalIcon fontSize="small" />
+                </ListItemIcon>
+                <ListItemText
+                  primary="临时页面脚本"
+                  primaryTypographyProps={{ fontSize: "0.82rem", fontWeight: 700 }}
+                />
+              </MenuItem>
+            </Menu>
+          </Stack>
           <TextField
             select
             size="small"
             value={selectedActionKey}
-            onChange={(event) => setSelectedActionKey(event.target.value)}
+            onChange={(event) => selectAction(event.target.value)}
             disabled={loading}
+            SelectProps={{
+              displayEmpty: true,
+              inputProps: { "aria-label": "网页动作" },
+            }}
             fullWidth
           >
+            <MenuItem value="" disabled>
+              请选择网页动作
+            </MenuItem>
             {actions.map((action) => (
               <MenuItem key={action.key} value={action.key}>
                 {formatActionOption(action)}
               </MenuItem>
             ))}
-            <MenuItem value={TEMPORARY_ACTION_KEY}>临时脚本 · 当前页面</MenuItem>
+            {httpRequestDraft ? (
+              <MenuItem value={HTTP_REQUEST_DRAFT_ACTION_KEY}>
+                {formatHttpRequestDraftOption(httpRequestDraft)}
+              </MenuItem>
+            ) : null}
+            {scriptDraftActive ? (
+              <MenuItem value={SCRIPT_DRAFT_ACTION_KEY}>草稿 · 临时页面脚本</MenuItem>
+            ) : null}
           </TextField>
-          {selectedAction?.params.length ? (
-            <Box
-              sx={{
-                display: "grid",
-                gridTemplateColumns: {
-                  xs: "minmax(0,1fr)",
-                  sm: "repeat(2, minmax(0,1fr))",
-                },
-                gap: 0.8,
-              }}
-            >
-              {selectedAction.params.map((param) => (
-                <TextField
-                  key={param.key}
-                  size="small"
-                  label={param.label || param.key}
-                  value={paramValues[param.key] ?? ""}
-                  helperText={webActionParamSourceLabel(
-                    param,
-                    context?.contextParams,
-                  )}
-                  onChange={(event) =>
-                    setParamValues((current) => ({
-                      ...current,
-                      [param.key]: event.target.value,
-                    }))
-                  }
-                />
-              ))}
-            </Box>
-          ) : null}
-          {isTemporaryAction ? (
-            <TextField
-              size="small"
-              label="临时参数 JSON"
-              value={temporaryParamsText}
-              onChange={(event) => setTemporaryParamsText(event.target.value)}
-              fullWidth
-              sx={{
-                "& .MuiInputBase-root": {
-                  fontFamily:
-                    '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                  fontSize: "0.74rem",
-                },
-              }}
+
+          {isHttpRequestDraft && httpRequestDraft ? (
+            <HttpRequestDraftEditor
+              request={httpRequestDraft}
+              validationErrors={httpRequestValidationErrors}
+              onChange={updateHttpRequestDraft}
+              onImportFetch={openFetchImporter}
+              onFormatBody={formatHttpRequestBody}
             />
+          ) : selectedAction || isScriptDraft ? (
+            <>
+              {selectedAction?.params.length ? (
+                <Box
+                  sx={{
+                    display: "grid",
+                    gridTemplateColumns: {
+                      xs: "minmax(0,1fr)",
+                      sm: "repeat(2, minmax(0,1fr))",
+                    },
+                    gap: 0.8,
+                  }}
+                >
+                  {selectedAction.params.map((param) => (
+                    <TextField
+                      key={param.key}
+                      size="small"
+                      label={param.label || param.key}
+                      value={paramValues[param.key] ?? ""}
+                      helperText={webActionParamSourceLabel(
+                        param,
+                        context?.contextParams,
+                      )}
+                      onChange={(event) =>
+                        setParamValues((current) => ({
+                          ...current,
+                          [param.key]: event.target.value,
+                        }))
+                      }
+                    />
+                  ))}
+                </Box>
+              ) : null}
+              {isScriptDraft ? (
+                <TextField
+                  size="small"
+                  label="临时参数 JSON"
+                  value={temporaryParamsText}
+                  onChange={(event) => setTemporaryParamsText(event.target.value)}
+                  fullWidth
+                  sx={{
+                    "& .MuiInputBase-root": {
+                      fontFamily:
+                        '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                      fontSize: "0.74rem",
+                    },
+                  }}
+                />
+              ) : null}
+              <TextField
+                value={scriptValue}
+                multiline
+                label={selectedAction?.kind === "request" ? "请求配置" : undefined}
+                minRows={selectedAction?.kind === "request" ? 3 : compact ? 4 : 5}
+                maxRows={compact ? 7 : 10}
+                fullWidth
+                onChange={(event) => {
+                  if (isScriptDraft) {
+                    setTemporaryScript(event.target.value);
+                  }
+                }}
+                InputProps={{ readOnly: !isScriptDraft }}
+                helperText={
+                  isScriptDraft
+                    ? "临时脚本不会写入配置文件"
+                    : selectedAction?.kind === "request"
+                      ? "请求动作由 Rust HTTP 客户端执行，支持 GET/POST/PUT/PATCH/DELETE、Header、Body 和参数替换。"
+                      : ""
+                }
+                sx={{
+                  "& .MuiInputBase-root": {
+                    fontFamily:
+                      '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                    fontSize: "0.74rem",
+                    lineHeight: 1.48,
+                  },
+                  "& textarea": {
+                    scrollbarWidth: "thin",
+                    scrollbarColor: "var(--scrollbar-thumb) transparent",
+                  },
+                  "& textarea::-webkit-scrollbar": {
+                    width: 6,
+                  },
+                  "& textarea::-webkit-scrollbar-track": {
+                    background: "transparent",
+                  },
+                  "& textarea::-webkit-scrollbar-thumb": {
+                    borderRadius: "999px",
+                    backgroundColor: "var(--scrollbar-thumb)",
+                  },
+                }}
+              />
+            </>
           ) : null}
-          <TextField
-            value={scriptValue}
-            multiline
-            label={selectedAction?.kind === "request" ? "请求配置" : undefined}
-            minRows={selectedAction?.kind === "request" ? 3 : compact ? 4 : 5}
-            maxRows={compact ? 7 : 10}
-            fullWidth
-            onChange={(event) => {
-              if (isTemporaryAction) {
-                setTemporaryScript(event.target.value);
-              }
-            }}
-            InputProps={{ readOnly: !isTemporaryAction }}
-            helperText={
-              isTemporaryAction
-                ? "临时脚本不会写入配置文件"
-                : selectedAction?.kind === "request"
-                  ? "请求动作由 Rust HTTP 客户端执行，支持 GET/POST/PUT/PATCH/DELETE、Header、Body 和参数替换。"
-                  : ""
-            }
-            sx={{
-              "& .MuiInputBase-root": {
-                fontFamily:
-                  '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                fontSize: "0.74rem",
-                lineHeight: 1.48,
-              },
-              "& textarea": {
-                scrollbarWidth: "thin",
-                scrollbarColor: "var(--scrollbar-thumb) transparent",
-              },
-              "& textarea::-webkit-scrollbar": {
-                width: 6,
-              },
-              "& textarea::-webkit-scrollbar-track": {
-                background: "transparent",
-              },
-              "& textarea::-webkit-scrollbar-thumb": {
-                borderRadius: "999px",
-                backgroundColor: "var(--scrollbar-thumb)",
-              },
-            }}
-          />
         </Stack>
       </Box>
 
@@ -1183,6 +1397,18 @@ export function WebActionsPanel({
           {running ? "执行中" : "运行动作"}
         </Button>
       </Stack>
+
+      <FetchImportDialog
+        open={fetchImportOpen}
+        source={fetchImportSource}
+        error={fetchImportError}
+        onSourceChange={(source) => {
+          setFetchImportSource(source);
+          setFetchImportError("");
+        }}
+        onClose={closeFetchImporter}
+        onImport={importFetchSource}
+      />
     </Stack>
   );
 }

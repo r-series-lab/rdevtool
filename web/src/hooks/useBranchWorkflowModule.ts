@@ -10,6 +10,7 @@ import type {
   BranchTaskResponse,
   BranchWorkflowMode,
   BranchWorktreeSummary,
+  MergeHistoryEntry,
 } from "../app-types";
 import type {
   ActivityResource,
@@ -17,7 +18,17 @@ import type {
   ActivityUpdater,
 } from "../lib/activityCenter";
 import { stableActivityJson } from "../lib/activityCenter";
-import { deleteStoredJson, getStoredJson, setStoredJson } from "../lib/storage";
+import {
+  branchTaskDiagnosticSteps,
+  branchTaskDisplayDetail,
+  branchTaskFailureReplay,
+} from "../lib/branchTaskDetails";
+import {
+  deleteStoredJson,
+  getStoredJson,
+  prependStoredJsonArray,
+  setStoredJson,
+} from "../lib/storage";
 import {
   createBranchTaskSignals,
   workflowReplayFromBranchHistory,
@@ -30,6 +41,7 @@ const BRANCH_WORKFLOW_STORAGE_NAMESPACE = "branch-workflow";
 const BRANCH_WORKFLOW_HISTORY_KEY = "history";
 const MAX_STORED_HISTORY_ITEMS = 200;
 const MAX_VISIBLE_HISTORY_ITEMS = 20;
+const CLI_BRANCH_SYNC_HISTORY_PREFIX = "branch-sync-cli-";
 const PUSH_STATUS_STALE_MS = 60_000;
 const PUSH_STATUS_AUTO_REFRESH_COOLDOWN_MS = 5_000;
 const REPLAY_COMMANDS = new Set<BranchTaskReplayCommand>([
@@ -57,6 +69,7 @@ type UseBranchWorkflowModuleOptions = {
 
 type BranchTaskRunOptions = {
   force?: boolean;
+  origin?: "app" | "tray";
   workspaceKey?: string | null;
   chainId?: string | null;
   parentId?: string | null;
@@ -71,6 +84,7 @@ function normalizeValues(values: string[]): string[] {
 
 export function branchWorkflowProjectReset(selectedProject: string) {
   return {
+    syncProjects: selectedProject ? [selectedProject] : [],
     syncSource: "",
     syncTargets: [] as string[],
     createProjects: selectedProject ? [selectedProject] : [],
@@ -139,14 +153,148 @@ function normalizeHistory(value: unknown): BranchTaskHistoryEntry[] {
     .slice(0, MAX_STORED_HISTORY_ITEMS);
 }
 
+function cliBranchSyncBatch(historyKey: string) {
+  if (!historyKey.startsWith(CLI_BRANCH_SYNC_HISTORY_PREFIX)) {
+    return null;
+  }
+  const separatorIndex = historyKey.lastIndexOf("-");
+  const itemIndex = Number(historyKey.slice(separatorIndex + 1));
+  if (
+    separatorIndex < CLI_BRANCH_SYNC_HISTORY_PREFIX.length ||
+    !Number.isInteger(itemIndex) ||
+    itemIndex < 0
+  ) {
+    return { batchKey: historyKey, itemIndex: 0 };
+  }
+  return {
+    batchKey: historyKey.slice(0, separatorIndex),
+    itemIndex,
+  };
+}
+
+function normalizeMergeHistoryCreatedAt(value: string) {
+  const normalized = value.trim().replace(
+    /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/,
+    "$1T$2Z",
+  );
+  const timestamp = Date.parse(normalized);
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : value;
+}
+
+function branchTaskHistoryTimestamp(item: BranchTaskHistoryEntry) {
+  const timestamp = Date.parse(item.createdAt);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function cliMergeHistoryDetail(items: BranchTaskHistoryEntry["items"]) {
+  return items
+    .map((item) => {
+      const heading = `${item.projectName}: ${item.sourceBranch} -> ${item.targetBranch ?? "-"} [${item.statusLabel}]`;
+      if (item.success) {
+        return heading;
+      }
+      return [
+        heading,
+        item.summary.trim() ? `原因：${item.summary.trim()}` : "",
+        item.detail.trim() && item.detail.trim() !== item.summary.trim()
+          ? item.detail.trim()
+          : "",
+      ]
+        .filter(Boolean)
+        .join("\n");
+    })
+    .join("\n");
+}
+
+export function branchTaskHistoryFromCliMergeHistory(
+  history: MergeHistoryEntry[],
+): BranchTaskHistoryEntry[] {
+  const batches = new Map<
+    string,
+    Array<{ history: MergeHistoryEntry; itemIndex: number }>
+  >();
+  for (const item of history) {
+    const batch = cliBranchSyncBatch(item.historyKey);
+    if (!batch) {
+      continue;
+    }
+    const entries = batches.get(batch.batchKey) ?? [];
+    entries.push({ history: item, itemIndex: batch.itemIndex });
+    batches.set(batch.batchKey, entries);
+  }
+
+  return Array.from(batches, ([batchKey, entries]) => {
+    entries.sort((left, right) => left.itemIndex - right.itemIndex);
+    const items = entries.map(({ history: item }) => ({
+      projectKey: item.projectKey,
+      projectName: item.projectName,
+      sourceBranch: item.sourceBranch,
+      targetBranch: item.targetBranch,
+      outputPath: null,
+      success: item.success,
+      statusKey: item.success ? "merged" : "merge_failed",
+      statusLabel: item.success ? "已合并" : "失败",
+      summary: item.summary,
+      detail: item.detail,
+      remote: item.remote,
+      commit: item.targetCommit ?? null,
+    }));
+    const failed = items.filter((item) => !item.success).length;
+    const succeeded = items.length - failed;
+    const summary = [`成功 ${succeeded}`, failed > 0 ? `失败 ${failed}` : ""]
+      .filter(Boolean)
+      .join(" / ");
+    const createdAt = entries
+      .map(({ history: item }) => normalizeMergeHistoryCreatedAt(item.createdAt))
+      .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
+
+    return {
+      id: batchKey,
+      taskKind: "sync" as const,
+      success: failed === 0,
+      summary,
+      detail: cliMergeHistoryDetail(items),
+      items,
+      createdAt,
+      workspaceKey: entries[0]?.history.workspaceKey ?? null,
+      replay: null,
+    };
+  }).sort(
+    (left, right) => branchTaskHistoryTimestamp(right) - branchTaskHistoryTimestamp(left),
+  );
+}
+
+export function mergeBranchTaskHistory(
+  ...sources: BranchTaskHistoryEntry[][]
+): BranchTaskHistoryEntry[] {
+  const historyById = new Map<string, BranchTaskHistoryEntry>();
+  for (const item of sources.flat()) {
+    if (!historyById.has(item.id)) {
+      historyById.set(item.id, item);
+    }
+  }
+  return Array.from(historyById.values())
+    .sort(
+      (left, right) => branchTaskHistoryTimestamp(right) - branchTaskHistoryTimestamp(left),
+    )
+    .slice(0, MAX_STORED_HISTORY_ITEMS);
+}
+
+function isCliBranchTaskHistory(item: BranchTaskHistoryEntry) {
+  return item.id.startsWith(CLI_BRANCH_SYNC_HISTORY_PREFIX);
+}
+
 function makeHistoryEntry(
   result: BranchTaskResponse,
   workspaceKey: string,
   replay?: BranchTaskReplayRequest | null,
+  entryId?: string | null,
 ): BranchTaskHistoryEntry {
   return {
     ...result,
-    id: `${result.taskKind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    id:
+      entryId?.trim() ||
+      `${result.taskKind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     createdAt: new Date().toISOString(),
     workspaceKey,
     replay: replay ? { ...replay, request: cloneReplayRequest(replay.request) } : null,
@@ -296,6 +444,7 @@ export function useBranchWorkflowModule({
   updateActivity,
 }: UseBranchWorkflowModuleOptions) {
   const [mode, setMode] = useState<BranchWorkflowMode>("sync");
+  const [syncProjects, setSyncProjects] = useState<string[]>([]);
   const [syncSource, setSyncSource] = useState("");
   const [syncTargets, setSyncTargets] = useState<string[]>([]);
   const [createProjects, setCreateProjects] = useState<string[]>([]);
@@ -407,6 +556,7 @@ export function useBranchWorkflowModule({
       setPushSelectedPaths([]);
       pushStatusLoadedProjectRef.current = "";
       const reset = branchWorkflowProjectReset("");
+      setSyncProjects(reset.syncProjects);
       setSyncSource(reset.syncSource);
       setSyncTargets(reset.syncTargets);
       setCreateProjects(reset.createProjects);
@@ -423,6 +573,7 @@ export function useBranchWorkflowModule({
       return;
     }
     const reset = branchWorkflowProjectReset(selectedProject);
+    setSyncProjects(reset.syncProjects);
     setSyncSource(reset.syncSource);
     setSyncTargets(reset.syncTargets);
     setCreateProjects(reset.createProjects);
@@ -490,11 +641,19 @@ export function useBranchWorkflowModule({
       return;
     }
     try {
-      const stored = await getStoredJson<unknown>(
-        BRANCH_WORKFLOW_STORAGE_NAMESPACE,
-        BRANCH_WORKFLOW_HISTORY_KEY,
+      const [stored, mergeHistory] = await Promise.all([
+        getStoredJson<unknown>(
+          BRANCH_WORKFLOW_STORAGE_NAMESPACE,
+          BRANCH_WORKFLOW_HISTORY_KEY,
+        ),
+        invoke<MergeHistoryEntry[]>("list_merge_history").catch(() => []),
+      ]);
+      setBranchTaskHistory(
+        mergeBranchTaskHistory(
+          normalizeHistory(stored),
+          branchTaskHistoryFromCliMergeHistory(mergeHistory),
+        ),
       );
-      setBranchTaskHistory(normalizeHistory(stored));
     } catch (reason) {
       setError(String(reason));
     }
@@ -504,22 +663,18 @@ export function useBranchWorkflowModule({
     result: BranchTaskResponse,
     replay?: BranchTaskReplayRequest | null,
     workspaceKey = activeProjectWorkspaceKey,
+    entryId?: string | null,
   ) {
-    const entry = makeHistoryEntry(result, workspaceKey, replay);
-    const stored = await getStoredJson<unknown>(
+    const entry = makeHistoryEntry(result, workspaceKey, replay, entryId);
+    const stored = await prependStoredJsonArray<unknown>(
       BRANCH_WORKFLOW_STORAGE_NAMESPACE,
       BRANCH_WORKFLOW_HISTORY_KEY,
-    );
-    const allHistory = normalizeHistory(stored);
-    const next = [entry, ...allHistory.filter((item) => item.id !== entry.id)].slice(
-      0,
+      entry,
       MAX_STORED_HISTORY_ITEMS,
     );
-    setBranchTaskHistory(next);
-    await setStoredJson(
-      BRANCH_WORKFLOW_STORAGE_NAMESPACE,
-      BRANCH_WORKFLOW_HISTORY_KEY,
-      next,
+    const next = normalizeHistory(stored);
+    setBranchTaskHistory((current) =>
+      mergeBranchTaskHistory(next, current.filter(isCliBranchTaskHistory)),
     );
     return entry;
   }
@@ -540,16 +695,33 @@ export function useBranchWorkflowModule({
             projectKeySet,
           ),
       );
-      if (remaining.length > 0) {
-        await setStoredJson(
-          BRANCH_WORKFLOW_STORAGE_NAMESPACE,
-          BRANCH_WORKFLOW_HISTORY_KEY,
+      await Promise.all([
+        remaining.length > 0
+          ? setStoredJson(
+              BRANCH_WORKFLOW_STORAGE_NAMESPACE,
+              BRANCH_WORKFLOW_HISTORY_KEY,
+              remaining,
+            )
+          : deleteStoredJson(
+              BRANCH_WORKFLOW_STORAGE_NAMESPACE,
+              BRANCH_WORKFLOW_HISTORY_KEY,
+            ),
+        invoke<number>("clear_merge_history"),
+      ]);
+      setBranchTaskHistory((current) =>
+        mergeBranchTaskHistory(
           remaining,
-        );
-      } else {
-        await deleteStoredJson(BRANCH_WORKFLOW_STORAGE_NAMESPACE, BRANCH_WORKFLOW_HISTORY_KEY);
-      }
-      setBranchTaskHistory(remaining);
+          current.filter(
+            (item) =>
+              isCliBranchTaskHistory(item) &&
+              !branchHistoryMatchesWorkspace(
+                item,
+                activeProjectWorkspaceKey,
+                projectKeySet,
+              ),
+          ),
+        ),
+      );
       setCurrentBranchTaskHistoryId("");
       setCurrentBranchTaskRunningLabel("");
       lastBranchTaskHistoryEntryRef.current = null;
@@ -694,11 +866,17 @@ export function useBranchWorkflowModule({
       }) || "";
     lastBranchActivityIdRef.current = activityId;
     try {
-      const result = await invoke<BranchTaskResponse>(command, { request });
+      const result = await invoke<BranchTaskResponse>(command, {
+        request,
+        activityId: activityId || null,
+        operationOrigin: options.origin ?? "app",
+      });
+      const recoveryReplay = branchTaskFailureReplay(result, replay);
       const historyEntry = await persistHistory(
         result,
-        replay,
+        recoveryReplay,
         options.workspaceKey ?? activeProjectWorkspaceKey,
+        activityId,
       );
       setCurrentBranchTaskHistoryId(historyEntry.id);
       setCurrentBranchTaskRunningLabel("");
@@ -712,19 +890,30 @@ export function useBranchWorkflowModule({
         updateActivity?.(activityId, {
           status: result.success ? "success" : "failed",
           summary: result.summary,
-          detail: result.detail,
+          detail: branchTaskDisplayDetail(result),
           chainId: options.chainId ?? undefined,
           parentId: options.parentId ?? undefined,
           stepLabel: options.stepLabel ?? branchActivityTitle(command),
           chainLabel: options.chainId ? "联动链路" : undefined,
           projectKey: resultProjectKey,
           projectName: resultProjectName,
+          diagnostics: branchTaskDiagnosticSteps(result),
+          warnings: !result.success && !recoveryReplay
+            ? ["当前批次包含同一项目的部分成功结果，请打开 Git 页面核对后按剩余目标执行。"]
+            : [],
           resource: branchResultResource(result),
           target: {
             page: "merge",
             projectKey: resultProjectKey,
             branchMode: result.taskKind,
           },
+          action: recoveryReplay
+            ? {
+                kind: "branchReplay",
+                label: "检查并重试 Git 操作",
+                replay: recoveryReplay,
+              }
+            : null,
         });
       }
       return result;
@@ -736,6 +925,19 @@ export function useBranchWorkflowModule({
           status: "failed",
           summary: `${branchActivityTitle(command)}失败`,
           detail: String(reason),
+          diagnostics: [{
+            id: `${taskKind}:${requestedProject}:invoke`,
+            type: `git.${taskKind}`,
+            label: requestedProjectName,
+            status: "failed",
+            summary: `${branchActivityTitle(command)}失败`,
+            risks: [String(reason)],
+          }],
+          action: {
+            kind: "branchReplay",
+            label: "检查并重试 Git 操作",
+            replay,
+          },
         });
       }
       setError(String(reason));
@@ -785,7 +987,7 @@ export function useBranchWorkflowModule({
         chainId: options.chainId ?? undefined,
       },
     );
-    return result !== null;
+    return result?.success === true;
   }
 
   async function handleReplayBranchTaskHistory(
@@ -950,12 +1152,36 @@ export function useBranchWorkflowModule({
     }
   }
 
-  async function handleExecuteSync() {
-    const request = {
-      project: selectedProject,
+  function currentBranchSyncRequest() {
+    const projects = normalizeValues(syncProjects);
+    return {
+      project: projects[0] || "",
+      projects,
       sourceBranch: syncSource,
       targetBranches: normalizeValues(syncTargets),
     };
+  }
+
+  async function handlePlanSync() {
+    if (!enabled) {
+      return null;
+    }
+    setBusy("正在检查远端分支");
+    setError("");
+    try {
+      return await invoke<BranchTaskResponse>("plan_branch_sync_task", {
+        request: currentBranchSyncRequest(),
+      });
+    } catch (reason) {
+      setError(String(reason));
+      return null;
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function handleExecuteSync() {
+    const request = currentBranchSyncRequest();
     const result = await runBranchTask(
       "正在合并分支",
       "execute_branch_sync_task",
@@ -1099,6 +1325,8 @@ export function useBranchWorkflowModule({
     mode,
     setMode,
     projectOptions,
+    syncProjects,
+    setSyncProjects,
     syncSource,
     setSyncSource,
     syncTargets,
@@ -1140,6 +1368,7 @@ export function useBranchWorkflowModule({
     handleChooseCheckoutDirectory,
     handleChooseWorktreeDirectory,
     handleRepairWorktree,
+    handlePlanSync,
     handleExecuteSync,
     handleExecuteCreate,
     handleExecuteCheckout,

@@ -16,8 +16,8 @@
         "title": "rDevTool",
         "width": 950,
         "height": 760,
-        "minWidth": 950,
-        "minHeight": 760,
+        "minWidth": 820,
+        "minHeight": 640,
         "resizable": true,
         "decorations": true,
         "transparent": true,
@@ -31,7 +31,8 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self' customprotocol: asset:; connect-src ipc: http://ipc.localhost; img-src 'self' asset: http://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; font-src 'self' data:; object-src 'none'; base-uri 'none'; frame-src 'none'",
+      "freezePrototype": true
     }
   },
   "bundle": {

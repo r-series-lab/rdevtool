@@ -2,11 +2,20 @@ mod desktop;
 mod tui;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum, error::ErrorKind};
-use rdevtool_core::agent::{AgentCapabilities, AgentContext, capabilities, context_for_workspace};
+use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use rdevtool_core::agent::{
+    AgentCapabilities, AgentContext, AgentContextOptions, AgentContextPreset, AgentContextSection,
+    capabilities, context_for_workspace, context_for_workspace_with_options_and_paths,
+};
+use rdevtool_core::artifacts::{
+    ManagedArtifactCleanupPlanResponse, ManagedArtifactCleanupQuery,
+    ManagedArtifactInventoryResponse, ManagedArtifactQuery, managed_artifact_cleanup_plan,
+    managed_artifact_inventory,
+};
 use rdevtool_core::config::{
-    AppConfig, BranchRules, BuildActionKind, BuildTargetAdapter, CreateProjectWorkspaceRequest,
-    DeployParamConfig, DeployParamKind, DeployTargetConfig, JobConfig, Jobs, ProjectConfig,
+    AppConfig, BranchRules, BuildActionKind, BuildArtifactConfig, BuildTargetAdapter, ConfigPaths,
+    CreateProjectWorkspaceRequest, DeployParamConfig, DeployParamKind, DeployTargetConfig,
+    JobConfig, Jobs, ProjectConfig, ProjectDebugProfileConfig, ProjectDebugReadyProbeConfig,
     ProjectFocusConfig, ProjectWorkspaceConfig, ProjectWorkspaceProjectInstanceConfig,
     ProjectWorkspaceResourceCategoryConfig, ProjectWorkspaceResourceEntryConfig,
     SYSTEM_PROJECT_WORKSPACE_KEY, active_project_workspace_key, apply_project_workspace_context,
@@ -24,15 +33,16 @@ use rdevtool_core::config_sources::{
 use rdevtool_core::core::{
     self, BranchCheckoutRequest, BranchCommitOverview, BranchCreateRequest, BranchFileDiffRequest,
     BranchFileDiffResponse, BranchPushRequest, BranchPushStatus, BranchSwitchRequest,
-    BranchSyncRequest, BranchTaskResponse, BuildStatusResponse, DeployRequest, DeployTargetMeta,
-    MergeRequest, MergeResponse, StatusRequest, branch_file_diff, branch_push_status,
-    checkout_branch_to_directory, execute_branch_create, execute_branch_push,
-    execute_branch_switch, execute_branch_sync, parse_extra_params_args,
+    BranchSyncRequest, BranchTaskResponse, BuildStatusResponse, BuildTriggerResponse,
+    DeployRequest, DeployTargetMeta, MergeRequest, MergeResponse, StatusRequest, branch_file_diff,
+    branch_push_status, checkout_branch_to_directory, execute_branch_create, execute_branch_push,
+    execute_branch_switch, execute_branch_sync, parse_extra_params_args, plan_branch_sync,
 };
 use rdevtool_core::link::{
     LinkConfig, LinkExecutionReport, LinkExecutionStepReport, LinkStepConfig,
     LinkWorkspaceAttachRequest, attach_link_to_workspace, delete_link as core_delete_link,
-    get_link, links_file_path, list_link_summaries, plan_link as core_plan_link, upsert_link,
+    get_link, link_proxy_check_status, links_file_path, list_link_summaries,
+    plan_link as core_plan_link, upsert_link,
 };
 use rdevtool_core::navigation::{
     NavigationEditorCategory, NavigationEditorEntry, NavigationIndexEntry,
@@ -41,17 +51,25 @@ use rdevtool_core::navigation::{
     save_navigation_editor_data, search_navigation_entries_for_workspace,
     validate_workspace_resource_entry,
 };
+use rdevtool_core::operation::{
+    ManagedArtifact, OPERATION_EVENT_HISTORY_LIMIT, OperationEvent, OperationEventOrigin,
+    OperationEventState, OperationEvidence, OperationRisk, OperationStatus, RecommendedAction,
+    branch_task_operation_event, build_history_request, build_operation_event,
+    failed_build_operation_event, lifecycle_operation_event, link_operation_event,
+    list_operation_events, operation_event_id, save_operation_event,
+    update_build_operation_event_from_history,
+};
 use rdevtool_core::proxy::{
-    ProxyConfig, ProxyOutboundMode, ProxyProfile, ProxyProfilePack, ProxyRequestDiagnosis,
-    ProxyRule, ProxyRuleAction, default_proxy_path,
+    PROXY_VERIFY_ID_HEADER, ProxyConfig, ProxyEvent, ProxyOutboundMode, ProxyProfile,
+    ProxyProfilePack, ProxyRequestDiagnosis, ProxyRule, ProxyRuleAction, default_proxy_path,
     delete_proxy_profile as core_delete_proxy_profile, delete_proxy_rule as core_delete_proxy_rule,
     diagnose_proxy_request, ensure_proxy_config, export_proxy_profile_pack,
     import_proxy_profile_pack, load_proxy_config, save_proxy_config, upsert_proxy_profile,
     upsert_proxy_rule, validate_proxy_profile, validate_proxy_rule,
 };
 use rdevtool_core::proxy_daemon::{
-    ProxyDaemonStatus, proxy_daemon_restart, proxy_daemon_start, proxy_daemon_status,
-    proxy_daemon_stop,
+    ProxyDaemonRuntime, ProxyDaemonStatus, proxy_daemon_restart, proxy_daemon_start,
+    proxy_daemon_status, proxy_daemon_stop,
 };
 use rdevtool_core::replay::{
     ReplayAction, build_replay_action, merge_replay_action, replay_kind_and_history_key,
@@ -59,20 +77,23 @@ use rdevtool_core::replay::{
 use rdevtool_core::runtime::{
     ProjectRuntimeFocusResponse, ProjectRuntimeInspectResponse, ProjectRuntimeLaunchOptions,
     ProjectRuntimeLogKind, ProjectRuntimeLogResponse, ProjectRuntimePreflightResponse,
-    ProjectRuntimeStartResponse, RuntimeProfileSummary, RuntimeProfilesResponse,
+    ProjectRuntimeStartResponse, ProjectRuntimeWaitOptions, ProjectRuntimeWaitResponse,
+    ProjectRuntimeWaitUntil, RuntimeProfileSummary, RuntimeProfilesResponse,
     adopt_project_runtime_with_options, clear_project_runtime_log,
-    inspect_project_runtime_with_options, project_runtime_preflight_with_options,
-    read_project_runtime_log, runtime_profile_show, runtime_profiles,
-    start_project_runtime_detached_with_options,
+    inspect_project_runtime_with_options, project_runtime_candidate_cwds,
+    project_runtime_preflight_with_options, read_project_runtime_log_with_selection,
+    runtime_profile_show, runtime_profiles, start_project_runtime_detached_with_options,
+    wait_project_runtime,
 };
 use rdevtool_core::runtime_daemon::{
     RuntimeDaemonAdoptResponse, RuntimeDaemonDiagnosis, RuntimeDaemonStatus,
-    diagnose as diagnose_runtime_daemon, list as list_runtime_daemons,
+    diagnose as diagnose_runtime_daemon, find as find_runtime_daemon, list as list_runtime_daemons,
     status as runtime_daemon_status, stop as stop_runtime_daemon,
 };
 use rdevtool_core::runtime_link::{BindProxyRuntimeRequest, bind_proxy_runtime_profile};
 use rdevtool_core::storage::{
-    self, DeployHistoryEntry, MergeHistoryEntry, SaveNoteRequest, Storage,
+    self, DeployHistoryEntry, HistoryCommitInfo, MergeHistoryEntry, SaveDeployHistoryRequest,
+    SaveMergeHistoryRequest, SaveNoteRequest, Storage,
 };
 use rdevtool_core::web_actions::{
     WebActionListResponse, WebActionRunRequest, WebActionRunResult, WebActionScriptRunRequest,
@@ -80,8 +101,18 @@ use rdevtool_core::web_actions::{
     open_web_action_target, run_web_action, run_web_action_script,
 };
 use rdevtool_core::workspace_init::{
-    InitDemandWorkspaceBranch, InitDemandWorkspaceProject, InitDemandWorkspaceRequest,
-    InitDemandWorkspaceRequirementEntry, InitDemandWorkspaceResult, init_demand_workspace,
+    InitDemandWorkspaceAction, InitDemandWorkspaceBranch, InitDemandWorkspaceCopyMode,
+    InitDemandWorkspaceEffective, InitDemandWorkspaceObserved, InitDemandWorkspaceProject,
+    InitDemandWorkspaceRequest, InitDemandWorkspaceRequested, InitDemandWorkspaceRequirementEntry,
+    InitDemandWorkspaceResult, init_demand_workspace,
+};
+use rdevtool_core::workspace_instance::{
+    WorkspaceProjectInstanceValidation, validate_workspace_project_instance,
+};
+use rdevtool_core::workspace_resources::{
+    WorkspaceOperationWorklogEvent, WorkspaceResourceStatus, append_workspace_operation_worklog,
+    append_workspace_worklog, initialize_workspace_resources, read_workspace_worklog,
+    set_workspace_worklog_auto_record, workspace_resource_status,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -90,6 +121,24 @@ use std::fs;
 use std::io::{self, Read};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+
+const BRANCH_WORKFLOW_STORAGE_NAMESPACE: &str = "branch-workflow";
+const BRANCH_WORKFLOW_HISTORY_KEY: &str = "history";
+const BRANCH_WORKFLOW_HISTORY_LIMIT: usize = 200;
+
+#[derive(Debug)]
+struct CliReportedFailure {
+    code: &'static str,
+    message: String,
+}
+
+impl std::fmt::Display for CliReportedFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CliReportedFailure {}
 
 #[derive(Parser)]
 #[command(name = "rdevtool")]
@@ -212,12 +261,14 @@ enum Commands {
         target: String,
     },
     SyncBranches {
-        #[arg(long)]
-        project: String,
+        #[arg(long = "project")]
+        projects: Vec<String>,
         #[arg(long = "source")]
         source_branch: String,
         #[arg(long = "target")]
         target_branches: Vec<String>,
+        #[arg(long, visible_alias = "dry-run")]
+        plan: bool,
     },
     CreateBranch {
         #[arg(long = "project")]
@@ -273,6 +324,10 @@ enum Commands {
         #[command(subcommand)]
         command: RuntimeCommands,
     },
+    Artifacts {
+        #[command(subcommand)]
+        command: ArtifactCommands,
+    },
     WebActions {
         #[command(subcommand)]
         command: WebActionCommands,
@@ -321,6 +376,14 @@ enum WorkspaceCommands {
         #[arg(long)]
         root_dir: Option<PathBuf>,
         #[arg(long)]
+        resource_dir: Option<PathBuf>,
+        #[arg(long)]
+        worklog_file: Option<PathBuf>,
+        #[arg(long)]
+        no_worklog: bool,
+        #[arg(long)]
+        no_auto_worklog: bool,
+        #[arg(long)]
         independent_dir: bool,
         #[arg(long)]
         empty: bool,
@@ -341,13 +404,25 @@ enum WorkspaceCommands {
         #[arg(long)]
         requirement_dir: PathBuf,
         #[arg(long)]
-        repo_path: PathBuf,
+        repo_path: Option<PathBuf>,
         #[arg(long)]
         project: Option<String>,
         #[arg(long)]
         branch: Option<String>,
         #[arg(long)]
         root_dir: Option<PathBuf>,
+        #[arg(long)]
+        instance_dir: Option<PathBuf>,
+        #[arg(long, value_enum, default_value_t = WorkspaceCopyModeArg::Existing)]
+        copy_mode: WorkspaceCopyModeArg,
+        #[arg(long)]
+        resource_dir: Option<PathBuf>,
+        #[arg(long)]
+        worklog_file: Option<PathBuf>,
+        #[arg(long)]
+        no_worklog: bool,
+        #[arg(long)]
+        no_auto_worklog: bool,
         #[arg(long, default_value = "需求资料")]
         requirement_category: String,
         #[arg(long, default_value = "需求")]
@@ -356,6 +431,38 @@ enum WorkspaceCommands {
         requirement_entry_name: String,
         #[arg(long)]
         no_switch: bool,
+        #[arg(long)]
+        allow_remote_mismatch: bool,
+        #[arg(long)]
+        dry_run: bool,
+    },
+    ResourcesInit {
+        workspace: Option<String>,
+        #[arg(long)]
+        resource_dir: Option<PathBuf>,
+        #[arg(long)]
+        worklog_file: Option<PathBuf>,
+        #[arg(long)]
+        no_worklog: bool,
+    },
+    WorklogAppend {
+        workspace: Option<String>,
+        #[arg(long, default_value = "记录")]
+        kind: String,
+        #[arg(long)]
+        summary: String,
+        #[arg(long)]
+        detail: Option<String>,
+    },
+    WorklogShow {
+        workspace: Option<String>,
+        #[arg(long, default_value_t = 80)]
+        lines: usize,
+    },
+    WorklogAuto {
+        workspace: Option<String>,
+        #[arg(long, action = clap::ArgAction::Set)]
+        enabled: bool,
     },
     Use {
         workspace: String,
@@ -394,7 +501,26 @@ enum WorkspaceCommands {
         project_instances: Vec<String>,
         #[arg(long)]
         clear_project_instances: bool,
+        #[arg(long)]
+        allow_remote_mismatch: bool,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkspaceCopyModeArg {
+    Existing,
+    Worktree,
+    Clone,
+}
+
+impl From<WorkspaceCopyModeArg> for InitDemandWorkspaceCopyMode {
+    fn from(value: WorkspaceCopyModeArg) -> Self {
+        match value {
+            WorkspaceCopyModeArg::Existing => InitDemandWorkspaceCopyMode::Existing,
+            WorkspaceCopyModeArg::Worktree => InitDemandWorkspaceCopyMode::Worktree,
+            WorkspaceCopyModeArg::Clone => InitDemandWorkspaceCopyMode::Clone,
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -460,6 +586,8 @@ enum ProjectCommands {
         profile: Option<String>,
         #[arg(long)]
         job: Option<String>,
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
     },
     #[command(visible_alias = "build-target-update")]
     TargetUpdate {
@@ -475,6 +603,10 @@ enum ProjectCommands {
         profile: Option<String>,
         #[arg(long)]
         job: Option<String>,
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+        #[arg(long)]
+        clear_output_dir: bool,
     },
     #[command(visible_alias = "build-target-delete")]
     TargetDelete {
@@ -501,6 +633,8 @@ enum ProjectCommands {
         true_value: Option<String>,
         #[arg(long)]
         false_value: Option<String>,
+        #[arg(long = "impact-path")]
+        impact_paths: Vec<String>,
     },
     #[command(visible_alias = "build-param-update")]
     TargetParamUpdate {
@@ -531,12 +665,94 @@ enum ProjectCommands {
         false_value: Option<String>,
         #[arg(long)]
         clear_false_value: bool,
+        #[arg(long = "impact-path")]
+        impact_paths: Vec<String>,
+        #[arg(long)]
+        clear_impact_paths: bool,
     },
     #[command(visible_alias = "build-param-delete")]
     TargetParamDelete {
         project: String,
         target: String,
         param: String,
+    },
+    DebugProfileList {
+        project: String,
+    },
+    DebugProfileShow {
+        project: String,
+        profile: String,
+    },
+    DebugProfileAdd {
+        project: String,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long = "expect-port")]
+        expected_port: Option<u16>,
+        #[arg(long = "focus-url")]
+        focus_url: Option<String>,
+        #[arg(long = "ready-probe-url")]
+        ready_probe_url: Option<String>,
+        #[arg(long = "ready-probe-path")]
+        ready_probe_path: Option<String>,
+        #[arg(long = "ready-expect-status")]
+        ready_expected_statuses: Vec<u16>,
+        #[arg(long = "ready-timeout-ms")]
+        ready_timeout_ms: Option<u64>,
+        #[arg(long = "runtime-profile")]
+        runtime_profile: Option<String>,
+        #[arg(long = "env")]
+        env: Vec<String>,
+    },
+    DebugProfileUpdate {
+        project: String,
+        profile: String,
+        #[arg(long)]
+        label: Option<String>,
+        #[arg(long)]
+        command: Option<String>,
+        #[arg(long)]
+        clear_command: bool,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long)]
+        clear_cwd: bool,
+        #[arg(long = "expect-port")]
+        expected_port: Option<u16>,
+        #[arg(long)]
+        clear_expect_port: bool,
+        #[arg(long = "focus-url")]
+        focus_url: Option<String>,
+        #[arg(long)]
+        clear_focus_url: bool,
+        #[arg(long = "ready-probe-url")]
+        ready_probe_url: Option<String>,
+        #[arg(long = "ready-probe-path")]
+        ready_probe_path: Option<String>,
+        #[arg(long = "ready-expect-status")]
+        ready_expected_statuses: Vec<u16>,
+        #[arg(long = "ready-timeout-ms")]
+        ready_timeout_ms: Option<u64>,
+        #[arg(long)]
+        clear_ready_probe: bool,
+        #[arg(long = "runtime-profile")]
+        runtime_profile: Option<String>,
+        #[arg(long)]
+        clear_runtime_profile: bool,
+        #[arg(long = "env")]
+        env: Vec<String>,
+        #[arg(long)]
+        clear_env: bool,
+    },
+    DebugProfileDelete {
+        project: String,
+        profile: String,
     },
     Show {
         project: String,
@@ -573,7 +789,36 @@ impl ProjectCommands {
                 | ProjectCommands::TargetParamAdd { .. }
                 | ProjectCommands::TargetParamUpdate { .. }
                 | ProjectCommands::TargetParamDelete { .. }
+                | ProjectCommands::DebugProfileAdd { .. }
+                | ProjectCommands::DebugProfileUpdate { .. }
+                | ProjectCommands::DebugProfileDelete { .. }
         )
+    }
+
+    fn json_command_name(&self) -> &'static str {
+        match self {
+            Self::List => "projects.list",
+            Self::Add { .. } => "projects.add",
+            Self::Update { .. } => "projects.update",
+            Self::Delete { .. } => "projects.delete",
+            Self::SetCommand { .. } => "projects.set-command",
+            Self::TargetAdd { .. } => "projects.target-add",
+            Self::TargetUpdate { .. } => "projects.target-update",
+            Self::TargetDelete { .. } => "projects.target-delete",
+            Self::TargetParamAdd { .. } => "projects.target-param-add",
+            Self::TargetParamUpdate { .. } => "projects.target-param-update",
+            Self::TargetParamDelete { .. } => "projects.target-param-delete",
+            Self::DebugProfileList { .. } => "projects.debug-profile-list",
+            Self::DebugProfileShow { .. } => "projects.debug-profile-show",
+            Self::DebugProfileAdd { .. } => "projects.debug-profile-add",
+            Self::DebugProfileUpdate { .. } => "projects.debug-profile-update",
+            Self::DebugProfileDelete { .. } => "projects.debug-profile-delete",
+            Self::Show { .. } => "projects.show",
+            Self::Branch { .. } => "projects.branch",
+            Self::Branches { .. } => "projects.branches",
+            Self::Envs { .. } => "projects.envs",
+            Self::Options { .. } => "projects.options",
+        }
     }
 }
 
@@ -722,6 +967,8 @@ enum BuildCommands {
         branch: Option<String>,
         #[arg(long = "set")]
         extra_params: Vec<String>,
+        #[command(flatten)]
+        follow: BuildFollowOptions,
     },
     Trigger {
         project: String,
@@ -733,12 +980,16 @@ enum BuildCommands {
         branch: Option<String>,
         #[arg(long = "set")]
         extra_params: Vec<String>,
+        #[command(flatten)]
+        follow: BuildFollowOptions,
     },
     Status {
         #[arg(long)]
         queue_url: Option<String>,
         #[arg(long)]
         build_url: Option<String>,
+        #[command(flatten)]
+        follow: BuildFollowOptions,
     },
     History {
         #[arg(long)]
@@ -746,6 +997,19 @@ enum BuildCommands {
         #[arg(long, default_value_t = 20)]
         limit: usize,
     },
+}
+
+#[derive(Args, Clone, Copy, Debug, Default)]
+struct BuildFollowOptions {
+    /// Keep polling Jenkins until the build reaches a terminal state.
+    #[arg(long)]
+    follow: bool,
+    /// Delay between status requests while following.
+    #[arg(long, requires = "follow", value_parser = clap::value_parser!(u64).range(250..=60_000))]
+    poll_interval_ms: Option<u64>,
+    /// Maximum time to follow before returning a non-zero timeout error.
+    #[arg(long, requires = "follow", value_parser = clap::value_parser!(u64).range(1..=86_400))]
+    timeout_secs: Option<u64>,
 }
 
 #[derive(Subcommand)]
@@ -773,12 +1037,14 @@ enum GitCommands {
         target: String,
     },
     MergeMany {
-        #[arg(long)]
-        project: String,
+        #[arg(long = "project")]
+        projects: Vec<String>,
         #[arg(long = "source")]
         source_branch: String,
         #[arg(long = "target")]
         target_branches: Vec<String>,
+        #[arg(long, visible_alias = "dry-run")]
+        plan: bool,
     },
     Create {
         #[arg(long = "project")]
@@ -880,7 +1146,24 @@ enum NoteCommands {
 }
 
 #[derive(Subcommand)]
+enum HistoryOperationCommands {
+    Show { id: String },
+}
+
+#[derive(Subcommand)]
 enum HistoryCommands {
+    Operations {
+        #[command(subcommand)]
+        command: Option<HistoryOperationCommands>,
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        origin: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, default_value_t = 24)]
+        limit: usize,
+    },
     Build {
         #[arg(long)]
         project: Option<String>,
@@ -1367,6 +1650,8 @@ enum RuntimeCommands {
     Status {
         #[arg(long)]
         project: String,
+        #[arg(long = "run-id")]
+        run_id: Option<String>,
     },
     List {
         #[arg(long)]
@@ -1375,6 +1660,8 @@ enum RuntimeCommands {
     Stop {
         #[arg(long)]
         project: String,
+        #[arg(long = "run-id")]
+        run_id: Option<String>,
     },
     Restart {
         #[arg(long)]
@@ -1405,6 +1692,8 @@ enum RuntimeCommands {
     Diagnose {
         #[arg(long)]
         project: String,
+        #[arg(long = "run-id")]
+        run_id: Option<String>,
     },
     Focus {
         #[arg(long)]
@@ -1416,6 +1705,24 @@ enum RuntimeCommands {
         #[arg(long)]
         url: Option<String>,
     },
+    Wait {
+        #[arg(long)]
+        project: String,
+        #[arg(long = "run-id")]
+        run_id: Option<String>,
+        #[arg(long, value_enum, default_value = "http-verified")]
+        until: RuntimeWaitUntilArg,
+        #[arg(long)]
+        timeout_ms: Option<u64>,
+        #[arg(long, default_value_t = 250)]
+        poll_interval_ms: u64,
+        #[arg(long = "probe-url")]
+        probe_url: Option<String>,
+        #[arg(long = "probe-path")]
+        probe_path: Option<String>,
+        #[arg(long = "expect-status")]
+        expected_statuses: Vec<u16>,
+    },
     Log {
         #[arg(long)]
         project: String,
@@ -1425,6 +1732,10 @@ enum RuntimeCommands {
         max_lines: usize,
         #[arg(long)]
         clear: bool,
+        #[arg(long)]
+        current: bool,
+        #[arg(long = "run-id")]
+        run_id: Option<String>,
     },
 }
 
@@ -1443,6 +1754,7 @@ impl RuntimeCommands {
             Self::Adopt { .. } => "runtime.adopt",
             Self::Diagnose { .. } => "runtime.diagnose",
             Self::Focus { .. } => "runtime.focus",
+            Self::Wait { .. } => "runtime.wait",
             Self::Log { .. } => "runtime.log",
         }
     }
@@ -1454,11 +1766,63 @@ enum RuntimeLogKindArg {
     Build,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum RuntimeWaitUntilArg {
+    ProcessStarted,
+    ListenerReady,
+    HttpVerified,
+}
+
+impl From<RuntimeWaitUntilArg> for ProjectRuntimeWaitUntil {
+    fn from(value: RuntimeWaitUntilArg) -> Self {
+        match value {
+            RuntimeWaitUntilArg::ProcessStarted => ProjectRuntimeWaitUntil::ProcessStarted,
+            RuntimeWaitUntilArg::ListenerReady => ProjectRuntimeWaitUntil::ListenerReady,
+            RuntimeWaitUntilArg::HttpVerified => ProjectRuntimeWaitUntil::HttpVerified,
+        }
+    }
+}
+
 impl From<RuntimeLogKindArg> for ProjectRuntimeLogKind {
     fn from(value: RuntimeLogKindArg) -> Self {
         match value {
             RuntimeLogKindArg::Dev => ProjectRuntimeLogKind::Dev,
             RuntimeLogKindArg::Build => ProjectRuntimeLogKind::Build,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum ArtifactCommands {
+    List {
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long)]
+        all_workspaces: bool,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long = "kind")]
+        kinds: Vec<String>,
+    },
+    CleanupPlan {
+        #[arg(long)]
+        workspace: Option<String>,
+        #[arg(long)]
+        all_workspaces: bool,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long = "kind")]
+        kinds: Vec<String>,
+        #[arg(long = "artifact-id")]
+        artifact_ids: Vec<String>,
+    },
+}
+
+impl ArtifactCommands {
+    fn json_command_name(&self) -> &'static str {
+        match self {
+            Self::List { .. } => "artifacts.list",
+            Self::CleanupPlan { .. } => "artifacts.cleanup-plan",
         }
     }
 }
@@ -1515,7 +1879,65 @@ enum AgentCommands {
         query: Option<String>,
         #[arg(long, default_value_t = 6)]
         limit: usize,
+        #[arg(long = "for", value_enum)]
+        preset: Option<AgentContextPresetArg>,
+        #[arg(long)]
+        compact: bool,
+        #[arg(long, value_enum, value_delimiter = ',')]
+        include: Vec<AgentContextSectionArg>,
+        #[arg(long)]
+        debug_profile: Option<String>,
+        #[arg(long)]
+        runtime_profile: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AgentContextPresetArg {
+    Workspace,
+    Git,
+    Runtime,
+    Build,
+    WebActions,
+    Artifacts,
+}
+
+impl From<AgentContextPresetArg> for AgentContextPreset {
+    fn from(value: AgentContextPresetArg) -> Self {
+        match value {
+            AgentContextPresetArg::Workspace => AgentContextPreset::Workspace,
+            AgentContextPresetArg::Git => AgentContextPreset::Git,
+            AgentContextPresetArg::Runtime => AgentContextPreset::Runtime,
+            AgentContextPresetArg::Build => AgentContextPreset::Build,
+            AgentContextPresetArg::WebActions => AgentContextPreset::WebActions,
+            AgentContextPresetArg::Artifacts => AgentContextPreset::Artifacts,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum AgentContextSectionArg {
+    History,
+    Notes,
+    Navigation,
+    Proxy,
+    Projects,
+    Worklog,
+    Artifacts,
+}
+
+impl From<AgentContextSectionArg> for AgentContextSection {
+    fn from(value: AgentContextSectionArg) -> Self {
+        match value {
+            AgentContextSectionArg::History => AgentContextSection::History,
+            AgentContextSectionArg::Notes => AgentContextSection::Notes,
+            AgentContextSectionArg::Navigation => AgentContextSection::Navigation,
+            AgentContextSectionArg::Proxy => AgentContextSection::Proxy,
+            AgentContextSectionArg::Projects => AgentContextSection::Projects,
+            AgentContextSectionArg::Worklog => AgentContextSection::Worklog,
+            AgentContextSectionArg::Artifacts => AgentContextSection::Artifacts,
+        }
+    }
 }
 
 fn main() {
@@ -1540,7 +1962,9 @@ fn main() {
         Ok(cli) => match run_cli(cli) {
             Ok(()) => 0,
             Err(error) => {
-                emit_cli_error(&error, json_mode);
+                if error.downcast_ref::<CliReportedFailure>().is_none() {
+                    emit_cli_error(&error, json_mode);
+                }
                 classify_error(&error).1
             }
         },
@@ -1696,12 +2120,20 @@ fn run_cli(cli: Cli) -> Result<()> {
             run_merge(&config, project, source, target, json)
         }
         Commands::SyncBranches {
-            project,
+            projects,
             source_branch,
             target_branches,
+            plan,
         } => {
             let (config, _) = load_cli_effective_config(config_override)?;
-            run_branch_sync(&config, project, source_branch, target_branches, json)
+            run_branch_sync(
+                &config,
+                projects,
+                source_branch,
+                target_branches,
+                plan,
+                json,
+            )
         }
         Commands::CreateBranch {
             projects,
@@ -1744,6 +2176,7 @@ fn run_cli(cli: Cli) -> Result<()> {
             let (config, _) = load_cli_effective_config(config_override)?;
             run_runtime(&config, command, json)
         }
+        Commands::Artifacts { command } => run_artifacts(command, config_override, json),
         Commands::WebActions { command } => run_web_actions(command, json),
         Commands::Notes { command } => run_notes(command, json),
         Commands::History { command } => {
@@ -1851,6 +2284,7 @@ struct ProxyStatusResponse {
     source_name: String,
     path: String,
     profiles: Vec<ProxyStatusItem>,
+    operation: ProxyOperationContract,
 }
 
 #[derive(Debug, Serialize)]
@@ -1868,10 +2302,19 @@ struct ProxyStatusItem {
     started_at: Option<String>,
     owner: Option<String>,
     ownership: String,
+    state_path: String,
     detail: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyDiagnoseResponse {
+    #[serde(flatten)]
+    diagnosis: ProxyRequestDiagnosis,
+    operation: ProxyOperationContract,
+}
+
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ProxyVerifyResponse {
     profile_id: String,
@@ -1890,6 +2333,112 @@ struct ProxyVerifyResponse {
     status_matches: bool,
     body_matches: bool,
     verified: bool,
+    operation: ProxyOperationContract,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyOperationContract {
+    schema_version: u16,
+    requested: ProxyOperationRequested,
+    effective: ProxyOperationEffective,
+    observed: ProxyOperationObserved,
+    lifecycle: ProxyOperationLifecycle,
+    status: OperationStatus,
+    evidence: Vec<OperationEvidence>,
+    risks: Vec<OperationRisk>,
+    managed_artifacts: Vec<ManagedArtifact>,
+    recommended_actions: Vec<RecommendedAction>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyOperationRequested {
+    profile: Option<String>,
+    method: Option<String>,
+    url: Option<String>,
+    header_count: usize,
+    body_provided: bool,
+    expected_status: Option<u16>,
+    expected_body_text_provided: bool,
+    timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyOperationEffective {
+    source_id: String,
+    config_path: String,
+    profile_ids: Vec<String>,
+    selected_profile_id: Option<String>,
+    listen_url: Option<String>,
+    method: Option<String>,
+    request_url: Option<String>,
+    path: Option<String>,
+    predicted_rule_id: Option<String>,
+    predicted_action: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyOperationObserved {
+    configured_profile_count: usize,
+    listening_count: usize,
+    managed_listener_count: usize,
+    external_listener_count: usize,
+    selected_listener: Option<ProxyListenerObservation>,
+    response: Option<ProxyResponseObservation>,
+    event: Option<ProxyEventObservation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyListenerObservation {
+    listening: bool,
+    managed: bool,
+    version_compatible: bool,
+    ownership: String,
+    pid: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyResponseObservation {
+    received: bool,
+    status: u16,
+    elapsed_ms: u128,
+    status_matches: bool,
+    body_matches: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyEventObservation {
+    captured: bool,
+    event_id: Option<String>,
+    matched_rule_id: Option<String>,
+    matched_rule_name: Option<String>,
+    action: Option<String>,
+    status: Option<u16>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyOperationLifecycle {
+    configured: ProxyOperationStage,
+    started: ProxyOperationStage,
+    matched: ProxyOperationStage,
+    verified: ProxyOperationStage,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxyOperationStage {
+    state: String,
+    confirmed: bool,
+    source: String,
+    detail: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -1897,17 +2446,33 @@ struct ProxyVerifyResponse {
 struct WorkspaceScopeCliInfo {
     workspace: ProjectWorkspaceCliInfo,
     proxy_profiles: Vec<String>,
+    project_instance_validations: Vec<WorkspaceProjectInstanceValidation>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct InitDemandWorkspaceCliInfo {
+    schema_version: u32,
+    dry_run: bool,
+    copy_mode: InitDemandWorkspaceCopyMode,
+    requested: InitDemandWorkspaceRequested,
+    effective: InitDemandWorkspaceEffective,
+    observed: InitDemandWorkspaceObserved,
+    status: OperationStatus,
+    evidence: Vec<OperationEvidence>,
+    risks: Vec<OperationRisk>,
+    managed_artifacts: Vec<ManagedArtifact>,
+    recommended_actions: Vec<RecommendedAction>,
+    planned_actions: Vec<InitDemandWorkspaceAction>,
     workspace: ProjectWorkspaceCliInfo,
     project: InitDemandWorkspaceProject,
     requirement_entry: InitDemandWorkspaceRequirementEntry,
+    resources: WorkspaceResourceStatus,
     branch: InitDemandWorkspaceBranch,
     metadata: BTreeMap<String, String>,
     warnings: Vec<String>,
+    source_repository_validation: Option<WorkspaceProjectInstanceValidation>,
+    project_instance_validation: Option<WorkspaceProjectInstanceValidation>,
 }
 
 struct WorkspaceScopeUpdate {
@@ -1927,6 +2492,7 @@ struct WorkspaceScopeUpdate {
     clear_root_dir: bool,
     project_instances: Vec<String>,
     clear_project_instances: bool,
+    allow_remote_mismatch: bool,
 }
 
 struct ProxyRuleCliPatch {
@@ -1974,6 +2540,11 @@ struct ProjectWorkspaceCliInfo {
     workspace_type: String,
     metadata: BTreeMap<String, String>,
     root_dir: Option<String>,
+    resource_dir: Option<String>,
+    worklog_file: Option<String>,
+    worklog_path: Option<String>,
+    worklog_exists: bool,
+    worklog_auto_record: bool,
     project_count: usize,
     resource_count: usize,
     include_all_projects: bool,
@@ -2021,6 +2592,9 @@ fn load_cli_config(config_override: Option<&Path>) -> Result<(AppConfig, PathBuf
 
 fn load_cli_effective_config(config_override: Option<&Path>) -> Result<(AppConfig, PathBuf)> {
     let (config, path) = load_cli_config(config_override)?;
+    if config_override.is_some() {
+        return Ok((config, path));
+    }
     let paths = ensure_default_configs()?;
     let workspace = load_active_project_workspace(&paths)?;
     Ok((apply_project_workspace_context(&config, &workspace), path))
@@ -2036,6 +2610,9 @@ fn load_cli_context(
 }
 
 fn classify_error(error: &anyhow::Error) -> (&'static str, i32) {
+    if let Some(reported) = error.downcast_ref::<CliReportedFailure>() {
+        return (reported.code, 1);
+    }
     let message = error.to_string().to_lowercase();
     if message.contains("not found")
         || message.contains("missing")
@@ -2066,6 +2643,11 @@ fn classify_error(error: &anyhow::Error) -> (&'static str, i32) {
         || message.contains("非空")
     {
         ("invalid_arguments", 2)
+    } else if message.contains("timeout")
+        || message.contains("timed out")
+        || message.contains("超时")
+    {
+        ("operation_timeout", 1)
     } else {
         ("internal_error", 1)
     }
@@ -2764,11 +3346,24 @@ fn proxy_listener_is_managed(status: Option<&ProxyDaemonStatus>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        Cli, Commands, ConfigSourceCommands, ProxyDaemonStatus, RuntimeCommands,
-        proxy_listener_is_managed, resolve_project_runtime_lookup_cwd,
+        AgentCommands, AgentContextPresetArg, ArtifactCommands, BuildCommands, Cli,
+        CliReportedFailure, Commands, ConfigSourceCommands, GitCommands, HistoryCommands,
+        HistoryOperationCommands, ProjectCommands, ProjectDebugProfilePatch, ProxyDaemonStatus,
+        RuntimeCommands, RuntimeWaitUntilArg, WorkspaceCommands, WorkspaceCopyModeArg,
+        add_project_debug_profile, classify_error, cli_branch_task_history_entry_with_id,
+        delete_project_debug_profile, finish_branch_task_command, is_terminal_deploy_state,
+        proxy_event_confirms_match, proxy_listener_is_managed, proxy_started_stage,
+        proxy_verification_confirmed, resolve_project_runtime_lookup_cwd,
+        update_project_debug_profile,
     };
     use clap::Parser;
-    use rdevtool_core::config::{ProjectCommandConfig, ProjectConfig};
+    use rdevtool_core::config::{
+        ProjectCommandConfig, ProjectConfig, ProjectDebugLocalFileConfig,
+        ProjectDebugProfileConfig, ProjectDebugReadyProbeConfig,
+    };
+    use rdevtool_core::core::{BranchTaskItemResult, BranchTaskResponse};
+    use rdevtool_core::proxy::ProxyEvent;
+    use std::collections::BTreeMap;
     use std::path::PathBuf;
 
     fn daemon_status(running: bool, managed: bool) -> ProxyDaemonStatus {
@@ -2790,6 +3385,146 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cli_branch_task_history_preserves_push_result_for_app_activity_sync() {
+        let response = BranchTaskResponse {
+            task_kind: "push".to_string(),
+            success: false,
+            summary: "成功 0 / 失败 1".to_string(),
+            detail: "批量任务包含失败项".to_string(),
+            items: vec![BranchTaskItemResult {
+                project_key: "admin".to_string(),
+                project_name: "管理端".to_string(),
+                source_branch: "feature/demo".to_string(),
+                target_branch: None,
+                output_path: None,
+                checkout_mode: None,
+                fallback_reason: None,
+                success: false,
+                status_key: "push_failed".to_string(),
+                status_label: "失败".to_string(),
+                summary: "推送失败".to_string(),
+                detail: "remote rejected".to_string(),
+                remote: false,
+                commit: None,
+            }],
+        };
+
+        let replay = serde_json::json!({
+            "command": "execute_branch_push_task",
+            "busyText": "正在重新推送分支",
+            "request": { "project": "admin" },
+        });
+        let entry = cli_branch_task_history_entry_with_id(
+            "feature-a",
+            &response,
+            "branch-push-cli-test",
+            Some(&replay),
+        )
+        .expect("create CLI branch history entry");
+
+        assert_eq!(entry["taskKind"], "push");
+        assert_eq!(entry["workspaceKey"], "feature-a");
+        assert_eq!(entry["items"][0]["detail"], "remote rejected");
+        assert_eq!(entry["replay"]["command"], "execute_branch_push_task");
+        assert!(
+            entry["id"]
+                .as_str()
+                .unwrap()
+                .starts_with("branch-push-cli-")
+        );
+        assert!(
+            entry["createdAt"]
+                .as_str()
+                .is_some_and(|value| value.ends_with('Z'))
+        );
+    }
+
+    #[test]
+    fn failed_branch_task_command_returns_stable_nonzero_failure() {
+        let response = BranchTaskResponse {
+            task_kind: "push".to_string(),
+            success: false,
+            summary: "成功 0 / 失败 1".to_string(),
+            detail: "批量任务包含失败项".to_string(),
+            items: Vec::new(),
+        };
+
+        let error = finish_branch_task_command(
+            None,
+            None,
+            Ok(response),
+            false,
+            "git.push",
+            "branch_task_failed",
+        )
+        .expect_err("a failed branch response must fail the CLI command");
+
+        assert_eq!(classify_error(&error), ("branch_task_failed", 1));
+    }
+
+    fn proxy_event(rule_id: Option<&str>) -> ProxyEvent {
+        ProxyEvent {
+            id: "event-1".to_string(),
+            profile_id: "profile".to_string(),
+            profile_name: "Profile".to_string(),
+            started_at: "2026-07-21T00:00:00Z".to_string(),
+            duration_ms: 1,
+            method: "GET".to_string(),
+            url: "http://example.test/api".to_string(),
+            path: "/api".to_string(),
+            status: Some(200),
+            action: "mock".to_string(),
+            matched_rule_id: rule_id.map(ToString::to_string),
+            matched_rule_name: rule_id.map(|_| "Rule".to_string()),
+            request_bytes: 0,
+            response_bytes: 2,
+            request_headers: BTreeMap::new(),
+            response_headers: BTreeMap::new(),
+            request_body_preview: String::new(),
+            response_body_preview: "ok".to_string(),
+            request_body_truncated: false,
+            response_body_truncated: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn proxy_lifecycle_requires_managed_listener_event_and_response_evidence() {
+        let external = daemon_status(true, false);
+        let managed = daemon_status(true, true);
+        let mut outdated = daemon_status(true, true);
+        outdated.version_compatible = false;
+        assert!(!proxy_started_stage(&external).confirmed);
+        assert!(proxy_started_stage(&managed).confirmed);
+        assert!(!proxy_started_stage(&outdated).confirmed);
+
+        let matched = proxy_event(Some("rule-1"));
+        assert!(proxy_event_confirms_match(
+            Some(&matched),
+            Some("rule-1"),
+            "GET"
+        ));
+        assert!(!proxy_event_confirms_match(
+            Some(&matched),
+            Some("rule-2"),
+            "GET"
+        ));
+        assert!(!proxy_event_confirms_match(None, Some("rule-1"), "GET"));
+
+        assert!(proxy_verification_confirmed(true, true, true));
+        assert!(!proxy_verification_confirmed(false, true, true));
+        assert!(!proxy_verification_confirmed(true, false, true));
+        assert!(!proxy_verification_confirmed(true, true, false));
+    }
+
+    #[test]
+    fn terminal_deploy_state_recognizes_completed_results() {
+        assert!(is_terminal_deploy_state("success"));
+        assert!(is_terminal_deploy_state("failure"));
+        assert!(!is_terminal_deploy_state("queued"));
+    }
+
     fn parse_runtime_command(args: &[&str]) -> RuntimeCommands {
         let mut values = vec!["rdevtool", "runtime"];
         values.extend_from_slice(args);
@@ -2798,6 +3533,226 @@ mod tests {
             Commands::Runtime { command } => command,
             _ => panic!("expected runtime command"),
         }
+    }
+
+    fn parse_artifact_command(args: &[&str]) -> ArtifactCommands {
+        let mut values = vec!["rdevtool", "artifacts"];
+        values.extend_from_slice(args);
+        let cli = Cli::try_parse_from(values).unwrap();
+        match cli.command {
+            Commands::Artifacts { command } => command,
+            _ => panic!("expected artifacts command"),
+        }
+    }
+
+    fn parse_agent_command(args: &[&str]) -> AgentCommands {
+        let mut values = vec!["rdevtool", "agent"];
+        values.extend_from_slice(args);
+        let cli = Cli::try_parse_from(values).unwrap();
+        match cli.command {
+            Commands::Agent { command } => command,
+            _ => panic!("expected agent command"),
+        }
+    }
+
+    fn parse_project_command(args: &[&str]) -> ProjectCommands {
+        let mut values = vec!["rdevtool", "projects"];
+        values.extend_from_slice(args);
+        let cli = Cli::try_parse_from(values).unwrap();
+        match cli.command {
+            Commands::Projects { command } => command,
+            _ => panic!("expected projects command"),
+        }
+    }
+
+    fn parse_build_command(args: &[&str]) -> BuildCommands {
+        let mut values = vec!["rdevtool", "build"];
+        values.extend_from_slice(args);
+        let cli = Cli::try_parse_from(values).unwrap();
+        match cli.command {
+            Commands::Build { command } => command,
+            _ => panic!("expected build command"),
+        }
+    }
+
+    fn parse_workspace_command(args: &[&str]) -> WorkspaceCommands {
+        let mut values = vec!["rdevtool", "workspace"];
+        values.extend_from_slice(args);
+        let cli = Cli::try_parse_from(values).unwrap();
+        match cli.command {
+            Commands::Workspace { command } => command,
+            _ => panic!("expected workspace command"),
+        }
+    }
+
+    fn parse_git_command(args: &[&str]) -> GitCommands {
+        let mut values = vec!["rdevtool", "git"];
+        values.extend_from_slice(args);
+        let cli = Cli::try_parse_from(values).unwrap();
+        match cli.command {
+            Commands::Git { command } => command,
+            _ => panic!("expected git command"),
+        }
+    }
+
+    #[test]
+    fn parses_filtered_operation_history_command() {
+        let cli = Cli::try_parse_from([
+            "rdevtool",
+            "--json",
+            "history",
+            "operations",
+            "--domain",
+            "git",
+            "--origin",
+            "cli",
+            "--project",
+            "demo",
+            "--limit",
+            "8",
+        ])
+        .expect("parse operation history command");
+
+        assert!(matches!(
+            cli.command,
+            Commands::History {
+                command: HistoryCommands::Operations {
+                    command: None,
+                    domain: Some(domain),
+                    origin: Some(origin),
+                    project: Some(project),
+                    limit: 8,
+                }
+            } if domain == "git" && origin == "cli" && project == "demo"
+        ));
+    }
+
+    #[test]
+    fn parses_operation_history_show_command() {
+        let cli = Cli::try_parse_from([
+            "rdevtool",
+            "history",
+            "operations",
+            "show",
+            "operation-cli-link-run-1",
+        ])
+        .expect("parse operation history show command");
+
+        assert!(matches!(
+            cli.command,
+            Commands::History {
+                command: HistoryCommands::Operations {
+                    command: Some(HistoryOperationCommands::Show { id }),
+                    ..
+                }
+            } if id == "operation-cli-link-run-1"
+        ));
+    }
+
+    #[test]
+    fn parses_build_target_artifact_flags() {
+        let add = parse_project_command(&[
+            "build-target-add",
+            "demo",
+            "--key",
+            "web",
+            "--label",
+            "Web",
+            "--adapter",
+            "local_command",
+            "--output-dir",
+            "web/dist",
+        ]);
+        assert!(matches!(
+            add,
+            ProjectCommands::TargetAdd {
+                output_dir: Some(path),
+                ..
+            } if path == PathBuf::from("web/dist")
+        ));
+
+        let update =
+            parse_project_command(&["build-target-update", "demo", "web", "--clear-output-dir"]);
+        assert!(matches!(
+            update,
+            ProjectCommands::TargetUpdate {
+                clear_output_dir: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_build_param_impact_path_flags() {
+        let add = parse_project_command(&[
+            "build-param-add",
+            "demo",
+            "vke",
+            "--key",
+            "IS_BUILD_MOBILE",
+            "--label",
+            "移动端",
+            "--kind",
+            "boolean",
+            "--impact-path",
+            "mobile/",
+            "--impact-path",
+            "shared/mobile/",
+        ]);
+        assert!(matches!(
+            add,
+            ProjectCommands::TargetParamAdd { impact_paths, .. }
+                if impact_paths == vec!["mobile/", "shared/mobile/"]
+        ));
+
+        let update = parse_project_command(&[
+            "build-param-update",
+            "demo",
+            "vke",
+            "IS_BUILD_MOBILE",
+            "--clear-impact-paths",
+        ]);
+        assert!(matches!(
+            update,
+            ProjectCommands::TargetParamUpdate {
+                clear_impact_paths: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_build_follow_options() {
+        let command = parse_build_command(&[
+            "run",
+            "demo",
+            "--follow",
+            "--poll-interval-ms",
+            "750",
+            "--timeout-secs",
+            "120",
+        ]);
+        assert!(matches!(
+            command,
+            BuildCommands::Run { follow, .. }
+                if follow.follow
+                    && follow.poll_interval_ms == Some(750)
+                    && follow.timeout_secs == Some(120)
+        ));
+    }
+
+    #[test]
+    fn build_follow_tuning_requires_follow() {
+        let result = Cli::try_parse_from([
+            "rdevtool",
+            "build",
+            "status",
+            "--queue-url",
+            "https://jenkins.example/queue/item/1/",
+            "--poll-interval-ms",
+            "750",
+        ]);
+        assert!(result.is_err());
     }
 
     fn runtime_project(repo_path: Option<PathBuf>, cwd: Option<PathBuf>) -> ProjectConfig {
@@ -2899,12 +3854,125 @@ mod tests {
     }
 
     #[test]
+    fn parses_workspace_resource_and_worklog_commands() {
+        assert!(matches!(
+            parse_workspace_command(&[
+                "init-demand",
+                "--name",
+                "Feature A",
+                "--requirement-dir",
+                "/tmp/requirement",
+                "--project",
+                "sample",
+                "--branch",
+                "feature-a",
+                "--root-dir",
+                "/tmp/workspace",
+                "--instance-dir",
+                "/tmp/workspace/sample-copy",
+                "--copy-mode",
+                "worktree",
+                "--dry-run"
+            ]),
+            WorkspaceCommands::InitDemand {
+                repo_path: None,
+                project: Some(project),
+                instance_dir: Some(instance_dir),
+                copy_mode: WorkspaceCopyModeArg::Worktree,
+                dry_run: true,
+                ..
+            } if project == "sample" && instance_dir == PathBuf::from("/tmp/workspace/sample-copy")
+        ));
+        assert!(matches!(
+            parse_workspace_command(&[
+                "resources-init",
+                "feature-a",
+                "--resource-dir",
+                "/tmp/feature-a"
+            ]),
+            WorkspaceCommands::ResourcesInit {
+                workspace: Some(workspace),
+                resource_dir: Some(resource_dir),
+                no_worklog: false,
+                ..
+            } if workspace == "feature-a" && resource_dir == PathBuf::from("/tmp/feature-a")
+        ));
+        assert!(matches!(
+            parse_workspace_command(&[
+                "worklog-append",
+                "feature-a",
+                "--kind",
+                "修复",
+                "--summary",
+                "修复分支刷新"
+            ]),
+            WorkspaceCommands::WorklogAppend {
+                workspace: Some(workspace),
+                kind,
+                summary,
+                detail: None,
+            } if workspace == "feature-a" && kind == "修复" && summary == "修复分支刷新"
+        ));
+        assert!(matches!(
+            parse_workspace_command(&[
+                "worklog-auto",
+                "feature-a",
+                "--enabled",
+                "false"
+            ]),
+            WorkspaceCommands::WorklogAuto {
+                workspace: Some(workspace),
+                enabled: false,
+            } if workspace == "feature-a"
+        ));
+    }
+
+    #[test]
+    fn parses_batch_merge_projects_and_targets() {
+        assert!(matches!(
+            parse_git_command(&[
+                "merge-many",
+                "--project",
+                "alpha",
+                "--project",
+                "beta",
+                "--source",
+                "feature/demo",
+                "--target",
+                "pre",
+                "--target",
+                "main",
+                "--plan",
+            ]),
+            GitCommands::MergeMany {
+                projects,
+                source_branch,
+                target_branches,
+                plan,
+            } if projects == vec!["alpha", "beta"]
+                && source_branch == "feature/demo"
+                && target_branches == vec!["pre", "main"]
+                && plan
+        ));
+    }
+
+    #[test]
+    fn reported_batch_failure_uses_a_nonzero_exit_code_without_reclassification() {
+        let error = anyhow::Error::new(CliReportedFailure {
+            code: "partial_failure",
+            message: "成功 1 / 失败 1".to_string(),
+        });
+
+        assert_eq!(classify_error(&error), ("partial_failure", 1));
+    }
+
+    #[test]
     fn parses_runtime_lifecycle_commands_with_stable_json_names() {
         let status = parse_runtime_command(&["status", "--project", "sample"]);
         assert_eq!(status.json_command_name(), "runtime.status");
         assert!(matches!(
             status,
-            RuntimeCommands::Status { project } if project == "sample"
+            RuntimeCommands::Status { project, .. } if project == "sample"
         ));
 
         let list = parse_runtime_command(&["list", "--running-only"]);
@@ -2915,7 +3983,7 @@ mod tests {
         assert_eq!(stop.json_command_name(), "runtime.stop");
         assert!(matches!(
             stop,
-            RuntimeCommands::Stop { project } if project == "sample"
+            RuntimeCommands::Stop { project, .. } if project == "sample"
         ));
 
         let adopt = parse_runtime_command(&["adopt", "--project", "sample", "--pid", "4242"]);
@@ -2935,8 +4003,374 @@ mod tests {
         assert_eq!(diagnose.json_command_name(), "runtime.diagnose");
         assert!(matches!(
             diagnose,
-            RuntimeCommands::Diagnose { project } if project == "sample"
+            RuntimeCommands::Diagnose { project, .. } if project == "sample"
         ));
+
+        let wait = parse_runtime_command(&[
+            "wait",
+            "--project",
+            "sample",
+            "--run-id",
+            "run-1",
+            "--until",
+            "http-verified",
+            "--probe-path",
+            "/health",
+            "--expect-status",
+            "204",
+        ]);
+        assert_eq!(wait.json_command_name(), "runtime.wait");
+        assert!(matches!(
+            wait,
+            RuntimeCommands::Wait {
+                project,
+                run_id: Some(run_id),
+                until: RuntimeWaitUntilArg::HttpVerified,
+                probe_path: Some(path),
+                expected_statuses,
+                ..
+            } if project == "sample"
+                && run_id == "run-1"
+                && path == "/health"
+                && expected_statuses == vec![204]
+        ));
+
+        let log = parse_runtime_command(&["log", "--project", "sample", "--current"]);
+        assert!(matches!(
+            log,
+            RuntimeCommands::Log {
+                project,
+                current: true,
+                run_id: None,
+                ..
+            } if project == "sample"
+        ));
+    }
+
+    #[test]
+    fn parses_managed_artifact_read_only_commands() {
+        let list = parse_artifact_command(&[
+            "list",
+            "--workspace",
+            "feature-a",
+            "--project",
+            "demo",
+            "--kind",
+            "runtimeState",
+        ]);
+        assert_eq!(list.json_command_name(), "artifacts.list");
+        assert!(matches!(
+            list,
+            ArtifactCommands::List {
+                workspace: Some(workspace),
+                all_workspaces: false,
+                project: Some(project),
+                kinds,
+            } if workspace == "feature-a"
+                && project == "demo"
+                && kinds == vec!["runtimeState"]
+        ));
+
+        let plan = parse_artifact_command(&[
+            "cleanup-plan",
+            "--all-workspaces",
+            "--artifact-id",
+            "artifact-1",
+            "--artifact-id",
+            "artifact-2",
+        ]);
+        assert_eq!(plan.json_command_name(), "artifacts.cleanup-plan");
+        assert!(matches!(
+            plan,
+            ArtifactCommands::CleanupPlan {
+                workspace: None,
+                all_workspaces: true,
+                project: None,
+                kinds,
+                artifact_ids,
+            } if kinds.is_empty()
+                && artifact_ids == vec!["artifact-1", "artifact-2"]
+        ));
+    }
+
+    #[test]
+    fn parses_managed_artifact_agent_context_preset() {
+        let context = parse_agent_command(&[
+            "context",
+            "--for",
+            "artifacts",
+            "--compact",
+            "--project",
+            "demo",
+        ]);
+        assert!(matches!(
+            context,
+            AgentCommands::Context {
+                project: Some(project),
+                preset: Some(AgentContextPresetArg::Artifacts),
+                compact: true,
+                ..
+            } if project == "demo"
+        ));
+    }
+
+    #[test]
+    fn parses_project_debug_profile_commands_with_stable_json_names() {
+        let list = parse_project_command(&["debug-profile-list", "sample"]);
+        assert_eq!(list.json_command_name(), "projects.debug-profile-list");
+        assert!(matches!(
+            list,
+            ProjectCommands::DebugProfileList { project } if project == "sample"
+        ));
+
+        let show = parse_project_command(&["debug-profile-show", "sample", "local"]);
+        assert_eq!(show.json_command_name(), "projects.debug-profile-show");
+        assert!(matches!(
+            show,
+            ProjectCommands::DebugProfileShow { project, profile }
+                if project == "sample" && profile == "local"
+        ));
+
+        let add = parse_project_command(&[
+            "debug-profile-add",
+            "sample",
+            "--key",
+            "local",
+            "--label",
+            "Local dev",
+            "--command",
+            "npm run dev:local",
+            "--cwd",
+            "worktrees/local",
+            "--expect-port",
+            "4173",
+            "--focus-url",
+            "http://127.0.0.1:4173/debug",
+            "--ready-probe-path",
+            "/health",
+            "--ready-expect-status",
+            "204",
+            "--ready-timeout-ms",
+            "90000",
+            "--runtime-profile",
+            "browser",
+            "--env",
+            "MODE=local",
+        ]);
+        assert_eq!(add.json_command_name(), "projects.debug-profile-add");
+        assert!(matches!(
+            add,
+            ProjectCommands::DebugProfileAdd {
+                project,
+                key,
+                label: Some(label),
+                command: Some(command),
+                cwd: Some(cwd),
+                expected_port: Some(4173),
+                focus_url: Some(focus_url),
+                ready_probe_path: Some(ready_probe_path),
+                ready_expected_statuses,
+                ready_timeout_ms: Some(90000),
+                runtime_profile: Some(runtime_profile),
+                env,
+                ..
+            } if project == "sample"
+                && key == "local"
+                && label == "Local dev"
+                && command == "npm run dev:local"
+                && cwd == PathBuf::from("worktrees/local")
+                && focus_url == "http://127.0.0.1:4173/debug"
+                && ready_probe_path == "/health"
+                && ready_expected_statuses == vec![204]
+                && runtime_profile == "browser"
+                && env == ["MODE=local"]
+        ));
+
+        let update = parse_project_command(&[
+            "debug-profile-update",
+            "sample",
+            "local",
+            "--clear-command",
+            "--clear-expect-port",
+            "--clear-runtime-profile",
+            "--clear-env",
+        ]);
+        assert_eq!(update.json_command_name(), "projects.debug-profile-update");
+        assert!(matches!(
+            update,
+            ProjectCommands::DebugProfileUpdate {
+                project,
+                profile,
+                clear_command: true,
+                clear_expect_port: true,
+                clear_runtime_profile: true,
+                clear_env: true,
+                ..
+            } if project == "sample" && profile == "local"
+        ));
+
+        let delete = parse_project_command(&["debug-profile-delete", "sample", "local"]);
+        assert_eq!(delete.json_command_name(), "projects.debug-profile-delete");
+        assert!(matches!(
+            delete,
+            ProjectCommands::DebugProfileDelete { project, profile }
+                if project == "sample" && profile == "local"
+        ));
+    }
+
+    #[test]
+    fn classifies_only_project_debug_profile_writes_as_config_writes() {
+        assert!(!parse_project_command(&["debug-profile-list", "sample"]).writes_config());
+        assert!(!parse_project_command(&["debug-profile-show", "sample", "local"]).writes_config());
+        assert!(
+            parse_project_command(&["debug-profile-add", "sample", "--key", "local"])
+                .writes_config()
+        );
+        assert!(
+            parse_project_command(&[
+                "debug-profile-update",
+                "sample",
+                "local",
+                "--label",
+                "Local",
+            ])
+            .writes_config()
+        );
+        assert!(
+            parse_project_command(&["debug-profile-delete", "sample", "local"]).writes_config()
+        );
+    }
+
+    #[test]
+    fn project_debug_profile_helpers_reject_duplicate_and_missing_keys() {
+        let mut project = runtime_project(None, None);
+        add_project_debug_profile(
+            &mut project,
+            "local".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
+        let duplicate = add_project_debug_profile(
+            &mut project,
+            "local".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap_err();
+        assert!(duplicate.to_string().contains("already exists"));
+
+        let missing_update = update_project_debug_profile(
+            &mut project,
+            "missing",
+            ProjectDebugProfilePatch {
+                label: Some("Missing".to_string()),
+                ..ProjectDebugProfilePatch::default()
+            },
+        )
+        .unwrap_err();
+        assert!(missing_update.to_string().contains("not found"));
+
+        let missing_delete = delete_project_debug_profile(&mut project, "missing").unwrap_err();
+        assert!(missing_delete.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn project_debug_profile_update_preserves_unspecified_nested_fields() {
+        let mut project = runtime_project(None, None);
+        project.debug_profiles.push(ProjectDebugProfileConfig {
+            key: "local".to_string(),
+            label: "Local".to_string(),
+            command: Some("npm run dev".to_string()),
+            cwd: Some(PathBuf::from("worktrees/local")),
+            expected_port: Some(5173),
+            focus_url: Some("http://127.0.0.1:5173/debug".to_string()),
+            ready_probe: Some(ProjectDebugReadyProbeConfig {
+                path: Some("/health".to_string()),
+                expected_statuses: vec![204],
+                timeout_ms: Some(90_000),
+                ..ProjectDebugReadyProbeConfig::default()
+            }),
+            runtime_profile: Some("browser".to_string()),
+            env: BTreeMap::from([("OLD".to_string(), "kept".to_string())]),
+            local_files: vec![ProjectDebugLocalFileConfig {
+                path: PathBuf::from(".env.local"),
+                mode: "overwrite".to_string(),
+                content: "MODE=local".to_string(),
+                enabled: true,
+            }],
+            browser: Some("chrome".to_string()),
+            browser_args: vec!["--guest".to_string()],
+            ..ProjectDebugProfileConfig::default()
+        });
+
+        update_project_debug_profile(
+            &mut project,
+            "local",
+            ProjectDebugProfilePatch {
+                label: Some("Local updated".to_string()),
+                command: None,
+                clear_command: true,
+                env: BTreeMap::from([("NEW".to_string(), "added".to_string())]),
+                ..ProjectDebugProfilePatch::default()
+            },
+        )
+        .unwrap();
+
+        let profile = &project.debug_profiles[0];
+        assert_eq!(profile.label, "Local updated");
+        assert_eq!(profile.command, None);
+        assert_eq!(profile.cwd, Some(PathBuf::from("worktrees/local")));
+        assert_eq!(profile.expected_port, Some(5173));
+        assert_eq!(
+            profile.focus_url.as_deref(),
+            Some("http://127.0.0.1:5173/debug")
+        );
+        assert_eq!(
+            profile
+                .ready_probe
+                .as_ref()
+                .and_then(|probe| probe.path.as_deref()),
+            Some("/health")
+        );
+        assert_eq!(profile.runtime_profile.as_deref(), Some("browser"));
+        assert_eq!(profile.env.get("OLD").map(String::as_str), Some("kept"));
+        assert_eq!(profile.env.get("NEW").map(String::as_str), Some("added"));
+        assert_eq!(profile.local_files.len(), 1);
+        assert_eq!(profile.local_files[0].path, PathBuf::from(".env.local"));
+        assert_eq!(profile.browser.as_deref(), Some("chrome"));
+        assert_eq!(profile.browser_args, ["--guest"]);
+
+        update_project_debug_profile(
+            &mut project,
+            "local",
+            ProjectDebugProfilePatch {
+                clear_expect_port: true,
+                clear_runtime_profile: true,
+                clear_env: true,
+                ..ProjectDebugProfilePatch::default()
+            },
+        )
+        .unwrap();
+
+        let profile = &project.debug_profiles[0];
+        assert_eq!(profile.expected_port, None);
+        assert_eq!(profile.runtime_profile, None);
+        assert!(profile.env.is_empty());
+        assert_eq!(profile.local_files.len(), 1);
+        assert_eq!(profile.browser.as_deref(), Some("chrome"));
     }
 
     #[test]
@@ -3152,6 +4586,10 @@ fn run_workspace(
             name,
             description,
             root_dir,
+            resource_dir,
+            worklog_file,
+            no_worklog,
+            no_auto_worklog,
             independent_dir,
             empty,
             no_switch,
@@ -3168,7 +4606,7 @@ fn run_workspace(
                 (None, true) => Some(default_project_workspace_root_dir(&key)),
                 (None, false) => None,
             };
-            let workspace = create_project_workspace(
+            let mut workspace = create_project_workspace(
                 &paths,
                 CreateProjectWorkspaceRequest {
                     name: name.unwrap_or_else(|| key.clone()),
@@ -3180,6 +4618,26 @@ fn run_workspace(
                     activate: !no_switch,
                 },
             )?;
+            let initializes_resources =
+                !no_worklog || resource_dir.is_some() || worklog_file.is_some();
+            workspace.worklog_auto_record = !no_auto_worklog && initializes_resources;
+            save_project_workspace_config(
+                &paths
+                    .project_workspaces
+                    .join(format!("{}.toml", workspace.key)),
+                &workspace,
+            )?;
+            if initializes_resources {
+                let normalized_resource_dir =
+                    resource_dir.map(normalize_cli_path_buf).transpose()?;
+                (workspace, _) = initialize_workspace_resources(
+                    &paths,
+                    &workspace.key,
+                    normalized_resource_dir,
+                    worklog_file,
+                    !no_worklog,
+                )?;
+            }
             let active_key =
                 active_project_workspace_key(&load_workspace_config(&paths.workspace)?);
             let info = project_workspace_cli_info(workspace, &config, &active_key);
@@ -3200,10 +4658,18 @@ fn run_workspace(
             project,
             branch,
             root_dir,
+            instance_dir,
+            copy_mode,
+            resource_dir,
+            worklog_file,
+            no_worklog,
+            no_auto_worklog,
             requirement_category,
             requirement_short_label,
             requirement_entry_name,
             no_switch,
+            allow_remote_mismatch,
+            dry_run,
         } => {
             let (config, _) = load_cli_config(config_override)?;
             let paths = ensure_default_configs()?;
@@ -3221,10 +4687,18 @@ fn run_workspace(
                     project,
                     branch,
                     root_dir,
+                    instance_dir,
+                    copy_mode: copy_mode.into(),
+                    resource_dir: resource_dir.map(normalize_cli_path_buf).transpose()?,
+                    worklog_file,
+                    create_worklog: !no_worklog,
+                    worklog_auto_record: !no_worklog && !no_auto_worklog,
                     requirement_category: Some(requirement_category),
                     requirement_short_label: Some(requirement_short_label),
                     requirement_entry_name: Some(requirement_entry_name),
                     activate: !no_switch,
+                    allow_remote_mismatch,
+                    dry_run,
                 },
             )?;
             let active_key =
@@ -3239,6 +4713,8 @@ fn run_workspace(
                 info.project.name, info.project.key
             );
             println!("requirement   : {}", info.requirement_entry.path);
+            println!("resource dir  : {}", info.resources.resource_dir);
+            println!("worklog       : {}", info.resources.worklog_path);
             if let Some(expected) = &info.branch.expected {
                 let marker = if info.branch.matches == Some(true) {
                     "matched"
@@ -3255,6 +4731,74 @@ fn run_workspace(
             for warning in &info.warnings {
                 println!("warning       : {}", warning);
             }
+            Ok(())
+        }
+        WorkspaceCommands::ResourcesInit {
+            workspace,
+            resource_dir,
+            worklog_file,
+            no_worklog,
+        } => {
+            let paths = ensure_default_configs()?;
+            let key = resolve_workspace_cli_key(&paths, workspace)?;
+            let (_, status) = initialize_workspace_resources(
+                &paths,
+                &key,
+                resource_dir.map(normalize_cli_path_buf).transpose()?,
+                worklog_file,
+                !no_worklog,
+            )?;
+            if json_mode {
+                return print_json_command("workspace.resources-init", &status);
+            }
+            print_workspace_resource_status(&status);
+            Ok(())
+        }
+        WorkspaceCommands::WorklogAppend {
+            workspace,
+            kind,
+            summary,
+            detail,
+        } => {
+            let paths = ensure_default_configs()?;
+            let key = resolve_workspace_cli_key(&paths, workspace)?;
+            let result =
+                append_workspace_worklog(&paths, &key, &kind, &summary, detail.as_deref())?;
+            if json_mode {
+                return print_json_command("workspace.worklog-append", &result);
+            }
+            println!("workspace     : {}", result.workspace_key);
+            println!("worklog       : {}", result.path);
+            println!("recorded at   : {}", result.recorded_at);
+            println!("entry         : {} · {}", result.kind, result.summary);
+            Ok(())
+        }
+        WorkspaceCommands::WorklogShow { workspace, lines } => {
+            let paths = ensure_default_configs()?;
+            let key = resolve_workspace_cli_key(&paths, workspace)?;
+            let result = read_workspace_worklog(&paths, &key, lines)?;
+            if json_mode {
+                return print_json_command("workspace.worklog-show", &result);
+            }
+            println!("worklog       : {}", result.path);
+            println!(
+                "lines         : {} / {}",
+                result.shown_lines, result.total_lines
+            );
+            if result.exists && !result.content.is_empty() {
+                println!();
+                println!("{}", result.content);
+            }
+            Ok(())
+        }
+        WorkspaceCommands::WorklogAuto { workspace, enabled } => {
+            let paths = ensure_default_configs()?;
+            let key = resolve_workspace_cli_key(&paths, workspace)?;
+            let status = set_workspace_worklog_auto_record(&paths, &key, enabled)?;
+            if json_mode {
+                return print_json_command("workspace.worklog-auto", &status);
+            }
+            print_workspace_resource_status(&status);
             Ok(())
         }
         WorkspaceCommands::Use { workspace } => {
@@ -3296,6 +4840,7 @@ fn run_workspace(
             clear_root_dir,
             project_instances,
             clear_project_instances,
+            allow_remote_mismatch,
         } => run_workspace_scope(
             config_override,
             workspace,
@@ -3316,6 +4861,7 @@ fn run_workspace(
                 clear_root_dir,
                 project_instances,
                 clear_project_instances,
+                allow_remote_mismatch,
             },
             json_mode,
         ),
@@ -3340,6 +4886,7 @@ fn project_workspace_cli_info(
         .iter()
         .map(|category| category.entries.len())
         .sum();
+    let resource_status = workspace_resource_status(&workspace);
     ProjectWorkspaceCliInfo {
         active: workspace.key == active_key,
         system: workspace.is_system(),
@@ -3350,6 +4897,19 @@ fn project_workspace_cli_info(
             .root_dir
             .as_ref()
             .map(|path| path.display().to_string()),
+        resource_dir: resource_status
+            .as_ref()
+            .map(|status| status.resource_dir.clone()),
+        worklog_file: resource_status
+            .as_ref()
+            .map(|status| status.worklog_file.clone()),
+        worklog_path: resource_status
+            .as_ref()
+            .map(|status| status.worklog_path.clone()),
+        worklog_exists: resource_status
+            .as_ref()
+            .is_some_and(|status| status.worklog_exists),
+        worklog_auto_record: workspace.worklog_auto_record,
         project_count: workspace.project_count_for(config),
         resource_count,
         key: workspace.key,
@@ -3390,18 +4950,580 @@ fn project_workspace_cli_info(
     }
 }
 
+fn resolve_workspace_cli_key(paths: &ConfigPaths, workspace: Option<String>) -> Result<String> {
+    match workspace.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(value)
+    }) {
+        Some(key) => Ok(key),
+        None => Ok(active_project_workspace_key(&load_workspace_config(
+            &paths.workspace,
+        )?)),
+    }
+}
+
+fn record_cli_workspace_operation(event: WorkspaceOperationWorklogEvent) {
+    let result = (|| {
+        let paths = ensure_default_configs()?;
+        let workspace = load_active_project_workspace(&paths)?;
+        append_workspace_operation_worklog(&paths, &workspace.key, event)?;
+        Ok::<(), anyhow::Error>(())
+    })();
+    if let Err(error) = result {
+        eprintln!("warning: failed to record workspace worklog: {error}");
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_cli_lifecycle_operation(
+    domain: &str,
+    action: &str,
+    state: OperationEventState,
+    title: &str,
+    summary: &str,
+    detail: &str,
+    project_key: Option<&str>,
+    project_name: Option<&str>,
+    payload: Option<serde_json::Value>,
+) {
+    let result = (|| {
+        let paths = ensure_default_configs()?;
+        let workspace = load_active_project_workspace(&paths)?;
+        let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+        let event = lifecycle_operation_event(
+            operation_event_id(None, OperationEventOrigin::Cli, action),
+            OperationEventOrigin::Cli,
+            workspace.key,
+            domain,
+            action,
+            state,
+            title,
+            summary,
+            detail,
+            project_key,
+            project_name,
+            payload,
+        );
+        save_operation_event(&storage, &event).map_err(anyhow::Error::msg)
+    })();
+    if let Err(error) = result {
+        eprintln!("warning: failed to record {domain} operation event: {error}");
+    }
+}
+
+fn runtime_operation_payload<T: Serialize>(
+    response: Option<&T>,
+    project_key: &str,
+    options: &ProjectRuntimeLaunchOptions,
+) -> serde_json::Value {
+    let mut payload = response
+        .and_then(|response| serde_json::to_value(response).ok())
+        .unwrap_or_else(|| json!({}));
+    if !payload.is_object() {
+        payload = json!({});
+    }
+    if let Some(payload) = payload.as_object_mut() {
+        payload.insert("projectKey".to_string(), json!(project_key));
+        payload.insert(
+            "debugProfile".to_string(),
+            json!(options.debug_profile.clone()),
+        );
+        payload.insert("envOverrides".to_string(), json!(options.env.clone()));
+        payload.insert(
+            "requestedRuntimeProfile".to_string(),
+            json!(options.runtime_profile.clone()),
+        );
+        payload.insert(
+            "requestedCommand".to_string(),
+            json!(options.command.clone()),
+        );
+        payload.insert(
+            "requestedExpectedPort".to_string(),
+            json!(options.expected_port),
+        );
+    }
+    payload
+}
+
+fn record_cli_link_operation(action: &str, link_key: &str, result: &Result<LinkExecutionReport>) {
+    let record_result = (|| {
+        let paths = ensure_default_configs()?;
+        let workspace = load_active_project_workspace(&paths)?;
+        let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+        let error = result.as_ref().err().map(ToString::to_string);
+        let event = link_operation_event(
+            operation_event_id(None, OperationEventOrigin::Cli, &format!("link-{action}")),
+            OperationEventOrigin::Cli,
+            workspace.key,
+            action,
+            link_key,
+            None,
+            result.as_ref().ok(),
+            error.as_deref(),
+        );
+        save_operation_event(&storage, &event).map_err(anyhow::Error::msg)
+    })();
+    if let Err(error) = record_result {
+        eprintln!("warning: failed to record link operation event: {error}");
+    }
+}
+
+fn record_cli_branch_task(action: &str, result: &Result<BranchTaskResponse>) {
+    let event = match result {
+        Ok(response) => WorkspaceOperationWorklogEvent {
+            event_id: None,
+            kind: "Git".to_string(),
+            summary: format!("{action} · {}", response.summary),
+            detail: Some(response.detail.clone()),
+            success: response.success,
+        },
+        Err(error) => WorkspaceOperationWorklogEvent {
+            event_id: None,
+            kind: "Git".to_string(),
+            summary: format!("{action}失败"),
+            detail: Some(error.to_string()),
+            success: false,
+        },
+    };
+    record_cli_workspace_operation(event);
+}
+
+fn record_cli_branch_task_artifacts(
+    action_label: &str,
+    action_key: &str,
+    replay: Option<&serde_json::Value>,
+    result: &Result<BranchTaskResponse>,
+) {
+    let result = (|| {
+        let paths = ensure_default_configs()?;
+        let workspace = load_active_project_workspace(&paths)?;
+        let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+        let event_id = operation_event_id(None, OperationEventOrigin::Cli, action_key);
+        let mut related_history_keys = Vec::new();
+        if let Ok(response) = result {
+            let history_result = if response.task_kind == "sync" {
+                storage
+                    .save_branch_task_merge_history_for_event(
+                        &workspace, response, "cli", &event_id,
+                    )
+                    .map_err(anyhow::Error::msg)
+            } else {
+                let entry = cli_branch_task_history_entry_with_id(
+                    &workspace.key,
+                    response,
+                    &event_id,
+                    replay,
+                )?;
+                storage
+                    .prepend_json_array(
+                        BRANCH_WORKFLOW_STORAGE_NAMESPACE,
+                        BRANCH_WORKFLOW_HISTORY_KEY,
+                        entry,
+                        BRANCH_WORKFLOW_HISTORY_LIMIT,
+                    )
+                    .map(|_| vec![event_id.clone()])
+                    .map_err(anyhow::Error::msg)
+            };
+            match history_result {
+                Ok(history_keys) => related_history_keys = history_keys,
+                Err(error) => eprintln!("warning: failed to save branch task history: {error}"),
+            }
+        }
+
+        let error = result.as_ref().err().map(ToString::to_string);
+        let mut event = branch_task_operation_event(
+            event_id,
+            OperationEventOrigin::Cli,
+            workspace.key,
+            action_label,
+            action_key,
+            result
+                .as_ref()
+                .ok()
+                .and_then(|response| response.items.first())
+                .map(|item| item.project_key.as_str()),
+            result.as_ref().ok(),
+            error.as_deref(),
+            related_history_keys,
+        );
+        if let Some(replay) = replay {
+            let payload = event.payload.get_or_insert_with(|| json!({}));
+            if let Some(payload) = payload.as_object_mut() {
+                payload.insert("replay".to_string(), replay.clone());
+            }
+        }
+        save_operation_event(&storage, &event).map_err(anyhow::Error::msg)?;
+        Ok::<(), anyhow::Error>(())
+    })();
+    if let Err(error) = result {
+        eprintln!("warning: failed to save branch operation event: {error}");
+    }
+}
+
+fn cli_branch_task_history_entry_with_id(
+    workspace_key: &str,
+    response: &BranchTaskResponse,
+    event_id: &str,
+    replay: Option<&serde_json::Value>,
+) -> Result<serde_json::Value> {
+    let mut entry = serde_json::to_value(response)?;
+    let object = entry
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("branch task history must be a JSON object"))?;
+    object.insert("id".to_string(), json!(event_id));
+    object.insert("workspaceKey".to_string(), json!(workspace_key));
+    object.insert(
+        "createdAt".to_string(),
+        json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+    );
+    object.insert(
+        "replay".to_string(),
+        replay.cloned().unwrap_or(serde_json::Value::Null),
+    );
+    Ok(entry)
+}
+
+fn cli_branch_replay_request(
+    command: &str,
+    busy_text: &str,
+    request: serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "command": command,
+        "busyText": busy_text,
+        "request": request,
+    })
+}
+
+fn finish_branch_task_command(
+    action: Option<(&str, &str)>,
+    replay: Option<serde_json::Value>,
+    result: Result<BranchTaskResponse>,
+    json_mode: bool,
+    command_name: &str,
+    failure_code: &'static str,
+) -> Result<()> {
+    if let Some((action_label, action_key)) = action {
+        record_cli_branch_task_artifacts(action_label, action_key, replay.as_ref(), &result);
+        record_cli_branch_task(action_label, &result);
+    }
+
+    let response = result?;
+    if json_mode {
+        print_branch_task_json_command(command_name, &response, failure_code)?;
+    } else {
+        print_branch_task_result(&response);
+    }
+    if response.success {
+        return Ok(());
+    }
+
+    Err(anyhow::Error::new(CliReportedFailure {
+        code: failure_code,
+        message: response.summary,
+    }))
+}
+
+fn is_terminal_deploy_state(state_key: &str) -> bool {
+    matches!(
+        state_key,
+        "success"
+            | "succeeded"
+            | "failure"
+            | "failed"
+            | "error"
+            | "cancelled"
+            | "canceled"
+            | "aborted"
+    )
+}
+
+fn deploy_history_worklog_event(
+    request: &SaveDeployHistoryRequest,
+) -> Option<WorkspaceOperationWorklogEvent> {
+    if !is_terminal_deploy_state(&request.state_key) {
+        return None;
+    }
+    let success = matches!(request.state_key.as_str(), "success" | "succeeded");
+    let mut detail = vec![format!("- 项目: `{}`", request.project_key)];
+    if !request.mode.trim().is_empty() {
+        detail.push(format!("- 任务: {}", request.mode.trim()));
+    }
+    if let Some(env) = request
+        .env
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        detail.push(format!("- 环境: `{}`", env.trim()));
+    }
+    if let Some(branch) = request
+        .branch
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        detail.push(format!("- 分支: `{}`", branch.trim()));
+    }
+    if !request.detail.trim().is_empty() {
+        detail.push(String::new());
+        detail.push(request.detail.trim().to_string());
+    }
+    if let Some(url) = request
+        .build_url
+        .as_deref()
+        .or(request.queue_url.as_deref())
+        .filter(|value| !value.trim().is_empty())
+    {
+        detail.push(String::new());
+        detail.push(format!("- 构建地址: {url}"));
+    }
+    Some(WorkspaceOperationWorklogEvent {
+        event_id: Some(format!(
+            "build:{}:{}",
+            request.history_key, request.state_key
+        )),
+        kind: "构建".to_string(),
+        summary: format!("{} · {}", request.project_name, request.state_label),
+        detail: Some(detail.join("\n")),
+        success,
+    })
+}
+
+fn build_operation_title(action: &str) -> &'static str {
+    match action.trim().to_ascii_lowercase().as_str() {
+        "deploy" => "触发部署",
+        "package" => "触发产物构建",
+        "release" => "触发发布",
+        _ => "触发构建",
+    }
+}
+
+fn persist_cli_deploy_result(result: &BuildTriggerResponse, event_id: &str) -> Result<()> {
+    let workspace = active_history_workspace_cli()?;
+    let request = build_history_request(&workspace, result, event_id);
+    let worklog_event = deploy_history_worklog_event(&request);
+    let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+    let event = build_operation_event(
+        event_id.to_string(),
+        OperationEventOrigin::Cli,
+        workspace.key,
+        build_operation_title(&result.plan.action_kind),
+        &result.plan.action_kind,
+        &request,
+    );
+    storage
+        .save_deploy_history(request)
+        .map_err(anyhow::Error::msg)?;
+    save_operation_event(&storage, &event).map_err(anyhow::Error::msg)?;
+    if let Some(event) = worklog_event {
+        record_cli_workspace_operation(event);
+    }
+    Ok(())
+}
+
+fn persist_cli_deploy_status(
+    status: &BuildStatusResponse,
+    requested_queue_url: Option<&str>,
+    requested_build_url: Option<&str>,
+) -> Result<()> {
+    let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+    let workspace = active_history_workspace_cli()?;
+    let workspace_key = (!workspace.is_system()).then_some(workspace.key.as_str());
+    let Some(request) = storage
+        .update_deploy_history_status(
+            status,
+            requested_queue_url,
+            requested_build_url,
+            None,
+            workspace_key,
+        )
+        .map_err(anyhow::Error::msg)?
+    else {
+        return Ok(());
+    };
+    let worklog_event = deploy_history_worklog_event(&request);
+    update_build_operation_event_from_history(&storage, &request).map_err(anyhow::Error::msg)?;
+    if let Some(event) = worklog_event {
+        record_cli_workspace_operation(event);
+    }
+    Ok(())
+}
+
+fn execute_cli_deploy(config: &AppConfig, request: &DeployRequest) -> Result<BuildTriggerResponse> {
+    let project_key = request.project.clone();
+    let project_name = config
+        .find_project(&project_key)
+        .ok()
+        .map(|project| project.name.clone());
+    let event_id = operation_event_id(None, OperationEventOrigin::Cli, "build");
+    let planned_action = core::build_plan(config, request)
+        .ok()
+        .map(|plan| plan.action_kind);
+    match core::trigger_deploy(config, request) {
+        Ok(result) => {
+            if let Err(error) = persist_cli_deploy_result(&result, &event_id) {
+                eprintln!("warning: failed to save deploy history: {error}");
+            }
+            Ok(result)
+        }
+        Err(error) => {
+            let action = planned_action.as_deref().unwrap_or("build");
+            let persistence_result = (|| {
+                let workspace = active_history_workspace_cli()?;
+                let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+                let event = failed_build_operation_event(
+                    event_id.clone(),
+                    OperationEventOrigin::Cli,
+                    workspace.key,
+                    build_operation_title(action),
+                    action,
+                    project_name.as_deref(),
+                    request,
+                    &error.to_string(),
+                );
+                save_operation_event(&storage, &event).map_err(anyhow::Error::msg)
+            })();
+            if let Err(save_error) = persistence_result {
+                eprintln!("warning: failed to save build failure event: {save_error}");
+            }
+            record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                event_id: Some(format!("build:{event_id}:failure")),
+                kind: "构建".to_string(),
+                summary: format!("触发 {project_key} 构建失败"),
+                detail: Some(error.to_string()),
+                success: false,
+            });
+            Err(error)
+        }
+    }
+}
+
+fn merge_history_request(
+    workspace: &ProjectWorkspaceConfig,
+    response: &MergeResponse,
+) -> SaveMergeHistoryRequest {
+    let commit = |value: &rdevtool_core::core::BranchCommitInfo| HistoryCommitInfo {
+        short_hash: value.short_hash.clone(),
+        subject: value.subject.clone(),
+        committed_at: value.committed_at.clone(),
+    };
+    SaveMergeHistoryRequest {
+        history_key: format!("cli-merge-{}", uuid::Uuid::new_v4()),
+        workspace_key: Some(workspace.key.clone()),
+        project_instance_path: workspace
+            .project_instance_path(&response.project_key)
+            .map(|path| path.display().to_string()),
+        project_key: response.project_key.clone(),
+        project_name: response.project_name.clone(),
+        source_branch: response.source_branch.clone(),
+        target_branch: response.target_branch.clone(),
+        success: response.success,
+        remote: response.remote,
+        summary: response.summary.clone(),
+        detail: response.detail.clone(),
+        merged_commit: response.merged_commit.clone(),
+        source_commit: response.source_commit.as_ref().map(commit),
+        target_commit: response.target_commit.as_ref().map(commit),
+    }
+}
+
+fn record_cli_merge_result(
+    action: &str,
+    project: &str,
+    source: &str,
+    target: &str,
+    result: &Result<MergeResponse>,
+) {
+    if let Ok(response) = result {
+        let save_result = (|| {
+            let workspace = active_history_workspace_cli()?;
+            Storage::new_default()
+                .map_err(anyhow::Error::msg)?
+                .save_merge_history(merge_history_request(&workspace, response))
+                .map_err(anyhow::Error::msg)
+        })();
+        if let Err(error) = save_result {
+            eprintln!("warning: failed to save merge history: {error}");
+        }
+    }
+    let event = match result {
+        Ok(response) => WorkspaceOperationWorklogEvent {
+            event_id: response.merged_commit.as_ref().map(|commit| {
+                format!(
+                    "git-merge:{}:{}:{}",
+                    response.project_key, response.target_branch, commit
+                )
+            }),
+            kind: "Git".to_string(),
+            summary: format!("{action} · {}", response.summary),
+            detail: Some(format!(
+                "- 项目: `{}`\n- 分支: `{}` → `{}`\n\n{}",
+                response.project_key,
+                response.source_branch,
+                response.target_branch,
+                response.detail
+            )),
+            success: response.success,
+        },
+        Err(error) => WorkspaceOperationWorklogEvent {
+            event_id: None,
+            kind: "Git".to_string(),
+            summary: format!("{action}失败"),
+            detail: Some(format!(
+                "- 项目: `{project}`\n- 分支: `{source}` → `{target}`\n\n{error}"
+            )),
+            success: false,
+        },
+    };
+    record_cli_workspace_operation(event);
+}
+
+fn print_workspace_resource_status(value: &WorkspaceResourceStatus) {
+    println!(
+        "workspace     : {} ({})",
+        value.workspace_name, value.workspace_key
+    );
+    println!("resource dir  : {}", value.resource_dir);
+    println!("worklog       : {}", value.worklog_path);
+    println!("auto record   : {}", value.auto_record_enabled);
+    println!(
+        "status        : {}",
+        if value.worklog_created {
+            "created"
+        } else if value.worklog_exists {
+            "ready"
+        } else {
+            "configured"
+        }
+    );
+}
+
 fn init_demand_workspace_cli_info(
     result: InitDemandWorkspaceResult,
     config: &AppConfig,
     active_key: &str,
 ) -> InitDemandWorkspaceCliInfo {
     InitDemandWorkspaceCliInfo {
+        schema_version: result.schema_version,
+        dry_run: result.dry_run,
+        copy_mode: result.copy_mode,
+        requested: result.requested,
+        effective: result.effective,
+        observed: result.observed,
+        status: result.status,
+        evidence: result.evidence,
+        risks: result.risks,
+        managed_artifacts: result.managed_artifacts,
+        recommended_actions: result.recommended_actions,
+        planned_actions: result.planned_actions,
         workspace: project_workspace_cli_info(result.workspace, config, active_key),
         project: result.project,
         requirement_entry: result.requirement_entry,
+        resources: result.resources,
         branch: result.branch,
         metadata: result.metadata,
         warnings: result.warnings,
+        source_repository_validation: result.source_repository_validation,
+        project_instance_validation: result.project_instance_validation,
     }
 }
 
@@ -3420,6 +5542,21 @@ fn print_project_workspace(value: &ProjectWorkspaceCliInfo) {
     }
     if let Some(root_dir) = &value.root_dir {
         println!("root dir      : {}", root_dir);
+    }
+    if let Some(resource_dir) = &value.resource_dir {
+        println!("resource dir  : {}", resource_dir);
+    }
+    if let Some(worklog_path) = &value.worklog_path {
+        println!(
+            "worklog       : {} ({})",
+            worklog_path,
+            if value.worklog_exists {
+                "ready"
+            } else {
+                "missing"
+            }
+        );
+        println!("auto record   : {}", value.worklog_auto_record);
     }
     println!(
         "projects      : {}",
@@ -3508,6 +5645,7 @@ fn run_workspace_scope(
     }
 
     let should_save_workspace = update.has_workspace_changes();
+    let mut project_instance_validations = Vec::new();
 
     if update.clear_root_dir && update.root_dir.is_some() {
         anyhow::bail!("choose only one of --root-dir or --clear-root-dir");
@@ -3579,6 +5717,12 @@ fn run_workspace_scope(
             .collect::<Vec<_>>();
         validate_workspace_projects(&config, &instance_projects)?;
         for instance in instances {
+            let project = config.find_project(&instance.project)?;
+            project_instance_validations.push(validate_workspace_project_instance(
+                project,
+                &instance,
+                update.allow_remote_mismatch,
+            )?);
             if !workspace.include_all_projects
                 && !workspace
                     .projects
@@ -3616,6 +5760,7 @@ fn run_workspace_scope(
     let info = WorkspaceScopeCliInfo {
         proxy_profiles: proxy_profiles_for_workspace(&workspace)?,
         workspace: project_workspace_cli_info(workspace, &config, &active_key),
+        project_instance_validations,
     };
     if json_mode {
         return print_json_command("workspace.scope", &info);
@@ -3769,7 +5914,7 @@ fn parse_workspace_project_instances(
         instances.push(ProjectWorkspaceProjectInstanceConfig {
             project,
             path: normalize_cli_path_buf(PathBuf::from(path))?,
-            managed: true,
+            managed: false,
         });
     }
     Ok(instances)
@@ -3956,11 +6101,30 @@ fn show_branches_command(
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
-    let branches = core::available_branches(config, key)?;
+    let catalog = core::branch_catalog(config, key)?;
+    if !catalog.status.success {
+        anyhow::bail!(catalog.status.detail);
+    }
+    let branches = catalog
+        .branches
+        .iter()
+        .map(|branch| branch.name.clone())
+        .collect::<Vec<_>>();
     if json_mode {
         return print_json_command(
             command_name,
-            &json!({ "project": key, "branches": branches }),
+            &json!({
+                "project": key,
+                "branches": branches,
+                "branchOptions": catalog.branches,
+                "requested": catalog.requested,
+                "effective": catalog.effective,
+                "observed": catalog.observed,
+                "status": catalog.status,
+                "evidence": catalog.evidence,
+                "risks": catalog.risks,
+                "recommendedActions": catalog.recommended_actions,
+            }),
         );
     }
     for branch in branches {
@@ -4035,6 +6199,7 @@ fn run_project_config_command(
     config_override: Option<&Path>,
     json_mode: bool,
 ) -> Result<()> {
+    let command_name = command.json_command_name();
     match command {
         ProjectCommands::Add {
             key,
@@ -4100,6 +6265,7 @@ fn run_project_config_command(
             action_kind,
             profile,
             job,
+            output_dir,
         } => add_project_target_config_command(
             project,
             key,
@@ -4108,6 +6274,7 @@ fn run_project_config_command(
             action_kind,
             profile,
             job,
+            output_dir,
             config_override,
             json_mode,
         ),
@@ -4119,6 +6286,8 @@ fn run_project_config_command(
             action_kind,
             profile,
             job,
+            output_dir,
+            clear_output_dir,
         } => update_project_target_config_command(
             project,
             target,
@@ -4127,6 +6296,8 @@ fn run_project_config_command(
             action_kind,
             profile,
             job,
+            output_dir,
+            clear_output_dir,
             config_override,
             json_mode,
         ),
@@ -4144,6 +6315,7 @@ fn run_project_config_command(
             required,
             true_value,
             false_value,
+            impact_paths,
         } => add_project_target_param_config_command(
             project,
             target,
@@ -4155,6 +6327,7 @@ fn run_project_config_command(
             required,
             true_value,
             false_value,
+            impact_paths,
             config_override,
             json_mode,
         ),
@@ -4174,6 +6347,8 @@ fn run_project_config_command(
             clear_true_value,
             false_value,
             clear_false_value,
+            impact_paths,
+            clear_impact_paths,
         } => update_project_target_param_config_command(
             project,
             target,
@@ -4190,6 +6365,8 @@ fn run_project_config_command(
             clear_true_value,
             false_value,
             clear_false_value,
+            impact_paths,
+            clear_impact_paths,
             config_override,
             json_mode,
         ),
@@ -4204,6 +6381,95 @@ fn run_project_config_command(
             config_override,
             json_mode,
         ),
+        ProjectCommands::DebugProfileAdd {
+            project,
+            key,
+            label,
+            command,
+            cwd,
+            expected_port,
+            focus_url,
+            ready_probe_url,
+            ready_probe_path,
+            ready_expected_statuses,
+            ready_timeout_ms,
+            runtime_profile,
+            env,
+        } => add_project_debug_profile_config_command(
+            project,
+            key,
+            label,
+            command,
+            cwd,
+            expected_port,
+            focus_url,
+            ready_probe_url,
+            ready_probe_path,
+            ready_expected_statuses,
+            ready_timeout_ms,
+            runtime_profile,
+            env,
+            config_override,
+            json_mode,
+            command_name,
+        ),
+        ProjectCommands::DebugProfileUpdate {
+            project,
+            profile,
+            label,
+            command,
+            clear_command,
+            cwd,
+            clear_cwd,
+            expected_port,
+            clear_expect_port,
+            focus_url,
+            clear_focus_url,
+            ready_probe_url,
+            ready_probe_path,
+            ready_expected_statuses,
+            ready_timeout_ms,
+            clear_ready_probe,
+            runtime_profile,
+            clear_runtime_profile,
+            env,
+            clear_env,
+        } => update_project_debug_profile_config_command(
+            project,
+            profile,
+            ProjectDebugProfilePatch {
+                label,
+                command,
+                clear_command,
+                cwd,
+                clear_cwd,
+                expected_port,
+                clear_expect_port,
+                focus_url,
+                clear_focus_url,
+                ready_probe_url,
+                ready_probe_path,
+                ready_expected_statuses,
+                ready_timeout_ms,
+                clear_ready_probe,
+                runtime_profile,
+                clear_runtime_profile,
+                env: parse_key_value_map(&env)?,
+                clear_env,
+            },
+            config_override,
+            json_mode,
+            command_name,
+        ),
+        ProjectCommands::DebugProfileDelete { project, profile } => {
+            delete_project_debug_profile_config_command(
+                project,
+                profile,
+                config_override,
+                json_mode,
+                command_name,
+            )
+        }
         _ => anyhow::bail!("unsupported project config command"),
     }
 }
@@ -4407,6 +6673,7 @@ fn add_project_target_config_command(
     action_kind: Option<BuildActionKindArg>,
     profile: Option<String>,
     job: Option<String>,
+    output_dir: Option<PathBuf>,
     config_override: Option<&Path>,
     json_mode: bool,
 ) -> Result<()> {
@@ -4440,6 +6707,12 @@ fn add_project_target_config_command(
     let action_kind = action_kind
         .map(Into::into)
         .unwrap_or_else(|| default_action_kind_for_adapter(&adapter));
+    let artifact = output_dir
+        .map(normalize_cli_path_buf)
+        .transpose()?
+        .map(|output_dir| BuildArtifactConfig {
+            output_dir: Some(output_dir),
+        });
 
     project_config.deploy_targets.push(DeployTargetConfig {
         key: key.clone(),
@@ -4448,6 +6721,7 @@ fn add_project_target_config_command(
         action_kind,
         jenkins_profile: profile,
         job_name: job.clone(),
+        artifact,
         params: Vec::new(),
     });
     if !job.is_empty() {
@@ -4472,6 +6746,8 @@ fn update_project_target_config_command(
     action_kind: Option<BuildActionKindArg>,
     profile: Option<String>,
     job: Option<String>,
+    output_dir: Option<PathBuf>,
+    clear_output_dir: bool,
     config_override: Option<&Path>,
     json_mode: bool,
 ) -> Result<()> {
@@ -4480,9 +6756,16 @@ fn update_project_target_config_command(
         && action_kind.is_none()
         && profile.is_none()
         && job.is_none()
+        && output_dir.is_none()
+        && !clear_output_dir
     {
         anyhow::bail!("at least one build target update flag is required");
     }
+    if output_dir.is_some() && clear_output_dir {
+        anyhow::bail!("choose only one of --output-dir or --clear-output-dir");
+    }
+
+    let output_dir = output_dir.map(normalize_cli_path_buf).transpose()?;
 
     let (mut config, config_path) = load_cli_config(config_override)?;
     let project_config = find_project_config_mut(&mut config, &project)?;
@@ -4509,6 +6792,13 @@ fn update_project_target_config_command(
     }
     if let Some(job) = job {
         target_config.job_name = require_non_empty_cli_value("job name", &job)?;
+    }
+    if clear_output_dir {
+        target_config.artifact = None;
+    } else if let Some(output_dir) = output_dir {
+        target_config.artifact = Some(BuildArtifactConfig {
+            output_dir: Some(output_dir),
+        });
     }
     let target_key = target_config.key.clone();
     let job_name = target_config.job_name.clone();
@@ -4564,6 +6854,7 @@ fn add_project_target_param_config_command(
     required: bool,
     true_value: Option<String>,
     false_value: Option<String>,
+    impact_paths: Vec<String>,
     config_override: Option<&Path>,
     json_mode: bool,
 ) -> Result<()> {
@@ -4589,6 +6880,7 @@ fn add_project_target_param_config_command(
             required,
             true_value: true_value.and_then(optional_cli_text),
             false_value: false_value.and_then(optional_cli_text),
+            impact_paths: normalize_cli_strings(impact_paths),
         });
         target_config.key.clone()
     };
@@ -4621,6 +6913,8 @@ fn update_project_target_param_config_command(
     clear_true_value: bool,
     false_value: Option<String>,
     clear_false_value: bool,
+    impact_paths: Vec<String>,
+    clear_impact_paths: bool,
     config_override: Option<&Path>,
     json_mode: bool,
 ) -> Result<()> {
@@ -4639,6 +6933,9 @@ fn update_project_target_param_config_command(
     if false_value.is_some() && clear_false_value {
         anyhow::bail!("choose only one of --false-value or --clear-false-value");
     }
+    if !impact_paths.is_empty() && clear_impact_paths {
+        anyhow::bail!("choose only one of --impact-path or --clear-impact-paths");
+    }
     if label.is_none()
         && kind.is_none()
         && default.is_none()
@@ -4651,6 +6948,8 @@ fn update_project_target_param_config_command(
         && !clear_true_value
         && false_value.is_none()
         && !clear_false_value
+        && impact_paths.is_empty()
+        && !clear_impact_paths
     {
         anyhow::bail!("at least one build param update flag is required");
     }
@@ -4707,6 +7006,12 @@ fn update_project_target_param_config_command(
         if clear_false_value {
             param_config.false_value = None;
         }
+        if !impact_paths.is_empty() {
+            param_config.impact_paths = normalize_cli_strings(impact_paths);
+        }
+        if clear_impact_paths {
+            param_config.impact_paths.clear();
+        }
         target_key
     };
     sync_legacy_project_job_params(project_config, &target_key);
@@ -4755,6 +7060,526 @@ fn delete_project_target_param_config_command(
     )
 }
 
+#[derive(Default)]
+struct ProjectDebugProfilePatch {
+    label: Option<String>,
+    command: Option<String>,
+    clear_command: bool,
+    cwd: Option<PathBuf>,
+    clear_cwd: bool,
+    expected_port: Option<u16>,
+    clear_expect_port: bool,
+    focus_url: Option<String>,
+    clear_focus_url: bool,
+    ready_probe_url: Option<String>,
+    ready_probe_path: Option<String>,
+    ready_expected_statuses: Vec<u16>,
+    ready_timeout_ms: Option<u64>,
+    clear_ready_probe: bool,
+    runtime_profile: Option<String>,
+    clear_runtime_profile: bool,
+    env: BTreeMap<String, String>,
+    clear_env: bool,
+}
+
+fn list_project_debug_profiles(
+    config: &AppConfig,
+    project: &str,
+    json_mode: bool,
+    command_name: &str,
+) -> Result<()> {
+    let project = find_project_config(config, project)?;
+    if json_mode {
+        return print_json_command(
+            command_name,
+            &json!({
+                "project": project.key,
+                "profiles": project.debug_profiles,
+            }),
+        );
+    }
+    for profile in &project.debug_profiles {
+        println!("{:<20} {}", profile.key, profile.label);
+    }
+    Ok(())
+}
+
+fn show_project_debug_profile(
+    config: &AppConfig,
+    project: &str,
+    profile: &str,
+    json_mode: bool,
+    command_name: &str,
+) -> Result<()> {
+    let project = find_project_config(config, project)?;
+    let profile = find_project_debug_profile(project, profile)?;
+    if json_mode {
+        return print_json_command(
+            command_name,
+            &json!({
+                "project": project.key,
+                "profile": profile,
+            }),
+        );
+    }
+    print_project_debug_profile(profile);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_project_debug_profile_config_command(
+    project: String,
+    key: String,
+    label: Option<String>,
+    command: Option<String>,
+    cwd: Option<PathBuf>,
+    expected_port: Option<u16>,
+    focus_url: Option<String>,
+    ready_probe_url: Option<String>,
+    ready_probe_path: Option<String>,
+    ready_expected_statuses: Vec<u16>,
+    ready_timeout_ms: Option<u64>,
+    runtime_profile: Option<String>,
+    env: Vec<String>,
+    config_override: Option<&Path>,
+    json_mode: bool,
+    command_name: &str,
+) -> Result<()> {
+    let (mut config, config_path) = load_cli_config(config_override)?;
+    let env = parse_key_value_map(&env)?;
+    let project_config = find_project_config_mut(&mut config, &project)?;
+    let project_key = project_config.key.clone();
+    let profile_key = add_project_debug_profile(
+        project_config,
+        key,
+        label,
+        command,
+        cwd,
+        expected_port,
+        focus_url,
+        build_debug_ready_probe(
+            ready_probe_url,
+            ready_probe_path,
+            ready_expected_statuses,
+            ready_timeout_ms,
+        )?,
+        runtime_profile,
+        env,
+    )?;
+
+    save_config(&config_path, &config)?;
+    print_project_debug_profile_config_result(
+        &config,
+        &config_path,
+        &project_key,
+        &profile_key,
+        json_mode,
+        command_name,
+    )
+}
+
+fn update_project_debug_profile_config_command(
+    project: String,
+    profile: String,
+    patch: ProjectDebugProfilePatch,
+    config_override: Option<&Path>,
+    json_mode: bool,
+    command_name: &str,
+) -> Result<()> {
+    let (mut config, config_path) = load_cli_config(config_override)?;
+    let project_config = find_project_config_mut(&mut config, &project)?;
+    let project_key = project_config.key.clone();
+    let profile_key = update_project_debug_profile(project_config, &profile, patch)?;
+
+    save_config(&config_path, &config)?;
+    print_project_debug_profile_config_result(
+        &config,
+        &config_path,
+        &project_key,
+        &profile_key,
+        json_mode,
+        command_name,
+    )
+}
+
+fn delete_project_debug_profile_config_command(
+    project: String,
+    profile: String,
+    config_override: Option<&Path>,
+    json_mode: bool,
+    command_name: &str,
+) -> Result<()> {
+    let (mut config, config_path) = load_cli_config(config_override)?;
+    let project_config = find_project_config_mut(&mut config, &project)?;
+    let project_key = project_config.key.clone();
+    let deleted_profile = delete_project_debug_profile(project_config, &profile)?;
+
+    save_config(&config_path, &config)?;
+    if json_mode {
+        return print_json_command(
+            command_name,
+            &json!({
+                "configPath": config_path.display().to_string(),
+                "project": project_key,
+                "deletedProfile": deleted_profile,
+            }),
+        );
+    }
+    println!("deleted debug profile: {}", deleted_profile.key);
+    println!("project              : {project_key}");
+    println!("config path          : {}", config_path.display());
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_project_debug_profile(
+    project: &mut ProjectConfig,
+    key: String,
+    label: Option<String>,
+    command: Option<String>,
+    cwd: Option<PathBuf>,
+    expected_port: Option<u16>,
+    focus_url: Option<String>,
+    ready_probe: Option<ProjectDebugReadyProbeConfig>,
+    runtime_profile: Option<String>,
+    env: BTreeMap<String, String>,
+) -> Result<String> {
+    let key = validate_cli_config_key("debug profile", &key)?;
+    if project
+        .debug_profiles
+        .iter()
+        .any(|profile| profile.key == key)
+    {
+        anyhow::bail!(
+            "debug profile key already exists for project {}: {key}",
+            project.key
+        );
+    }
+    let label = label
+        .map(|value| require_non_empty_cli_value("debug profile label", &value))
+        .transpose()?
+        .unwrap_or_else(|| key.clone());
+    let command = normalize_debug_profile_optional_value("debug profile command", command)?;
+    let cwd = normalize_debug_profile_cwd(cwd)?;
+    let expected_port = validate_debug_profile_expected_port(expected_port)?;
+    let focus_url = validate_debug_profile_url("focus URL", focus_url)?;
+    let runtime_profile =
+        normalize_debug_profile_optional_value("runtime profile", runtime_profile)?;
+
+    project.debug_profiles.push(ProjectDebugProfileConfig {
+        key: key.clone(),
+        label,
+        command,
+        cwd,
+        expected_port,
+        focus_url,
+        ready_probe,
+        runtime_profile,
+        env,
+        ..ProjectDebugProfileConfig::default()
+    });
+    Ok(key)
+}
+
+fn update_project_debug_profile(
+    project: &mut ProjectConfig,
+    profile: &str,
+    patch: ProjectDebugProfilePatch,
+) -> Result<String> {
+    if patch.command.is_some() && patch.clear_command {
+        anyhow::bail!("choose only one of --command or --clear-command");
+    }
+    if patch.cwd.is_some() && patch.clear_cwd {
+        anyhow::bail!("choose only one of --cwd or --clear-cwd");
+    }
+    if patch.expected_port.is_some() && patch.clear_expect_port {
+        anyhow::bail!("choose only one of --expect-port or --clear-expect-port");
+    }
+    if patch.runtime_profile.is_some() && patch.clear_runtime_profile {
+        anyhow::bail!("choose only one of --runtime-profile or --clear-runtime-profile");
+    }
+    if patch.focus_url.is_some() && patch.clear_focus_url {
+        anyhow::bail!("choose only one of --focus-url or --clear-focus-url");
+    }
+    let ready_probe_changed = patch.ready_probe_url.is_some()
+        || patch.ready_probe_path.is_some()
+        || !patch.ready_expected_statuses.is_empty()
+        || patch.ready_timeout_ms.is_some();
+    if ready_probe_changed && patch.clear_ready_probe {
+        anyhow::bail!("ready probe flags cannot be combined with --clear-ready-probe");
+    }
+    if patch.label.is_none()
+        && patch.command.is_none()
+        && !patch.clear_command
+        && patch.cwd.is_none()
+        && !patch.clear_cwd
+        && patch.expected_port.is_none()
+        && !patch.clear_expect_port
+        && patch.focus_url.is_none()
+        && !patch.clear_focus_url
+        && !ready_probe_changed
+        && !patch.clear_ready_probe
+        && patch.runtime_profile.is_none()
+        && !patch.clear_runtime_profile
+        && patch.env.is_empty()
+        && !patch.clear_env
+    {
+        anyhow::bail!("at least one debug profile update flag is required");
+    }
+
+    let label = patch
+        .label
+        .map(|value| require_non_empty_cli_value("debug profile label", &value))
+        .transpose()?;
+    let command = normalize_debug_profile_optional_value("debug profile command", patch.command)?;
+    let cwd = normalize_debug_profile_cwd(patch.cwd)?;
+    let expected_port = validate_debug_profile_expected_port(patch.expected_port)?;
+    let focus_url = validate_debug_profile_url("focus URL", patch.focus_url)?;
+    let ready_probe = ready_probe_changed
+        .then(|| {
+            build_debug_ready_probe(
+                patch.ready_probe_url,
+                patch.ready_probe_path,
+                patch.ready_expected_statuses,
+                patch.ready_timeout_ms,
+            )
+        })
+        .transpose()?
+        .flatten();
+    let runtime_profile =
+        normalize_debug_profile_optional_value("runtime profile", patch.runtime_profile)?;
+    let profile_key = validate_cli_config_key("debug profile", profile)?;
+    let project_key = project.key.clone();
+    let profile = project
+        .debug_profiles
+        .iter_mut()
+        .find(|item| item.key == profile_key)
+        .ok_or_else(|| {
+            anyhow::anyhow!("debug profile {profile_key} not found for project {project_key}")
+        })?;
+
+    if let Some(label) = label {
+        profile.label = label;
+    }
+    if let Some(command) = command {
+        profile.command = Some(command);
+    }
+    if patch.clear_command {
+        profile.command = None;
+    }
+    if let Some(cwd) = cwd {
+        profile.cwd = Some(cwd);
+    }
+    if patch.clear_cwd {
+        profile.cwd = None;
+    }
+    if let Some(expected_port) = expected_port {
+        profile.expected_port = Some(expected_port);
+    }
+    if patch.clear_expect_port {
+        profile.expected_port = None;
+    }
+    if let Some(focus_url) = focus_url {
+        profile.focus_url = Some(focus_url);
+    }
+    if patch.clear_focus_url {
+        profile.focus_url = None;
+    }
+    if ready_probe_changed {
+        profile.ready_probe = ready_probe;
+    }
+    if patch.clear_ready_probe {
+        profile.ready_probe = None;
+    }
+    if let Some(runtime_profile) = runtime_profile {
+        profile.runtime_profile = Some(runtime_profile);
+    }
+    if patch.clear_runtime_profile {
+        profile.runtime_profile = None;
+    }
+    if patch.clear_env {
+        profile.env.clear();
+    }
+    profile.env.extend(patch.env);
+
+    Ok(profile.key.clone())
+}
+
+fn delete_project_debug_profile(
+    project: &mut ProjectConfig,
+    profile: &str,
+) -> Result<ProjectDebugProfileConfig> {
+    let profile = validate_cli_config_key("debug profile", profile)?;
+    let index = project
+        .debug_profiles
+        .iter()
+        .position(|item| item.key == profile)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "debug profile {profile} not found for project {}",
+                project.key
+            )
+        })?;
+    Ok(project.debug_profiles.remove(index))
+}
+
+fn normalize_debug_profile_optional_value(
+    label: &str,
+    value: Option<String>,
+) -> Result<Option<String>> {
+    value
+        .map(|value| require_non_empty_cli_value(label, &value))
+        .transpose()
+}
+
+fn validate_debug_profile_expected_port(value: Option<u16>) -> Result<Option<u16>> {
+    if value == Some(0) {
+        anyhow::bail!("debug profile expected port must be between 1 and 65535");
+    }
+    Ok(value)
+}
+
+fn normalize_debug_profile_cwd(value: Option<PathBuf>) -> Result<Option<PathBuf>> {
+    value
+        .map(|path| {
+            if path.as_os_str().is_empty() {
+                anyhow::bail!("debug profile cwd cannot be empty");
+            }
+            Ok(path)
+        })
+        .transpose()
+}
+
+fn validate_debug_profile_url(label: &str, value: Option<String>) -> Result<Option<String>> {
+    let value = normalize_debug_profile_optional_value(label, value)?;
+    if let Some(value) = value.as_deref() {
+        let url = reqwest::Url::parse(value)
+            .map_err(|error| anyhow::anyhow!("invalid {label}: {error}"))?;
+        if !matches!(url.scheme(), "http" | "https") {
+            anyhow::bail!("{label} must use http or https");
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            anyhow::bail!("{label} must not contain credentials");
+        }
+    }
+    Ok(value)
+}
+
+fn build_debug_ready_probe(
+    url: Option<String>,
+    path: Option<String>,
+    mut expected_statuses: Vec<u16>,
+    timeout_ms: Option<u64>,
+) -> Result<Option<ProjectDebugReadyProbeConfig>> {
+    let url = validate_debug_profile_url("ready probe URL", url)?;
+    let path = normalize_debug_profile_optional_value("ready probe path", path)?;
+    if expected_statuses
+        .iter()
+        .any(|status| !(100..=599).contains(status))
+    {
+        anyhow::bail!("ready probe expected status must be between 100 and 599");
+    }
+    if timeout_ms.is_some_and(|timeout| !(100..=600_000).contains(&timeout)) {
+        anyhow::bail!("ready probe timeout must be between 100 and 600000 ms");
+    }
+    expected_statuses.sort_unstable();
+    expected_statuses.dedup();
+    if url.is_none() && path.is_none() && expected_statuses.is_empty() && timeout_ms.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ProjectDebugReadyProbeConfig {
+        url,
+        path,
+        expected_statuses,
+        timeout_ms,
+    }))
+}
+
+fn print_project_debug_profile_config_result(
+    config: &AppConfig,
+    config_path: &Path,
+    project: &str,
+    profile: &str,
+    json_mode: bool,
+    command_name: &str,
+) -> Result<()> {
+    let project = find_project_config(config, project)?;
+    let profile = find_project_debug_profile(project, profile)?;
+    if json_mode {
+        return print_json_command(
+            command_name,
+            &json!({
+                "configPath": config_path.display().to_string(),
+                "project": project.key,
+                "profile": profile,
+            }),
+        );
+    }
+    print_project_debug_profile(profile);
+    println!("project     : {}", project.key);
+    println!("config path : {}", config_path.display());
+    Ok(())
+}
+
+fn print_project_debug_profile(profile: &ProjectDebugProfileConfig) {
+    println!("profile         : {}", profile.key);
+    println!("label           : {}", profile.label);
+    println!(
+        "command         : {}",
+        profile.command.as_deref().unwrap_or("<project default>")
+    );
+    println!(
+        "cwd             : {}",
+        profile
+            .cwd
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<project default>".to_string())
+    );
+    println!(
+        "expected port   : {}",
+        profile
+            .expected_port
+            .map(|port| port.to_string())
+            .unwrap_or_else(|| "<auto>".to_string())
+    );
+    println!(
+        "runtime profile : {}",
+        profile.runtime_profile.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "focus URL       : {}",
+        profile.focus_url.as_deref().unwrap_or("<project default>")
+    );
+    if let Some(probe) = profile.ready_probe.as_ref() {
+        println!(
+            "ready probe    : url={} path={} statuses={} timeout={}ms",
+            probe.url.as_deref().unwrap_or("<focus/ready URL>"),
+            probe.path.as_deref().unwrap_or("<none>"),
+            if probe.expected_statuses.is_empty() {
+                "200-399".to_string()
+            } else {
+                probe
+                    .expected_statuses
+                    .iter()
+                    .map(u16::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            },
+            probe
+                .timeout_ms
+                .map(|value| value.to_string())
+                .unwrap_or_else(|| "180000".to_string())
+        );
+    }
+    if !profile.env.is_empty() {
+        println!("environment:");
+        for (key, value) in &profile.env {
+            println!("  {key}={value}");
+        }
+    }
+}
+
 fn print_project_config_result(
     config: &AppConfig,
     config_path: &Path,
@@ -4775,6 +7600,30 @@ fn print_project_config_result(
     println!("project    : {} ({})", project.name, project.key);
     println!("config path: {}", config_path.display());
     Ok(())
+}
+
+fn find_project_config<'a>(config: &'a AppConfig, project: &str) -> Result<&'a ProjectConfig> {
+    config
+        .projects
+        .iter()
+        .find(|item| item.key == project)
+        .ok_or_else(|| anyhow::anyhow!("project {project} not found"))
+}
+
+fn find_project_debug_profile<'a>(
+    project: &'a ProjectConfig,
+    profile: &str,
+) -> Result<&'a ProjectDebugProfileConfig> {
+    project
+        .debug_profiles
+        .iter()
+        .find(|item| item.key == profile)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "debug profile {profile} not found for project {}",
+                project.key
+            )
+        })
 }
 
 fn find_project_config_mut<'a>(
@@ -4877,22 +7726,29 @@ fn clear_legacy_project_job(project: &mut ProjectConfig, target_key: &str) {
 }
 
 fn run_projects(config: &AppConfig, command: ProjectCommands, json_mode: bool) -> Result<()> {
+    let command_name = command.json_command_name();
     match command {
-        ProjectCommands::List => list_projects_command(config, json_mode, "projects.list"),
+        ProjectCommands::List => list_projects_command(config, json_mode, command_name),
         ProjectCommands::Show { project } => {
-            show_project_command(config, &project, json_mode, "projects.show")
+            show_project_command(config, &project, json_mode, command_name)
         }
         ProjectCommands::Branch { project } => {
-            show_branch_command(config, &project, json_mode, "projects.branch")
+            show_branch_command(config, &project, json_mode, command_name)
         }
         ProjectCommands::Branches { project } => {
-            show_branches_command(config, &project, json_mode, "projects.branches")
+            show_branches_command(config, &project, json_mode, command_name)
         }
         ProjectCommands::Envs { project, target } => {
-            show_envs_command(config, &project, target, json_mode, "projects.envs")
+            show_envs_command(config, &project, target, json_mode, command_name)
         }
         ProjectCommands::Options { project, target } => {
-            show_options_command(config, &project, target, json_mode, "projects.options")
+            show_options_command(config, &project, target, json_mode, command_name)
+        }
+        ProjectCommands::DebugProfileList { project } => {
+            list_project_debug_profiles(config, &project, json_mode, command_name)
+        }
+        ProjectCommands::DebugProfileShow { project, profile } => {
+            show_project_debug_profile(config, &project, &profile, json_mode, command_name)
         }
         _ => anyhow::bail!("unsupported project read command"),
     }
@@ -4938,7 +7794,7 @@ fn plan_deploy_command(
         extra_params: parse_extra_params_args(extra_params)?,
         params: BTreeMap::new(),
     };
-    let plan = core::build_plan(config, &request)?;
+    let plan = core::build_plan_refreshed(config, &request)?;
     if json_mode {
         return print_json_command(command_name, &plan);
     }
@@ -4986,26 +7842,254 @@ fn trigger_deploy_command(
         extra_params: parse_extra_params_args(extra_params)?,
         params: BTreeMap::new(),
     };
-    let result = core::trigger_deploy(config, &request)?;
+    let result = execute_cli_deploy(config, &request)?;
     if json_mode {
         return print_json_command(command_name, &result);
     }
+    print_trigger_result(&result);
+    Ok(())
+}
+
+const DEFAULT_BUILD_FOLLOW_POLL_INTERVAL_MS: u64 = 3_000;
+const DEFAULT_BUILD_FOLLOW_TIMEOUT_SECS: u64 = 5 * 60;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildFollowResponse {
+    trigger: BuildTriggerResponse,
+    final_status: BuildStatusResponse,
+    polls: usize,
+    elapsed_ms: u64,
+}
+
+struct BuildFollowOutcome {
+    status: BuildStatusResponse,
+    polls: usize,
+    elapsed_ms: u64,
+}
+
+impl BuildFollowOptions {
+    fn poll_interval(self) -> std::time::Duration {
+        std::time::Duration::from_millis(
+            self.poll_interval_ms
+                .unwrap_or(DEFAULT_BUILD_FOLLOW_POLL_INTERVAL_MS),
+        )
+    }
+
+    fn timeout(self) -> std::time::Duration {
+        std::time::Duration::from_secs(
+            self.timeout_secs
+                .unwrap_or(DEFAULT_BUILD_FOLLOW_TIMEOUT_SECS),
+        )
+    }
+}
+
+fn trigger_build_command_with_follow(
+    config: &AppConfig,
+    project: String,
+    target: Option<String>,
+    env: Option<String>,
+    branch: Option<String>,
+    extra_params: Vec<String>,
+    follow: BuildFollowOptions,
+    json_mode: bool,
+    command_name: &str,
+) -> Result<()> {
+    if !follow.follow {
+        return trigger_deploy_command(
+            config,
+            project,
+            target,
+            env,
+            branch,
+            extra_params,
+            json_mode,
+            command_name,
+        );
+    }
+
+    let request = DeployRequest {
+        project,
+        target,
+        variant: false,
+        env,
+        branch,
+        extra_params: parse_extra_params_args(extra_params)?,
+        params: BTreeMap::new(),
+    };
+    let trigger = execute_cli_deploy(config, &request)?;
+    if !json_mode {
+        print_trigger_result(&trigger);
+    }
+
+    let outcome = if is_terminal_deploy_state(&trigger.state_key) {
+        BuildFollowOutcome {
+            status: build_status_from_trigger(&trigger),
+            polls: 0,
+            elapsed_ms: 0,
+        }
+    } else {
+        follow_build_status(
+            config,
+            trigger.queue_url.clone(),
+            trigger.build_url.clone(),
+            follow,
+            json_mode,
+        )?
+    };
+
+    if json_mode {
+        return print_json_command(
+            command_name,
+            &BuildFollowResponse {
+                trigger,
+                final_status: outcome.status,
+                polls: outcome.polls,
+                elapsed_ms: outcome.elapsed_ms,
+            },
+        );
+    }
+    println!("follow polls  : {}", outcome.polls);
+    println!("follow elapsed: {}ms", outcome.elapsed_ms);
+    Ok(())
+}
+
+fn show_build_status_command(
+    config: &AppConfig,
+    queue_url: Option<String>,
+    build_url: Option<String>,
+    follow: BuildFollowOptions,
+    json_mode: bool,
+    command_name: &str,
+) -> Result<()> {
+    if !follow.follow {
+        return show_status_command(config, queue_url, build_url, json_mode, command_name);
+    }
+
+    let outcome = follow_build_status(config, queue_url, build_url, follow, json_mode)?;
+    if json_mode {
+        return print_json_command(command_name, &outcome.status);
+    }
+    println!("follow polls  : {}", outcome.polls);
+    println!("follow elapsed: {}ms", outcome.elapsed_ms);
+    Ok(())
+}
+
+fn follow_build_status(
+    config: &AppConfig,
+    mut queue_url: Option<String>,
+    mut build_url: Option<String>,
+    options: BuildFollowOptions,
+    json_mode: bool,
+) -> Result<BuildFollowOutcome> {
+    if queue_url.is_none() && build_url.is_none() {
+        anyhow::bail!("没有可跟踪的 Jenkins 队列或构建地址");
+    }
+
+    let started = std::time::Instant::now();
+    let timeout = options.timeout();
+    let poll_interval = options.poll_interval();
+    let mut polls = 0usize;
+    let mut last_status: Option<BuildStatusResponse> = None;
+
+    loop {
+        if started.elapsed() >= timeout {
+            return Err(build_follow_timeout_error(
+                polls,
+                started.elapsed(),
+                last_status.as_ref(),
+            ));
+        }
+
+        let requested_queue_url = queue_url.clone();
+        let requested_build_url = build_url.clone();
+        let status = core::refresh_deploy_status(
+            config,
+            &StatusRequest {
+                queue_url,
+                build_url,
+                project: None,
+            },
+        )?;
+        polls += 1;
+        if let Err(error) = persist_cli_deploy_status(
+            &status,
+            requested_queue_url.as_deref(),
+            requested_build_url.as_deref(),
+        ) {
+            eprintln!("warning: failed to update deploy history: {error}");
+        }
+        if !json_mode {
+            print_status(&status);
+        }
+
+        queue_url = status.queue_url.clone().or(requested_queue_url);
+        build_url = status.build_url.clone().or(requested_build_url);
+        if is_terminal_deploy_state(&status.state_key) {
+            return Ok(BuildFollowOutcome {
+                status,
+                polls,
+                elapsed_ms: elapsed_millis(started.elapsed()),
+            });
+        }
+        last_status = Some(status);
+
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(build_follow_timeout_error(
+                polls,
+                started.elapsed(),
+                last_status.as_ref(),
+            ));
+        }
+        std::thread::sleep(poll_interval.min(remaining));
+    }
+}
+
+fn build_status_from_trigger(trigger: &BuildTriggerResponse) -> BuildStatusResponse {
+    BuildStatusResponse {
+        queue_url: trigger.queue_url.clone(),
+        build_url: trigger.build_url.clone(),
+        state_key: trigger.state_key.clone(),
+        state_label: trigger.state_label.clone(),
+        detail: trigger.detail.clone(),
+    }
+}
+
+fn build_follow_timeout_error(
+    polls: usize,
+    elapsed: std::time::Duration,
+    last_status: Option<&BuildStatusResponse>,
+) -> anyhow::Error {
+    let state = last_status
+        .map(|status| status.state_label.as_str())
+        .unwrap_or("尚未获取状态");
+    anyhow::anyhow!(
+        "构建状态跟踪超时（{}ms，轮询 {polls} 次，最后状态：{state}）",
+        elapsed_millis(elapsed)
+    )
+}
+
+fn elapsed_millis(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u64::MAX as u128) as u64
+}
+
+fn print_trigger_result(result: &BuildTriggerResponse) {
     print_plan(&result.plan);
     println!("triggered     : yes");
     println!("http status   : {}", result.status);
-    if let Some(queue_url) = result.queue_url {
+    if let Some(queue_url) = &result.queue_url {
         println!("queue url     : {queue_url}");
     } else {
         println!("queue url     : <missing location header>");
     }
-    if let Some(build_url) = result.build_url {
+    if let Some(build_url) = &result.build_url {
         println!("build url     : {build_url}");
     } else {
         println!("build url     : <not available>");
     }
     println!("build state   : {}", result.state_label);
     println!("detail        : {}", result.detail);
-    Ok(())
 }
 
 fn show_status(
@@ -5024,6 +8108,8 @@ fn show_status_command(
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
+    let requested_queue_url = queue_url.clone();
+    let requested_build_url = build_url.clone();
     let status = core::refresh_deploy_status(
         config,
         &StatusRequest {
@@ -5032,6 +8118,13 @@ fn show_status_command(
             project: None,
         },
     )?;
+    if let Err(error) = persist_cli_deploy_status(
+        &status,
+        requested_queue_url.as_deref(),
+        requested_build_url.as_deref(),
+    ) {
+        eprintln!("warning: failed to update deploy history: {error}");
+    }
     if json_mode {
         return print_json_command(command_name, &status);
     }
@@ -5127,6 +8220,7 @@ fn run_build(config: &AppConfig, command: BuildCommands, json_mode: bool) -> Res
             env,
             branch,
             extra_params,
+            follow,
         }
         | BuildCommands::Trigger {
             project,
@@ -5134,20 +8228,30 @@ fn run_build(config: &AppConfig, command: BuildCommands, json_mode: bool) -> Res
             env,
             branch,
             extra_params,
-        } => trigger_deploy_command(
+            follow,
+        } => trigger_build_command_with_follow(
             config,
             project,
             target,
             env,
             branch,
             extra_params,
+            follow,
             json_mode,
             "build.run",
         ),
         BuildCommands::Status {
             queue_url,
             build_url,
-        } => show_status_command(config, queue_url, build_url, json_mode, "build.status"),
+            follow,
+        } => show_build_status_command(
+            config,
+            queue_url,
+            build_url,
+            follow,
+            json_mode,
+            "build.status",
+        ),
         BuildCommands::History { project, limit } => {
             let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
             let items = storage
@@ -5453,11 +8557,13 @@ fn run_merge_command(
     let result = core::execute_merge(
         config,
         &MergeRequest {
-            project,
-            source_branch: source,
-            target_branch: target,
+            project: project.clone(),
+            source_branch: source.clone(),
+            target_branch: target.clone(),
         },
-    )?;
+    );
+    record_cli_merge_result("合并分支", &project, &source, &target, &result);
+    let result = result?;
     if json_mode {
         return print_json_command(command_name, &result);
     }
@@ -5467,16 +8573,18 @@ fn run_merge_command(
 
 fn run_branch_sync(
     config: &AppConfig,
-    project: String,
+    projects: Vec<String>,
     source_branch: String,
     target_branches: Vec<String>,
+    plan: bool,
     json_mode: bool,
 ) -> Result<()> {
     run_branch_sync_command(
         config,
-        project,
+        projects,
         source_branch,
         target_branches,
+        plan,
         json_mode,
         "sync-branches",
     )
@@ -5484,29 +8592,60 @@ fn run_branch_sync(
 
 fn run_branch_sync_command(
     config: &AppConfig,
-    project: String,
+    projects: Vec<String>,
     source_branch: String,
     target_branches: Vec<String>,
+    plan: bool,
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
     if target_branches.is_empty() {
         anyhow::bail!("at least one --target is required");
     }
-
-    let result = execute_branch_sync(
-        config,
-        &BranchSyncRequest {
-            project,
-            source_branch,
-            target_branches,
-        },
-    )?;
-    if json_mode {
-        return print_json_command(command_name, &result);
+    if projects.is_empty() {
+        anyhow::bail!("at least one --project is required");
     }
-    print_branch_task_result(&result);
-    Ok(())
+
+    let request = BranchSyncRequest {
+        project: String::new(),
+        projects,
+        source_branch,
+        target_branches,
+    };
+    let result = if plan {
+        plan_branch_sync(config, &request)
+    } else {
+        execute_branch_sync(config, &request)
+    };
+    if plan {
+        finish_branch_task_command(
+            None,
+            None,
+            result,
+            json_mode,
+            command_name,
+            "preflight_failed",
+        )
+    } else {
+        let replay = cli_branch_replay_request(
+            "execute_branch_sync_task",
+            "正在重新合并分支",
+            json!({
+                "project": request.project,
+                "projects": request.projects,
+                "sourceBranch": request.source_branch,
+                "targetBranches": request.target_branches,
+            }),
+        );
+        finish_branch_task_command(
+            Some(("批量合并分支", "sync")),
+            Some(replay),
+            result,
+            json_mode,
+            command_name,
+            "partial_failure",
+        )
+    }
 }
 
 fn run_git(config: &AppConfig, command: GitCommands, json_mode: bool) -> Result<()> {
@@ -5535,14 +8674,16 @@ fn run_git(config: &AppConfig, command: GitCommands, json_mode: bool) -> Result<
             target,
         } => run_merge_command(config, project, source, target, json_mode, "git.merge"),
         GitCommands::MergeMany {
-            project,
+            projects,
             source_branch,
             target_branches,
+            plan,
         } => run_branch_sync_command(
             config,
-            project,
+            projects,
             source_branch,
             target_branches,
+            plan,
             json_mode,
             "git.merge-many",
         ),
@@ -5650,19 +8791,29 @@ fn run_branch_create_command(
         anyhow::bail!("at least one --project is required");
     }
 
-    let result = execute_branch_create(
-        config,
-        &BranchCreateRequest {
-            projects,
-            source_branch,
-            target_branch,
-        },
-    )?;
-    if json_mode {
-        return print_json_command(command_name, &result);
-    }
-    print_branch_task_result(&result);
-    Ok(())
+    let request = BranchCreateRequest {
+        projects,
+        source_branch,
+        target_branch,
+    };
+    let result = execute_branch_create(config, &request);
+    let replay = cli_branch_replay_request(
+        "execute_branch_create_task",
+        "正在重新创建分支",
+        json!({
+            "projects": request.projects,
+            "sourceBranch": request.source_branch,
+            "targetBranch": request.target_branch,
+        }),
+    );
+    finish_branch_task_command(
+        Some(("创建分支", "create")),
+        Some(replay),
+        result,
+        json_mode,
+        command_name,
+        "branch_task_failed",
+    )
 }
 
 fn run_branch_checkout(
@@ -5691,19 +8842,29 @@ fn run_branch_checkout_command(
     command_name: &str,
 ) -> Result<()> {
     let destination = normalize_cli_path(destination)?;
-    let result = checkout_branch_to_directory(
-        config,
-        &BranchCheckoutRequest {
-            project,
-            source_branch,
-            destination_dir: destination,
-        },
-    )?;
-    if json_mode {
-        return print_json_command(command_name, &result);
-    }
-    print_branch_task_result(&result);
-    Ok(())
+    let request = BranchCheckoutRequest {
+        project,
+        source_branch,
+        destination_dir: destination,
+    };
+    let result = checkout_branch_to_directory(config, &request);
+    let replay = cli_branch_replay_request(
+        "checkout_branch_to_directory_task",
+        "正在重新创建工作副本",
+        json!({
+            "project": request.project,
+            "sourceBranch": request.source_branch,
+            "destinationDir": request.destination_dir,
+        }),
+    );
+    finish_branch_task_command(
+        Some(("创建工作副本", "checkout")),
+        Some(replay),
+        result,
+        json_mode,
+        command_name,
+        "branch_task_failed",
+    )
 }
 
 fn run_branch_switch(
@@ -5722,19 +8883,29 @@ fn run_branch_switch_command(
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
-    let result = execute_branch_switch(
-        config,
-        &BranchSwitchRequest {
-            project,
-            target_branch,
-            repo_path: None,
-        },
-    )?;
-    if json_mode {
-        return print_json_command(command_name, &result);
-    }
-    print_branch_task_result(&result);
-    Ok(())
+    let request = BranchSwitchRequest {
+        project,
+        target_branch,
+        repo_path: None,
+    };
+    let result = execute_branch_switch(config, &request);
+    let replay = cli_branch_replay_request(
+        "execute_branch_switch_task",
+        "正在重新切换分支",
+        json!({
+            "project": request.project,
+            "targetBranch": request.target_branch,
+            "repoPath": request.repo_path,
+        }),
+    );
+    finish_branch_task_command(
+        Some(("切换分支", "switch")),
+        Some(replay),
+        result,
+        json_mode,
+        command_name,
+        "branch_task_failed",
+    )
 }
 
 fn run_push_status(config: &AppConfig, project: String, json_mode: bool) -> Result<()> {
@@ -5816,21 +8987,47 @@ fn run_push_branch_command(
         .as_deref()
         .map(str::trim)
         .is_some_and(|value| !value.is_empty());
-    let result = execute_branch_push(
-        config,
-        &BranchPushRequest {
-            project,
-            repo_path,
-            commit_before_push,
-            commit_message: message,
-            selected_paths,
+    let request = BranchPushRequest {
+        project,
+        repo_path,
+        commit_before_push,
+        commit_message: message,
+        selected_paths,
+    };
+    let result = execute_branch_push(config, &request);
+    let mut replay = cli_branch_replay_request(
+        "execute_branch_push_task",
+        if request.commit_before_push {
+            "正在重新提交并推送"
+        } else {
+            "正在重新推送分支"
         },
-    )?;
-    if json_mode {
-        return print_json_command(command_name, &result);
+        json!({
+            "project": request.project,
+            "repoPath": request.repo_path,
+            "commitBeforePush": request.commit_before_push,
+            "commitMessage": request.commit_message,
+            "selectedPaths": request.selected_paths,
+        }),
+    );
+    if let Some(replay) = replay.as_object_mut() {
+        replay.insert(
+            "refreshPushStatusProject".to_string(),
+            json!(request.project),
+        );
+        replay.insert(
+            "clearPushCommitMessageOnSuccess".to_string(),
+            json!(request.commit_before_push),
+        );
     }
-    print_branch_task_result(&result);
-    Ok(())
+    finish_branch_task_command(
+        Some(("提交推送", "push")),
+        Some(replay),
+        result,
+        json_mode,
+        command_name,
+        "branch_task_failed",
+    )
 }
 
 fn run_notes(command: NoteCommands, json_mode: bool) -> Result<()> {
@@ -6192,7 +9389,9 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
             }
         }
         LinkCommands::Run { key } => {
-            let report = execute_link_cli(&key, "run", config_override)?;
+            let result = execute_link_cli(&key, "run", config_override);
+            record_cli_link_operation("run", &key, &result);
+            let report = result?;
             if json_mode {
                 print_json_command("link.run", &report)
             } else {
@@ -6201,7 +9400,9 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
             }
         }
         LinkCommands::Stop { key } => {
-            let report = execute_link_cli(&key, "stop", config_override)?;
+            let result = execute_link_cli(&key, "stop", config_override);
+            record_cli_link_operation("stop", &key, &result);
+            let report = result?;
             if json_mode {
                 print_json_command("link.stop", &report)
             } else {
@@ -6449,6 +9650,7 @@ fn execute_link_step_cli(
         .map(|item| item.summary.clone())
         .unwrap_or_else(|| "Link step".to_string());
     let planned_risks = plan_step.map(|item| item.risks.clone()).unwrap_or_default();
+    let planned_runtime = plan_step.and_then(|item| item.runtime.as_ref()).cloned();
 
     if !planned_risks.is_empty() {
         return LinkExecutionStepReport {
@@ -6472,6 +9674,7 @@ fn execute_link_step_cli(
             step_type,
             label,
             planned_summary,
+            planned_runtime.as_ref(),
         ),
         "run" => run_link_step_cli(
             config,
@@ -6513,6 +9716,7 @@ fn check_link_step_cli(
     step_type: String,
     label: String,
     planned_summary: String,
+    planned_runtime: Option<&rdevtool_core::runtime::ProjectRuntimeContextSnapshot>,
 ) -> LinkExecutionStepReport {
     match step_type.as_str() {
         "localFile.ensure" => {
@@ -6558,26 +9762,28 @@ fn check_link_step_cli(
                 let runtime_status = proxy_daemon_status(&default_proxy_path(), &profile.id).ok();
                 let listening = runtime_status.as_ref().is_some_and(|status| status.running);
                 let managed = runtime_status.as_ref().is_some_and(|status| status.managed);
-                let ready = listening && (step_type == "proxy.check" || managed);
-                let mut risks = Vec::new();
-                if !listening {
-                    risks.push(format!("代理端口未监听：{}", profile.listen_url()));
-                } else if step_type == "proxy.start" && !managed {
-                    risks.push("代理端口由非 rDevTool 进程占用，无法安全接管。".to_string());
-                }
+                let status = link_proxy_check_status(&step_type, listening, managed);
+                let risks = if status == "blocked" {
+                    if listening {
+                        vec!["代理端口由非 rDevTool 进程占用，无法安全接管。".to_string()]
+                    } else {
+                        vec![format!("代理尚未启动：{}", profile.listen_url())]
+                    }
+                } else {
+                    Vec::new()
+                };
                 LinkExecutionStepReport {
                     id,
                     step_type,
                     label,
-                    status: if ready {
-                        "checked".to_string()
-                    } else {
-                        "failed".to_string()
-                    },
-                    summary: if listening {
-                        format!("代理正在监听 {}", profile.listen_url())
-                    } else {
-                        format!("代理未启动，期望监听 {}", profile.listen_url())
+                    status: status.to_string(),
+                    summary: match status {
+                        "checked" => format!("代理正在监听 {}", profile.listen_url()),
+                        "ready" => format!("代理配置有效，可以启动 {}", profile.listen_url()),
+                        _ if listening => {
+                            format!("代理端口已被外部进程占用 {}", profile.listen_url())
+                        }
+                        _ => format!("代理尚未启动，期望监听 {}", profile.listen_url()),
                     },
                     detail: Some(json!({
                         "profileId": profile.id,
@@ -6632,7 +9838,10 @@ fn check_link_step_cli(
                         label,
                         status: status.to_string(),
                         summary: response.summary.clone(),
-                        detail: Some(json!(response)),
+                        detail: Some(json!({
+                            "preflight": response,
+                            "runtime": planned_runtime,
+                        })),
                         risks,
                     }
                 }
@@ -6652,8 +9861,12 @@ fn check_link_step_cli(
             step_type,
             label,
             status: "checked".to_string(),
-            summary: "打开页面步骤已识别，CLI 检查模式不执行打开动作。".to_string(),
-            detail: None,
+            summary: planned_runtime
+                .and_then(|runtime| runtime.effective.target.as_ref())
+                .and_then(|target| target.focus_url.as_ref())
+                .map(|url| format!("已解析打开页面 {url}；CLI 检查模式不执行打开动作。"))
+                .unwrap_or_else(|| "打开页面步骤已识别，CLI 检查模式不执行打开动作。".to_string()),
+            detail: planned_runtime.map(|runtime| json!(runtime)),
             risks: Vec::new(),
         },
         _ => LinkExecutionStepReport {
@@ -7439,7 +10652,9 @@ fn run_config_source(command: ConfigSourceCommands, json_mode: bool) -> Result<(
             name,
             base_dir,
         } => {
-            let result = copy_config_source(
+            let source_id = source.clone();
+            let target_id = id.clone();
+            let result = match copy_config_source(
                 &workspaces,
                 CopyConfigSourceRequest {
                     source_id: source,
@@ -7447,7 +10662,31 @@ fn run_config_source(command: ConfigSourceCommands, json_mode: bool) -> Result<(
                     name,
                     base_dir: base_dir.map(|path| path.display().to_string()),
                 },
-            )?;
+            ) {
+                Ok(result) => {
+                    record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                        event_id: None,
+                        kind: "配置".to_string(),
+                        summary: format!("复制配置源 {source_id} → {target_id}"),
+                        detail: Some(format!(
+                            "- 已复制文件: {}\n- 缺失文件: {}",
+                            result.copied_count, result.missing_count
+                        )),
+                        success: true,
+                    });
+                    result
+                }
+                Err(error) => {
+                    record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                        event_id: None,
+                        kind: "配置".to_string(),
+                        summary: format!("复制配置源 {source_id} → {target_id} 失败"),
+                        detail: Some(error.to_string()),
+                        success: false,
+                    });
+                    return Err(error);
+                }
+            };
             if json_mode {
                 print_json_command("config-source.copy", &result)
             } else {
@@ -7474,7 +10713,28 @@ fn run_config_source(command: ConfigSourceCommands, json_mode: bool) -> Result<(
                 anyhow::bail!("unsupported config source capability: {capability}");
             }
             let source =
-                save_config_source_preference(&paths, &workspace_key, &capability, &source)?;
+                match save_config_source_preference(&paths, &workspace_key, &capability, &source) {
+                    Ok(source) => {
+                        record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                            event_id: None,
+                            kind: "配置".to_string(),
+                            summary: format!("切换 {capability} 配置源"),
+                            detail: Some(format!("- 配置源: `{}`", source.id)),
+                            success: true,
+                        });
+                        source
+                    }
+                    Err(error) => {
+                        record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                            event_id: None,
+                            kind: "配置".to_string(),
+                            summary: format!("切换 {capability} 配置源失败"),
+                            detail: Some(error.to_string()),
+                            success: false,
+                        });
+                        return Err(error);
+                    }
+                };
             if json_mode {
                 print_json_command(
                     "config-source.use",
@@ -7491,6 +10751,112 @@ fn run_config_source(command: ConfigSourceCommands, json_mode: bool) -> Result<(
                 Ok(())
             }
         }
+    }
+}
+
+fn run_proxy_lifecycle_action(
+    info: ProxyCliInfo,
+    requested_profile: &str,
+    action: &str,
+    json_command: &str,
+    json_mode: bool,
+) -> Result<()> {
+    let event_source_id = info.source_id.clone();
+    let action_label = match action {
+        "start" => "启动代理服务",
+        "stop" => "停止代理服务",
+        "restart" => "重启代理服务",
+        _ => "操作代理服务",
+    };
+    let result = (|| {
+        let selected = info
+            .profiles
+            .iter()
+            .find(|item| item.id == requested_profile || item.name == requested_profile)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {requested_profile}"))?;
+        match action {
+            "start" => {
+                proxy_daemon_start(Path::new(&info.path), &selected.id)?;
+            }
+            "stop" => {
+                proxy_daemon_stop(Path::new(&info.path), &selected.id)?;
+            }
+            "restart" => {
+                proxy_daemon_restart(Path::new(&info.path), &selected.id)?;
+            }
+            _ => anyhow::bail!("unsupported proxy lifecycle action: {action}"),
+        }
+        let response = proxy_status_response(&info, Some(&selected.id))?;
+        Ok::<_, anyhow::Error>((selected, response))
+    })();
+
+    let (selected, response) = match result {
+        Ok(result) => result,
+        Err(error) => {
+            record_cli_lifecycle_operation(
+                "proxy",
+                action,
+                OperationEventState::Failed,
+                action_label,
+                &format!("{action_label}失败"),
+                &error.to_string(),
+                None,
+                None,
+                Some(json!({
+                    "profileId": requested_profile,
+                    "sourceId": event_source_id.clone(),
+                })),
+            );
+            return Err(error);
+        }
+    };
+    let status = response.profiles.first();
+    let expected_running = action != "stop";
+    let state_matches = status.is_some_and(|status| status.listening == expected_running);
+    let state = if state_matches {
+        OperationEventState::Success
+    } else {
+        OperationEventState::Failed
+    };
+    let completed_label = match action {
+        "start" => "已启动",
+        "stop" => "已停止",
+        "restart" => "已重启",
+        _ => "已完成",
+    };
+    let title = match action {
+        "start" => "代理服务已启动",
+        "stop" => "代理服务已停止",
+        "restart" => "代理服务已重启",
+        _ => action_label,
+    };
+    let detail = status
+        .map(|status| status.detail.as_str())
+        .unwrap_or("代理状态已更新");
+    let mut event_payload = serde_json::to_value(&response).unwrap_or_else(|_| json!({}));
+    if let Some(payload) = event_payload.as_object_mut() {
+        payload.insert("profileId".to_string(), json!(selected.id.clone()));
+        payload.insert("profileName".to_string(), json!(selected.name.clone()));
+        payload.insert("sourceId".to_string(), json!(event_source_id));
+    }
+    record_cli_lifecycle_operation(
+        "proxy",
+        action,
+        state,
+        title,
+        &format!("{} · {completed_label}", selected.name),
+        detail,
+        None,
+        None,
+        Some(event_payload),
+    );
+
+    if json_mode {
+        print_json_command(json_command, &response)
+    } else {
+        print_proxy_status(&response);
+        Ok(())
     }
 }
 
@@ -7549,53 +10915,18 @@ fn run_proxy(
             }
         }
         ProxyCommands::Start { profile } => {
-            let info = initial_info;
-            let selected = info
-                .profiles
-                .iter()
-                .find(|item| item.id == profile || item.name == profile)
-                .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {profile}"))?;
-            proxy_daemon_start(Path::new(&info.path), &selected.id)?;
-            let response = proxy_status_response(&info, Some(&selected.id))?;
-            if json_mode {
-                print_json_command("proxy.start", &response)
-            } else {
-                print_proxy_status(&response);
-                Ok(())
-            }
+            run_proxy_lifecycle_action(initial_info, &profile, "start", "proxy.start", json_mode)
         }
         ProxyCommands::Stop { profile } => {
-            let info = initial_info;
-            let selected = info
-                .profiles
-                .iter()
-                .find(|item| item.id == profile || item.name == profile)
-                .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {profile}"))?;
-            proxy_daemon_stop(Path::new(&info.path), &selected.id)?;
-            let response = proxy_status_response(&info, Some(&selected.id))?;
-            if json_mode {
-                print_json_command("proxy.stop", &response)
-            } else {
-                print_proxy_status(&response);
-                Ok(())
-            }
+            run_proxy_lifecycle_action(initial_info, &profile, "stop", "proxy.stop", json_mode)
         }
-        ProxyCommands::Restart { profile } => {
-            let info = initial_info;
-            let selected = info
-                .profiles
-                .iter()
-                .find(|item| item.id == profile || item.name == profile)
-                .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {profile}"))?;
-            proxy_daemon_restart(Path::new(&info.path), &selected.id)?;
-            let response = proxy_status_response(&info, Some(&selected.id))?;
-            if json_mode {
-                print_json_command("proxy.restart", &response)
-            } else {
-                print_proxy_status(&response);
-                Ok(())
-            }
-        }
+        ProxyCommands::Restart { profile } => run_proxy_lifecycle_action(
+            initial_info,
+            &profile,
+            "restart",
+            "proxy.restart",
+            json_mode,
+        ),
         ProxyCommands::Status { profile } => {
             let info = initial_info;
             let response = proxy_status_response(&info, profile.as_deref())?;
@@ -7967,6 +11298,7 @@ fn run_proxy(
             headers,
         } => {
             let info = initial_info;
+            let requested_profile = profile.clone();
             let selected_profile = select_proxy_profile_for_diagnosis(&info, profile.as_deref())?;
             let header_map = parse_key_value_map(&headers)?;
             let diagnosis = diagnose_proxy_request(
@@ -7979,10 +11311,25 @@ fn run_proxy(
                 &url,
                 &header_map,
             )?;
+            let daemon_status = proxy_daemon_status(Path::new(&info.path), &selected_profile.id)?;
+            let operation = proxy_diagnose_operation(
+                &info,
+                requested_profile,
+                &method,
+                &url,
+                header_map.len(),
+                &diagnosis,
+                &daemon_status,
+            );
+            let response = ProxyDiagnoseResponse {
+                diagnosis,
+                operation,
+            };
             if json_mode {
-                print_json_command("proxy.diagnose", &diagnosis)
+                print_json_command("proxy.diagnose", &response)
             } else {
-                print_proxy_diagnosis(&diagnosis);
+                print_proxy_diagnosis(&response.diagnosis);
+                print_proxy_operation_lifecycle(&response.operation);
                 Ok(())
             }
         }
@@ -8078,6 +11425,50 @@ struct RuntimeRestartResponse {
 fn resolve_runtime_lookup_cwd(config: &AppConfig, project_key: &str) -> Result<PathBuf> {
     let project = config.find_project(project_key)?;
     resolve_project_runtime_lookup_cwd(project)
+}
+
+fn selected_runtime_daemon_status(
+    config: &AppConfig,
+    project_key: &str,
+    run_id: Option<&str>,
+    require_unambiguous_running: bool,
+) -> Result<RuntimeDaemonStatus> {
+    let project = config.find_project(project_key)?;
+    if let Some(run_id) = run_id {
+        return find_runtime_daemon(project_key, Some(run_id))?.ok_or_else(|| {
+            anyhow::anyhow!("runtime session not found for project {project_key}: {run_id}")
+        });
+    }
+    let candidate_cwds = project_runtime_candidate_cwds(project).map_err(anyhow::Error::msg)?;
+    let candidate_statuses = list_runtime_daemons()?
+        .into_iter()
+        .filter(|status| {
+            status.project_key == project_key
+                && candidate_cwds
+                    .iter()
+                    .any(|cwd| Path::new(&status.canonical_cwd) == cwd)
+        })
+        .collect::<Vec<_>>();
+    if require_unambiguous_running && run_id.is_none() {
+        let running = candidate_statuses
+            .iter()
+            .filter(|status| status.running)
+            .cloned()
+            .collect::<Vec<_>>();
+        if running.len() > 1 {
+            anyhow::bail!(
+                "project {project_key} has multiple running sessions; select one with --run-id"
+            );
+        }
+        if let Some(status) = running.into_iter().next() {
+            return Ok(status);
+        }
+    }
+    if let Some(status) = candidate_statuses.into_iter().next() {
+        return Ok(status);
+    }
+    let cwd = resolve_runtime_lookup_cwd(config, project_key)?;
+    Ok(runtime_daemon_status(project_key, &cwd)?)
 }
 
 fn resolve_project_runtime_lookup_cwd(project: &ProjectConfig) -> Result<PathBuf> {
@@ -8191,6 +11582,10 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
             expected_port,
             env,
         } => {
+            let configured_project_name = config
+                .find_project(&project)
+                .ok()
+                .map(|project| project.name.clone());
             let options = ProjectRuntimeLaunchOptions {
                 debug_profile,
                 runtime_profile,
@@ -8198,8 +11593,77 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                 expected_port,
                 env: parse_key_value_map(&env)?,
             };
-            let response = start_project_runtime_detached_with_options(config, &project, &options)
-                .map_err(|error| anyhow::anyhow!(error))?;
+            let response =
+                match start_project_runtime_detached_with_options(config, &project, &options) {
+                    Ok(response) => {
+                        record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                            event_id: Some(format!(
+                                "runtime-start:{}:{}",
+                                project, response.run_id
+                            )),
+                            kind: "运行".to_string(),
+                            summary: format!(
+                                "启动 {} · {}",
+                                response.project_name, response.status_label
+                            ),
+                            detail: Some(format!(
+                                "- 项目: `{}`\n- 命令: `{}`\n- 目录: `{}`\n\n{}",
+                                response.project_key,
+                                response.command,
+                                response.cwd,
+                                response.detail
+                            )),
+                            success: response.running,
+                        });
+                        record_cli_lifecycle_operation(
+                            "runtime",
+                            "start",
+                            if response.running {
+                                OperationEventState::Success
+                            } else {
+                                OperationEventState::Failed
+                            },
+                            if response.running {
+                                "dev 服务已启动"
+                            } else {
+                                "dev 服务启动失败"
+                            },
+                            &format!("{} · {}", response.project_name, response.status_label),
+                            &response.detail,
+                            Some(&response.project_key),
+                            Some(&response.project_name),
+                            Some(runtime_operation_payload(
+                                Some(&response),
+                                &project,
+                                &options,
+                            )),
+                        );
+                        response
+                    }
+                    Err(error) => {
+                        record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                            event_id: None,
+                            kind: "运行".to_string(),
+                            summary: format!("启动 {project} 失败"),
+                            detail: Some(error.clone()),
+                            success: false,
+                        });
+                        record_cli_lifecycle_operation(
+                            "runtime",
+                            "start",
+                            OperationEventState::Failed,
+                            "启动 dev 服务",
+                            "dev 服务启动失败",
+                            &error,
+                            Some(&project),
+                            configured_project_name.as_deref(),
+                            Some(runtime_operation_payload::<serde_json::Value>(
+                                None, &project, &options,
+                            )),
+                        );
+                        return Err(anyhow::anyhow!(error));
+                    }
+                };
             if json_mode {
                 print_json_command(json_command, &response)
             } else {
@@ -8207,9 +11671,9 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                 Ok(())
             }
         }
-        RuntimeCommands::Status { project } => {
-            let cwd = resolve_runtime_lookup_cwd(config, &project)?;
-            let response = runtime_daemon_status(&project, &cwd)?;
+        RuntimeCommands::Status { project, run_id } => {
+            let response =
+                selected_runtime_daemon_status(config, &project, run_id.as_deref(), false)?;
             if json_mode {
                 print_json_command(json_command, &response)
             } else {
@@ -8229,9 +11693,69 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                 Ok(())
             }
         }
-        RuntimeCommands::Stop { project } => {
-            let cwd = resolve_runtime_lookup_cwd(config, &project)?;
-            let response = stop_runtime_daemon(&project, &cwd)?;
+        RuntimeCommands::Stop { project, run_id } => {
+            let configured_project_name = config
+                .find_project(&project)
+                .ok()
+                .map(|project| project.name.clone());
+            let selected =
+                selected_runtime_daemon_status(config, &project, run_id.as_deref(), true)?;
+            let response = match stop_runtime_daemon(&project, Path::new(&selected.canonical_cwd)) {
+                Ok(response) => {
+                    record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                        event_id: None,
+                        kind: "运行".to_string(),
+                        summary: format!("停止 {project} · {}", response.status_key),
+                        detail: Some(response.detail.clone()),
+                        success: !response.running,
+                    });
+                    record_cli_lifecycle_operation(
+                        "runtime",
+                        "stop",
+                        if response.running {
+                            OperationEventState::Failed
+                        } else {
+                            OperationEventState::Success
+                        },
+                        if response.running {
+                            "dev 服务停止失败"
+                        } else {
+                            "dev 服务已停止"
+                        },
+                        &format!(
+                            "{} · {}",
+                            configured_project_name.as_deref().unwrap_or(&project),
+                            response.status_key
+                        ),
+                        &response.detail,
+                        Some(&project),
+                        configured_project_name.as_deref(),
+                        serde_json::to_value(&response).ok(),
+                    );
+                    response
+                }
+                Err(error) => {
+                    record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                        event_id: None,
+                        kind: "运行".to_string(),
+                        summary: format!("停止 {project} 失败"),
+                        detail: Some(error.to_string()),
+                        success: false,
+                    });
+                    record_cli_lifecycle_operation(
+                        "runtime",
+                        "stop",
+                        OperationEventState::Failed,
+                        "停止 dev 服务",
+                        "dev 服务停止失败",
+                        &error.to_string(),
+                        Some(&project),
+                        configured_project_name.as_deref(),
+                        Some(json!({ "projectKey": project.clone() })),
+                    );
+                    return Err(error);
+                }
+            };
             if json_mode {
                 print_json_command(json_command, &response)
             } else {
@@ -8247,6 +11771,10 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
             expected_port,
             env,
         } => {
+            let configured_project_name = config
+                .find_project(&project)
+                .ok()
+                .map(|project| project.name.clone());
             let options = ProjectRuntimeLaunchOptions {
                 debug_profile,
                 runtime_profile,
@@ -8254,11 +11782,86 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                 expected_port,
                 env: parse_key_value_map(&env)?,
             };
-            let cwd = resolve_runtime_lookup_cwd(config, &project)?;
-            let stopped = stop_runtime_daemon(&project, &cwd)?;
-            let started = start_project_runtime_detached_with_options(config, &project, &options)
-                .map_err(|error| anyhow::anyhow!(error))?;
+            let selected = selected_runtime_daemon_status(config, &project, None, true)?;
+            let stopped = match stop_runtime_daemon(&project, Path::new(&selected.canonical_cwd)) {
+                Ok(stopped) => stopped,
+                Err(error) => {
+                    record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                        event_id: None,
+                        kind: "运行".to_string(),
+                        summary: format!("重启 {project} 失败"),
+                        detail: Some(error.to_string()),
+                        success: false,
+                    });
+                    record_cli_lifecycle_operation(
+                        "runtime",
+                        "restart",
+                        OperationEventState::Failed,
+                        "重启 dev 服务",
+                        "dev 服务重启失败",
+                        &error.to_string(),
+                        Some(&project),
+                        configured_project_name.as_deref(),
+                        Some(json!({ "projectKey": project.clone() })),
+                    );
+                    return Err(error);
+                }
+            };
+            let started =
+                match start_project_runtime_detached_with_options(config, &project, &options) {
+                    Ok(started) => started,
+                    Err(error) => {
+                        record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                            event_id: None,
+                            kind: "运行".to_string(),
+                            summary: format!("重启 {project} 失败"),
+                            detail: Some(error.clone()),
+                            success: false,
+                        });
+                        record_cli_lifecycle_operation(
+                            "runtime",
+                            "restart",
+                            OperationEventState::Failed,
+                            "重启 dev 服务",
+                            "dev 服务重启失败",
+                            &error,
+                            Some(&project),
+                            configured_project_name.as_deref(),
+                            Some(json!({ "projectKey": project.clone() })),
+                        );
+                        return Err(anyhow::anyhow!(error));
+                    }
+                };
+            record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                event_id: Some(format!("runtime-restart:{}:{}", project, started.run_id)),
+                kind: "运行".to_string(),
+                summary: format!("重启 {} · {}", started.project_name, started.status_label),
+                detail: Some(started.detail.clone()),
+                success: started.running,
+            });
             let response = RuntimeRestartResponse { stopped, started };
+            record_cli_lifecycle_operation(
+                "runtime",
+                "restart",
+                if response.started.running {
+                    OperationEventState::Success
+                } else {
+                    OperationEventState::Failed
+                },
+                if response.started.running {
+                    "dev 服务已重启"
+                } else {
+                    "dev 服务重启失败"
+                },
+                &format!(
+                    "{} · {}",
+                    response.started.project_name, response.started.status_label
+                ),
+                &response.started.detail,
+                Some(&response.started.project_key),
+                Some(&response.started.project_name),
+                serde_json::to_value(&response).ok(),
+            );
             if json_mode {
                 print_json_command(json_command, &response)
             } else {
@@ -8277,6 +11880,10 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
             command,
             expected_port,
         } => {
+            let configured_project_name = config
+                .find_project(&project)
+                .ok()
+                .map(|project| project.name.clone());
             let response = adopt_project_runtime_with_options(
                 config,
                 &project,
@@ -8287,8 +11894,62 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                     expected_port,
                     ..ProjectRuntimeLaunchOptions::default()
                 },
-            )
-            .map_err(anyhow::Error::msg)?;
+            );
+            match &response {
+                Ok(response) => {
+                    record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                        event_id: None,
+                        kind: "运行".to_string(),
+                        summary: format!("认领 {project} 进程 · {}", response.status_key),
+                        detail: Some(response.detail.clone()),
+                        success: response.supported,
+                    });
+                    record_cli_lifecycle_operation(
+                        "runtime",
+                        "adopt",
+                        if response.supported {
+                            OperationEventState::Success
+                        } else {
+                            OperationEventState::Failed
+                        },
+                        if response.supported {
+                            "已认领外部 dev 服务"
+                        } else {
+                            "外部 dev 服务认领失败"
+                        },
+                        &format!(
+                            "{} · {}",
+                            configured_project_name.as_deref().unwrap_or(&project),
+                            response.status_key
+                        ),
+                        &response.detail,
+                        Some(&project),
+                        configured_project_name.as_deref(),
+                        serde_json::to_value(response).ok(),
+                    );
+                }
+                Err(error) => {
+                    record_cli_workspace_operation(WorkspaceOperationWorklogEvent {
+                        event_id: None,
+                        kind: "运行".to_string(),
+                        summary: format!("认领 {project} 进程失败"),
+                        detail: Some(error.clone()),
+                        success: false,
+                    });
+                    record_cli_lifecycle_operation(
+                        "runtime",
+                        "adopt",
+                        OperationEventState::Failed,
+                        "认领外部 dev 服务",
+                        "外部 dev 服务认领失败",
+                        error,
+                        Some(&project),
+                        configured_project_name.as_deref(),
+                        Some(json!({ "projectKey": project.clone(), "pid": pid })),
+                    );
+                }
+            }
+            let response = response.map_err(anyhow::Error::msg)?;
             if json_mode {
                 print_json_command(json_command, &response)
             } else {
@@ -8296,9 +11957,10 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                 Ok(())
             }
         }
-        RuntimeCommands::Diagnose { project } => {
-            let cwd = resolve_runtime_lookup_cwd(config, &project)?;
-            let response = diagnose_runtime_daemon(&project, &cwd)?;
+        RuntimeCommands::Diagnose { project, run_id } => {
+            let selected =
+                selected_runtime_daemon_status(config, &project, run_id.as_deref(), false)?;
+            let response = diagnose_runtime_daemon(&project, Path::new(&selected.canonical_cwd))?;
             if json_mode {
                 print_json_command(json_command, &response)
             } else {
@@ -8327,17 +11989,63 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                 Ok(())
             }
         }
+        RuntimeCommands::Wait {
+            project,
+            run_id,
+            until,
+            timeout_ms,
+            poll_interval_ms,
+            probe_url,
+            probe_path,
+            expected_statuses,
+        } => {
+            let response = wait_project_runtime(
+                config,
+                &project,
+                &ProjectRuntimeWaitOptions {
+                    run_id,
+                    until: until.into(),
+                    timeout_ms,
+                    poll_interval_ms,
+                    probe_url,
+                    probe_path,
+                    expected_statuses,
+                },
+            )
+            .map_err(anyhow::Error::msg)?;
+            if json_mode {
+                print_json_command(json_command, &response)
+            } else {
+                print_runtime_wait(&response);
+                Ok(())
+            }
+        }
         RuntimeCommands::Log {
             project,
             kind,
             max_lines,
             clear,
+            current,
+            run_id,
         } => {
+            if clear && (current || run_id.is_some()) {
+                anyhow::bail!("--clear cannot be combined with --current or --run-id");
+            }
+            if current && run_id.is_some() {
+                anyhow::bail!("choose only one of --current or --run-id");
+            }
             let kind = ProjectRuntimeLogKind::from(kind);
             let response = if clear {
                 clear_project_runtime_log(config, &project, kind)
             } else {
-                read_project_runtime_log(config, &project, kind, max_lines)
+                read_project_runtime_log_with_selection(
+                    config,
+                    &project,
+                    kind,
+                    max_lines,
+                    current,
+                    run_id.as_deref(),
+                )
             }
             .map_err(|error| anyhow::anyhow!(error))?;
             if json_mode {
@@ -8347,6 +12055,120 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                 Ok(())
             }
         }
+    }
+}
+
+fn run_artifacts(
+    command: ArtifactCommands,
+    config_override: Option<&Path>,
+    json_mode: bool,
+) -> Result<()> {
+    let json_command = command.json_command_name();
+    let (config, _) = load_cli_config(config_override)?;
+    let paths = ensure_default_configs()?;
+    match command {
+        ArtifactCommands::List {
+            workspace,
+            all_workspaces,
+            project,
+            kinds,
+        } => {
+            let response = managed_artifact_inventory(
+                &config,
+                &paths,
+                &ManagedArtifactQuery {
+                    workspace,
+                    all_workspaces,
+                    project,
+                    kinds,
+                },
+            )?;
+            if json_mode {
+                print_json_command(json_command, &response)
+            } else {
+                print_managed_artifact_inventory(&response);
+                Ok(())
+            }
+        }
+        ArtifactCommands::CleanupPlan {
+            workspace,
+            all_workspaces,
+            project,
+            kinds,
+            artifact_ids,
+        } => {
+            let response = managed_artifact_cleanup_plan(
+                &config,
+                &paths,
+                &ManagedArtifactCleanupQuery {
+                    inventory: ManagedArtifactQuery {
+                        workspace,
+                        all_workspaces,
+                        project,
+                        kinds,
+                    },
+                    artifact_ids,
+                },
+            )?;
+            if json_mode {
+                print_json_command(json_command, &response)
+            } else {
+                print_managed_artifact_cleanup_plan(&response);
+                Ok(())
+            }
+        }
+    }
+}
+
+fn print_managed_artifact_inventory(response: &ManagedArtifactInventoryResponse) {
+    println!("{}", response.status.label);
+    println!(
+        "workspace : {}",
+        response.effective.workspace_keys.join(", ")
+    );
+    println!(
+        "artifacts : {} (existing {}, missing {}, active {})",
+        response.observed.summary.artifact_count,
+        response.observed.summary.existing_count,
+        response.observed.summary.missing_count,
+        response.observed.summary.active_count,
+    );
+    for record in &response.observed.artifacts {
+        println!(
+            "- {} {:<24} {:<9} {}",
+            record.id,
+            record.artifact.kind,
+            if record.active {
+                "active"
+            } else {
+                &record.object_type
+            },
+            record.artifact.path,
+        );
+    }
+    if !response.observed.references.is_empty() {
+        println!("references: {}", response.observed.references.len());
+        for reference in &response.observed.references {
+            println!("- {:<24} {}", reference.kind, reference.path);
+        }
+    }
+}
+
+fn print_managed_artifact_cleanup_plan(response: &ManagedArtifactCleanupPlanResponse) {
+    println!("{}", response.status.label);
+    println!("execution : unsupported (plan only)");
+    println!(
+        "actions   : {} eligible, {} review, {} blocked",
+        response.observed.eligible_count,
+        response.observed.review_required_count,
+        response.observed.blocked_count,
+    );
+    for action in &response.observed.actions {
+        println!(
+            "- {:<14} {:<28} {}",
+            action.eligibility, action.action, action.path
+        );
+        println!("  {}", action.reason);
     }
 }
 
@@ -8462,6 +12284,16 @@ fn print_runtime_preflight(response: &ProjectRuntimePreflightResponse) {
     if let Some(profile) = response.runtime_profile_key.as_ref() {
         println!("runtime profile: {}", profile);
     }
+    if let Some(target) = response.target.as_ref() {
+        println!("target cwd: {} ({})", target.cwd, target.cwd_source);
+        println!(
+            "target command: {} ({})",
+            target.command, target.command_source
+        );
+        if let Some(url) = target.focus_url.as_deref() {
+            println!("target focus: {}", url);
+        }
+    }
     for check in &response.checks {
         println!(
             "[{}] {} / {}: {}",
@@ -8486,6 +12318,39 @@ fn print_runtime_inspect(response: &ProjectRuntimeInspectResponse) {
     }
     if let Some(profile) = response.runtime_profile_key.as_ref() {
         println!("runtime profile: {}", profile);
+    }
+    if let Some(target) = response.target.as_ref() {
+        println!("effective target: {} · {}", target.cwd, target.command);
+        if let Some(url) = target.focus_url.as_deref() {
+            println!("effective focus: {}", url);
+        }
+    }
+    println!(
+        "environment: {}{}",
+        response.environment.status_key,
+        response
+            .environment
+            .cwd
+            .as_deref()
+            .map(|cwd| format!(" · {cwd}"))
+            .unwrap_or_default()
+    );
+    if let Some(command) = response.environment.dev.configured_command.as_ref() {
+        println!("dev command: {}", command);
+    }
+    if let Some(port) = response.environment.port.effective_port {
+        println!(
+            "dev port: {} ({})",
+            port,
+            response
+                .environment
+                .port
+                .source
+                .as_deref()
+                .unwrap_or("detected")
+        );
+    } else if let Some(port) = response.environment.port.suggested_port {
+        println!("suggested port: {}", port);
     }
     if !response.local_files.is_empty() {
         println!("local files:");
@@ -8527,6 +12392,17 @@ fn print_runtime_start(response: &ProjectRuntimeStartResponse) {
     );
     println!("command: {}", response.command);
     println!("cwd: {}", response.cwd);
+    if let Some(url) = response.focus_url.as_deref() {
+        println!("focus: {}", url);
+    }
+    if let Some(probe) = response.ready_probe.as_ref() {
+        println!(
+            "ready probe: url={} path={} timeout={}ms",
+            probe.url.as_deref().unwrap_or("<focus/ready URL>"),
+            probe.path.as_deref().unwrap_or("<none>"),
+            probe.timeout_ms.unwrap_or(180_000)
+        );
+    }
     if let Some(pid) = response.pid {
         println!("pid: {}", pid);
     }
@@ -8551,6 +12427,7 @@ fn print_runtime_focus(response: &ProjectRuntimeFocusResponse) {
 
 fn print_runtime_log(response: &ProjectRuntimeLogResponse) {
     println!("log: {}", response.path);
+    println!("selection: {}", response.selection);
     println!(
         "ready: {} - {}",
         response.ready_summary.status_label,
@@ -8568,6 +12445,25 @@ fn print_runtime_log(response: &ProjectRuntimeLogResponse) {
     }
     for line in &response.lines {
         println!("{}", line);
+    }
+}
+
+fn print_runtime_wait(response: &ProjectRuntimeWaitResponse) {
+    println!(
+        "{} - {}: {}",
+        response.project_key, response.status.label, response.status.detail
+    );
+    if let Some(run_id) = response.effective.run_id.as_deref() {
+        println!("run id: {}", run_id);
+    }
+    println!("process started: {}", response.observed.process_started);
+    println!("listener ready: {}", response.observed.listener_ready);
+    println!("http verified: {}", response.observed.http_verified);
+    if let Some(url) = response.effective.probe_url.as_deref() {
+        println!("probe url: {}", url);
+    }
+    if let Some(status) = response.observed.http_status {
+        println!("http status: {}", status);
     }
 }
 
@@ -8803,38 +12699,342 @@ fn proxy_status_response(
         ],
         None => info.profiles.iter().collect(),
     };
+    let statuses = profiles
+        .iter()
+        .map(|profile| proxy_daemon_status(Path::new(&info.path), &profile.id))
+        .collect::<Result<Vec<_>>>()?;
+    let items = profiles
+        .iter()
+        .zip(statuses.iter())
+        .map(|(profile, status)| ProxyStatusItem {
+            profile_id: profile.id.clone(),
+            profile_name: profile.name.clone(),
+            listen_url: profile.listen_url(),
+            listening: status.running,
+            managed: status.managed,
+            version_compatible: status.version_compatible,
+            protocol_version: status.protocol_version,
+            app_version: status.app_version.clone(),
+            pid: status.pid,
+            started_at: status.started_at.clone(),
+            owner: status.owner.clone(),
+            ownership: proxy_listener_ownership(status),
+            state_path: status.state_path.clone(),
+            detail: status.detail.clone(),
+        })
+        .collect::<Vec<_>>();
+    let operation = proxy_status_operation(info, profile, &statuses);
     Ok(ProxyStatusResponse {
         source_id: info.source_id.clone(),
         source_name: info.source_name.clone(),
         path: info.path.clone(),
-        profiles: profiles
-            .into_iter()
-            .map(|profile| -> Result<ProxyStatusItem> {
-                let status = proxy_daemon_status(Path::new(&info.path), &profile.id)?;
-                Ok(ProxyStatusItem {
-                    profile_id: profile.id.clone(),
-                    profile_name: profile.name.clone(),
-                    listen_url: profile.listen_url(),
-                    listening: status.running,
-                    managed: status.managed,
-                    version_compatible: status.version_compatible,
-                    protocol_version: status.protocol_version,
-                    app_version: status.app_version,
-                    pid: status.pid,
-                    started_at: status.started_at,
-                    owner: status.owner,
-                    ownership: if status.managed {
-                        "rdevtool-daemon".to_string()
-                    } else if status.running {
-                        "external".to_string()
-                    } else {
-                        "none".to_string()
-                    },
-                    detail: status.detail,
-                })
-            })
-            .collect::<Result<Vec<_>>>()?,
+        profiles: items,
+        operation,
     })
+}
+
+fn proxy_status_operation(
+    info: &ProxyCliInfo,
+    requested_profile: Option<&str>,
+    statuses: &[ProxyDaemonStatus],
+) -> ProxyOperationContract {
+    let configured_count = statuses.len();
+    let listening_count = statuses.iter().filter(|status| status.running).count();
+    let managed_listener_count = statuses
+        .iter()
+        .filter(|status| status.running && status.managed)
+        .count();
+    let compatible_managed_listener_count = statuses
+        .iter()
+        .filter(|status| status.running && status.managed && status.version_compatible)
+        .count();
+    let external_listener_count = statuses
+        .iter()
+        .filter(|status| status.running && !status.managed)
+        .count();
+    let mut risks = Vec::new();
+    let mut recommended_actions = Vec::new();
+    for status in statuses {
+        if status.running && !status.managed {
+            risks.push(OperationRisk {
+                code: "proxy_listener_unmanaged".to_string(),
+                severity: "warning".to_string(),
+                detail: format!("{} 正在监听，但不属于 rDevTool daemon", status.profile_name),
+            });
+        } else if status.managed && !status.running {
+            risks.push(OperationRisk {
+                code: "proxy_daemon_not_listening".to_string(),
+                severity: "warning".to_string(),
+                detail: format!("{} 的 daemon 存在，但配置端口未监听", status.profile_name),
+            });
+        }
+        if status.managed && !status.version_compatible {
+            risks.push(OperationRisk {
+                code: "proxy_daemon_upgrade_required".to_string(),
+                severity: "warning".to_string(),
+                detail: format!("{} 使用了不兼容的 daemon 版本", status.profile_name),
+            });
+            recommended_actions.push(RecommendedAction {
+                command: format!(
+                    "rdevtool --json proxy restart {}",
+                    proxy_shell_quote(&status.profile_id)
+                ),
+                reason: "受控重启并升级该 rDevTool Proxy daemon".to_string(),
+                risk: "processRestart".to_string(),
+            });
+        } else if !status.running {
+            recommended_actions.push(RecommendedAction {
+                command: format!(
+                    "rdevtool --json proxy start {}",
+                    proxy_shell_quote(&status.profile_id)
+                ),
+                reason: "启动配置的 Proxy daemon 后再进行请求诊断".to_string(),
+                risk: "processStart".to_string(),
+            });
+        }
+    }
+    recommended_actions.truncate(4);
+    let started = if compatible_managed_listener_count == configured_count && configured_count > 0 {
+        proxy_stage(
+            "confirmed",
+            true,
+            "daemonState+tcpListener",
+            "所有选中 profile 均由兼容性可识别的 rDevTool daemon 监听",
+        )
+    } else if compatible_managed_listener_count > 0 {
+        proxy_stage(
+            "partial",
+            false,
+            "daemonState+tcpListener",
+            "只有部分选中 profile 由 rDevTool daemon 监听",
+        )
+    } else {
+        proxy_stage(
+            "notConfirmed",
+            false,
+            "daemonState+tcpListener",
+            "没有选中 profile 同时满足 rDevTool 归属和端口监听",
+        )
+    };
+    ProxyOperationContract {
+        schema_version: 1,
+        requested: ProxyOperationRequested {
+            profile: requested_profile.map(ToString::to_string),
+            ..ProxyOperationRequested::default()
+        },
+        effective: ProxyOperationEffective {
+            source_id: info.source_id.clone(),
+            config_path: info.path.clone(),
+            profile_ids: statuses
+                .iter()
+                .map(|status| status.profile_id.clone())
+                .collect(),
+            selected_profile_id: (statuses.len() == 1).then(|| statuses[0].profile_id.clone()),
+            listen_url: (statuses.len() == 1).then(|| statuses[0].listen_url.clone()),
+            ..ProxyOperationEffective::default()
+        },
+        observed: ProxyOperationObserved {
+            configured_profile_count: configured_count,
+            listening_count,
+            managed_listener_count,
+            external_listener_count,
+            selected_listener: (statuses.len() == 1)
+                .then(|| proxy_listener_observation(&statuses[0])),
+            response: None,
+            event: None,
+        },
+        lifecycle: ProxyOperationLifecycle {
+            configured: proxy_stage(
+                "confirmed",
+                true,
+                "proxyConfig",
+                "选中的 Proxy profile 已从有效配置源解析",
+            ),
+            started,
+            matched: proxy_stage(
+                "notEvaluated",
+                false,
+                "none",
+                "status 不执行规则匹配或真实请求",
+            ),
+            verified: proxy_stage("notEvaluated", false, "none", "status 不发送验证请求"),
+        },
+        status: OperationStatus {
+            key: if risks.is_empty() {
+                "observed".to_string()
+            } else {
+                "observedWithRisks".to_string()
+            },
+            label: "Proxy 状态已观测".to_string(),
+            success: true,
+            terminal: true,
+            detail: format!(
+                "{configured_count} 个 profile 已配置，{managed_listener_count} 个由 rDevTool daemon 监听，{external_listener_count} 个端口由外部进程监听"
+            ),
+        },
+        evidence: vec![
+            OperationEvidence {
+                kind: "configuration".to_string(),
+                source: "proxyConfig".to_string(),
+                detail: "profile、监听地址和配置来源来自有效 Proxy 配置".to_string(),
+            },
+            OperationEvidence {
+                kind: "listener".to_string(),
+                source: "daemonState+tcpListener".to_string(),
+                detail: "started 仅在 daemon 归属与 TCP 监听同时成立时确认".to_string(),
+            },
+        ],
+        risks,
+        managed_artifacts: proxy_daemon_managed_artifacts(statuses),
+        recommended_actions,
+    }
+}
+
+fn proxy_diagnose_operation(
+    info: &ProxyCliInfo,
+    requested_profile: Option<String>,
+    requested_method: &str,
+    requested_url: &str,
+    requested_header_count: usize,
+    diagnosis: &ProxyRequestDiagnosis,
+    daemon_status: &ProxyDaemonStatus,
+) -> ProxyOperationContract {
+    let predicted_match = diagnosis.matched_rule.is_some();
+    let mut risks = diagnosis
+        .warnings
+        .iter()
+        .map(|warning| OperationRisk {
+            code: warning.key.clone(),
+            severity: "warning".to_string(),
+            detail: warning.detail.clone(),
+        })
+        .collect::<Vec<_>>();
+    if daemon_status.running && !daemon_status.managed {
+        risks.push(OperationRisk {
+            code: "proxy_listener_unmanaged".to_string(),
+            severity: "warning".to_string(),
+            detail: "配置端口正在监听，但无法证明属于 rDevTool Proxy daemon".to_string(),
+        });
+    }
+    if predicted_match {
+        risks.push(OperationRisk {
+            code: "proxy_match_predicted_only".to_string(),
+            severity: "info".to_string(),
+            detail: "规则命中来自静态配置推演，尚未观察到真实代理事件".to_string(),
+        });
+    }
+    let verify_reason = if requested_header_count > 0 {
+        "发送真实请求并关联 Proxy 事件；执行时需补回本次诊断使用的非敏感请求头"
+    } else {
+        "发送真实请求并关联 Proxy 事件，确认实际规则命中与响应"
+    };
+    let recommended_actions =
+        if daemon_status.running && daemon_status.managed && daemon_status.version_compatible {
+            vec![RecommendedAction {
+                command: format!(
+                    "rdevtool --json proxy verify --profile {} --method {} --url {}",
+                    proxy_shell_quote(&diagnosis.profile.id),
+                    proxy_shell_quote(&diagnosis.request.method),
+                    proxy_shell_quote(&diagnosis.request.path)
+                ),
+                reason: verify_reason.to_string(),
+                risk: "networkRequest".to_string(),
+            }]
+        } else {
+            vec![RecommendedAction {
+                command: format!(
+                    "rdevtool --json proxy status --profile {}",
+                    proxy_shell_quote(&diagnosis.profile.id)
+                ),
+                reason: "先确认 listener 归属、daemon 版本和 started 阶段".to_string(),
+                risk: "readOnly".to_string(),
+            }]
+        };
+    ProxyOperationContract {
+        schema_version: 1,
+        requested: ProxyOperationRequested {
+            profile: requested_profile,
+            method: Some(requested_method.to_string()),
+            url: Some(requested_url.to_string()),
+            header_count: requested_header_count,
+            ..ProxyOperationRequested::default()
+        },
+        effective: ProxyOperationEffective {
+            source_id: info.source_id.clone(),
+            config_path: info.path.clone(),
+            profile_ids: vec![diagnosis.profile.id.clone()],
+            selected_profile_id: Some(diagnosis.profile.id.clone()),
+            listen_url: Some(diagnosis.profile.listen_url.clone()),
+            method: Some(diagnosis.request.method.clone()),
+            request_url: Some(diagnosis.request.url.clone()),
+            path: Some(diagnosis.request.path.clone()),
+            predicted_rule_id: diagnosis.matched_rule.as_ref().map(|rule| rule.id.clone()),
+            predicted_action: diagnosis
+                .matched_rule
+                .as_ref()
+                .map(|rule| rule.action.clone()),
+        },
+        observed: ProxyOperationObserved {
+            configured_profile_count: 1,
+            listening_count: usize::from(daemon_status.running),
+            managed_listener_count: usize::from(daemon_status.running && daemon_status.managed),
+            external_listener_count: usize::from(daemon_status.running && !daemon_status.managed),
+            selected_listener: Some(proxy_listener_observation(daemon_status)),
+            response: None,
+            event: None,
+        },
+        lifecycle: ProxyOperationLifecycle {
+            configured: proxy_stage(
+                "confirmed",
+                true,
+                "proxyConfig",
+                "profile 与规则已从有效配置源解析",
+            ),
+            started: proxy_started_stage(daemon_status),
+            matched: if predicted_match {
+                proxy_stage(
+                    "predicted",
+                    false,
+                    "ruleEvaluation",
+                    "静态规则推演预测会命中；未观察真实请求事件",
+                )
+            } else {
+                proxy_stage(
+                    "notConfirmed",
+                    false,
+                    "ruleEvaluation",
+                    "静态规则推演未找到显式规则命中",
+                )
+            },
+            verified: proxy_stage("notEvaluated", false, "none", "diagnose 不发送真实请求"),
+        },
+        status: OperationStatus {
+            key: "diagnosed".to_string(),
+            label: "Proxy 规则诊断已完成".to_string(),
+            success: true,
+            terminal: true,
+            detail: if predicted_match {
+                "已完成静态规则推演；matched 尚未由 Proxy 事件确认".to_string()
+            } else {
+                "静态规则推演未命中显式规则；尚未发送真实请求".to_string()
+            },
+        },
+        evidence: vec![
+            OperationEvidence {
+                kind: "configuration".to_string(),
+                source: "proxyConfig.ruleEvaluation".to_string(),
+                detail: "effective 中的 predictedRuleId 只代表配置推演".to_string(),
+            },
+            OperationEvidence {
+                kind: "listener".to_string(),
+                source: "daemonState+tcpListener".to_string(),
+                detail: "started 需要 rDevTool daemon 归属和 TCP 监听同时成立".to_string(),
+            },
+        ],
+        risks,
+        managed_artifacts: proxy_daemon_managed_artifacts(std::slice::from_ref(daemon_status)),
+        recommended_actions,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8849,11 +13049,13 @@ fn verify_proxy_request(
     expected_body_text: Option<&str>,
     timeout_ms: u64,
 ) -> Result<ProxyVerifyResponse> {
+    let requested_method = method.to_string();
     let profile = info
         .profiles
         .iter()
         .find(|profile| profile.id == profile_key || profile.name == profile_key)
         .ok_or_else(|| anyhow::anyhow!("proxy profile not found: {profile_key}"))?;
+    let daemon_status = proxy_daemon_status(Path::new(&info.path), &profile.id)?;
     let diagnosis = diagnose_proxy_request(
         &ProxyConfig {
             profiles: info.profiles.clone(),
@@ -8871,7 +13073,14 @@ fn verify_proxy_request(
         .build()?;
     let mut request = client.request(method.clone(), &request_url);
     for (key, value) in headers {
-        request = request.header(key, value);
+        if !key.eq_ignore_ascii_case(PROXY_VERIFY_ID_HEADER) {
+            request = request.header(key, value);
+        }
+    }
+    let verification_id = (daemon_status.managed && daemon_status.version_compatible)
+        .then(|| uuid::Uuid::new_v4().to_string());
+    if let Some(verification_id) = verification_id.as_ref() {
+        request = request.header(PROXY_VERIFY_ID_HEADER, verification_id);
     }
     if let Some(body) = body {
         request = request.body(body.to_string());
@@ -8900,6 +13109,36 @@ fn verify_proxy_request(
         .unwrap_or(true);
     let (body_preview, body_truncated) =
         proxy_body_preview(&response_body, content_type.as_deref());
+    let observed_event = verification_id.as_deref().and_then(|verification_id| {
+        wait_for_proxy_verify_event(
+            Path::new(&info.path),
+            &profile.id,
+            verification_id,
+            timeout_ms,
+        )
+    });
+    let verified = status_matches && body_matches;
+    let operation = proxy_verify_operation(
+        info,
+        profile_key,
+        &requested_method,
+        profile,
+        raw_url,
+        headers.len(),
+        body.is_some(),
+        expected_status,
+        expected_body_text.is_some(),
+        timeout_ms,
+        &diagnosis,
+        &daemon_status,
+        &request_url,
+        status,
+        elapsed_ms,
+        status_matches,
+        body_matches,
+        verified,
+        observed_event.as_ref(),
+    );
 
     Ok(ProxyVerifyResponse {
         profile_id: profile.id.clone(),
@@ -8917,8 +13156,380 @@ fn verify_proxy_request(
         expected_body_text_provided: expected_body_text.is_some(),
         status_matches,
         body_matches,
-        verified: status_matches && body_matches,
+        verified,
+        operation,
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn proxy_verify_operation(
+    info: &ProxyCliInfo,
+    requested_profile: &str,
+    requested_method: &str,
+    profile: &ProxyProfile,
+    requested_url: &str,
+    header_count: usize,
+    body_provided: bool,
+    expected_status: Option<u16>,
+    expected_body_text_provided: bool,
+    timeout_ms: u64,
+    diagnosis: &ProxyRequestDiagnosis,
+    daemon_status: &ProxyDaemonStatus,
+    request_url: &str,
+    response_status: u16,
+    elapsed_ms: u128,
+    status_matches: bool,
+    body_matches: bool,
+    response_verified: bool,
+    event: Option<&ProxyEvent>,
+) -> ProxyOperationContract {
+    let predicted_rule_id = diagnosis.matched_rule.as_ref().map(|rule| rule.id.as_str());
+    let event_matches_prediction =
+        proxy_event_confirms_match(event, predicted_rule_id, &diagnosis.request.method);
+    let started_confirmed =
+        daemon_status.running && daemon_status.managed && daemon_status.version_compatible;
+    let strictly_verified = proxy_verification_confirmed(
+        started_confirmed,
+        event_matches_prediction,
+        response_verified,
+    );
+    let mut risks = Vec::new();
+    if !started_confirmed {
+        risks.push(OperationRisk {
+            code: if daemon_status.running {
+                "proxy_listener_unmanaged".to_string()
+            } else {
+                "proxy_not_started".to_string()
+            },
+            severity: "error".to_string(),
+            detail: "无法确认请求目标是已启动的 rDevTool Proxy daemon".to_string(),
+        });
+    }
+    if event.is_none() {
+        risks.push(OperationRisk {
+            code: "proxy_event_not_observed".to_string(),
+            severity: "error".to_string(),
+            detail: "HTTP 请求已返回，但没有捕获到带本次验证标记的 Proxy 事件".to_string(),
+        });
+    } else if !event_matches_prediction {
+        risks.push(OperationRisk {
+            code: "proxy_rule_observation_mismatch".to_string(),
+            severity: "error".to_string(),
+            detail: "实际 Proxy 事件与静态规则推演结果不一致".to_string(),
+        });
+    }
+    if !status_matches {
+        risks.push(OperationRisk {
+            code: "proxy_status_assertion_failed".to_string(),
+            severity: "error".to_string(),
+            detail: format!("实际 HTTP 状态码 {response_status} 不符合预期"),
+        });
+    }
+    if !body_matches {
+        risks.push(OperationRisk {
+            code: "proxy_body_assertion_failed".to_string(),
+            severity: "error".to_string(),
+            detail: "响应正文不包含预期文本".to_string(),
+        });
+    }
+    if let Some(error) = event.and_then(|event| event.error.as_ref()) {
+        risks.push(OperationRisk {
+            code: "proxy_event_error".to_string(),
+            severity: "error".to_string(),
+            detail: error.clone(),
+        });
+    }
+    let matched_stage = match event {
+        Some(event) if event_matches_prediction => proxy_stage(
+            "confirmed",
+            true,
+            "proxyEvent",
+            if event.matched_rule_id.is_some() {
+                "本次验证请求已进入静态推演选中的规则"
+            } else {
+                "本次验证请求已进入 Proxy，并按预测走默认转发"
+            },
+        ),
+        Some(_) => proxy_stage(
+            "notConfirmed",
+            false,
+            "proxyEvent",
+            "捕获到本次请求事件，但实际规则与静态推演不一致",
+        ),
+        None => proxy_stage(
+            "notConfirmed",
+            false,
+            "proxyEvent",
+            "没有捕获到可关联本次请求的 Proxy 事件",
+        ),
+    };
+    let mut recommended_actions = Vec::new();
+    if !strictly_verified {
+        recommended_actions.push(RecommendedAction {
+            command: format!(
+                "rdevtool --json proxy diagnose --profile {} --method {} --url {}",
+                proxy_shell_quote(&profile.id),
+                proxy_shell_quote(&diagnosis.request.method),
+                proxy_shell_quote(&diagnosis.request.path)
+            ),
+            reason: "重新读取规则推演、listener 归属和阻塞原因".to_string(),
+            risk: "readOnly".to_string(),
+        });
+    }
+    ProxyOperationContract {
+        schema_version: 1,
+        requested: ProxyOperationRequested {
+            profile: Some(requested_profile.to_string()),
+            method: Some(requested_method.to_string()),
+            url: Some(requested_url.to_string()),
+            header_count,
+            body_provided,
+            expected_status,
+            expected_body_text_provided,
+            timeout_ms: Some(timeout_ms),
+        },
+        effective: ProxyOperationEffective {
+            source_id: info.source_id.clone(),
+            config_path: info.path.clone(),
+            profile_ids: vec![profile.id.clone()],
+            selected_profile_id: Some(profile.id.clone()),
+            listen_url: Some(profile.listen_url()),
+            method: Some(diagnosis.request.method.clone()),
+            request_url: Some(request_url.to_string()),
+            path: Some(diagnosis.request.path.clone()),
+            predicted_rule_id: diagnosis.matched_rule.as_ref().map(|rule| rule.id.clone()),
+            predicted_action: diagnosis
+                .matched_rule
+                .as_ref()
+                .map(|rule| rule.action.clone()),
+        },
+        observed: ProxyOperationObserved {
+            configured_profile_count: 1,
+            listening_count: usize::from(daemon_status.running),
+            managed_listener_count: usize::from(started_confirmed),
+            external_listener_count: usize::from(daemon_status.running && !daemon_status.managed),
+            selected_listener: Some(proxy_listener_observation(daemon_status)),
+            response: Some(ProxyResponseObservation {
+                received: true,
+                status: response_status,
+                elapsed_ms,
+                status_matches,
+                body_matches,
+            }),
+            event: Some(proxy_event_observation(event)),
+        },
+        lifecycle: ProxyOperationLifecycle {
+            configured: proxy_stage(
+                "confirmed",
+                true,
+                "proxyConfig",
+                "profile、请求地址和规则已解析",
+            ),
+            started: proxy_started_stage(daemon_status),
+            matched: matched_stage,
+            verified: if strictly_verified {
+                proxy_stage(
+                    "confirmed",
+                    true,
+                    "proxyEvent+httpResponse",
+                    "Proxy 事件、实际规则和 HTTP 断言均已确认",
+                )
+            } else {
+                proxy_stage(
+                    "notConfirmed",
+                    false,
+                    "proxyEvent+httpResponse",
+                    "至少一项 Proxy 归属、事件关联、规则命中或 HTTP 断言未确认",
+                )
+            },
+        },
+        status: OperationStatus {
+            key: if strictly_verified {
+                "verified".to_string()
+            } else {
+                "verificationFailed".to_string()
+            },
+            label: if strictly_verified {
+                "Proxy 请求已验证".to_string()
+            } else {
+                "Proxy 请求未完成严格验证".to_string()
+            },
+            success: strictly_verified,
+            terminal: true,
+            detail: if strictly_verified {
+                "configured、started、matched、verified 四个阶段均有对应证据".to_string()
+            } else {
+                "保留 legacy verified 作为 HTTP 断言结果；严格结果以 operation.lifecycle.verified 为准"
+                    .to_string()
+            },
+        },
+        evidence: vec![
+            OperationEvidence {
+                kind: "listener".to_string(),
+                source: "daemonState+tcpListener".to_string(),
+                detail: "started 来自 rDevTool daemon 身份与端口监听的联合观测".to_string(),
+            },
+            OperationEvidence {
+                kind: "match".to_string(),
+                source: "proxyEvent.verificationId".to_string(),
+                detail: "matched 来自带单次随机标记的真实 Proxy 事件，而非静态推演".to_string(),
+            },
+            OperationEvidence {
+                kind: "response".to_string(),
+                source: "httpResponse".to_string(),
+                detail: "verified 同时要求事件规则一致和 HTTP 状态/正文断言通过".to_string(),
+            },
+        ],
+        risks,
+        managed_artifacts: proxy_daemon_managed_artifacts(std::slice::from_ref(daemon_status)),
+        recommended_actions,
+    }
+}
+
+fn wait_for_proxy_verify_event(
+    config_path: &Path,
+    profile_id: &str,
+    verification_id: &str,
+    request_timeout_ms: u64,
+) -> Option<ProxyEvent> {
+    let runtime = ProxyDaemonRuntime;
+    let timeout = std::time::Duration::from_millis(request_timeout_ms.clamp(100, 1_000));
+    let started = std::time::Instant::now();
+    loop {
+        if let Some(event) = runtime
+            .events(config_path, Some(profile_id))
+            .into_iter()
+            .find(|event| {
+                event.request_headers.iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case(PROXY_VERIFY_ID_HEADER) && value == verification_id
+                })
+            })
+        {
+            return Some(event);
+        }
+        if started.elapsed() >= timeout {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
+}
+
+fn proxy_event_observation(event: Option<&ProxyEvent>) -> ProxyEventObservation {
+    ProxyEventObservation {
+        captured: event.is_some(),
+        event_id: event.map(|event| event.id.clone()),
+        matched_rule_id: event.and_then(|event| event.matched_rule_id.clone()),
+        matched_rule_name: event.and_then(|event| event.matched_rule_name.clone()),
+        action: event.map(|event| event.action.clone()),
+        status: event.and_then(|event| event.status),
+        error: event.and_then(|event| event.error.clone()),
+    }
+}
+
+fn proxy_event_confirms_match(
+    event: Option<&ProxyEvent>,
+    predicted_rule_id: Option<&str>,
+    method: &str,
+) -> bool {
+    event.is_some_and(|event| {
+        event.matched_rule_id.as_deref() == predicted_rule_id
+            && event.method.eq_ignore_ascii_case(method)
+    })
+}
+
+fn proxy_verification_confirmed(
+    started_confirmed: bool,
+    event_match_confirmed: bool,
+    response_verified: bool,
+) -> bool {
+    started_confirmed && event_match_confirmed && response_verified
+}
+
+fn proxy_stage(state: &str, confirmed: bool, source: &str, detail: &str) -> ProxyOperationStage {
+    ProxyOperationStage {
+        state: state.to_string(),
+        confirmed,
+        source: source.to_string(),
+        detail: detail.to_string(),
+    }
+}
+
+fn proxy_started_stage(status: &ProxyDaemonStatus) -> ProxyOperationStage {
+    if status.running && status.managed && status.version_compatible {
+        proxy_stage(
+            "confirmed",
+            true,
+            "daemonState+tcpListener",
+            "rDevTool daemon 归属与配置端口监听均已确认",
+        )
+    } else if status.running && status.managed {
+        proxy_stage(
+            "notConfirmed",
+            false,
+            "daemonState+tcpListener",
+            "rDevTool daemon 正在监听，但协议版本不兼容；需受控重启后再验证",
+        )
+    } else if status.running {
+        proxy_stage(
+            "notConfirmed",
+            false,
+            "tcpListener",
+            "端口正在监听，但 listener 不属于 rDevTool daemon",
+        )
+    } else if status.managed {
+        proxy_stage(
+            "notConfirmed",
+            false,
+            "daemonState+tcpListener",
+            "daemon 状态存在，但配置端口没有监听",
+        )
+    } else {
+        proxy_stage("notConfirmed", false, "tcpListener", "配置端口没有监听")
+    }
+}
+
+fn proxy_listener_ownership(status: &ProxyDaemonStatus) -> String {
+    if status.managed {
+        "rdevtool-daemon".to_string()
+    } else if status.running {
+        "external".to_string()
+    } else {
+        "none".to_string()
+    }
+}
+
+fn proxy_listener_observation(status: &ProxyDaemonStatus) -> ProxyListenerObservation {
+    ProxyListenerObservation {
+        listening: status.running,
+        managed: status.managed,
+        version_compatible: status.version_compatible,
+        ownership: proxy_listener_ownership(status),
+        pid: status.pid,
+    }
+}
+
+fn proxy_daemon_managed_artifacts(statuses: &[ProxyDaemonStatus]) -> Vec<ManagedArtifact> {
+    statuses
+        .iter()
+        .filter(|status| status.managed)
+        .map(|status| ManagedArtifact {
+            kind: "proxyState".to_string(),
+            path: status.state_path.clone(),
+            ownership: "rdevtool".to_string(),
+            lifecycle: "proxySession".to_string(),
+        })
+        .collect()
+}
+
+fn proxy_shell_quote(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-._/:".contains(character))
+    {
+        return value.to_string();
+    }
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn proxy_local_request_url(profile: &ProxyProfile, raw_url: &str) -> Result<String> {
@@ -9392,6 +14003,7 @@ fn print_proxy_status(response: &ProxyStatusResponse) {
             }
         );
     }
+    print_proxy_operation_lifecycle(&response.operation);
 }
 
 fn print_proxy_verify(response: &ProxyVerifyResponse) {
@@ -9416,9 +14028,20 @@ fn print_proxy_verify(response: &ProxyVerifyResponse) {
         "verified: {} (status={}, body={})",
         response.verified, response.status_matches, response.body_matches
     );
+    print_proxy_operation_lifecycle(&response.operation);
     if !response.body_preview.is_empty() {
         println!("body: {}", response.body_preview);
     }
+}
+
+fn print_proxy_operation_lifecycle(operation: &ProxyOperationContract) {
+    println!(
+        "lifecycle: configured={} started={} matched={} verified={}",
+        operation.lifecycle.configured.state,
+        operation.lifecycle.started.state,
+        operation.lifecycle.matched.state,
+        operation.lifecycle.verified.state
+    );
 }
 
 fn print_proxy_rules(rules: &[ProxyRule]) {
@@ -9534,6 +14157,30 @@ fn list_merge_history_for_workspace(
         .collect())
 }
 
+fn list_operation_events_for_workspace(
+    storage: &Storage,
+    domain: Option<&str>,
+    origin: Option<&str>,
+    project: Option<&str>,
+    limit: usize,
+) -> Result<Vec<OperationEvent>> {
+    let workspace = active_history_workspace_cli()?;
+    if !workspace.is_system() && project.is_some_and(|project| !workspace.allows_project(project)) {
+        return Ok(Vec::new());
+    }
+    Ok(list_operation_events(storage)
+        .map_err(anyhow::Error::msg)?
+        .into_iter()
+        .filter(|event| workspace.is_system() || event.workspace_key == workspace.key)
+        .filter(|event| domain.is_none_or(|domain| event.domain.eq_ignore_ascii_case(domain)))
+        .filter(|event| {
+            origin.is_none_or(|origin| event.origin.as_str().eq_ignore_ascii_case(origin))
+        })
+        .filter(|event| project.is_none_or(|project| event.project_key.as_deref() == Some(project)))
+        .take(limit.clamp(1, 500))
+        .collect())
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HistoryReplayPreview {
@@ -9591,13 +14238,19 @@ fn run_history_replay(config: &AppConfig, action: &ReplayAction) -> Result<serde
     match action.kind.as_str() {
         "build" => {
             let request: DeployRequest = serde_json::from_value(action.request.clone())?;
-            serde_json::to_value(core::trigger_deploy(config, &request)?)
-                .map_err(anyhow::Error::from)
+            serde_json::to_value(execute_cli_deploy(config, &request)?).map_err(anyhow::Error::from)
         }
         "merge" => {
             let request: MergeRequest = serde_json::from_value(action.request.clone())?;
-            serde_json::to_value(core::execute_merge(config, &request)?)
-                .map_err(anyhow::Error::from)
+            let result = core::execute_merge(config, &request);
+            record_cli_merge_result(
+                "重播合并",
+                &request.project,
+                &request.source_branch,
+                &request.target_branch,
+                &result,
+            );
+            serde_json::to_value(result?).map_err(anyhow::Error::from)
         }
         other => anyhow::bail!("unsupported replay kind: {other}"),
     }
@@ -9606,6 +14259,72 @@ fn run_history_replay(config: &AppConfig, action: &ReplayAction) -> Result<serde
 fn run_history(config: &AppConfig, command: HistoryCommands, json_mode: bool) -> Result<()> {
     let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
     match command {
+        HistoryCommands::Operations {
+            command,
+            domain,
+            origin,
+            project,
+            limit,
+        } => {
+            if let Some(HistoryOperationCommands::Show { id }) = command {
+                let item = list_operation_events_for_workspace(
+                    &storage,
+                    None,
+                    None,
+                    None,
+                    OPERATION_EVENT_HISTORY_LIMIT,
+                )?
+                .into_iter()
+                .find(|item| item.id == id)
+                .ok_or_else(|| anyhow::anyhow!("operation event not found: {id}"))?;
+                if json_mode {
+                    return print_json_command("history.operations.show", &item);
+                }
+                println!("ID: {}", item.id);
+                println!("来源: {}", item.origin.as_str());
+                println!("领域: {} / {}", item.domain, item.action);
+                println!("状态: {:?}", item.state);
+                println!("标题: {}", item.title);
+                println!("摘要: {}", item.summary);
+                if !item.detail.trim().is_empty() {
+                    println!("详情: {}", item.detail);
+                }
+                println!("工作区: {}", item.workspace_key);
+                if let Some(project) = item.project_key.as_deref() {
+                    println!("项目: {project}");
+                }
+                println!("创建时间: {}", item.created_at);
+                println!("更新时间: {}", item.updated_at);
+                if let Some(payload) = item.payload.as_ref() {
+                    println!("诊断数据:\n{}", serde_json::to_string_pretty(payload)?);
+                }
+                return Ok(());
+            }
+            let items = list_operation_events_for_workspace(
+                &storage,
+                domain.as_deref(),
+                origin.as_deref(),
+                project.as_deref(),
+                limit,
+            )?;
+            if json_mode {
+                print_json_command("history.operations", &items)
+            } else {
+                for item in items {
+                    let state = match item.state {
+                        OperationEventState::Running => "进行中",
+                        OperationEventState::Success => "成功",
+                        OperationEventState::Failed => "失败",
+                        OperationEventState::Info => "信息",
+                    };
+                    println!(
+                        "{:<24} {:<6} {:<12} {}",
+                        item.updated_at, state, item.title, item.summary
+                    );
+                }
+                Ok(())
+            }
+        }
         HistoryCommands::Build { project, limit } => {
             let items = list_deploy_history_for_workspace(&storage, project.as_deref(), limit)?;
             if json_mode {
@@ -9706,17 +14425,31 @@ fn run_agent(
             project,
             query,
             limit,
+            preset,
+            compact,
+            include,
+            debug_profile,
+            runtime_profile,
         } => {
             let (config, workspace, _) = context_input
                 .ok_or_else(|| anyhow::anyhow!("config is required for agent context"))?;
             let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
-            let value = context_for_workspace(
+            let paths = ensure_default_configs()?;
+            let value = context_for_workspace_with_options_and_paths(
                 config,
                 &storage,
                 Some(workspace),
                 project.as_deref(),
                 query.as_deref(),
                 limit,
+                &AgentContextOptions {
+                    preset: preset.map(Into::into),
+                    compact,
+                    includes: include.into_iter().map(Into::into).collect(),
+                    debug_profile,
+                    runtime_profile,
+                },
+                &paths,
             )?;
             if json_mode {
                 print_json_command("agent.context", &value)
@@ -9738,6 +14471,25 @@ fn print_json_command<T: Serialize>(command: &str, value: &T) -> Result<()> {
         "ok": true,
         "command": command,
         "data": value,
+    }))
+}
+
+fn print_branch_task_json_command(
+    command: &str,
+    value: &BranchTaskResponse,
+    error_code: &str,
+) -> Result<()> {
+    if value.success {
+        return print_json_command(command, value);
+    }
+    print_json(&json!({
+        "ok": false,
+        "command": command,
+        "data": value,
+        "error": {
+            "code": error_code,
+            "message": value.summary,
+        },
     }))
 }
 
@@ -9842,8 +14594,21 @@ fn print_agent_context(value: &AgentContext) {
     println!("app          : {}", value.app.app_name);
     println!("version      : {}", value.app.app_version);
     println!("storage path : {}", value.app.storage_path);
+    println!(
+        "preset       : {}",
+        value.preset.as_deref().unwrap_or("full")
+    );
+    println!("compact      : {}", value.compact);
+    println!("sections     : {}", value.included_sections.join(", "));
     if let Some(workspace) = &value.workspace {
         println!("workspace    : {} ({})", workspace.name, workspace.key);
+        if let Some(resource_dir) = &workspace.resource_dir {
+            println!("resource dir : {resource_dir}");
+        }
+        if let Some(worklog) = &workspace.worklog {
+            println!("worklog      : {}", worklog.path);
+            println!("auto record  : {}", workspace.worklog_auto_record);
+        }
     }
     println!("projects     : {}", value.projects.len());
     println!("notes        : {}", value.notes.len());
@@ -9851,11 +14616,34 @@ fn print_agent_context(value: &AgentContext) {
     println!("merge hist   : {}", value.merge_history.len());
     println!("replayable   : {}", value.replay_actions.len());
     println!("navigation   : {}", value.navigation.len());
+    if let Some(proxy) = value.proxy.as_ref() {
+        println!(
+            "proxy config : {} debug / {} runtime bindings (observed={})",
+            proxy.debug_profiles.len(),
+            proxy.runtime_profiles.len(),
+            proxy.observed
+        );
+    }
     if let Some(project) = &value.project {
         println!("project      : {}", project.detail.name);
         if let Some(branch) = &project.suggested_branch {
             println!("branch hint  : {branch}");
         }
+    }
+    if let Some(artifacts) = &value.artifacts {
+        println!(
+            "artifacts     : {} managed / {} observed / {} references",
+            artifacts.observed.summary.managed_count,
+            artifacts.observed.summary.artifact_count,
+            artifacts.observed.summary.reference_count
+        );
+        println!(
+            "cleanup plan  : {} eligible / {} review / {} blocked (execution={})",
+            artifacts.observed.cleanup_plan.eligible_count,
+            artifacts.observed.cleanup_plan.review_required_count,
+            artifacts.observed.cleanup_plan.blocked_count,
+            artifacts.effective.execution_supported
+        );
     }
 }
 
@@ -9923,6 +14711,23 @@ fn print_plan(plan: &core::DeployPlan) {
     println!("job kind      : {}", plan.job_kind);
     println!("adapter       : {}", plan.adapter);
     println!("action        : {}", plan.action_kind);
+    println!(
+        "requested     : target={} env={} branch={}",
+        plan.requested.target.as_deref().unwrap_or("<default>"),
+        plan.requested.env.as_deref().unwrap_or("<default>"),
+        plan.requested.branch.as_deref().unwrap_or("<default>")
+    );
+    println!(
+        "effective     : target={} env={} branch={}",
+        plan.effective.target,
+        plan.effective.env.as_deref().unwrap_or("<none>"),
+        plan.effective.branch.as_deref().unwrap_or("<none>")
+    );
+    println!(
+        "plan status   : {} ({})",
+        plan.status.label, plan.status.key
+    );
+    println!("plan detail   : {}", plan.status.detail);
     if plan.adapter == "jenkins" {
         println!("jenkins job   : {}", plan.job_name);
         println!("jenkins base  : {}", plan.jenkins_base_url);
@@ -9934,9 +14739,53 @@ fn print_plan(plan: &core::DeployPlan) {
             println!("output dir    : {output_dir}");
         }
     }
+    if let Some(commit) = &plan.observed.commit {
+        println!("commit        : {}", commit.short_hash);
+        println!(
+            "commit source : {}",
+            plan.observed
+                .commit_source
+                .as_deref()
+                .unwrap_or("repository")
+        );
+        println!("commit subject: {}", commit.subject);
+    } else {
+        println!("commit        : <unavailable>");
+    }
+    if !plan.observed.changed_paths.is_empty() {
+        println!("changed paths : {}", plan.observed.changed_paths.len());
+        for path in plan.observed.changed_paths.iter().take(12) {
+            println!("  - {path}");
+        }
+        if plan.observed.changed_paths.len() > 12 {
+            println!("  - ... {} more", plan.observed.changed_paths.len() - 12);
+        }
+    }
     println!("parameters:");
     for (key, value) in &plan.params {
+        let value = if is_sensitive_output_key(key) {
+            "<redacted>"
+        } else {
+            value
+        };
         println!("  {key} = {value}");
+    }
+    if !plan.ignored_inputs.is_empty() {
+        println!("ignored inputs:");
+        for input in &plan.ignored_inputs {
+            let value = if is_sensitive_output_key(&input.key) {
+                "<redacted>"
+            } else {
+                input.value.as_str()
+            };
+            println!("  - {} = {} ({})", input.key, value, input.reason);
+        }
+    }
+    if !plan.risks.is_empty() {
+        println!("risks:");
+        for risk in &plan.risks {
+            println!("  - [{}] {}: {}", risk.severity, risk.code, risk.detail);
+        }
     }
 }
 

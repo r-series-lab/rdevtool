@@ -13,8 +13,10 @@ import {
   Chip,
   FormControlLabel,
   IconButton,
+  InputAdornment,
   MenuItem,
   Stack,
+  Switch,
   TextField,
   Tooltip,
   Typography,
@@ -23,6 +25,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useWorkspaceTypeOptions } from "../hooks/useWorkspaceTypeOptions";
 import { useConfigSource } from "../hooks/useConfigSource";
+import { useConfirmationPreferences } from "../hooks/useConfirmationPreferences";
+import { useActivityPreferences } from "../hooks/useActivityPreferences";
 import type {
   AppExitRuntimePolicy,
   CreateProjectWorkspacePayload,
@@ -57,6 +61,12 @@ import {
 } from "../lib/workspaceTypes";
 import { configSourceIdForWorkspace } from "../lib/configSources";
 import {
+  CONFIRMATION_PREFERENCE_DEFINITIONS,
+  confirmationEnabled,
+  type ConfirmationMode,
+  type ConfirmationPreferenceKey,
+} from "../lib/confirmationPreferences";
+import {
   CheckIcon,
   ClearIcon,
   CopyIcon,
@@ -69,13 +79,16 @@ import { AppEmptyState } from "./AppEmptyState";
 import { AppToast } from "./AppToast";
 import { ConfigSourceBar } from "./ConfigSourceBar";
 import { ConfigSourceManagerDialog } from "./ConfigSourceManagerDialog";
+import { ManagedArtifactsPanel } from "./ManagedArtifactsPanel";
 import { WorkspaceTypeSelect } from "./WorkspaceTypeSelect";
 
 export type SettingsSection =
   | "general"
   | "menu"
+  | "confirmation"
   | "appearance"
   | "access"
+  | "artifacts"
   | "workspace"
   | "projects"
   | "projectBasics"
@@ -144,9 +157,11 @@ type SettingsConfirmState = {
 };
 
 const SECTION_ITEMS: Array<{ key: SettingsSection; label: string }> = [
-  { key: "menu", label: "菜单" },
+  { key: "menu", label: "通用" },
   { key: "appearance", label: "外观" },
+  { key: "confirmation", label: "操作确认" },
   { key: "access", label: "快捷入口" },
+  { key: "artifacts", label: "受管产物" },
 ];
 
 const DEPLOY_PARAM_KIND_OPTIONS: Array<{ value: DeployParamConfigKind; label: string }> = [
@@ -216,6 +231,7 @@ const R_SERIES_PACKAGE_PARAM_PRESETS: DeployParamConfigSummary[] = [
     required: false,
     trueValue: null,
     falseValue: null,
+    impactPaths: [],
   },
   {
     key: "profile",
@@ -226,6 +242,7 @@ const R_SERIES_PACKAGE_PARAM_PRESETS: DeployParamConfigSummary[] = [
     required: false,
     trueValue: null,
     falseValue: null,
+    impactPaths: [],
   },
   {
     key: "channel",
@@ -236,6 +253,7 @@ const R_SERIES_PACKAGE_PARAM_PRESETS: DeployParamConfigSummary[] = [
     required: false,
     trueValue: null,
     falseValue: null,
+    impactPaths: [],
   },
 ];
 
@@ -245,6 +263,7 @@ const NAVIGATION_ENTRY_KIND_OPTIONS: Array<{
 }> = [
   { value: "url", label: "网站" },
   { value: "directory", label: "目录" },
+  { value: "file", label: "文件" },
   { value: "app", label: "应用" },
   { value: "script", label: "脚本" },
   { value: "tool", label: "工具" },
@@ -256,6 +275,7 @@ const NAVIGATION_ENTRY_CREATE_OPTIONS: Array<{
 }> = [
   { value: "url", label: "网站" },
   { value: "directory", label: "目录" },
+  { value: "file", label: "文件" },
   { value: "app", label: "应用" },
   { value: "script", label: "脚本" },
   { value: "tool", label: "工具" },
@@ -384,7 +404,10 @@ function emptyDebugProfile(existingKeys: string[]): ProjectDebugProfileDraft {
     key,
     label: "项目运行配置",
     command: null,
+    cwd: null,
     expectedPort: null,
+    focusUrl: null,
+    readyProbe: null,
     runtimeProfile: null,
     envText: "",
     localFiles: [],
@@ -484,6 +507,8 @@ function debugProfileMeta(profile: ProjectDebugProfileDraft) {
     .length;
   const parts = [
     profile.runtimeProfile ? `继承 ${profile.runtimeProfile}` : "",
+    profile.cwd ? "独有目录" : "",
+    profile.readyProbe ? "HTTP Ready" : "",
     envCount > 0 ? `${envCount} env` : "",
     enabledFiles > 0 ? `${enabledFiles} 文件` : "",
     profile.browserUserDataDir || profile.browserArgsText?.trim()
@@ -611,8 +636,10 @@ export function SettingsPanel({
   const normalizeSettingsSection = (section?: SettingsSection): SettingsSection => {
     switch (section) {
       case "menu":
+      case "confirmation":
       case "appearance":
       case "access":
+      case "artifacts":
         return section;
       case "general":
       default:
@@ -644,6 +671,9 @@ export function SettingsPanel({
   const [newWorkspaceType, setNewWorkspaceType] = useState(DEFAULT_NEW_WORKSPACE_TYPE);
   const [newWorkspaceIndependentDir, setNewWorkspaceIndependentDir] = useState(false);
   const [newWorkspaceRootDir, setNewWorkspaceRootDir] = useState("");
+  const [newWorkspaceResourceDir, setNewWorkspaceResourceDir] = useState("");
+  const [createWorkspaceWorklog, setCreateWorkspaceWorklog] = useState(true);
+  const [autoRecordWorkspaceWorklog, setAutoRecordWorkspaceWorklog] = useState(true);
   const [copyCurrentWorkspace, setCopyCurrentWorkspace] = useState(true);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [workspaceEditor, setWorkspaceEditor] = useState<ProjectWorkspaceEditorState | null>(null);
@@ -688,6 +718,18 @@ export function SettingsPanel({
     addWorkspaceType,
     removeWorkspaceType,
   } = useWorkspaceTypeOptions();
+  const {
+    preferences: confirmationPreferences,
+    loading: confirmationPreferencesLoading,
+    setMode: setConfirmationMode,
+    setCategoryEnabled: setConfirmationCategoryEnabled,
+    reset: resetConfirmationPreferences,
+  } = useConfirmationPreferences();
+  const {
+    preferences: activityPreferences,
+    loading: activityPreferencesLoading,
+    setConfigActivityVisibility,
+  } = useActivityPreferences();
 
   function bumpToast(value: string) {
     if (value.trim()) {
@@ -703,6 +745,24 @@ export function SettingsPanel({
   function setError(value: string) {
     setErrorValue(value);
     bumpToast(value);
+  }
+
+  function persistConfirmationPreference(
+    operation: Promise<unknown>,
+    successMessage: string,
+  ) {
+    void operation
+      .then(() => setStatus(successMessage))
+      .catch((reason) => setError(String(reason)));
+  }
+
+  function persistActivityPreference(
+    operation: Promise<unknown>,
+    successMessage: string,
+  ) {
+    void operation
+      .then(() => setStatus(successMessage))
+      .catch((reason) => setError(String(reason)));
   }
 
   const selectedProject = useMemo(
@@ -952,6 +1012,24 @@ export function SettingsPanel({
     }
   }
 
+  async function chooseWorkspaceResourceDirectory(target: "create" | "edit") {
+    const defaultPath =
+      target === "create"
+        ? newWorkspaceResourceDir.trim() || newWorkspaceRootDir.trim() || undefined
+        : workspaceDraft?.resourceDir || workspaceDraft?.rootDir || undefined;
+    const selected = await open({ directory: true, multiple: false, defaultPath });
+    if (typeof selected !== "string" || !selected.trim()) {
+      return;
+    }
+    if (target === "create") {
+      setNewWorkspaceResourceDir(selected);
+    } else {
+      setWorkspaceDraft((current) =>
+        current ? { ...current, resourceDir: selected } : current,
+      );
+    }
+  }
+
   async function openWorkspaceProjectDirectory(path: string) {
     if (!path.trim() || path === "未配置项目目录") {
       return;
@@ -999,6 +1077,10 @@ export function SettingsPanel({
         description: description || null,
         workspaceType: newWorkspaceType,
         rootDir: newWorkspaceIndependentDir ? newWorkspaceRootDir.trim() || null : null,
+        resourceDir: newWorkspaceResourceDir.trim() || null,
+        worklogFile: "WORKLOG.md",
+        createWorklog: createWorkspaceWorklog,
+        worklogAutoRecord: createWorkspaceWorklog && autoRecordWorkspaceWorklog,
         independentDir: newWorkspaceIndependentDir,
         copyCurrent: copyCurrentWorkspace,
         copyFromWorkspaceKey: workspaceDraft?.key ?? workspaceEditorKey,
@@ -1010,6 +1092,9 @@ export function SettingsPanel({
       setNewWorkspaceType(DEFAULT_NEW_WORKSPACE_TYPE);
       setNewWorkspaceIndependentDir(false);
       setNewWorkspaceRootDir("");
+      setNewWorkspaceResourceDir("");
+      setCreateWorkspaceWorklog(true);
+      setAutoRecordWorkspaceWorklog(true);
       setCopyCurrentWorkspace(true);
       await loadProjectWorkspaceEditor(key);
       setStatus(`已创建工作区 ${name}`);
@@ -1782,15 +1867,16 @@ export function SettingsPanel({
     }));
   }
 
-  async function chooseNavigationDirectory(
+  async function chooseNavigationPath(
     categoryIndex: number,
     entryIndex: number,
+    directory: boolean,
   ) {
     try {
       const selected = await open({
-        title: "选择目录入口",
+        title: directory ? "选择目录入口" : "选择文件入口",
         multiple: false,
-        directory: true,
+        directory,
       });
       if (typeof selected !== "string") {
         return;
@@ -1885,6 +1971,7 @@ export function SettingsPanel({
         actionKind: "build",
         jenkinsProfile: "",
         jobName: "",
+        artifactOutputDir: null,
         params: [],
       },
     ]);
@@ -1912,6 +1999,7 @@ export function SettingsPanel({
         params: source.params.map((param) => ({
           ...param,
           options: [...param.options],
+          impactPaths: [...param.impactPaths],
         })),
       };
 
@@ -1980,6 +2068,7 @@ export function SettingsPanel({
                   required: false,
                   trueValue: null,
                   falseValue: null,
+                  impactPaths: [],
                 },
               ],
             }
@@ -2008,6 +2097,7 @@ export function SettingsPanel({
                 ...missingParams.map((param) => ({
                   ...param,
                   options: [...param.options],
+                  impactPaths: [...param.impactPaths],
                 })),
               ],
             }
@@ -2381,6 +2471,49 @@ export function SettingsPanel({
                   placeholder="留空为轻量范围工作区"
                   onChange={(event) => updateDraft({ rootDir: event.target.value })}
                   disabled={workspaceSaving}
+                />
+                <TextField
+                  size="small"
+                  label="资料目录"
+                  value={workspaceDraft.resourceDir ?? ""}
+                  placeholder="默认：工作区目录/resources"
+                  onChange={(event) => updateDraft({ resourceDir: event.target.value })}
+                  disabled={workspaceSaving}
+                  InputProps={{
+                    endAdornment: (
+                      <InputAdornment position="end">
+                        <IconButton
+                          size="small"
+                          aria-label="选择资料目录"
+                          onClick={() => void chooseWorkspaceResourceDirectory("edit")}
+                          disabled={workspaceSaving}
+                        >
+                          <FolderIcon fontSize="small" />
+                        </IconButton>
+                      </InputAdornment>
+                    ),
+                  }}
+                />
+                <TextField
+                  size="small"
+                  label="工作日志文件"
+                  value={workspaceDraft.worklogFile ?? "WORKLOG.md"}
+                  onChange={(event) => updateDraft({ worklogFile: event.target.value })}
+                  disabled={workspaceSaving}
+                />
+                <FormControlLabel
+                  className="settings-workspace-copy"
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={workspaceDraft.worklogAutoRecord}
+                      onChange={(event) =>
+                        updateDraft({ worklogAutoRecord: event.target.checked })
+                      }
+                      disabled={workspaceSaving || !workspaceDraft.resourceDir}
+                    />
+                  }
+                  label="自动记录关键操作"
                 />
               </div>
               <div className="settings-workspace-project-dir-list">
@@ -2822,6 +2955,54 @@ export function SettingsPanel({
                           disabled={creatingWorkspace}
                         />
                       ) : null}
+                      <TextField
+                        size="small"
+                        label="资料目录"
+                        value={newWorkspaceResourceDir}
+                        placeholder="默认：工作区目录/resources"
+                        onChange={(event) => setNewWorkspaceResourceDir(event.target.value)}
+                        disabled={creatingWorkspace}
+                        InputProps={{
+                          endAdornment: (
+                            <InputAdornment position="end">
+                              <IconButton
+                                size="small"
+                                aria-label="选择资料目录"
+                                onClick={() => void chooseWorkspaceResourceDirectory("create")}
+                                disabled={creatingWorkspace}
+                              >
+                                <FolderIcon fontSize="small" />
+                              </IconButton>
+                            </InputAdornment>
+                          ),
+                        }}
+                      />
+                      <FormControlLabel
+                        className="settings-workspace-copy"
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={createWorkspaceWorklog}
+                            onChange={(event) => setCreateWorkspaceWorklog(event.target.checked)}
+                            disabled={creatingWorkspace}
+                          />
+                        }
+                        label="初始化工作日志"
+                      />
+                      <FormControlLabel
+                        className="settings-workspace-copy"
+                        control={
+                          <Checkbox
+                            size="small"
+                            checked={autoRecordWorkspaceWorklog}
+                            onChange={(event) =>
+                              setAutoRecordWorkspaceWorklog(event.target.checked)
+                            }
+                            disabled={creatingWorkspace || !createWorkspaceWorklog}
+                          />
+                        }
+                        label="自动记录关键操作"
+                      />
                       <FormControlLabel
                         className="settings-workspace-copy"
                         control={
@@ -2846,20 +3027,34 @@ export function SettingsPanel({
     );
   }
 
-  function renderGeneralSection() {
+  function renderGlobalSettingsSection(
+    title: string,
+    description: string,
+    content: ReactNode,
+  ) {
     return (
       <Stack className="settings-overview" spacing={1.15}>
         <section
           className="settings-list-section settings-list-section--global-combined"
-          aria-labelledby="settings-global-title"
+          aria-labelledby={`settings-${activeSection}-title`}
         >
           <header className="settings-list-head">
-            <Typography id="settings-global-title" variant="subtitle2">
-              应用设置
+            <Typography id={`settings-${activeSection}-title`} variant="subtitle2">
+              {title}
             </Typography>
-            <Typography variant="caption">菜单、外观与快捷入口</Typography>
+            <Typography variant="caption">{description}</Typography>
           </header>
-          <div className="settings-list settings-global-combined-list">
+          <div className="settings-list settings-global-combined-list">{content}</div>
+        </section>
+      </Stack>
+    );
+  }
+
+  function renderMenuSettingsSection() {
+    return renderGlobalSettingsSection(
+      "通用",
+      "设置应用菜单与退出行为",
+      <>
             <div className="settings-list-group-head">
               <Typography variant="caption">菜单</Typography>
               <Typography variant="caption">未启用的菜单不会展示</Typography>
@@ -2922,7 +3117,53 @@ export function SettingsPanel({
                 ))}
               </TextField>
             </div>
-
+            <div className="settings-list-group-head">
+              <Typography variant="caption">活动中心</Typography>
+              <Typography variant="caption">配置监听保持开启</Typography>
+            </div>
+            <div className="settings-list-row settings-list-row--split">
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">配置变更活动</Typography>
+                <Typography variant="caption">
+                  待处理和未确认失败项保留，已处理记录可按需查看。
+                </Typography>
+              </div>
+              <div
+                className="settings-activity-mode"
+                role="radiogroup"
+                aria-label="配置变更活动显示"
+              >
+                {(
+                  [
+                    { value: "actionable", label: "仅待处理" },
+                    { value: "all", label: "全部记录" },
+                  ] as const
+                ).map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={
+                      activityPreferences.configActivityVisibility === option.value
+                    }
+                    className={
+                      activityPreferences.configActivityVisibility === option.value
+                        ? "is-active"
+                        : ""
+                    }
+                    onClick={() =>
+                      persistActivityPreference(
+                        setConfigActivityVisibility(option.value),
+                        `配置变更活动已设为${option.label}`,
+                      )
+                    }
+                    disabled={activityPreferencesLoading}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            </div>
             <div className="settings-list-group-head">
               <Typography variant="caption">运行</Typography>
               <Typography variant="caption">退出行为</Typography>
@@ -2930,6 +3171,7 @@ export function SettingsPanel({
             <div className="settings-list-row settings-list-row--split">
               <div className="settings-overview-copy">
                 <Typography variant="subtitle2">退出时项目</Typography>
+                <Typography variant="caption">控制关闭应用时已启动项目的处理方式。</Typography>
               </div>
               <TextField
                 select
@@ -2948,11 +3190,121 @@ export function SettingsPanel({
                 <MenuItem value="stop">停止本次启动项目</MenuItem>
               </TextField>
             </div>
+      </>,
+    );
+  }
 
-            <div className="settings-list-group-head">
-              <Typography variant="caption">外观</Typography>
-              <Typography variant="caption">当前窗口偏好</Typography>
+  function renderConfirmationSettingsSection() {
+    return renderGlobalSettingsSection(
+      "操作确认",
+      "统一控制不同风险操作的确认方式",
+      <>
+            <div className="settings-list-group-head settings-list-group-head--confirmation">
+              <div>
+                <Typography variant="caption">确认策略</Typography>
+                <Typography variant="caption">高风险动作始终需要确认</Typography>
+              </div>
+              <Button
+                size="small"
+                color="inherit"
+                onClick={() =>
+                  persistConfirmationPreference(
+                    resetConfirmationPreferences(),
+                    "已恢复平衡确认策略",
+                  )
+                }
+                disabled={confirmationPreferencesLoading}
+              >
+                恢复平衡
+              </Button>
             </div>
+            <div className="settings-list-row settings-list-row--split">
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">确认策略</Typography>
+                <Typography variant="caption">高风险动作始终需要确认。</Typography>
+              </div>
+              <div
+                className="settings-confirmation-mode"
+                role="radiogroup"
+                aria-label="操作确认策略"
+              >
+                {(
+                  [
+                    { value: "strict", label: "严格" },
+                    { value: "balanced", label: "平衡" },
+                    { value: "fast", label: "快捷" },
+                  ] as Array<{
+                    value: Exclude<ConfirmationMode, "custom">;
+                    label: string;
+                  }>
+                ).map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={confirmationPreferences.mode === option.value}
+                    className={
+                      confirmationPreferences.mode === option.value ? "is-active" : ""
+                    }
+                    onClick={() =>
+                      persistConfirmationPreference(
+                        setConfirmationMode(option.value),
+                        `已切换为${option.label}确认策略`,
+                      )
+                    }
+                    disabled={confirmationPreferencesLoading}
+                  >
+                    {option.label}
+                  </button>
+                ))}
+                {confirmationPreferences.mode === "custom" ? (
+                  <Chip size="small" label="自定义" />
+                ) : null}
+              </div>
+            </div>
+            <div className="settings-confirmation-list">
+              {CONFIRMATION_PREFERENCE_DEFINITIONS.map((definition) => (
+                <div
+                  key={definition.key}
+                  className="settings-list-row settings-list-row--split settings-confirmation-row"
+                >
+                  <div className="settings-overview-copy">
+                    <Typography variant="subtitle2">{definition.label}</Typography>
+                    <Typography variant="caption">{definition.description}</Typography>
+                  </div>
+                  {definition.required ? (
+                    <Chip size="small" variant="outlined" label="始终确认" />
+                  ) : (
+                    <Switch
+                      size="small"
+                      checked={confirmationEnabled(confirmationPreferences, definition.key)}
+                      onChange={(event) =>
+                        persistConfirmationPreference(
+                          setConfirmationCategoryEnabled(
+                            definition.key as ConfirmationPreferenceKey,
+                            event.target.checked,
+                          ),
+                          `已更新${definition.label}确认策略`,
+                        )
+                      }
+                      disabled={confirmationPreferencesLoading}
+                      slotProps={{
+                        input: { "aria-label": `${definition.label}确认` },
+                      }}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
+      </>,
+    );
+  }
+
+  function renderAppearanceSettingsSection() {
+    return renderGlobalSettingsSection(
+      "外观",
+      "选择当前窗口的视觉风格",
+      <>
             <div className="settings-list-row settings-list-row--split">
               <div className="settings-overview-copy">
                 <Typography variant="subtitle2">换肤</Typography>
@@ -3009,11 +3361,15 @@ export function SettingsPanel({
                 </button>
               </div>
             </div>
+      </>,
+    );
+  }
 
-            <div className="settings-list-group-head">
-              <Typography variant="caption">快捷入口</Typography>
-              <Typography variant="caption">命令与配置文件</Typography>
-            </div>
+  function renderAccessSettingsSection() {
+    return renderGlobalSettingsSection(
+      "快捷入口",
+      "查看常用命令并打开配置文件",
+      <>
             <div className="settings-list-row">
               <div className="settings-list-icon">
                 <span>⌘</span>
@@ -3069,10 +3425,24 @@ export function SettingsPanel({
               </span>
               <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
             </Button>
-          </div>
-        </section>
-      </Stack>
+      </>,
     );
+  }
+
+  function renderGeneralSection() {
+    switch (activeSection) {
+      case "confirmation":
+        return renderConfirmationSettingsSection();
+      case "appearance":
+        return renderAppearanceSettingsSection();
+      case "access":
+        return renderAccessSettingsSection();
+      case "artifacts":
+        return <ManagedArtifactsPanel activeWorkspaceKey={activeProjectWorkspaceKey} />;
+      case "menu":
+      default:
+        return renderMenuSettingsSection();
+    }
   }
 
   function renderProjectSelector() {
@@ -3299,6 +3669,19 @@ export function SettingsPanel({
                 helperText="仅对该调试档案生效，不修改项目默认启动命令。"
               />
               <TextField
+                className="settings-form-grid-wide"
+                size="small"
+                label="独有工作目录"
+                value={selectedDebugProfile.cwd ?? ""}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    cwd: event.target.value || null,
+                  })
+                }
+                placeholder="留空时使用项目 dev.cwd；相对路径基于 repoPath"
+                helperText="用于同一项目的不同 worktree、副本或子应用运行目录。"
+              />
+              <TextField
                 size="small"
                 type="number"
                 label="预期端口"
@@ -3313,6 +3696,107 @@ export function SettingsPanel({
                 inputProps={{ min: 1, max: 65535 }}
                 helperText="被占用时直接阻止启动。"
               />
+              <TextField
+                className="settings-form-grid-wide"
+                size="small"
+                label="启动页面 URL"
+                value={selectedDebugProfile.focusUrl ?? ""}
+                onChange={(event) =>
+                  updateDebugProfileAt(selectedDebugProfileIndex, {
+                    focusUrl: event.target.value || null,
+                  })
+                }
+                placeholder="http://127.0.0.1:5173/#/debug"
+                helperText="覆盖项目 focus.url，仅用于该调试档案的聚焦与 Ready 回退。"
+              />
+              <FormControlLabel
+                className="settings-form-grid-wide settings-checkbox-row"
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={Boolean(selectedDebugProfile.readyProbe)}
+                    onChange={(event) =>
+                      updateDebugProfileAt(selectedDebugProfileIndex, {
+                        readyProbe: event.target.checked
+                          ? {
+                              url: null,
+                              path: null,
+                              expectedStatuses: [],
+                              timeoutMs: null,
+                            }
+                          : null,
+                      })
+                    }
+                  />
+                }
+                label="启用该档案的 HTTP Ready 探测"
+              />
+              {selectedDebugProfile.readyProbe ? (
+                <>
+                  <TextField
+                    size="small"
+                    label="Ready URL"
+                    value={selectedDebugProfile.readyProbe.url ?? ""}
+                    onChange={(event) =>
+                      updateDebugProfileAt(selectedDebugProfileIndex, {
+                        readyProbe: {
+                          ...selectedDebugProfile.readyProbe!,
+                          url: event.target.value || null,
+                        },
+                      })
+                    }
+                    placeholder="留空时使用启动页面或监听端口"
+                  />
+                  <TextField
+                    size="small"
+                    label="Ready 路径"
+                    value={selectedDebugProfile.readyProbe.path ?? ""}
+                    onChange={(event) =>
+                      updateDebugProfileAt(selectedDebugProfileIndex, {
+                        readyProbe: {
+                          ...selectedDebugProfile.readyProbe!,
+                          path: event.target.value || null,
+                        },
+                      })
+                    }
+                    placeholder="/health"
+                  />
+                  <TextField
+                    size="small"
+                    label="成功状态码"
+                    value={selectedDebugProfile.readyProbe.expectedStatuses.join(",")}
+                    onChange={(event) =>
+                      updateDebugProfileAt(selectedDebugProfileIndex, {
+                        readyProbe: {
+                          ...selectedDebugProfile.readyProbe!,
+                          expectedStatuses: parseParamOptions(event.target.value)
+                            .map(Number)
+                            .filter(Number.isInteger),
+                        },
+                      })
+                    }
+                    placeholder="留空表示 200-399；或 200,204"
+                  />
+                  <TextField
+                    size="small"
+                    type="number"
+                    label="Ready 超时 (ms)"
+                    value={selectedDebugProfile.readyProbe.timeoutMs ?? ""}
+                    onChange={(event) =>
+                      updateDebugProfileAt(selectedDebugProfileIndex, {
+                        readyProbe: {
+                          ...selectedDebugProfile.readyProbe!,
+                          timeoutMs: event.target.value
+                            ? Number(event.target.value)
+                            : null,
+                        },
+                      })
+                    }
+                    inputProps={{ min: 100, max: 600000 }}
+                    placeholder="180000"
+                  />
+                </>
+              ) : null}
               <TextField
                 size="small"
                 label="浏览器"
@@ -4516,12 +5000,13 @@ export function SettingsPanel({
       );
     }
 
-    if (entry.kind === "directory") {
+    if (entry.kind === "directory" || entry.kind === "file") {
+      const directory = entry.kind === "directory";
       return (
         <div className="settings-path-field settings-form-grid-wide">
           <TextField
             size="small"
-            label="目录路径"
+            label={directory ? "目录路径" : "文件路径"}
             value={entry.path ?? ""}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -4533,7 +5018,7 @@ export function SettingsPanel({
             variant="outlined"
             color="inherit"
             startIcon={<FolderIcon fontSize="small" />}
-            onClick={() => void chooseNavigationDirectory(categoryIndex, entryIndex)}
+            onClick={() => void chooseNavigationPath(categoryIndex, entryIndex, directory)}
             disabled={saving}
           >
             选择
@@ -5295,6 +5780,34 @@ export function SettingsPanel({
                   })
                 }
               />
+              <TextField
+                size="small"
+                multiline
+                minRows={2}
+                label="影响路径"
+                className="settings-form-grid-wide"
+                value={param.impactPaths.join("\n")}
+                onChange={(event) =>
+                  updateDeployParamAt(targetIndex, paramIndex, {
+                    impactPaths: event.target.value.split(/\r?\n|[,，]/),
+                  })
+                }
+                onBlur={(event) =>
+                  updateDeployParamAt(targetIndex, paramIndex, {
+                    impactPaths: event.target.value
+                      .split(/\r?\n|[,，]/)
+                      .map((path) => path.trim())
+                      .filter(Boolean),
+                  })
+                }
+                helperText="每行一个仓库相对路径，可用 mobile/** 这类目录模式；命中后要求启用该构建项。"
+                inputProps={{
+                  autoCapitalize: "none",
+                  autoComplete: "off",
+                  autoCorrect: "off",
+                  spellCheck: false,
+                }}
+              />
             </>
           ) : null}
         </div>
@@ -5575,6 +6088,28 @@ export function SettingsPanel({
                     )}
                   </section>
                 ) : null}
+                <section className="settings-build-config-block">
+                  <div className="settings-build-config-head">
+                    <Typography variant="caption">产物</Typography>
+                  </div>
+                  <TextField
+                    size="small"
+                    className="settings-form-grid-wide"
+                    label="产物目录"
+                    value={activeDeployTarget.artifactOutputDir ?? ""}
+                    onChange={(event) =>
+                      updateDeployTargetAt(activeDeployTargetIndex, {
+                        artifactOutputDir: event.target.value || null,
+                      })
+                    }
+                    placeholder="留空时使用项目构建输出目录"
+                    helperText={
+                      activeDeployTarget.adapter === "jenkins"
+                        ? "仅用于产物定位，不会作为 Jenkins 参数发送。"
+                        : "相对路径基于构建目录；留空时使用项目构建输出目录。"
+                    }
+                  />
+                </section>
               </div>
               <div
                 className="settings-param-list"
@@ -5644,7 +6179,7 @@ export function SettingsPanel({
               {surface === "projectManagement" ? "项目配置" : "设置"}
             </Typography>
             <Typography variant="caption">
-              {surface === "projectManagement" ? "项目管理" : "菜单、外观与快捷入口"}
+              {surface === "projectManagement" ? "项目管理" : "应用偏好与行为"}
             </Typography>
           </div>
           <button
@@ -5657,27 +6192,30 @@ export function SettingsPanel({
           </button>
         </div>
 
-        <div
-          className={`settings-panel-body${
-            surface === "projectManagement" ? "" : " settings-panel-body--single"
-          }`}
-        >
-          {surface === "projectManagement" ? (
-            <div className="settings-section-nav" role="tablist" aria-label="设置分类">
-              {visibleSectionItems.map((item) => (
-                <button
-                  key={item.key}
-                  type="button"
-                  className={activeSection === item.key ? "is-active" : ""}
-                  onClick={() => setActiveSection(item.key)}
-                >
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          ) : null}
+        <div className="settings-panel-body">
+          <div className="settings-section-nav" role="tablist" aria-label="设置分类">
+            {visibleSectionItems.map((item) => (
+              <button
+                key={item.key}
+                id={`settings-${item.key}-tab`}
+                type="button"
+                role="tab"
+                aria-selected={activeSection === item.key}
+                aria-controls={`settings-${item.key}-panel`}
+                className={activeSection === item.key ? "is-active" : ""}
+                onClick={() => setActiveSection(item.key)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
 
-          <div className="settings-section-content">
+          <div
+            id={`settings-${activeSection}-panel`}
+            className="settings-section-content"
+            role="tabpanel"
+            aria-labelledby={`settings-${activeSection}-tab`}
+          >
             <AppToast
               message={error || status}
               severity={error ? "error" : "success"}

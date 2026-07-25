@@ -87,6 +87,12 @@ pub struct ProjectWorkspaceConfig {
     #[serde(default)]
     pub root_dir: Option<PathBuf>,
     #[serde(default)]
+    pub resource_dir: Option<PathBuf>,
+    #[serde(default)]
+    pub worklog_file: Option<PathBuf>,
+    #[serde(default = "default_true")]
+    pub worklog_auto_record: bool,
+    #[serde(default)]
     pub include_all_projects: bool,
     #[serde(default)]
     pub include_all_navigation: bool,
@@ -172,6 +178,9 @@ impl Default for ProjectWorkspaceConfig {
             workspace_type: SYSTEM_PROJECT_WORKSPACE_TYPE.to_string(),
             metadata: BTreeMap::new(),
             root_dir: None,
+            resource_dir: None,
+            worklog_file: None,
+            worklog_auto_record: false,
             include_all_projects: true,
             include_all_navigation: true,
             projects: Vec::new(),
@@ -192,6 +201,8 @@ impl ProjectWorkspaceConfig {
         self.workspace_type = normalize_project_workspace_type(&self.workspace_type);
         self.metadata = normalize_metadata(self.metadata);
         self.root_dir = normalize_optional_path(self.root_dir);
+        self.resource_dir = normalize_optional_path(self.resource_dir);
+        self.worklog_file = normalize_optional_path(self.worklog_file);
         self.projects = normalize_unique_strings(self.projects);
         self.navigation_categories = normalize_unique_strings(self.navigation_categories);
         self.navigation_entries = normalize_unique_strings(self.navigation_entries);
@@ -203,6 +214,9 @@ impl ProjectWorkspaceConfig {
             self.include_all_projects = true;
             self.include_all_navigation = true;
             self.root_dir = None;
+            self.resource_dir = None;
+            self.worklog_file = None;
+            self.worklog_auto_record = false;
             self.metadata.clear();
             self.project_instances.clear();
             self.resource_categories.clear();
@@ -423,7 +437,13 @@ pub struct ProjectDebugProfileConfig {
     #[serde(default)]
     pub command: Option<String>,
     #[serde(default)]
+    pub cwd: Option<PathBuf>,
+    #[serde(default)]
     pub expected_port: Option<u16>,
+    #[serde(default)]
+    pub focus_url: Option<String>,
+    #[serde(default)]
+    pub ready_probe: Option<ProjectDebugReadyProbeConfig>,
     #[serde(default)]
     pub runtime_profile: Option<String>,
     #[serde(default)]
@@ -442,6 +462,18 @@ pub struct ProjectDebugProfileConfig {
     pub network_proxy: ProjectNetworkProxyConfig,
     #[serde(default)]
     pub local_proxy: ProjectLocalProxyConfig,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ProjectDebugReadyProbeConfig {
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub expected_statuses: Vec<u16>,
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -689,8 +721,16 @@ pub struct DeployTargetConfig {
     pub jenkins_profile: String,
     #[serde(default)]
     pub job_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<BuildArtifactConfig>,
     #[serde(default)]
     pub params: Vec<DeployParamConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct BuildArtifactConfig {
+    #[serde(default)]
+    pub output_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -734,6 +774,10 @@ pub struct DeployParamConfig {
     pub true_value: Option<String>,
     #[serde(default)]
     pub false_value: Option<String>,
+    /// Repository-relative path patterns whose changes require this boolean build side.
+    /// A trailing `/**` matches the directory itself and every descendant.
+    #[serde(default, alias = "change_paths", skip_serializing_if = "Vec::is_empty")]
+    pub impact_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -1063,6 +1107,32 @@ pub fn create_project_workspace(
     paths: &ConfigPaths,
     request: CreateProjectWorkspaceRequest,
 ) -> Result<ProjectWorkspaceConfig> {
+    let activate = request.activate;
+    let workspace = build_project_workspace(paths, request)?;
+    if let Some(root_dir) = workspace.root_dir.as_ref() {
+        fs::create_dir_all(root_dir).with_context(|| {
+            format!(
+                "failed to create project workspace root: {}",
+                root_dir.display()
+            )
+        })?;
+    }
+    let path = paths
+        .project_workspaces
+        .join(format!("{}.toml", workspace.key));
+    save_project_workspace_config(&path, &workspace)?;
+
+    if activate {
+        activate_project_workspace(paths, &workspace.key)?;
+    }
+
+    Ok(workspace)
+}
+
+pub fn build_project_workspace(
+    paths: &ConfigPaths,
+    request: CreateProjectWorkspaceRequest,
+) -> Result<ProjectWorkspaceConfig> {
     let key = normalize_project_workspace_key(&request.key)
         .ok_or_else(|| anyhow::anyhow!("invalid project workspace key: {}", request.key))?;
     if key == SYSTEM_PROJECT_WORKSPACE_KEY {
@@ -1082,6 +1152,9 @@ pub fn create_project_workspace(
         workspace_type: DEFAULT_PROJECT_WORKSPACE_TYPE.to_string(),
         metadata: BTreeMap::new(),
         root_dir: None,
+        resource_dir: None,
+        worklog_file: None,
+        worklog_auto_record: true,
         include_all_projects: false,
         include_all_navigation: false,
         projects: Vec::new(),
@@ -1098,31 +1171,25 @@ pub fn create_project_workspace(
     }
     workspace.project_instances.clear();
     workspace.resource_categories.clear();
+    workspace.resource_dir = None;
+    workspace.worklog_file = None;
+    workspace.worklog_auto_record = true;
     workspace.root_dir = normalize_optional_path(request.root_dir);
     if workspace.root_dir.is_none() {
         workspace.project_instances.clear();
-    } else if let Some(root_dir) = workspace.root_dir.as_ref() {
-        fs::create_dir_all(root_dir).with_context(|| {
-            format!(
-                "failed to create project workspace root: {}",
-                root_dir.display()
-            )
-        })?;
     }
     if workspace.is_system() {
         workspace.include_all_projects = false;
         workspace.include_all_navigation = false;
     }
     workspace = workspace.normalized();
-    save_project_workspace_config(&path, &workspace)?;
-
-    if request.activate {
-        let mut app_workspace = load_workspace_config(&paths.workspace)?;
-        app_workspace.app.active_workspace = Some(workspace.key.clone());
-        save_workspace_config(&paths.workspace, &app_workspace)?;
-    }
-
     Ok(workspace)
+}
+
+pub fn activate_project_workspace(paths: &ConfigPaths, workspace_key: &str) -> Result<()> {
+    let mut app_workspace = load_workspace_config(&paths.workspace)?;
+    app_workspace.app.active_workspace = Some(workspace_key.to_string());
+    save_workspace_config(&paths.workspace, &app_workspace)
 }
 
 pub fn load_active_project_workspace(paths: &ConfigPaths) -> Result<ProjectWorkspaceConfig> {
@@ -1226,6 +1293,19 @@ fn apply_project_instance_path(project: &mut ProjectConfig, instance_path: &Path
     }
     if let Some(command) = &mut project.build {
         rebase_project_command_paths(command, previous_repo_path.as_deref(), instance_path);
+    }
+    if let Some(previous_repo_path) = previous_repo_path.as_deref() {
+        for target in &mut project.deploy_targets {
+            let Some(output_dir) = target
+                .artifact
+                .as_mut()
+                .and_then(|artifact| artifact.output_dir.as_mut())
+            else {
+                continue;
+            };
+            *output_dir =
+                rebase_path_for_project_instance(output_dir, previous_repo_path, instance_path);
+        }
     }
 }
 
@@ -1409,5 +1489,66 @@ impl ProjectConfig {
 
     pub fn supports_branch(&self) -> bool {
         self.repo_path.is_some() && !self.git_url.trim().is_empty()
+    }
+}
+
+#[cfg(test)]
+mod build_artifact_tests {
+    use super::*;
+
+    #[test]
+    fn workspace_project_instance_rebases_target_artifact_output_dir() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[defaults]
+
+[[projects]]
+key = "demo"
+name = "Demo"
+repo_path = "/source/demo"
+
+[[projects.deploy_targets]]
+key = "web"
+label = "Web"
+adapter = "local_command"
+
+[projects.deploy_targets.artifact]
+output_dir = "/source/demo/web/dist"
+"#,
+        )
+        .expect("parse project config");
+        let workspace = ProjectWorkspaceConfig {
+            key: "feature".to_string(),
+            name: "Feature".to_string(),
+            projects: vec!["demo".to_string()],
+            project_instances: vec![ProjectWorkspaceProjectInstanceConfig {
+                project: "demo".to_string(),
+                path: PathBuf::from("/workspace/demo"),
+                managed: true,
+            }],
+            ..ProjectWorkspaceConfig::default()
+        };
+
+        let effective = apply_project_workspace_context(&config, &workspace);
+        let output_dir = effective.projects[0].deploy_targets[0]
+            .artifact
+            .as_ref()
+            .and_then(|artifact| artifact.output_dir.as_ref());
+
+        assert_eq!(output_dir, Some(&PathBuf::from("/workspace/demo/web/dist")));
+    }
+
+    #[test]
+    fn legacy_target_without_artifact_still_deserializes() {
+        let target: DeployTargetConfig = toml::from_str(
+            r#"
+key = "legacy"
+label = "Legacy"
+job_name = "Demo/legacy"
+"#,
+        )
+        .expect("parse legacy target");
+
+        assert!(target.artifact.is_none());
     }
 }
