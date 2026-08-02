@@ -15,6 +15,32 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/smoke.html");
 });
 
+test("project startup profiles separate base commands from shared runtime environments", async ({
+  page,
+}) => {
+  await page.getByRole("button", { name: "打开构建配置测试" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "项目配置" });
+  const tabs = dialog.getByRole("tab");
+  await expect(tabs).toHaveText([
+    "基础信息",
+    "本地命令",
+    "启动档案",
+    "构建目标",
+    "分支规则",
+  ]);
+
+  await dialog.getByRole("tab", { name: "启动档案" }).click();
+  await expect(dialog.getByText("共享运行环境来源", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "项目启动档案" })).toBeVisible();
+  await expect(dialog).toContainText("项目仍可使用基础命令启动");
+
+  await dialog.getByRole("button", { name: "新增档案" }).click();
+  await expect(dialog.getByRole("combobox", { name: "共享运行环境" })).toBeVisible();
+  await expect(dialog.getByRole("textbox", { name: "启动命令覆盖" })).toBeVisible();
+  await expect(dialog.getByRole("textbox", { name: "档案环境变量" })).toBeVisible();
+});
+
 test("settings controls update the smoke harness state", async ({ page }) => {
   await page.getByLabel("打开设置").click();
 
@@ -23,15 +49,15 @@ test("settings controls update the smoke harness state", async ({ page }) => {
   const settingsNavigation = dialog.getByRole("tablist", { name: "设置分类" });
   const generalTab = settingsNavigation.getByRole("tab", { name: "通用" });
   const confirmationTab = settingsNavigation.getByRole("tab", { name: "操作确认" });
-  const appearanceTab = settingsNavigation.getByRole("tab", { name: "外观" });
   const accessTab = settingsNavigation.getByRole("tab", { name: "快捷入口" });
   const artifactsTab = settingsNavigation.getByRole("tab", { name: "受管产物" });
+  const diagnosticsTab = settingsNavigation.getByRole("tab", { name: "系统诊断" });
   await expect(settingsNavigation.getByRole("tab")).toHaveText([
     "通用",
-    "外观",
     "操作确认",
     "快捷入口",
     "受管产物",
+    "系统诊断",
   ]);
   await expect(generalTab).toHaveAttribute("aria-selected", "true");
   await expect(confirmationTab).toHaveAttribute("aria-selected", "false");
@@ -48,6 +74,10 @@ test("settings controls update the smoke harness state", async ({ page }) => {
   await exitRuntimePolicy.click();
   await page.getByRole("option", { name: "停止本次启动项目", exact: true }).click();
   await expect(exitRuntimePolicy).toHaveText("停止本次启动项目");
+  await expect(dialog.getByRole("group", { name: "主题" })).toBeVisible();
+  const darkMode = dialog.getByRole("button", { name: "暗色主题" });
+  await darkMode.click();
+  await expect(darkMode).toHaveAttribute("aria-pressed", "true");
 
   const resourcesMenu = dialog.getByRole("checkbox", {
     name: "资源入口",
@@ -83,13 +113,6 @@ test("settings controls update the smoke harness state", async ({ page }) => {
   await buildConfirmation.check();
   await expect(confirmationMode.getByText("自定义", { exact: true })).toBeVisible();
 
-  await appearanceTab.click();
-  await expect(appearanceTab).toHaveAttribute("aria-selected", "true");
-  await expect(dialog.getByRole("group", { name: "换肤" })).toBeVisible();
-  const darkMode = dialog.getByRole("button", { name: /^暗色/ });
-  await darkMode.click();
-  await expect(darkMode).toHaveAttribute("aria-pressed", "true");
-
   await accessTab.click();
   await expect(accessTab).toHaveAttribute("aria-selected", "true");
   await expect(dialog.getByText("命令面板", { exact: true })).toBeVisible();
@@ -117,6 +140,12 @@ test("settings controls update the smoke harness state", async ({ page }) => {
   expect(artifactStyle.inputHeight).toBeGreaterThanOrEqual(38);
   expect(artifactStyle.horizontalOverflow).toBeLessThanOrEqual(1);
 
+  await diagnosticsTab.click();
+  await expect(diagnosticsTab).toHaveAttribute("aria-selected", "true");
+  await expect(
+    dialog.locator('[data-system-diagnostics="read-only"]'),
+  ).toBeVisible();
+
   await dialog.getByLabel("关闭设置").click();
   await expect(dialog).toHaveCount(0);
   await expect(
@@ -125,6 +154,49 @@ test("settings controls update the smoke harness state", async ({ page }) => {
       exact: true,
     }),
   ).toHaveCount(0);
+});
+
+test("settings language choice updates immediately and persists", async ({
+  page,
+}) => {
+  await page.getByLabel("打开设置").click();
+
+  let dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  let languageChoice = dialog.getByRole("group", { name: "界面语言" });
+  await expect(
+    languageChoice.getByRole("button", { name: "跟随系统" }),
+  ).toHaveAttribute("aria-pressed", "true");
+
+  await languageChoice.getByRole("button", { name: "英文" }).click();
+
+  dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  languageChoice = dialog.getByRole("group", { name: "Interface Language" });
+  await expect(
+    dialog.getByText("Choose the language used by the app interface."),
+  ).toBeVisible();
+  await expect(
+    languageChoice.getByRole("button", { name: "English" }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.localStorage.getItem("rdevtool.language")),
+    )
+    .toBe("en-US");
+
+  await page.reload();
+  await page.getByLabel("Open Settings").click();
+  dialog = page.getByRole("dialog", { name: "Settings", exact: true });
+  languageChoice = dialog.getByRole("group", { name: "Interface Language" });
+  await expect(
+    languageChoice.getByRole("button", { name: "English" }),
+  ).toHaveAttribute("aria-pressed", "true");
+
+  await languageChoice.getByRole("button", { name: "Follow System" }).click();
+  dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  languageChoice = dialog.getByRole("group", { name: "界面语言" });
+  await expect(
+    languageChoice.getByRole("button", { name: "跟随系统" }),
+  ).toHaveAttribute("aria-pressed", "true");
 });
 
 test("build target artifact directory is editable and persisted", async ({ page }) => {
@@ -181,6 +253,15 @@ test("config source manager compares and copies a source", async ({ page }) => {
   const dialog = page.getByRole("dialog", { name: /配置源管理/ });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText("默认配置", { exact: true }).last()).toBeVisible();
+  await expect(
+    dialog.getByRole("button", { name: /已上线需求工作区 配置/ }),
+  ).toHaveCount(0);
+  await dialog
+    .getByRole("checkbox", { name: "显示归档来源 1" })
+    .check();
+  await expect(
+    dialog.getByRole("button", { name: /已上线需求工作区 配置/ }),
+  ).toBeVisible();
 
   await dialog.getByLabel("对比配置源").click();
   await page.getByRole("option", { name: "团队配置", exact: true }).click();
@@ -226,7 +307,14 @@ test("handled config activities stay hidden until all records are enabled", asyn
 
   const activityCenter = page.getByRole("complementary", { name: "活动中心" });
   await expect(activityCenter).toBeVisible();
-  await activityCenter.getByRole("button", { name: "重新加载" }).first().click();
+  const configQueueCard = activityCenter
+    .locator(".activity-queue-card")
+    .filter({ hasText: "配置更新" });
+  await expect(configQueueCard).toHaveCount(1);
+  await expect(configQueueCard).toContainText("需重新加载 3");
+  await activityCenter
+    .getByRole("button", { name: "全部重新加载 3", exact: true })
+    .click();
 
   await expect(page.getByTestId("config-activity-state")).toHaveText("success");
   await expect(activityCenter.getByRole("button", { name: "重新加载" })).toHaveCount(0);
@@ -245,11 +333,27 @@ test("handled config activities stay hidden until all records are enabled", asyn
   await settings.getByLabel("关闭设置").click();
 
   await page.getByLabel("打开活动中心").click();
+  const handledConfigRecords = page
+    .getByRole("complementary", { name: "活动中心" })
+    .getByText("已重新加载并应用最新配置");
+  await expect(handledConfigRecords).toHaveCount(3);
+  await expect(handledConfigRecords.first()).toBeVisible();
+});
+
+test("config reload notices can be ignored as one grouped reminder", async ({ page }) => {
+  await page.getByLabel("打开活动中心").click();
+
+  const activityCenter = page.getByRole("complementary", { name: "活动中心" });
+  const configQueueCard = activityCenter
+    .locator(".activity-queue-card")
+    .filter({ hasText: "配置更新" });
+  await configQueueCard.getByRole("button", { name: "忽略", exact: true }).click();
+
+  await expect(page.getByTestId("config-activity-state")).toHaveText("info");
+  await expect(configQueueCard).toHaveCount(0);
   await expect(
-    page.getByRole("complementary", { name: "活动中心" }).getByText(
-      "已重新加载并应用最新配置",
-    ),
-  ).toBeVisible();
+    activityCenter.getByRole("button", { name: "全部重新加载 3", exact: true }),
+  ).toHaveCount(0);
 });
 
 test("activity cards show complete grouped and standalone details", async ({ page }) => {
@@ -289,8 +393,8 @@ test("activity cards show complete grouped and standalone details", async ({ pag
   expect(deployLayout.scrollWidth).toBeLessThanOrEqual(deployLayout.clientWidth + 1);
   expect(deployLayout.parameterBottom).toBeLessThanOrEqual(deployLayout.cardBottom + 1);
 
-  await activityCenter.getByRole("tab", { name: /^全部 / }).click();
-  const mergeCard = activityList
+  await activityCenter.getByRole("tab", { name: /^失败 / }).click();
+  const mergeCard = activityCenter
     .locator(".activity-record-card")
     .filter({ hasText: "合并分支" })
     .first();
@@ -316,7 +420,7 @@ test("activity cards show complete grouped and standalone details", async ({ pag
   }
 
   await activityCenter.getByRole("tab", { name: /^App / }).click();
-  const standaloneCard = activityList
+  const standaloneCard = activityCenter
     .locator(".activity-record-card")
     .filter({ hasText: "dev 服务启动失败" });
   await standaloneCard.scrollIntoViewIfNeeded();
@@ -343,9 +447,35 @@ test("activity source tabs isolate App, CLI and tray records", async ({ page }) 
   await expect(activityList.locator(".activity-status-pills").first()).toContainText("托盘");
 
   await activityCenter.getByRole("tab", { name: /^App / }).click();
-  await expect(activityList).toContainText("dev 服务启动失败");
-  await expect(activityList).not.toContainText("触发部署（进行中测试）");
-  await expect(activityList.locator(".activity-status-pills").first()).toContainText("App");
+  await expect(activityCenter).toContainText("dev 服务启动失败");
+  await expect(activityCenter).not.toContainText("触发部署（进行中测试）");
+});
+
+test("activity bulk confirmations use the shared compact action dialog", async ({
+  page,
+}) => {
+  await page.getByLabel("打开活动中心").click();
+
+  const activityCenter = page.getByRole("complementary", { name: "活动中心" });
+  await activityCenter.getByRole("tab", { name: /^待办 / }).click();
+  await activityCenter.getByRole("button", { name: "忽略全部" }).click();
+
+  const dialog = page.getByRole("dialog", {
+    name: "忽略全部待处理项？",
+  });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toHaveClass(/app-action-dialog-paper/);
+  await expect(dialog.locator(".app-action-dialog-title-icon")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "关闭弹窗" })).toBeVisible();
+  await expect(dialog).toContainText("记录仍可在“全部”中查看");
+
+  const width = await dialog.evaluate((element) =>
+    Math.round(element.getBoundingClientRect().width),
+  );
+  expect(width).toBeLessThanOrEqual(500);
+
+  await dialog.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
 });
 
 test("failed Link activity exposes diagnostics and checks before retrying", async ({ page }) => {
@@ -353,7 +483,8 @@ test("failed Link activity exposes diagnostics and checks before retrying", asyn
 
   const activityCenter = page.getByRole("complementary", { name: "活动中心" });
   const activityList = activityCenter.locator(".activity-list-scroll");
-  const linkCard = activityList
+  await activityCenter.getByRole("tab", { name: /^待办 / }).click();
+  const linkCard = activityCenter
     .locator(".activity-record-card")
     .filter({ hasText: "合作渠道联调" })
     .first();
@@ -365,13 +496,16 @@ test("failed Link activity exposes diagnostics and checks before retrying", asyn
   await expect(detailDialog).toContainText("端口已被占用");
   await expect(detailDialog).toContainText("127.0.0.1:8791 已被外部进程占用");
   await expect(detailDialog).toContainText("请先确认本地代理端口的归属");
-  await detailDialog.getByRole("button", { name: "关闭" }).click();
+  await detailDialog
+    .getByRole("button", { name: "关闭", exact: true })
+    .click();
 
   await linkCard.getByRole("button", { name: "检查并重新启动" }).click();
   const confirmDialog = page.getByRole("dialog", { name: "确认检查并重试？" });
   await expect(confirmDialog).toContainText("只有检查通过后");
   await confirmDialog.getByRole("button", { name: "检查并重试" }).click();
 
+  await activityCenter.getByRole("tab", { name: /^全部 / }).click();
   const recoveredCard = activityList
     .locator(".activity-record-card")
     .filter({ hasText: "合作渠道联调" })
@@ -406,6 +540,7 @@ test("Git, Runtime and proxy recovery explain their safety checks", async ({ pag
   await page.getByLabel("打开活动中心").click();
 
   const activityCenter = page.getByRole("complementary", { name: "活动中心" });
+  await activityCenter.getByRole("tab", { name: /^待办 / }).click();
 
   await activityCenter.getByRole("tab", { name: /^CLI / }).click();
   await activityCenter
@@ -422,7 +557,7 @@ test("Git, Runtime and proxy recovery explain their safety checks", async ({ pag
     .first()
     .click();
   const runtimeDialog = page.getByRole("dialog", { name: "确认检查并重新启动？" });
-  await expect(runtimeDialog).toContainText("调试档案和临时参数");
+  await expect(runtimeDialog).toContainText("启动档案和本次覆盖");
   await expect(runtimeDialog).toContainText("启动前检查");
   await runtimeDialog.getByRole("button", { name: "取消" }).click();
 

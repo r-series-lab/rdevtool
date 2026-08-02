@@ -18,6 +18,15 @@ import {
   buildActivityParameters,
   type BuildActivityParameterMeta,
 } from "../lib/historyActivities";
+import {
+  createClientOperationId,
+  isOperationActiveState,
+  OPERATION_SUBMITTING_STATE,
+} from "../lib/operationLifecycle";
+import {
+  isConfigReadyBuildHistoryEntry,
+  normalizeBuildHistoryRecords,
+} from "../lib/buildHistoryRecords";
 import type { BuildPlan, BuildRequest } from "./useBuildContext";
 
 const BUILD_STATUS_POLL_DELAY_MS = 3000;
@@ -50,10 +59,6 @@ type BuildActionCopy = {
   triggerFailed: string;
   replayFailed: string;
 };
-
-function isActiveBuildState(stateKey?: string | null) {
-  return stateKey === "accepted" || stateKey === "queued" || stateKey === "running";
-}
 
 function buildActionCopy(actionKind?: string | null): BuildActionCopy {
   const noun =
@@ -106,7 +111,7 @@ function canRefreshBuildResult(result?: BuildResult | null) {
 }
 
 function activityStatusFromBuildState(stateKey?: string | null): ActivityStatus {
-  if (isActiveBuildState(stateKey)) {
+  if (isOperationActiveState(stateKey)) {
     return "running";
   }
   if (
@@ -205,6 +210,62 @@ function activityProjectNameForRequest(
     : request.project || fallbackProjectKey;
 }
 
+type OptimisticBuildHistoryInput = {
+  operationId: string;
+  workspaceKey: string;
+  request: BuildRequest;
+  plan: BuildPlan | null;
+  projectName: string;
+  fallbackTarget: string;
+  fallbackEnv: string;
+  fallbackBranch: string;
+  detail: string;
+};
+
+export function createOptimisticBuildHistoryEntry({
+  operationId,
+  workspaceKey,
+  request,
+  plan,
+  projectName,
+  fallbackTarget,
+  fallbackEnv,
+  fallbackBranch,
+  detail,
+}: OptimisticBuildHistoryInput): BuildHistoryEntry {
+  const matchingPlan = plan?.projectKey === request.project ? plan : null;
+  const params = normalizeBuildParams(request.params);
+  const createdAt = new Date().toISOString();
+  return {
+    historyKey: operationId,
+    workspaceKey,
+    projectInstancePath: null,
+    projectKey: request.project,
+    projectName,
+    mode: request.target || matchingPlan?.jobKind || fallbackTarget,
+    env:
+      params.ENV_PROFILE ??
+      params.projectEnv ??
+      params.env ??
+      request.env ??
+      fallbackEnv,
+    branch:
+      params.BRANCH ??
+      params.branch ??
+      params.Branch ??
+      request.branch ??
+      fallbackBranch,
+    stateKey: OPERATION_SUBMITTING_STATE,
+    stateLabel: "正在提交",
+    detail,
+    queueUrl: null,
+    buildUrl: null,
+    params,
+    createdAt,
+    updatedAt: createdAt,
+  };
+}
+
 type UseBuildHistoryOptions = {
   enabled: boolean;
   activeProjectWorkspaceKey: string;
@@ -242,6 +303,40 @@ export function resolveBuildExecutionWorkspaceKey(
     recordedWorkspaceKey?.trim() ||
     activeWorkspaceKey.trim()
   );
+}
+
+export function resolveBuildHistoryKey({
+  currentHistoryKey,
+  queueUrl,
+  buildUrl,
+  activityId,
+  workspaceKey,
+  projectKey,
+  target,
+}: {
+  currentHistoryKey?: string | null;
+  queueUrl?: string | null;
+  buildUrl?: string | null;
+  activityId?: string | null;
+  workspaceKey: string;
+  projectKey: string;
+  target?: string | null;
+}) {
+  const existingKey = [
+    currentHistoryKey,
+    queueUrl,
+    buildUrl,
+    activityId,
+  ].find((value) => value?.trim());
+  if (existingKey) {
+    return existingKey.trim();
+  }
+  return [
+    "runtime-build",
+    workspaceKey.trim() || "workspace",
+    projectKey.trim() || "project",
+    target?.trim() || "default",
+  ].join(":");
 }
 
 export function useBuildHistoryState({
@@ -367,7 +462,7 @@ export function useBuildHistoryState({
   }
 
   function syncBuildActivityFromHistory(item: BuildHistoryEntry) {
-    if (isActiveBuildState(item.stateKey)) {
+    if (isOperationActiveState(item.stateKey)) {
       return;
     }
     syncBuildActivityFromEntry(item, {
@@ -434,7 +529,7 @@ export function useBuildHistoryState({
       buildAutoRefreshTimedOut ||
       !buildAutoRefreshStartedAtMs ||
       !buildResult ||
-      !isActiveBuildState(buildResult.stateKey) ||
+      !isOperationActiveState(buildResult.stateKey) ||
       !canRefreshBuildResult(buildResult)
     ) {
       return;
@@ -487,7 +582,7 @@ export function useBuildHistoryState({
     if (
       !enabled ||
       !buildResult ||
-      !isActiveBuildState(buildResult.stateKey) ||
+      !isOperationActiveState(buildResult.stateKey) ||
       !canRefreshBuildResult(buildResult) ||
       buildAutoRefreshTimedOut
     ) {
@@ -498,31 +593,23 @@ export function useBuildHistoryState({
       buildResult.stateKey === "accepted"
         ? ACCEPTED_STATUS_POLL_DELAY_MS
         : BUILD_STATUS_POLL_DELAY_MS;
-    let disposed = false;
-    let timer: number | undefined;
-    const scheduleNextRefresh = () => {
-      timer = window.setTimeout(async () => {
-        await refreshCurrentBuildStatus({ silent: true });
-        if (!disposed) {
-          scheduleNextRefresh();
-        }
-      }, delay);
-    };
-    scheduleNextRefresh();
+    const timer = window.setTimeout(() => {
+      void refreshCurrentBuildStatus({ silent: true });
+    }, delay);
 
     return () => {
-      disposed = true;
-      if (timer !== undefined) {
-        window.clearTimeout(timer);
-      }
+      window.clearTimeout(timer);
     };
   }, [
     buildAutoRefreshTimedOut,
     buildResult?.buildUrl,
+    buildResult?.detail,
     buildResult?.plan?.adapter,
     buildResult?.plan?.projectKey,
     buildResult?.queueUrl,
     buildResult?.stateKey,
+    buildResultUpdatedAtMs,
+    currentBuildHistoryKey,
     enabled,
   ]);
 
@@ -532,7 +619,9 @@ export function useBuildHistoryState({
       return;
     }
     try {
-      const items = await invoke<BuildHistoryEntry[]>(BUILD_HISTORY_COMMANDS.list);
+      const items = normalizeBuildHistoryRecords(
+        await invoke<BuildHistoryEntry[]>(BUILD_HISTORY_COMMANDS.list),
+      );
       setBuildHistory(items);
       for (const item of items.slice(0, MAX_BUILD_HISTORY_ITEMS)) {
         syncBuildActivityFromHistory(item);
@@ -549,7 +638,7 @@ export function useBuildHistoryState({
     workspaceKey = activeProjectWorkspaceKey,
   ) {
     const plan = result.plan ?? buildResult?.plan ?? currentPlan;
-    if (!plan) {
+    if (!plan || isConfigReadyBuildHistoryEntry(result)) {
       return;
     }
     const previousEntry = buildHistory.find((item) => item.historyKey === historyKey);
@@ -577,27 +666,40 @@ export function useBuildHistoryState({
   }
 
   async function persistBuildHistoryFromEntry(item: BuildHistoryEntry, result: BuildResult) {
+    if (isConfigReadyBuildHistoryEntry(result)) {
+      return;
+    }
+    const resultPlan = result.plan ?? null;
+    const params = normalizeBuildParams(resultPlan?.params ?? item.params);
     const entry: BuildHistoryEntry = {
       historyKey: item.historyKey,
       workspaceKey: item.workspaceKey ?? activeProjectWorkspaceKey,
       projectInstancePath: item.projectInstancePath ?? null,
-      projectKey: item.projectKey,
-      projectName: item.projectName,
-      mode: item.mode,
-      env: item.env,
-      branch: item.branch,
+      projectKey: resultPlan?.projectKey || item.projectKey,
+      projectName: resultPlan?.projectName || item.projectName,
+      mode: resultPlan?.jobKind || item.mode,
+      env:
+        params.ENV_PROFILE ??
+        params.projectEnv ??
+        params.env ??
+        item.env,
+      branch:
+        params.BRANCH ??
+        params.branch ??
+        params.Branch ??
+        item.branch,
       stateKey: result.stateKey,
       stateLabel: result.stateLabel,
       detail: result.detail,
       queueUrl: result.queueUrl ?? item.queueUrl ?? null,
       buildUrl: result.buildUrl ?? item.buildUrl ?? null,
-      params: item.params ?? {},
+      params,
       createdAt: item.createdAt,
       updatedAt: new Date().toISOString(),
     };
-    await invoke(BUILD_HISTORY_COMMANDS.save, { request: entry });
     upsertBuildHistoryEntry(entry);
     syncBuildActivityFromEntry(entry, result);
+    await invoke(BUILD_HISTORY_COMMANDS.save, { request: entry });
   }
 
   async function triggerBuildRequest(
@@ -617,26 +719,55 @@ export function useBuildHistoryState({
     setError("");
     const activityProjectName =
       activityProjectNameForRequest(currentPlan, request, selectedProject);
-    const activityId =
-      recordActivity?.({
-        kind: "build",
-        status: "running",
-        title: actionCopy.triggerTitle,
-        summary: `${activityProjectName} · ${request.target || target || "默认目标"}`,
-        executionKey: buildActivityExecutionKey(request.project, request.target, request.params),
+    const activityId = createClientOperationId("build");
+    const optimisticPlan =
+      currentPlan?.projectKey === request.project ? currentPlan : null;
+    const optimisticDetail = `${actionCopy.noun}请求已接收，正在创建任务`;
+    const optimisticResult: BuildResult = {
+      plan: optimisticPlan ?? undefined,
+      stateKey: OPERATION_SUBMITTING_STATE,
+      stateLabel: "正在提交",
+      detail: optimisticDetail,
+      queueUrl: null,
+      buildUrl: null,
+    };
+    const optimisticEntry = createOptimisticBuildHistoryEntry({
+      operationId: activityId,
+      workspaceKey: executionWorkspaceKey,
+      request,
+      plan: optimisticPlan,
+      projectName: activityProjectName,
+      fallbackTarget: target,
+      fallbackEnv: env,
+      fallbackBranch: branch,
+      detail: optimisticDetail,
+    });
+    recordActivity?.({
+      id: activityId,
+      kind: "build",
+      status: "running",
+      title: actionCopy.triggerTitle,
+      summary: `${activityProjectName} · ${request.target || target || "默认目标"}`,
+      executionKey: buildActivityExecutionKey(request.project, request.target, request.params),
+      projectKey: request.project,
+      projectName: activityProjectName,
+      parameters: activityParametersForBuild(
+        request.project,
+        request.target,
+        request.params,
+      ),
+      target: {
+        page: "build",
         projectKey: request.project,
-        projectName: activityProjectName,
-        parameters: activityParametersForBuild(
-          request.project,
-          request.target,
-          request.params,
-        ),
-        target: {
-          page: "build",
-          projectKey: request.project,
-        },
-      }) || "";
+      },
+    });
     currentBuildActivityIdRef.current = activityId;
+    setBuildResult(optimisticResult);
+    setBuildResultUpdatedAtMs(Date.now());
+    setCurrentBuildHistoryKey(activityId);
+    setBuildAutoRefreshStartedAtMs(null);
+    setBuildAutoRefreshTimedOut(false);
+    upsertBuildHistoryEntry(optimisticEntry);
     try {
       const result = await invoke<BuildResult>("trigger_build", {
         request,
@@ -649,53 +780,64 @@ export function useBuildHistoryState({
       setBuildResult(result);
       setBuildResultUpdatedAtMs(Date.now());
       setBuildAutoRefreshStartedAtMs(
-        isActiveBuildState(result.stateKey) && canRefreshBuildResult(result)
+        isOperationActiveState(result.stateKey) && canRefreshBuildResult(result)
           ? Date.now()
           : null,
       );
       setBuildAutoRefreshTimedOut(false);
-      const historyKey =
-        result.queueUrl ??
-        result.buildUrl ??
-        (activityId || `${request.project}:${request.target ?? target}:${Date.now()}`);
-      setCurrentBuildHistoryKey(historyKey);
-      await persistBuildHistory(
-        historyKey,
-        result,
-        executionWorkspaceKey,
-      );
-      if (activityId) {
-        const status = activityStatusFromBuildResult(result.stateKey, result);
-        updateActivity?.(activityId, {
-          status,
-          summary: `${result.stateLabel} · ${result.detail}`,
-          detail: result.buildUrl || result.queueUrl || null,
-          projectName: result.plan?.projectName || activityProjectName,
-          resource: buildRecordResource(result),
-          action: status === "failed"
-            ? buildRecoveryActionForRequest(
-                request,
-                result.plan?.projectName || activityProjectName,
-                executionWorkspaceKey,
-              )
-            : null,
-        });
+      const historyPromise = persistBuildHistoryFromEntry(optimisticEntry, result);
+      const status = activityStatusFromBuildResult(result.stateKey, result);
+      updateActivity?.(activityId, {
+        status,
+        summary: `${result.stateLabel} · ${result.detail}`,
+        detail: result.buildUrl || result.queueUrl || null,
+        projectName: result.plan?.projectName || activityProjectName,
+        resource: buildRecordResource(result),
+        action: status === "failed"
+          ? buildRecoveryActionForRequest(
+              request,
+              result.plan?.projectName || activityProjectName,
+              executionWorkspaceKey,
+            )
+          : null,
+      });
+      try {
+        await historyPromise;
+      } catch (historyReason) {
+        setError(`${actionCopy.noun}已触发，但保存本地记录失败：${String(historyReason)}`);
       }
       return activityStatusFromBuildResult(result.stateKey, result) !== "failed";
     } catch (reason) {
-      if (activityId) {
-        updateActivity?.(activityId, {
-          status: "failed",
-          summary: actionCopy.triggerFailed,
-          detail: String(reason),
-          action: buildRecoveryActionForRequest(
-            request,
-            activityProjectName,
-            executionWorkspaceKey,
-          ),
-        });
-      }
-      setError(String(reason));
+      const failureDetail = String(reason);
+      const failureResult: BuildResult = {
+        plan: optimisticPlan ?? undefined,
+        stateKey: "failed",
+        stateLabel: "提交失败",
+        detail: failureDetail,
+        queueUrl: null,
+        buildUrl: null,
+      };
+      setBuildResult(failureResult);
+      setBuildResultUpdatedAtMs(Date.now());
+      setBuildAutoRefreshStartedAtMs(null);
+      upsertBuildHistoryEntry({
+        ...optimisticEntry,
+        stateKey: failureResult.stateKey,
+        stateLabel: failureResult.stateLabel,
+        detail: failureDetail,
+        updatedAt: new Date().toISOString(),
+      });
+      updateActivity?.(activityId, {
+        status: "failed",
+        summary: actionCopy.triggerFailed,
+        detail: failureDetail,
+        action: buildRecoveryActionForRequest(
+          request,
+          activityProjectName,
+          executionWorkspaceKey,
+        ),
+      });
+      setError(failureDetail);
       return false;
     } finally {
       setBusy("");
@@ -734,30 +876,65 @@ export function useBuildHistoryState({
       options.workspaceKey,
       item.workspaceKey,
     );
-    const activityId =
-      recordActivity?.({
-        kind: "build",
-        status: "running",
-        title: actionCopy.replayTitle,
-        summary: `${item.projectName} · ${replayTarget || "默认目标"}`,
-        executionKey: buildActivityExecutionKey(item.projectKey, replayTarget, replayParams),
-        chainId: options.chainId ?? null,
-        parentId: options.parentId ?? null,
-        stepLabel: options.stepLabel ?? actionCopy.triggerTitle,
-        chainLabel: options.chainId ? "联动链路" : null,
-        projectKey: item.projectKey,
+    const activityId = createClientOperationId("build");
+    const optimisticPlan =
+      currentPlan?.projectKey === item.projectKey &&
+      currentPlan.jobKind === item.mode
+        ? currentPlan
+        : null;
+    const optimisticDetail = `${actionCopy.noun}重播请求已接收，正在创建任务`;
+    const optimisticResult: BuildResult = {
+      plan: optimisticPlan ?? undefined,
+      stateKey: OPERATION_SUBMITTING_STATE,
+      stateLabel: "正在提交",
+      detail: optimisticDetail,
+      queueUrl: null,
+      buildUrl: null,
+    };
+    const optimisticEntry: BuildHistoryEntry = {
+      ...createOptimisticBuildHistoryEntry({
+        operationId: activityId,
+        workspaceKey: executionWorkspaceKey,
+        request: replayRequest,
+        plan: optimisticPlan,
         projectName: item.projectName,
-        parameters: activityParametersForBuild(
-          item.projectKey,
-          replayTarget,
-          replayParams,
-        ),
-        target: {
-          page: "build",
-          projectKey: item.projectKey,
-        },
-      }) || "";
+        fallbackTarget: item.mode,
+        fallbackEnv: item.env,
+        fallbackBranch: item.branch,
+        detail: optimisticDetail,
+      }),
+      projectInstancePath: item.projectInstancePath ?? null,
+    };
+    recordActivity?.({
+      id: activityId,
+      kind: "build",
+      status: "running",
+      title: actionCopy.replayTitle,
+      summary: `${item.projectName} · ${replayTarget || "默认目标"}`,
+      executionKey: buildActivityExecutionKey(item.projectKey, replayTarget, replayParams),
+      chainId: options.chainId ?? null,
+      parentId: options.parentId ?? null,
+      stepLabel: options.stepLabel ?? actionCopy.triggerTitle,
+      chainLabel: options.chainId ? "联动链路" : null,
+      projectKey: item.projectKey,
+      projectName: item.projectName,
+      parameters: activityParametersForBuild(
+        item.projectKey,
+        replayTarget,
+        replayParams,
+      ),
+      target: {
+        page: "build",
+        projectKey: item.projectKey,
+      },
+    });
     currentBuildActivityIdRef.current = activityId;
+    setBuildResult(optimisticResult);
+    setBuildResultUpdatedAtMs(Date.now());
+    setCurrentBuildHistoryKey(activityId);
+    setBuildAutoRefreshStartedAtMs(null);
+    setBuildAutoRefreshTimedOut(false);
+    upsertBuildHistoryEntry(optimisticEntry);
     try {
       const result = await invoke<BuildResult>("trigger_build", {
         request: replayRequest,
@@ -770,56 +947,67 @@ export function useBuildHistoryState({
       setBuildResult(result);
       setBuildResultUpdatedAtMs(Date.now());
       setBuildAutoRefreshStartedAtMs(
-        isActiveBuildState(result.stateKey) && canRefreshBuildResult(result)
+        isOperationActiveState(result.stateKey) && canRefreshBuildResult(result)
           ? Date.now()
           : null,
       );
       setBuildAutoRefreshTimedOut(false);
-      const historyKey =
-        result.queueUrl ??
-        result.buildUrl ??
-        (activityId || `${item.projectKey}:${item.mode}:${Date.now()}`);
-      setCurrentBuildHistoryKey(historyKey);
-      await persistBuildHistory(
-        historyKey,
-        result,
-        executionWorkspaceKey,
-      );
-      if (activityId) {
-        const status = activityStatusFromBuildResult(result.stateKey, result);
-        updateActivity?.(activityId, {
-          status,
-          summary: `${result.stateLabel} · ${result.detail}`,
-          detail: result.buildUrl || result.queueUrl || null,
-          chainId: options.chainId ?? undefined,
-          parentId: options.parentId ?? undefined,
-          stepLabel: options.stepLabel ?? buildActionCopy(result.plan?.actionKind).triggerTitle,
-          chainLabel: options.chainId ? "联动链路" : undefined,
-          projectName: result.plan?.projectName || item.projectName,
-          resource: buildRecordResource(result),
-          action: status === "failed"
-            ? buildRecoveryActionForRequest(
-                replayRequest,
-                result.plan?.projectName || item.projectName,
-                executionWorkspaceKey,
-              )
-            : null,
-        });
+      const historyPromise = persistBuildHistoryFromEntry(optimisticEntry, result);
+      const status = activityStatusFromBuildResult(result.stateKey, result);
+      updateActivity?.(activityId, {
+        status,
+        summary: `${result.stateLabel} · ${result.detail}`,
+        detail: result.buildUrl || result.queueUrl || null,
+        chainId: options.chainId ?? undefined,
+        parentId: options.parentId ?? undefined,
+        stepLabel: options.stepLabel ?? buildActionCopy(result.plan?.actionKind).triggerTitle,
+        chainLabel: options.chainId ? "联动链路" : undefined,
+        projectName: result.plan?.projectName || item.projectName,
+        resource: buildRecordResource(result),
+        action: status === "failed"
+          ? buildRecoveryActionForRequest(
+              replayRequest,
+              result.plan?.projectName || item.projectName,
+              executionWorkspaceKey,
+            )
+          : null,
+      });
+      try {
+        await historyPromise;
+      } catch (historyReason) {
+        setError(`${actionCopy.noun}已重播，但保存本地记录失败：${String(historyReason)}`);
       }
     } catch (reason) {
-      if (activityId) {
-        updateActivity?.(activityId, {
-          status: "failed",
-          summary: actionCopy.replayFailed,
-          detail: String(reason),
-          action: buildRecoveryActionForRequest(
-            replayRequest,
-            item.projectName,
-            executionWorkspaceKey,
-          ),
-        });
-      }
-      setError(String(reason));
+      const failureDetail = String(reason);
+      const failureResult: BuildResult = {
+        plan: optimisticPlan ?? undefined,
+        stateKey: "failed",
+        stateLabel: "提交失败",
+        detail: failureDetail,
+        queueUrl: null,
+        buildUrl: null,
+      };
+      setBuildResult(failureResult);
+      setBuildResultUpdatedAtMs(Date.now());
+      setBuildAutoRefreshStartedAtMs(null);
+      upsertBuildHistoryEntry({
+        ...optimisticEntry,
+        stateKey: failureResult.stateKey,
+        stateLabel: failureResult.stateLabel,
+        detail: failureDetail,
+        updatedAt: new Date().toISOString(),
+      });
+      updateActivity?.(activityId, {
+        status: "failed",
+        summary: actionCopy.replayFailed,
+        detail: failureDetail,
+        action: buildRecoveryActionForRequest(
+          replayRequest,
+          item.projectName,
+          executionWorkspaceKey,
+        ),
+      });
+      setError(failureDetail);
     } finally {
       setBusy("");
     }
@@ -865,11 +1053,15 @@ export function useBuildHistoryState({
       const changed = buildResultChanged(currentResult, nextResult);
       setBuildResult(nextResult);
       setBuildResultUpdatedAtMs(Date.now());
-      const historyKey =
-        currentBuildHistoryKey ||
-        currentResult.queueUrl ||
-        currentResult.buildUrl ||
-        `${selectedProject}:${target}:${Date.now()}`;
+      const historyKey = resolveBuildHistoryKey({
+        currentHistoryKey: currentBuildHistoryKey,
+        queueUrl: currentResult.queueUrl,
+        buildUrl: currentResult.buildUrl,
+        activityId: currentBuildActivityIdRef.current,
+        workspaceKey: activeProjectWorkspaceKey,
+        projectKey: currentResult.plan?.projectKey || selectedProject,
+        target,
+      });
       setCurrentBuildHistoryKey(historyKey);
       if (changed) {
         await persistBuildHistory(historyKey, nextResult);
@@ -901,7 +1093,7 @@ export function useBuildHistoryState({
     { reportItemFailure }: { reportItemFailure: boolean },
   ) {
     const activeItems = items
-      .filter((item) => isActiveBuildState(item.stateKey))
+      .filter((item) => isOperationActiveState(item.stateKey))
       .filter((item) => item.queueUrl || item.buildUrl || item.projectKey)
       .slice(0, BUILD_HISTORY_STATUS_SYNC_LIMIT);
 
@@ -942,7 +1134,9 @@ export function useBuildHistoryState({
     setBusy("正在刷新构建记录");
     setError("");
     try {
-      const items = await invoke<BuildHistoryEntry[]>(BUILD_HISTORY_COMMANDS.list);
+      const items = normalizeBuildHistoryRecords(
+        await invoke<BuildHistoryEntry[]>(BUILD_HISTORY_COMMANDS.list),
+      );
       setBuildHistory(items);
       await refreshBuildHistoryStatusItems(items, { reportItemFailure: true });
     } catch (reason) {

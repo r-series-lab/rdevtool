@@ -4,6 +4,7 @@ import type {
   ProjectDebugProfileSummary,
   ProjectRuntimeEntry,
   ProjectRuntimePreflightResponse,
+  ProjectRuntimeStartPromptMode,
   ProjectWorkflowAction,
 } from "../app-types";
 import type {
@@ -23,9 +24,14 @@ import {
   type WorkflowSignal,
 } from "../lib/workflowSignals";
 import { configSourceIdForWorkspace } from "../lib/configSources";
+import {
+  buildProjectRuntimeResolutionArgs,
+  normalizeRuntimeEnvOverrides,
+} from "../lib/projectRuntimeLaunch";
 
 type UseProjectsModuleOptions = {
   enabled: boolean;
+  active: boolean;
   activeProjectWorkspaceKey: string;
   setBusy: (value: string) => void;
   setError: (value: string) => void;
@@ -89,6 +95,11 @@ type FinderPreferences = {
   favoriteShortcutKeys: string[];
   recentShortcutKeys: string[];
   debugProfileKeysByProject: Record<string, string>;
+  debugProfileKeysByWorkspace: Record<string, Record<string, string>>;
+  runtimeStartPromptModesByWorkspace: Record<
+    string,
+    ProjectRuntimeStartPromptMode
+  >;
   lastFinderType?: FinderType;
   lastFinderCategory?: string;
 };
@@ -109,6 +120,8 @@ const EMPTY_FINDER_PREFERENCES: FinderPreferences = {
   favoriteShortcutKeys: [],
   recentShortcutKeys: [],
   debugProfileKeysByProject: {},
+  debugProfileKeysByWorkspace: {},
+  runtimeStartPromptModesByWorkspace: {},
 };
 
 function normalizeFinderType(value: unknown): FinderType | undefined {
@@ -142,30 +155,97 @@ function normalizeStringRecord(value: unknown): Record<string, string> {
     }
     const normalizedKey = key.trim();
     const normalizedValue = item.trim();
-    if (normalizedKey && normalizedValue) {
+    if (normalizedKey) {
       next[normalizedKey] = normalizedValue;
     }
   }
   return next;
 }
 
-function normalizeRuntimeEnvOverrides(
-  value?: Record<string, string> | null,
-): Record<string, string> {
+function normalizeRuntimeStartPromptMode(
+  value: unknown,
+): ProjectRuntimeStartPromptMode {
+  return value === "always" || value === "never" ? value : "auto";
+}
+
+function normalizeRuntimeStartPromptModeRecord(
+  value: unknown,
+): Record<string, ProjectRuntimeStartPromptMode> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return {};
   }
-  const next: Record<string, string> = {};
-  for (const [key, item] of Object.entries(value)) {
-    if (typeof item !== "string") {
-      continue;
-    }
-    const normalizedKey = key.trim();
-    if (normalizedKey) {
-      next[normalizedKey] = item;
-    }
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(
+        ([key, mode]) =>
+          [
+            key.trim(),
+            normalizeRuntimeStartPromptMode(mode),
+          ] as const,
+      )
+      .filter(([key]) => Boolean(key)),
+  );
+}
+
+function normalizeNestedStringRecord(
+  value: unknown,
+): Record<string, Record<string, string>> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
   }
-  return next;
+  return Object.fromEntries(
+    Object.entries(value)
+      .map(([key, item]) => [key.trim(), normalizeStringRecord(item)] as const)
+      .filter(([key]) => Boolean(key)),
+  );
+}
+
+export function resolveWorkspaceDebugProfileKeys(
+  workspaceKey: string,
+  byWorkspace: Record<string, Record<string, string>>,
+  legacyByProject: Record<string, string>,
+): Record<string, string> {
+  return byWorkspace[workspaceKey.trim() || "system"] ?? legacyByProject;
+}
+
+export function resolveWorkspaceRuntimeStartPromptMode(
+  workspaceKey: string,
+  byWorkspace: Record<string, ProjectRuntimeStartPromptMode>,
+): ProjectRuntimeStartPromptMode {
+  return normalizeRuntimeStartPromptMode(
+    byWorkspace[workspaceKey.trim() || "system"],
+  );
+}
+
+export function updateWorkspaceDebugProfileKey(
+  workspaceKey: string,
+  projectKey: string,
+  profileKey: string,
+  byWorkspace: Record<string, Record<string, string>>,
+  legacyByProject: Record<string, string>,
+): Record<string, Record<string, string>> {
+  const normalizedWorkspaceKey = workspaceKey.trim() || "system";
+  const normalizedProjectKey = projectKey.trim();
+  const nextProfiles = {
+    ...(byWorkspace[normalizedWorkspaceKey] ?? legacyByProject),
+  };
+  nextProfiles[normalizedProjectKey] = profileKey.trim();
+  return {
+    ...byWorkspace,
+    [normalizedWorkspaceKey]: nextProfiles,
+  };
+}
+
+export function updateWorkspaceRuntimeStartPromptMode(
+  workspaceKey: string,
+  mode: ProjectRuntimeStartPromptMode,
+  byWorkspace: Record<string, ProjectRuntimeStartPromptMode>,
+): Record<string, ProjectRuntimeStartPromptMode> {
+  return {
+    ...byWorkspace,
+    [workspaceKey.trim() || "system"]:
+      normalizeRuntimeStartPromptMode(mode),
+  };
 }
 
 function normalizeRuntimeEntries(value: unknown): ProjectRuntimeEntry[] {
@@ -173,13 +253,35 @@ function normalizeRuntimeEntries(value: unknown): ProjectRuntimeEntry[] {
     return [];
   }
 
-  return value.filter(
-    (item): item is ProjectRuntimeEntry =>
-      Boolean(
-        item &&
-          typeof item === "object" &&
-          typeof (item as { key?: unknown }).key === "string",
-      ),
+  return value.filter((item): item is ProjectRuntimeEntry =>
+    Boolean(
+      item &&
+      typeof item === "object" &&
+      typeof (item as { key?: unknown }).key === "string",
+    ),
+  );
+}
+
+function runtimeEntryValue(entry: ProjectRuntimeEntry) {
+  const { updatedAtMs: _updatedAtMs, ...value } = entry;
+  return value;
+}
+
+export function sameRuntimeEntries(
+  left: ProjectRuntimeEntry[],
+  right: ProjectRuntimeEntry[],
+) {
+  if (left === right) {
+    return true;
+  }
+  if (left.length !== right.length) {
+    return false;
+  }
+  return left.every(
+    (entry, index) =>
+      entry.key === right[index]?.key &&
+      JSON.stringify(runtimeEntryValue(entry)) ===
+        JSON.stringify(runtimeEntryValue(right[index])),
   );
 }
 
@@ -195,7 +297,7 @@ export function resolveProjectRuntimeDebugProfile(
   const candidate = requestedKey?.trim() ?? "";
   const profile =
     candidate && Array.isArray(entry?.debugProfiles)
-      ? entry.debugProfiles.find((item) => item.key === candidate) ?? null
+      ? (entry.debugProfiles.find((item) => item.key === candidate) ?? null)
       : null;
   return {
     key: profile?.key ?? "",
@@ -208,6 +310,7 @@ type ProjectRuntimeLaunchPlanOptions = {
   runtimeEntry: Pick<ProjectRuntimeEntry, "debugProfiles"> | null | undefined;
   requestedDebugProfileKey?: string | null;
   envOverrides?: Record<string, string>;
+  expectedPort?: number | null;
 };
 
 export function buildProjectRuntimeLaunchPlan({
@@ -215,6 +318,7 @@ export function buildProjectRuntimeLaunchPlan({
   runtimeEntry,
   requestedDebugProfileKey,
   envOverrides,
+  expectedPort,
 }: ProjectRuntimeLaunchPlanOptions) {
   const selection = resolveProjectRuntimeDebugProfile(
     runtimeEntry,
@@ -223,17 +327,21 @@ export function buildProjectRuntimeLaunchPlan({
   const debugProfile = selection.key || null;
   const hasExplicitEnvOverrides = envOverrides != null;
   const normalizedEnvOverrides = normalizeRuntimeEnvOverrides(envOverrides);
+  const resolutionArgs = buildProjectRuntimeResolutionArgs({
+    project: projectKey,
+    debugProfile,
+    envOverrides,
+    expectedPort,
+  });
   return {
     selection,
     hasExplicitEnvOverrides,
-    preflightArgs: {
-      project: projectKey,
-      debugProfile,
-    },
+    preflightArgs: resolutionArgs,
     startArgs: {
-      project: projectKey,
-      debugProfile,
+      project: resolutionArgs.project,
+      debugProfile: resolutionArgs.debugProfile,
       envOverrides: hasExplicitEnvOverrides ? normalizedEnvOverrides : null,
+      expectedPort: resolutionArgs.expectedPort,
     },
   };
 }
@@ -247,6 +355,14 @@ export function projectRuntimePreferencesAllowStart(
   preferencesHydrated: boolean,
 ) {
   return enabled && preferencesHydrated;
+}
+
+export function projectRuntimePollingEnabled(
+  enabled: boolean,
+  active: boolean,
+  activeRuntimePollingKey: string,
+) {
+  return enabled && active && activeRuntimePollingKey.length > 0;
 }
 
 function normalizeNavigationData(value: unknown): NavigationData | null {
@@ -269,9 +385,8 @@ function normalizeNavigationData(value: unknown): NavigationData | null {
           shortLabel:
             typeof category.shortLabel === "string" ? category.shortLabel : "",
           entries: Array.isArray(category.entries)
-            ? category.entries.filter(
-                (entry): entry is NavigationEntry =>
-                  Boolean(entry && typeof entry === "object"),
+            ? category.entries.filter((entry): entry is NavigationEntry =>
+                Boolean(entry && typeof entry === "object"),
               )
             : [],
         }))
@@ -281,7 +396,9 @@ function normalizeNavigationData(value: unknown): NavigationData | null {
   return {
     filePath: typeof data.filePath === "string" ? data.filePath : "",
     preferredCategory:
-      typeof data.preferredCategory === "string" ? data.preferredCategory : null,
+      typeof data.preferredCategory === "string"
+        ? data.preferredCategory
+        : null,
     categories,
   };
 }
@@ -348,7 +465,16 @@ function normalizeFinderPreferences(value: unknown): FinderPreferences {
       0,
       MAX_RECENT_FINDER_ITEMS,
     ),
-    debugProfileKeysByProject: normalizeStringRecord(record.debugProfileKeysByProject),
+    debugProfileKeysByProject: normalizeStringRecord(
+      record.debugProfileKeysByProject,
+    ),
+    debugProfileKeysByWorkspace: normalizeNestedStringRecord(
+      record.debugProfileKeysByWorkspace,
+    ),
+    runtimeStartPromptModesByWorkspace:
+      normalizeRuntimeStartPromptModeRecord(
+        record.runtimeStartPromptModesByWorkspace,
+      ),
     lastFinderType: normalizeFinderType(record.lastFinderType),
     lastFinderCategory:
       typeof record.lastFinderCategory === "string" &&
@@ -382,7 +508,9 @@ function entry_matches_finder_type(entry: NavigationEntry, value: FinderType) {
     case "目录":
       return entry.kind === "directory" || entry.kind === "file";
     case "工具":
-      return entry.kind === "app" || entry.kind === "script" || entry.kind === "tool";
+      return (
+        entry.kind === "app" || entry.kind === "script" || entry.kind === "tool"
+      );
     default:
       return false;
   }
@@ -516,10 +644,12 @@ export type ProjectsModuleState = {
   favoriteShortcutKeys: string[];
   recentShortcutKeys: string[];
   selectedDebugProfileKeys: Record<string, string>;
+  runtimeStartPromptMode: ProjectRuntimeStartPromptMode;
   preferencesHydrated: boolean;
   toggleProjectFavorite: (projectKey: string) => void;
   toggleShortcutFavorite: (item: FinderShortcutItem) => void;
   setProjectDebugProfile: (projectKey: string, profileKey: string) => void;
+  setRuntimeStartPromptMode: (mode: ProjectRuntimeStartPromptMode) => void;
   markShortcutUsed: (item: FinderShortcutItem) => void;
   loadFinderData: (options?: LoadFinderDataOptions) => Promise<void>;
   loadProjectRuntimes: () => Promise<void>;
@@ -528,13 +658,20 @@ export type ProjectsModuleState = {
     projectKey: string,
     debugProfileKey?: string,
     envOverrides?: Record<string, string>,
+    expectedPort?: number | null,
   ) => Promise<boolean>;
   handleStopRuntime: (projectKey: string) => Promise<boolean>;
-  handleAdoptRuntime: (projectKey: string, debugProfileKey?: string) => Promise<void>;
+  handleAdoptRuntime: (
+    projectKey: string,
+    debugProfileKey?: string,
+  ) => Promise<void>;
   handleRunBuild: (projectKey: string) => Promise<void>;
   handleStopBuild: (projectKey: string) => Promise<void>;
   handleOpenBuildOutput: (projectKey: string) => Promise<void>;
-  handleFocusRuntime: (projectKey: string, debugProfileKey?: string) => Promise<void>;
+  handleFocusRuntime: (
+    projectKey: string,
+    debugProfileKey?: string,
+  ) => Promise<void>;
   handleOpenProjectDirectory: (projectKey: string) => Promise<void>;
   handleReplayProjectWorkflow: (
     replay: WorkflowProjectReplay,
@@ -544,6 +681,7 @@ export type ProjectsModuleState = {
 
 export function useProjectsModule({
   enabled,
+  active,
   activeProjectWorkspaceKey,
   setBusy,
   setError,
@@ -556,13 +694,19 @@ export function useProjectsModule({
   const [finderType, setFinderType] = useState<FinderType>("项目");
   const [finderCategory, setFinderCategory] = useState("全部");
   const [finderQuery, setFinderQuery] = useState("");
-  const [runtimeEntries, setRuntimeEntries] = useState<ProjectRuntimeEntry[]>([]);
-  const [navigationData, setNavigationData] = useState<NavigationData | null>(null);
+  const [runtimeEntries, setRuntimeEntries] = useState<ProjectRuntimeEntry[]>(
+    [],
+  );
+  const [navigationData, setNavigationData] = useState<NavigationData | null>(
+    null,
+  );
   const [preferences, setPreferences] = useState<FinderPreferences>(
     EMPTY_FINDER_PREFERENCES,
   );
   const [preferencesHydrated, setPreferencesHydrated] = useState(false);
-  const [documentHidden, setDocumentHidden] = useState(getInitialDocumentHidden);
+  const [documentHidden, setDocumentHidden] = useState(
+    getInitialDocumentHidden,
+  );
   const navigationConfigSourceId = useMemo(
     () => configSourceIdForWorkspace(activeProjectWorkspaceKey),
     [activeProjectWorkspaceKey],
@@ -575,7 +719,8 @@ export function useProjectsModule({
   const runtimeRefreshRequestIdRef = useRef(0);
   const runtimeRefreshScopeRef = useRef("");
   const activeBuildActivityIdsRef = useRef<Record<string, string>>({});
-  const projectWorkflowReplayOptionsRef = useRef<ProjectWorkflowReplayOptions | null>(null);
+  const projectWorkflowReplayOptionsRef =
+    useRef<ProjectWorkflowReplayOptions | null>(null);
   const previousRuntimeStatesRef = useRef<
     Map<string, { statusKey: string; buildStatusKey: string }>
   >(new Map());
@@ -584,7 +729,10 @@ export function useProjectsModule({
     [runtimeEntries],
   );
   const navigationCategories = useMemo(
-    () => (Array.isArray(navigationData?.categories) ? navigationData.categories : []),
+    () =>
+      Array.isArray(navigationData?.categories)
+        ? navigationData.categories
+        : [],
     [navigationData?.categories],
   );
 
@@ -601,6 +749,28 @@ export function useProjectsModule({
   const favoriteShortcutKeySet = useMemo(
     () => new Set(preferences.favoriteShortcutKeys),
     [preferences.favoriteShortcutKeys],
+  );
+  const selectedDebugProfileKeys = useMemo(() => {
+    return resolveWorkspaceDebugProfileKeys(
+      activeProjectWorkspaceKey,
+      preferences.debugProfileKeysByWorkspace,
+      preferences.debugProfileKeysByProject,
+    );
+  }, [
+    activeProjectWorkspaceKey,
+    preferences.debugProfileKeysByProject,
+    preferences.debugProfileKeysByWorkspace,
+  ]);
+  const runtimeStartPromptMode = useMemo(
+    () =>
+      resolveWorkspaceRuntimeStartPromptMode(
+        activeProjectWorkspaceKey,
+        preferences.runtimeStartPromptModesByWorkspace,
+      ),
+    [
+      activeProjectWorkspaceKey,
+      preferences.runtimeStartPromptModesByWorkspace,
+    ],
   );
 
   const shortcutEntries = useMemo(() => {
@@ -624,7 +794,8 @@ export function useProjectsModule({
       项目: runtimeItems.length,
       网站: navigationCategories.reduce(
         (count, category) =>
-          count + category.entries.filter((entry) => entry.kind === "url").length,
+          count +
+          category.entries.filter((entry) => entry.kind === "url").length,
         0,
       ),
       目录: navigationCategories.reduce(
@@ -639,7 +810,10 @@ export function useProjectsModule({
         (count, category) =>
           count +
           category.entries.filter(
-            (entry) => entry.kind === "app" || entry.kind === "script" || entry.kind === "tool",
+            (entry) =>
+              entry.kind === "app" ||
+              entry.kind === "script" ||
+              entry.kind === "tool",
           ).length,
         0,
       ),
@@ -651,7 +825,9 @@ export function useProjectsModule({
     if (finderType === "项目") {
       return [];
     }
-    const values = Array.from(new Set(shortcutEntries.map((item) => item.categoryTitle)));
+    const values = Array.from(
+      new Set(shortcutEntries.map((item) => item.categoryTitle)),
+    );
     return values.length > 1 ? ["全部", ...values] : values;
   }, [finderType, shortcutEntries]);
 
@@ -697,19 +873,13 @@ export function useProjectsModule({
       }
       return buildRuntimeHaystack(item).includes(keyword);
     });
-    return [...filtered].sort(
-      (a, b) =>
-        compareMarkedFirst(
-          favoriteProjectKeySet.has(a.key),
-          favoriteProjectKeySet.has(b.key),
-        ),
+    return [...filtered].sort((a, b) =>
+      compareMarkedFirst(
+        favoriteProjectKeySet.has(a.key),
+        favoriteProjectKeySet.has(b.key),
+      ),
     );
-  }, [
-    favoriteProjectKeySet,
-    finderQuery,
-    finderType,
-    runtimeItems,
-  ]);
+  }, [favoriteProjectKeySet, finderQuery, finderType, runtimeItems]);
 
   const filteredShortcutEntries = useMemo(() => {
     const keyword = finderQuery.trim().toLowerCase();
@@ -718,7 +888,11 @@ export function useProjectsModule({
       if (finderType === "项目") {
         return false;
       }
-      if (finderCategory !== "全部" && finderCategory && item.categoryTitle !== finderCategory) {
+      if (
+        finderCategory !== "全部" &&
+        finderCategory &&
+        item.categoryTitle !== finderCategory
+      ) {
         return false;
       }
       if (!keyword) {
@@ -726,18 +900,14 @@ export function useProjectsModule({
       }
       return buildShortcutHaystack(item).includes(keyword);
     });
-    return [...filtered].sort(
-      (a, b) => {
-        const aKey = buildFinderShortcutKey(a);
-        const bKey = buildFinderShortcutKey(b);
-        return (
-          compareMarkedFirst(
-            favoriteShortcutKeySet.has(aKey),
-            favoriteShortcutKeySet.has(bKey),
-          )
-        );
-      },
-    );
+    return [...filtered].sort((a, b) => {
+      const aKey = buildFinderShortcutKey(a);
+      const bKey = buildFinderShortcutKey(b);
+      return compareMarkedFirst(
+        favoriteShortcutKeySet.has(aKey),
+        favoriteShortcutKeySet.has(bKey),
+      );
+    });
   }, [
     favoriteShortcutKeySet,
     finderCategory,
@@ -758,12 +928,17 @@ export function useProjectsModule({
     [activeRuntimeKeys],
   );
 
-  function replaceRuntimeEntry(projectKey: string, updated: ProjectRuntimeEntry) {
-    setRuntimeEntries((current) =>
-      normalizeRuntimeEntries(current).map((item) =>
+  function replaceRuntimeEntry(
+    projectKey: string,
+    updated: ProjectRuntimeEntry,
+  ) {
+    setRuntimeEntries((current) => {
+      const normalizedCurrent = normalizeRuntimeEntries(current);
+      const next = normalizedCurrent.map((item) =>
         item.key === projectKey ? updated : item,
-      ),
-    );
+      );
+      return sameRuntimeEntries(normalizedCurrent, next) ? current : next;
+    });
   }
 
   function mergeRuntimeEntries(updatedEntries: unknown) {
@@ -775,11 +950,13 @@ export function useProjectsModule({
     const updatedEntriesMap = new Map(
       normalizedEntries.map((item) => [item.key, item] as const),
     );
-    setRuntimeEntries((current) =>
-      normalizeRuntimeEntries(current).map(
+    setRuntimeEntries((current) => {
+      const normalizedCurrent = normalizeRuntimeEntries(current);
+      const next = normalizedCurrent.map(
         (item) => updatedEntriesMap.get(item.key) ?? item,
-      ),
-    );
+      );
+      return sameRuntimeEntries(normalizedCurrent, next) ? current : next;
+    });
   }
 
   function updatePreferences(
@@ -842,7 +1019,8 @@ export function useProjectsModule({
   ) {
     try {
       const nextChainId =
-        chain?.chainId || (chain?.sourceActivityId ? `chain:${chain.sourceActivityId}` : "");
+        chain?.chainId ||
+        (chain?.sourceActivityId ? `chain:${chain.sourceActivityId}` : "");
       const signals = createProjectWorkflowSignals({
         broadcasts: workflowBroadcastRules,
         replay,
@@ -854,7 +1032,8 @@ export function useProjectsModule({
       if (signals.length > 0 && chain?.sourceActivityId && nextChainId) {
         updateActivity?.(chain.sourceActivityId, {
           chainId: nextChainId,
-          stepLabel: chain.sourceStepLabel || projectWorkflowActionLabel(replay.action),
+          stepLabel:
+            chain.sourceStepLabel || projectWorkflowActionLabel(replay.action),
           chainLabel: "联动链路",
         });
       }
@@ -871,7 +1050,10 @@ export function useProjectsModule({
     };
   }
 
-  function localPathResource(label: string, value?: string | null): ActivityResource | null {
+  function localPathResource(
+    label: string,
+    value?: string | null,
+  ): ActivityResource | null {
     const path = value?.trim();
     return path
       ? {
@@ -889,7 +1071,9 @@ export function useProjectsModule({
     );
   }
 
-  function buildResourceForProject(projectKey: string): ActivityResource | null {
+  function buildResourceForProject(
+    projectKey: string,
+  ): ActivityResource | null {
     const entry = runtimeEntryForActivity(projectKey);
     return entry ? buildResource(entry) : null;
   }
@@ -925,7 +1109,10 @@ export function useProjectsModule({
     const shortcutKey = buildFinderShortcutKey(item);
     updatePreferences((current) => ({
       ...current,
-      favoriteShortcutKeys: toggleKey(current.favoriteShortcutKeys, shortcutKey),
+      favoriteShortcutKeys: toggleKey(
+        current.favoriteShortcutKeys,
+        shortcutKey,
+      ),
     }));
   }
 
@@ -936,24 +1123,39 @@ export function useProjectsModule({
     }
     const normalizedProfileKey = profileKey.trim();
     updatePreferences((current) => {
-      const nextProfiles = { ...current.debugProfileKeysByProject };
-      if (normalizedProfileKey) {
-        nextProfiles[normalizedProjectKey] = normalizedProfileKey;
-      } else {
-        delete nextProfiles[normalizedProjectKey];
-      }
       return {
         ...current,
-        debugProfileKeysByProject: nextProfiles,
+        debugProfileKeysByWorkspace: updateWorkspaceDebugProfileKey(
+          activeProjectWorkspaceKey,
+          normalizedProjectKey,
+          normalizedProfileKey,
+          current.debugProfileKeysByWorkspace,
+          current.debugProfileKeysByProject,
+        ),
       };
     });
+  }
+
+  function setRuntimeStartPromptMode(mode: ProjectRuntimeStartPromptMode) {
+    updatePreferences((current) => ({
+      ...current,
+      runtimeStartPromptModesByWorkspace:
+        updateWorkspaceRuntimeStartPromptMode(
+          activeProjectWorkspaceKey,
+          mode,
+          current.runtimeStartPromptModesByWorkspace,
+        ),
+    }));
   }
 
   function markShortcutUsed(item: FinderShortcutItem) {
     const shortcutKey = buildFinderShortcutKey(item);
     updatePreferences((current) => ({
       ...current,
-      recentShortcutKeys: touchRecentKey(current.recentShortcutKeys, shortcutKey),
+      recentShortcutKeys: touchRecentKey(
+        current.recentShortcutKeys,
+        shortcutKey,
+      ),
     }));
   }
 
@@ -998,7 +1200,10 @@ export function useProjectsModule({
         ) {
           return;
         }
-        setRuntimeEntries(normalizeRuntimeEntries(items));
+        const nextEntries = normalizeRuntimeEntries(items);
+        setRuntimeEntries((current) =>
+          sameRuntimeEntries(current, nextEntries) ? current : nextEntries,
+        );
       }
       if (!options?.silent) {
         setError("");
@@ -1049,7 +1254,7 @@ export function useProjectsModule({
     if (!options?.force && cacheFresh) {
       return;
     }
-    if (!options?.force && finderDataPromiseRef.current) {
+    if (finderDataPromiseRef.current) {
       return finderDataPromiseRef.current;
     }
 
@@ -1073,10 +1278,10 @@ export function useProjectsModule({
   useEffect(() => {
     finderDataLoadedAtRef.current = 0;
     finderDataPromiseRef.current = null;
-    if (enabled) {
+    if (enabled && active) {
       void loadFinderData({ force: true });
     }
-  }, [enabled, navigationConfigSourceId]);
+  }, [active, enabled, navigationConfigSourceId]);
 
   async function loadProjectRuntimes() {
     await refreshProjectRuntimes();
@@ -1131,12 +1336,7 @@ export function useProjectsModule({
       lastFinderType: finderType,
       lastFinderCategory: finderCategory,
     }));
-  }, [
-    enabled,
-    finderCategory,
-    finderType,
-    preferencesHydrated,
-  ]);
+  }, [enabled, finderCategory, finderType, preferencesHydrated]);
 
   useEffect(() => {
     if (!enabled || !preferencesHydrated) {
@@ -1173,11 +1373,7 @@ export function useProjectsModule({
   }, [activeRuntimeKeys]);
 
   useEffect(() => {
-    if (!enabled) {
-      return;
-    }
-
-    if (activeRuntimePollingKey.length === 0) {
+    if (!projectRuntimePollingEnabled(enabled, active, activeRuntimePollingKey)) {
       return;
     }
 
@@ -1212,7 +1408,7 @@ export function useProjectsModule({
         window.clearTimeout(timer);
       }
     };
-  }, [activeRuntimePollingKey, documentHidden, enabled]);
+  }, [active, activeRuntimePollingKey, documentHidden, enabled]);
 
   useEffect(() => {
     if (!enabled) {
@@ -1233,7 +1429,10 @@ export function useProjectsModule({
         const activityId = activeBuildActivityIdsRef.current[item.key];
         const completionPatch: ActivityPatch = {
           status,
-          summary: runtimeActivitySummary(item.buildStatusLabel, item.buildDetail),
+          summary: runtimeActivitySummary(
+            item.buildStatusLabel,
+            item.buildDetail,
+          ),
           detail: item.buildLogPath || item.buildOutputDir || null,
           projectName: item.name,
           target: runtimeActivityTarget(item.key),
@@ -1256,9 +1455,15 @@ export function useProjectsModule({
             kind: "build",
             status,
             title: "构建完成",
-            summary: runtimeActivitySummary(item.buildStatusLabel, item.buildDetail),
+            summary: runtimeActivitySummary(
+              item.buildStatusLabel,
+              item.buildDetail,
+            ),
             detail: item.buildLogPath || item.buildOutputDir || null,
-            executionKey: projectActivityExecutionKey("project.build.run", item.key),
+            executionKey: projectActivityExecutionKey(
+              "project.build.run",
+              item.key,
+            ),
             projectKey: item.key,
             projectName: item.name,
             target: runtimeActivityTarget(item.key),
@@ -1275,7 +1480,8 @@ export function useProjectsModule({
         recordActivity?.({
           kind: "runtime",
           status: "failed",
-          title: item.statusKey === "exited" ? "dev 服务已退出" : "dev 服务异常退出",
+          title:
+            item.statusKey === "exited" ? "dev 服务已退出" : "dev 服务异常退出",
           summary: runtimeActivitySummary(item.statusLabel, item.detail),
           detail: item.logPath || null,
           executionKey: projectActivityExecutionKey(
@@ -1302,7 +1508,9 @@ export function useProjectsModule({
     );
   }, [enabled, recordActivity, runtimeItems, syncActivities, updateActivity]);
 
-  async function handleOpenFinderEntry(entry: NavigationEntry): Promise<boolean> {
+  async function handleOpenFinderEntry(
+    entry: NavigationEntry,
+  ): Promise<boolean> {
     if (!enabled) {
       return false;
     }
@@ -1359,6 +1567,7 @@ export function useProjectsModule({
     projectKey: string,
     debugProfileKey?: string,
     envOverrides?: Record<string, string>,
+    expectedPort?: number | null,
   ) {
     if (!projectRuntimePreferencesAllowStart(enabled, preferencesHydrated)) {
       return false;
@@ -1367,8 +1576,9 @@ export function useProjectsModule({
       projectKey,
       runtimeEntry: runtimeItems.find((item) => item.key === projectKey),
       requestedDebugProfileKey:
-        debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey],
+        debugProfileKey ?? selectedDebugProfileKeys[projectKey],
       envOverrides,
+      expectedPort,
     });
     const selectedDebugProfile = launchPlan.selection.key;
     const { hasExplicitEnvOverrides } = launchPlan;
@@ -1382,17 +1592,27 @@ export function useProjectsModule({
         kind: "runtime",
         status: "running",
         title: "启动 dev 服务",
-        summary: hasExplicitEnvOverrides && envOverrideCount
-          ? `${runtimeProjectName(projectKey)} · 临时参数 ${envOverrideCount} 项`
-          : runtimeProjectName(projectKey),
+        summary: [
+          runtimeProjectName(projectKey),
+          hasExplicitEnvOverrides && envOverrideCount
+            ? `临时参数 ${envOverrideCount} 项`
+            : "",
+          expectedPort ? `临时端口 ${expectedPort}` : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
         executionKey: projectActivityExecutionKey(
           "project.runtime.start",
           projectKey,
-          hasExplicitEnvOverrides
-            ? `${selectedDebugProfile || "default"}:${stableActivityJson(
-                normalizedEnvOverrides,
-              )}`
-            : selectedDebugProfile || "default",
+          [
+            selectedDebugProfile || "default",
+            hasExplicitEnvOverrides
+              ? stableActivityJson(normalizedEnvOverrides)
+              : "",
+            expectedPort ? `port-${expectedPort}` : "",
+          ]
+            .filter(Boolean)
+            .join(":"),
         ),
         ...projectWorkflowChainFields("启动 dev 服务"),
         projectKey,
@@ -1405,7 +1625,10 @@ export function useProjectsModule({
         launchPlan.preflightArgs,
       );
       if (projectRuntimePreflightBlocksStart(preflight.statusKey)) {
-        const detail = preflight.summary.trim() || preflight.statusLabel || "启动前检查未通过";
+        const detail =
+          preflight.summary.trim() ||
+          preflight.statusLabel ||
+          "启动前检查未通过";
         if (activityId) {
           updateActivity?.(activityId, {
             status: "failed",
@@ -1417,9 +1640,10 @@ export function useProjectsModule({
               label: check.title,
               status: check.statusKey === "error" ? "failed" : "checked",
               summary: check.detail || check.statusLabel,
-              risks: check.statusKey === "error" && check.detail
-                ? [check.detail]
-                : [],
+              risks:
+                check.statusKey === "error" && check.detail
+                  ? [check.detail]
+                  : [],
             })),
             action: {
               kind: "runtimeRecover",
@@ -1430,6 +1654,7 @@ export function useProjectsModule({
               envOverrides: hasExplicitEnvOverrides
                 ? normalizedEnvOverrides
                 : null,
+              expectedPort: expectedPort ?? null,
               replayAction: "start",
             },
           });
@@ -1437,11 +1662,14 @@ export function useProjectsModule({
         setError(detail);
         return false;
       }
-      const updated = await invoke<ProjectRuntimeEntry>("start_project_runtime", {
-        ...launchPlan.startArgs,
-        activityId: activityId || null,
-        operationOrigin: "app",
-      });
+      const updated = await invoke<ProjectRuntimeEntry>(
+        "start_project_runtime",
+        {
+          ...launchPlan.startArgs,
+          activityId: activityId || null,
+          operationOrigin: "app",
+        },
+      );
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
       await emitProjectWorkflowSignals(
@@ -1462,19 +1690,21 @@ export function useProjectsModule({
           detail: updated.logPath || null,
           projectName: updated.name,
           resource: localPathResource("打开日志", updated.logPath),
-          action: status === "failed"
-            ? {
-                kind: "runtimeRecover",
-                label: "检查并重新启动",
-                projectKey,
-                projectName: updated.name,
-                debugProfileKey: selectedDebugProfile || null,
-                envOverrides: hasExplicitEnvOverrides
-                  ? normalizedEnvOverrides
-                  : null,
-                replayAction: "start",
-              }
-            : null,
+          action:
+            status === "failed"
+              ? {
+                  kind: "runtimeRecover",
+                  label: "检查并重新启动",
+                  projectKey,
+                  projectName: updated.name,
+                  debugProfileKey: selectedDebugProfile || null,
+                  envOverrides: hasExplicitEnvOverrides
+                    ? normalizedEnvOverrides
+                    : null,
+                  expectedPort: expectedPort ?? null,
+                  replayAction: "start",
+                }
+              : null,
         });
       }
       return runtimeStartActivityStatus(updated.statusKey) === "success";
@@ -1484,14 +1714,16 @@ export function useProjectsModule({
           status: "failed",
           summary: "dev 服务启动失败",
           detail: String(reason),
-          diagnostics: [{
-            id: `runtime:start:${projectKey}`,
-            type: "runtime.start",
-            label: runtimeProjectName(projectKey),
-            status: "failed",
-            summary: "dev 服务启动失败",
-            risks: [String(reason)],
-          }],
+          diagnostics: [
+            {
+              id: `runtime:start:${projectKey}`,
+              type: "runtime.start",
+              label: runtimeProjectName(projectKey),
+              status: "failed",
+              summary: "dev 服务启动失败",
+              risks: [String(reason)],
+            },
+          ],
           action: {
             kind: "runtimeRecover",
             label: "检查并重新启动",
@@ -1501,6 +1733,7 @@ export function useProjectsModule({
             envOverrides: hasExplicitEnvOverrides
               ? normalizedEnvOverrides
               : null,
+            expectedPort: expectedPort ?? null,
             replayAction: "start",
           },
         });
@@ -1526,18 +1759,24 @@ export function useProjectsModule({
         status: "running",
         title: "停止 dev 服务",
         summary: runtimeProjectName(projectKey),
-        executionKey: projectActivityExecutionKey("project.runtime.stop", projectKey),
+        executionKey: projectActivityExecutionKey(
+          "project.runtime.stop",
+          projectKey,
+        ),
         ...projectWorkflowChainFields("停止 dev 服务"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
         target: runtimeActivityTarget(projectKey),
       }) || "";
     try {
-      const updated = await invoke<ProjectRuntimeEntry>("stop_project_runtime", {
-        project: projectKey,
-        activityId: activityId || null,
-        operationOrigin: "app",
-      });
+      const updated = await invoke<ProjectRuntimeEntry>(
+        "stop_project_runtime",
+        {
+          project: projectKey,
+          activityId: activityId || null,
+          operationOrigin: "app",
+        },
+      );
       replaceRuntimeEntry(projectKey, updated);
       syncActivities?.(
         { kind: "runtime", status: "failed", projectKey },
@@ -1570,14 +1809,16 @@ export function useProjectsModule({
           status: "failed",
           summary: "dev 服务停止失败",
           detail: String(reason),
-          diagnostics: [{
-            id: `runtime:stop:${projectKey}`,
-            type: "runtime.stop",
-            label: runtimeProjectName(projectKey),
-            status: "failed",
-            summary: "dev 服务停止失败",
-            risks: [String(reason)],
-          }],
+          diagnostics: [
+            {
+              id: `runtime:stop:${projectKey}`,
+              type: "runtime.stop",
+              label: runtimeProjectName(projectKey),
+              status: "failed",
+              summary: "dev 服务停止失败",
+              risks: [String(reason)],
+            },
+          ],
           action: {
             kind: "runtimeRecover",
             label: "检查并重新停止",
@@ -1595,7 +1836,10 @@ export function useProjectsModule({
     }
   }
 
-  async function handleAdoptRuntime(projectKey: string, debugProfileKey?: string) {
+  async function handleAdoptRuntime(
+    projectKey: string,
+    debugProfileKey?: string,
+  ) {
     if (!enabled) {
       return;
     }
@@ -1605,7 +1849,7 @@ export function useProjectsModule({
       return;
     }
     const selectedDebugProfile =
-      debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey];
+      debugProfileKey ?? selectedDebugProfileKeys[projectKey];
     setBusy("正在认领外部 dev 服务");
     setError("");
     const activityId =
@@ -1614,19 +1858,25 @@ export function useProjectsModule({
         status: "running",
         title: "认领外部 dev 服务",
         summary: runtimeProjectName(projectKey),
-        executionKey: projectActivityExecutionKey("project.runtime.adopt", projectKey),
+        executionKey: projectActivityExecutionKey(
+          "project.runtime.adopt",
+          projectKey,
+        ),
         projectKey,
         projectName: runtimeProjectName(projectKey),
         target: runtimeActivityTarget(projectKey),
       }) || "";
     try {
-      const updated = await invoke<ProjectRuntimeEntry>("adopt_project_runtime", {
-        project: projectKey,
-        pid: runtime.pid,
-        debugProfile: selectedDebugProfile || null,
-        activityId: activityId || null,
-        operationOrigin: "app",
-      });
+      const updated = await invoke<ProjectRuntimeEntry>(
+        "adopt_project_runtime",
+        {
+          project: projectKey,
+          pid: runtime.pid,
+          debugProfile: selectedDebugProfile || null,
+          activityId: activityId || null,
+          operationOrigin: "app",
+        },
+      );
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
       if (activityId) {
@@ -1665,7 +1915,10 @@ export function useProjectsModule({
         status: "running",
         title: "执行构建",
         summary: runtimeProjectName(projectKey),
-        executionKey: projectActivityExecutionKey("project.build.run", projectKey),
+        executionKey: projectActivityExecutionKey(
+          "project.build.run",
+          projectKey,
+        ),
         ...projectWorkflowChainFields("执行构建"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
@@ -1691,7 +1944,10 @@ export function useProjectsModule({
           activeBuildActivityIdsRef.current[projectKey] = activityId;
           updateActivity?.(activityId, {
             status: "running",
-            summary: runtimeActivitySummary(updated.buildStatusLabel, updated.buildDetail),
+            summary: runtimeActivitySummary(
+              updated.buildStatusLabel,
+              updated.buildDetail,
+            ),
             detail: updated.buildLogPath || null,
             projectName: updated.name,
             resource: buildResource(updated),
@@ -1699,7 +1955,10 @@ export function useProjectsModule({
         } else {
           updateActivity?.(activityId, {
             status: runtimeActivityStatus(updated.buildStatusKey),
-            summary: runtimeActivitySummary(updated.buildStatusLabel, updated.buildDetail),
+            summary: runtimeActivitySummary(
+              updated.buildStatusLabel,
+              updated.buildDetail,
+            ),
             detail: updated.buildLogPath || updated.buildOutputDir || null,
             projectName: updated.name,
             resource: buildResource(updated),
@@ -1729,14 +1988,18 @@ export function useProjectsModule({
 
     setBusy("正在中止构建任务");
     setError("");
-    const runningBuildActivityId = activeBuildActivityIdsRef.current[projectKey] || "";
+    const runningBuildActivityId =
+      activeBuildActivityIdsRef.current[projectKey] || "";
     const activityId =
       recordActivity?.({
         kind: "build",
         status: "running",
         title: "中止构建",
         summary: runtimeProjectName(projectKey),
-        executionKey: projectActivityExecutionKey("project.build.stop", projectKey),
+        executionKey: projectActivityExecutionKey(
+          "project.build.stop",
+          projectKey,
+        ),
         ...projectWorkflowChainFields("中止构建"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
@@ -1770,7 +2033,10 @@ export function useProjectsModule({
       if (activityId) {
         updateActivity?.(activityId, {
           status: "success",
-          summary: runtimeActivitySummary(updated.buildStatusLabel, updated.buildDetail),
+          summary: runtimeActivitySummary(
+            updated.buildStatusLabel,
+            updated.buildDetail,
+          ),
           detail: updated.buildLogPath || null,
           projectName: updated.name,
           resource: buildResource(updated),
@@ -1805,7 +2071,10 @@ export function useProjectsModule({
         status: "running",
         title: "打开构建产物",
         summary: runtimeProjectName(projectKey),
-        executionKey: projectActivityExecutionKey("project.build.openOutput", projectKey),
+        executionKey: projectActivityExecutionKey(
+          "project.build.openOutput",
+          projectKey,
+        ),
         ...projectWorkflowChainFields("打开构建产物"),
         projectKey,
         projectName: runtimeProjectName(projectKey),
@@ -1813,10 +2082,13 @@ export function useProjectsModule({
         resource: buildResourceForProject(projectKey),
       }) || "";
     try {
-      const updated = await invoke<ProjectRuntimeEntry>("open_project_build_output", {
-        project: projectKey,
-        outputDir: null,
-      });
+      const updated = await invoke<ProjectRuntimeEntry>(
+        "open_project_build_output",
+        {
+          project: projectKey,
+          outputDir: null,
+        },
+      );
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
       await emitProjectWorkflowSignals(
@@ -1852,14 +2124,17 @@ export function useProjectsModule({
     }
   }
 
-  async function handleFocusRuntime(projectKey: string, debugProfileKey?: string) {
+  async function handleFocusRuntime(
+    projectKey: string,
+    debugProfileKey?: string,
+  ) {
     if (!enabled) {
       return;
     }
 
     const selectedDebugProfile = resolveProjectRuntimeDebugProfile(
       runtimeItems.find((item) => item.key === projectKey),
-      debugProfileKey ?? preferences.debugProfileKeysByProject[projectKey],
+      debugProfileKey ?? selectedDebugProfileKeys[projectKey],
     ).key;
     setBusy("正在唤起运行中的项目");
     setError("");
@@ -1882,10 +2157,13 @@ export function useProjectsModule({
         target: runtimeActivityTarget(projectKey),
       }) || "";
     try {
-      const updated = await invoke<ProjectRuntimeEntry>("focus_project_runtime", {
-        project: projectKey,
-        debugProfile: selectedDebugProfile || null,
-      });
+      const updated = await invoke<ProjectRuntimeEntry>(
+        "focus_project_runtime",
+        {
+          project: projectKey,
+          debugProfile: selectedDebugProfile || null,
+        },
+      );
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
       await emitProjectWorkflowSignals(
@@ -1940,7 +2218,10 @@ export function useProjectsModule({
         title: "打开项目目录",
         summary: entry.name,
         detail: path,
-        executionKey: projectActivityExecutionKey("project.openDirectory", projectKey),
+        executionKey: projectActivityExecutionKey(
+          "project.openDirectory",
+          projectKey,
+        ),
         ...projectWorkflowChainFields("打开项目目录"),
         projectKey,
         projectName: entry.name,
@@ -1948,9 +2229,12 @@ export function useProjectsModule({
         resource: localPathResource("打开项目目录", path),
       }) || "";
     try {
-      const updated = await invoke<ProjectRuntimeEntry>("open_project_directory", {
-        project: projectKey,
-      });
+      const updated = await invoke<ProjectRuntimeEntry>(
+        "open_project_directory",
+        {
+          project: projectKey,
+        },
+      );
       replaceRuntimeEntry(projectKey, updated);
       touchProjectUsage(projectKey);
       await emitProjectWorkflowSignals(
@@ -1992,7 +2276,8 @@ export function useProjectsModule({
     projectWorkflowReplayOptionsRef.current = options.chainId
       ? {
           ...options,
-          stepLabel: options.stepLabel || projectWorkflowActionLabel(replay.action),
+          stepLabel:
+            options.stepLabel || projectWorkflowActionLabel(replay.action),
         }
       : null;
     try {
@@ -2054,11 +2339,13 @@ export function useProjectsModule({
     recentProjectKeys: preferences.recentProjectKeys,
     favoriteShortcutKeys: preferences.favoriteShortcutKeys,
     recentShortcutKeys: preferences.recentShortcutKeys,
-    selectedDebugProfileKeys: preferences.debugProfileKeysByProject,
+    selectedDebugProfileKeys,
+    runtimeStartPromptMode,
     preferencesHydrated,
     toggleProjectFavorite,
     toggleShortcutFavorite,
     setProjectDebugProfile,
+    setRuntimeStartPromptMode,
     markShortcutUsed,
     loadFinderData,
     loadProjectRuntimes,

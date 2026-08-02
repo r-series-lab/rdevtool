@@ -182,6 +182,9 @@ pub struct BuildPlanObserved {
     pub commit_source: Option<String>,
     pub changed_paths: Vec<String>,
     pub change_sources: Vec<String>,
+    pub local_working_tree_paths: Vec<String>,
+    pub local_committed_paths: Vec<String>,
+    pub selected_branch_changed_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -258,6 +261,7 @@ pub struct BuildStatusResponse {
     pub state_key: String,
     pub state_label: String,
     pub detail: String,
+    pub commit: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1128,6 +1132,9 @@ fn build_plan_with_observation(
         commit_source: None,
         changed_paths: Vec::new(),
         change_sources: Vec::new(),
+        local_working_tree_paths: Vec::new(),
+        local_committed_paths: Vec::new(),
+        selected_branch_changed_paths: Vec::new(),
     };
     let mut evidence = Vec::new();
 
@@ -1136,6 +1143,8 @@ fn build_plan_with_observation(
             Ok(snapshot) => {
                 observed.changed_paths.extend(snapshot.paths);
                 observed.change_sources.extend(snapshot.sources);
+                observed.local_working_tree_paths = snapshot.working_tree_paths;
+                observed.local_committed_paths = snapshot.committed_paths;
             }
             Err(error) => risks.push(OperationRisk {
                 code: "changeInspectionFailed".to_string(),
@@ -1176,7 +1185,8 @@ fn build_plan_with_observation(
 
             match git::cached_branch_tip_changed_paths(repo_path, branch) {
                 Ok(paths) if !paths.is_empty() => {
-                    observed.changed_paths.extend(paths);
+                    observed.changed_paths.extend(paths.iter().cloned());
+                    observed.selected_branch_changed_paths = paths;
                     observed
                         .change_sources
                         .push("selectedBranchTip".to_string());
@@ -1201,11 +1211,12 @@ fn build_plan_with_observation(
     observed.changed_paths.dedup();
     observed.change_sources.sort();
     observed.change_sources.dedup();
-    risks.extend(build_side_change_risks(
-        target,
-        &params,
-        &observed.changed_paths,
-    ));
+    let build_scope_paths = if effective_branch.is_some() {
+        &observed.selected_branch_changed_paths
+    } else {
+        &observed.changed_paths
+    };
+    risks.extend(build_side_change_risks(target, &params, build_scope_paths));
 
     if let Some(commit) = observed.commit.as_ref() {
         evidence.push(OperationEvidence {
@@ -1217,11 +1228,30 @@ fn build_plan_with_observation(
             detail: format!("{} {}", commit.short_hash, commit.subject),
         });
     }
-    if !observed.changed_paths.is_empty() {
+    if !observed.local_working_tree_paths.is_empty() {
         evidence.push(OperationEvidence {
-            kind: "changedPaths".to_string(),
-            source: observed.change_sources.join(","),
-            detail: observed.changed_paths.join(", "),
+            kind: "localWorkingTreeChanges".to_string(),
+            source: "workingTree".to_string(),
+            detail: observed.local_working_tree_paths.join(", "),
+        });
+    }
+    if !observed.local_committed_paths.is_empty() {
+        evidence.push(OperationEvidence {
+            kind: "localCommittedChanges".to_string(),
+            source: observed
+                .change_sources
+                .iter()
+                .find(|source| source.starts_with("committedDiff:"))
+                .cloned()
+                .unwrap_or_else(|| "localBranch".to_string()),
+            detail: observed.local_committed_paths.join(", "),
+        });
+    }
+    if !observed.selected_branch_changed_paths.is_empty() {
+        evidence.push(OperationEvidence {
+            kind: "selectedBranchChanges".to_string(),
+            source: "selectedBranchTip".to_string(),
+            detail: observed.selected_branch_changed_paths.join(", "),
         });
     }
 
@@ -1344,6 +1374,7 @@ pub fn refresh_deploy_status(
         state_key: trigger_state_key(result.state).to_string(),
         state_label: result.state.label().to_string(),
         detail: result.detail,
+        commit: result.commit,
     })
 }
 
@@ -3315,6 +3346,8 @@ impact_paths = ["mobile/**"]
         std::fs::create_dir_all(repo.join("mobile/src")).expect("create mobile directory");
         std::fs::write(repo.join("mobile/src/mid-page.ts"), "export {};\n")
             .expect("write mobile change");
+        run_test_git(&repo, &["add", "mobile/src/mid-page.ts"]);
+        run_test_git(&repo, &["commit", "-m", "mobile change"]);
         let config = build_plan_test_config(&repo, true);
         let request = DeployRequest {
             project: "demo".to_string(),
@@ -3339,6 +3372,10 @@ impact_paths = ["mobile/**"]
                 .iter()
                 .any(|path| path == "mobile/src/mid-page.ts")
         );
+        assert_eq!(
+            blocked.observed.selected_branch_changed_paths,
+            vec!["mobile/src/mid-page.ts".to_string()]
+        );
 
         let mut enabled_request = request;
         enabled_request
@@ -3352,6 +3389,48 @@ impact_paths = ["mobile/**"]
                 .iter()
                 .all(|risk| risk.code != "buildSideDisabled.IS_BUILD_MOBILE")
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn build_plan_does_not_treat_unrelated_local_changes_as_selected_branch_changes() {
+        let (root, repo) = branch_catalog_test_repo(None);
+        std::fs::create_dir_all(repo.join("mobile/src")).expect("create mobile directory");
+        std::fs::write(repo.join("mobile/src/local-only.ts"), "export {};\n")
+            .expect("write local-only mobile change");
+        let config = build_plan_test_config(&repo, true);
+        let plan = build_plan(
+            &config,
+            &DeployRequest {
+                project: "demo".to_string(),
+                target: Some("vke".to_string()),
+                env: Some("dc2".to_string()),
+                branch: Some("main".to_string()),
+                ..DeployRequest::default()
+            },
+        )
+        .expect("build plan");
+
+        assert!(plan.status.success);
+        assert!(
+            plan.risks
+                .iter()
+                .all(|risk| risk.code != "buildSideDisabled.IS_BUILD_MOBILE")
+        );
+        assert_eq!(
+            plan.observed.local_working_tree_paths,
+            vec!["mobile/src/local-only.ts".to_string()]
+        );
+        assert!(
+            plan.observed
+                .selected_branch_changed_paths
+                .iter()
+                .all(|path| path != "mobile/src/local-only.ts")
+        );
+        assert!(plan.evidence.iter().any(|item| {
+            item.kind == "localWorkingTreeChanges"
+                && item.detail.contains("mobile/src/local-only.ts")
+        }));
         let _ = std::fs::remove_dir_all(root);
     }
 

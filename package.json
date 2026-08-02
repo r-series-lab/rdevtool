@@ -9,6 +9,7 @@
     "release:artifacts": "node ./scripts/collect-release-artifacts.mjs",
     "cli": "cargo run --quiet --",
     "cli:json": "cargo run --quiet -- --json",
+    "cli:install": "sh ./scripts/install-cli.sh",
     "manifest:check": "node ./scripts/validate-app-manifest.mjs",
     "manifest:check:json": "node ./scripts/validate-app-manifest.mjs --json",
     "ipc:check": "node ./scripts/check-ipc-contract.mjs",

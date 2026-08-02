@@ -5,6 +5,7 @@ import type {
   BranchPushAction,
   BranchPushStatus,
   BranchTaskHistoryEntry,
+  BranchTaskPendingEntry,
   BranchTaskReplayCommand,
   BranchTaskReplayRequest,
   BranchTaskResponse,
@@ -23,6 +24,12 @@ import {
   branchTaskDisplayDetail,
   branchTaskFailureReplay,
 } from "../lib/branchTaskDetails";
+import {
+  createFailedBranchTaskEntry,
+  createPendingBranchTaskEntry,
+  inferBranchSyncReplay,
+} from "../lib/branchOperationHistory";
+import { createClientOperationId } from "../lib/operationLifecycle";
 import {
   deleteStoredJson,
   getStoredJson,
@@ -57,8 +64,6 @@ type UseBranchWorkflowModuleOptions = {
   activeProjectWorkspaceKey: string;
   projects: ProjectSummary[];
   selectedProject: string;
-  sourceBranchOptions: string[];
-  targetBranchOptions: string[];
   setBusy: (value: string) => void;
   setError: (value: string) => void;
   workflowBroadcastRules: WorkflowBroadcastRule[];
@@ -80,6 +85,21 @@ function normalizeValues(values: string[]): string[] {
   return Array.from(
     new Set(values.map((value) => value.trim()).filter(Boolean)),
   );
+}
+
+export function branchWorkflowReferenceProject(
+  mode: BranchWorkflowMode,
+  selectedProject: string,
+  syncProjects: string[],
+  createProjects: string[],
+) {
+  const selectedProjects =
+    mode === "sync"
+      ? normalizeValues(syncProjects)
+      : mode === "create"
+        ? normalizeValues(createProjects)
+        : [];
+  return selectedProjects[0] || selectedProject.trim();
 }
 
 export function branchWorkflowProjectReset(selectedProject: string) {
@@ -124,7 +144,9 @@ function normalizeReplay(value: unknown): BranchTaskReplayRequest | null {
       typeof candidate.refreshPushStatusProject === "string"
         ? candidate.refreshPushStatusProject
         : null,
-    clearPushCommitMessageOnSuccess: Boolean(candidate.clearPushCommitMessageOnSuccess),
+    clearPushCommitMessageOnSuccess: Boolean(
+      candidate.clearPushCommitMessageOnSuccess,
+    ),
   };
 }
 
@@ -146,10 +168,13 @@ function normalizeHistory(value: unknown): BranchTaskHistoryEntry[] {
         Array.isArray(candidate.items)
       );
     })
-    .map((item) => ({
-      ...item,
-      replay: normalizeReplay(item.replay),
-    }))
+    .map((item) => {
+      const replay = normalizeReplay(item.replay);
+      return {
+        ...item,
+        replay: replay ?? inferBranchSyncReplay(item),
+      };
+    })
     .slice(0, MAX_STORED_HISTORY_ITEMS);
 }
 
@@ -173,10 +198,9 @@ function cliBranchSyncBatch(historyKey: string) {
 }
 
 function normalizeMergeHistoryCreatedAt(value: string) {
-  const normalized = value.trim().replace(
-    /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/,
-    "$1T$2Z",
-  );
+  const normalized = value
+    .trim()
+    .replace(/^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/, "$1T$2Z");
   const timestamp = Date.parse(normalized);
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : value;
 }
@@ -245,10 +269,12 @@ export function branchTaskHistoryFromCliMergeHistory(
       .filter(Boolean)
       .join(" / ");
     const createdAt = entries
-      .map(({ history: item }) => normalizeMergeHistoryCreatedAt(item.createdAt))
+      .map(({ history: item }) =>
+        normalizeMergeHistoryCreatedAt(item.createdAt),
+      )
       .sort((left, right) => Date.parse(right) - Date.parse(left))[0];
 
-    return {
+    const entry = {
       id: batchKey,
       taskKind: "sync" as const,
       success: failed === 0,
@@ -259,8 +285,13 @@ export function branchTaskHistoryFromCliMergeHistory(
       workspaceKey: entries[0]?.history.workspaceKey ?? null,
       replay: null,
     };
+    return {
+      ...entry,
+      replay: inferBranchSyncReplay(entry),
+    };
   }).sort(
-    (left, right) => branchTaskHistoryTimestamp(right) - branchTaskHistoryTimestamp(left),
+    (left, right) =>
+      branchTaskHistoryTimestamp(right) - branchTaskHistoryTimestamp(left),
   );
 }
 
@@ -275,7 +306,8 @@ export function mergeBranchTaskHistory(
   }
   return Array.from(historyById.values())
     .sort(
-      (left, right) => branchTaskHistoryTimestamp(right) - branchTaskHistoryTimestamp(left),
+      (left, right) =>
+        branchTaskHistoryTimestamp(right) - branchTaskHistoryTimestamp(left),
     )
     .slice(0, MAX_STORED_HISTORY_ITEMS);
 }
@@ -297,7 +329,9 @@ function makeHistoryEntry(
       `${result.taskKind}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     createdAt: new Date().toISOString(),
     workspaceKey,
-    replay: replay ? { ...replay, request: cloneReplayRequest(replay.request) } : null,
+    replay: replay
+      ? { ...replay, request: cloneReplayRequest(replay.request) }
+      : null,
   };
 }
 
@@ -305,7 +339,10 @@ function makeReplayRequest(
   command: BranchTaskReplayCommand,
   busyText: string,
   request: Record<string, unknown>,
-  options: Omit<BranchTaskReplayRequest, "command" | "busyText" | "request"> = {},
+  options: Omit<
+    BranchTaskReplayRequest,
+    "command" | "busyText" | "request"
+  > = {},
 ): BranchTaskReplayRequest {
   return {
     command,
@@ -324,17 +361,25 @@ function requestRepoPath(request: Record<string, unknown>) {
 }
 
 function requestFirstProject(request: Record<string, unknown>) {
-  const project = requestProject(request);
-  if (project) {
-    return project;
-  }
-  return Array.isArray(request.projects) && typeof request.projects[0] === "string"
-    ? request.projects[0]
-    : "";
+  return requestProjects(request)[0] || "";
 }
 
-function worktreeFromPushStatus(status: BranchPushStatus): BranchWorktreeSummary {
-  const name = status.repoPath.split(/[\\/]/).filter(Boolean).pop() || "自选目录";
+function requestProjects(request: Record<string, unknown>) {
+  return normalizeValues([
+    requestProject(request),
+    ...(Array.isArray(request.projects)
+      ? request.projects.filter(
+          (item): item is string => typeof item === "string",
+        )
+      : []),
+  ]);
+}
+
+function worktreeFromPushStatus(
+  status: BranchPushStatus,
+): BranchWorktreeSummary {
+  const name =
+    status.repoPath.split(/[\\/]/).filter(Boolean).pop() || "自选目录";
   return {
     projectKey: status.projectKey,
     projectName: status.projectName,
@@ -351,12 +396,16 @@ function worktreeFromPushStatus(status: BranchPushStatus): BranchWorktreeSummary
     managed: false,
     statusKey: status.clean ? "clean" : "dirty",
     statusLabel: status.clean ? "干净" : "有改动",
-    detail: status.upstreamBranch ? `upstream: ${status.upstreamBranch}` : "自选本地目录",
+    detail: status.upstreamBranch
+      ? `upstream: ${status.upstreamBranch}`
+      : "自选本地目录",
     latestCommit: status.latestCommit,
   };
 }
 
-function branchModeFromCommand(command: BranchTaskReplayCommand): BranchWorkflowMode {
+function branchModeFromCommand(
+  command: BranchTaskReplayCommand,
+): BranchWorkflowMode {
   if (command === "execute_branch_create_task") {
     return "create";
   }
@@ -419,8 +468,12 @@ export function branchHistoryMatchesWorkspace(
   );
 }
 
-function branchResultResource(result: BranchTaskResponse): ActivityResource | null {
-  const outputPath = result.items.find((item) => item.outputPath)?.outputPath?.trim();
+function branchResultResource(
+  result: BranchTaskResponse,
+): ActivityResource | null {
+  const outputPath = result.items
+    .find((item) => item.outputPath)
+    ?.outputPath?.trim();
   if (!outputPath) {
     return null;
   }
@@ -464,20 +517,37 @@ export function useBranchWorkflowModule({
   const [worktreesLoading, setWorktreesLoading] = useState(false);
   const [worktreesError, setWorktreesError] = useState("");
   const [selectedWorktreePath, setSelectedWorktreePath] = useState("");
-  const [branchTaskHistory, setBranchTaskHistory] = useState<BranchTaskHistoryEntry[]>([]);
-  const [currentBranchTaskHistoryId, setCurrentBranchTaskHistoryId] = useState("");
-  const [currentBranchTaskRunningLabel, setCurrentBranchTaskRunningLabel] = useState("");
+  const [branchTaskHistory, setBranchTaskHistory] = useState<
+    BranchTaskHistoryEntry[]
+  >([]);
+  const [currentBranchTaskHistoryId, setCurrentBranchTaskHistoryId] =
+    useState("");
+  const [currentBranchTask, setCurrentBranchTask] =
+    useState<BranchTaskPendingEntry | null>(null);
   const lastBranchActivityIdRef = useRef("");
-  const lastBranchTaskHistoryEntryRef = useRef<BranchTaskHistoryEntry | null>(null);
+  const lastBranchTaskHistoryEntryRef = useRef<BranchTaskHistoryEntry | null>(
+    null,
+  );
   const pushStatusLoadedProjectRef = useRef("");
+  const syncReferenceProjectRef = useRef("");
+  const createReferenceProjectRef = useRef("");
+  const syncReferenceProject = branchWorkflowReferenceProject(
+    "sync",
+    selectedProject,
+    syncProjects,
+    createProjects,
+  );
+  const createReferenceProject = branchWorkflowReferenceProject(
+    "create",
+    selectedProject,
+    syncProjects,
+    createProjects,
+  );
 
   const worktreeOptions = useMemo(() => {
     const items = [...worktrees];
     const selectedPath = selectedWorktreePath.trim();
-    if (
-      selectedPath &&
-      !items.some((item) => item.repoPath === selectedPath)
-    ) {
+    if (selectedPath && !items.some((item) => item.repoPath === selectedPath)) {
       if (pushStatus?.repoPath === selectedPath) {
         items.push(worktreeFromPushStatus(pushStatus));
       } else {
@@ -544,7 +614,7 @@ export function useBranchWorkflowModule({
   useEffect(() => {
     if (!enabled) {
       setCurrentBranchTaskHistoryId("");
-      setCurrentBranchTaskRunningLabel("");
+      setCurrentBranchTask(null);
       lastBranchTaskHistoryEntryRef.current = null;
       setPushStatus(null);
       setPushStatusError("");
@@ -567,6 +637,36 @@ export function useBranchWorkflowModule({
       setSwitchTarget(reset.switchTarget);
     }
   }, [enabled]);
+
+  useEffect(() => {
+    if (!enabled) {
+      syncReferenceProjectRef.current = "";
+      return;
+    }
+    if (
+      syncReferenceProjectRef.current &&
+      syncReferenceProjectRef.current !== syncReferenceProject
+    ) {
+      setSyncSource("");
+      setSyncTargets([]);
+    }
+    syncReferenceProjectRef.current = syncReferenceProject;
+  }, [enabled, syncReferenceProject]);
+
+  useEffect(() => {
+    if (!enabled) {
+      createReferenceProjectRef.current = "";
+      return;
+    }
+    if (
+      createReferenceProjectRef.current &&
+      createReferenceProjectRef.current !== createReferenceProject
+    ) {
+      setCreateSource("");
+      setCreateTarget("");
+    }
+    createReferenceProjectRef.current = createReferenceProject;
+  }, [createReferenceProject, enabled]);
 
   useEffect(() => {
     if (!enabled) {
@@ -666,6 +766,7 @@ export function useBranchWorkflowModule({
     entryId?: string | null,
   ) {
     const entry = makeHistoryEntry(result, workspaceKey, replay, entryId);
+    setBranchTaskHistory((current) => mergeBranchTaskHistory([entry], current));
     const stored = await prependStoredJsonArray<unknown>(
       BRANCH_WORKFLOW_STORAGE_NAMESPACE,
       BRANCH_WORKFLOW_HISTORY_KEY,
@@ -723,7 +824,7 @@ export function useBranchWorkflowModule({
         ),
       );
       setCurrentBranchTaskHistoryId("");
-      setCurrentBranchTaskRunningLabel("");
+      setCurrentBranchTask(null);
       lastBranchTaskHistoryEntryRef.current = null;
     } catch (reason) {
       setError(String(reason));
@@ -757,9 +858,12 @@ export function useBranchWorkflowModule({
     setWorktreesLoading(true);
     setWorktreesError("");
     try {
-      const result = await invoke<BranchWorktreeSummary[]>("list_project_worktrees", {
-        project: projectKey,
-      });
+      const result = await invoke<BranchWorktreeSummary[]>(
+        "list_project_worktrees",
+        {
+          project: projectKey,
+        },
+      );
       setWorktrees(result);
       setSelectedWorktreePath((current) => {
         const normalized = current.trim();
@@ -810,10 +914,13 @@ export function useBranchWorkflowModule({
     setError("");
     setWorktreesError("");
     try {
-      const result = await invoke<BranchWorktreeSummary[]>("repair_project_worktree", {
-        project: selectedProject,
-        repoPath: normalizedRepoPath,
-      });
+      const result = await invoke<BranchWorktreeSummary[]>(
+        "repair_project_worktree",
+        {
+          project: selectedProject,
+          repoPath: normalizedRepoPath,
+        },
+      );
       setWorktrees(result);
       setSelectedWorktreePath(normalizedRepoPath);
       await loadPushStatus(selectedProject, normalizedRepoPath);
@@ -838,32 +945,49 @@ export function useBranchWorkflowModule({
     }
     setBusy(busyText);
     setError("");
-    setCurrentBranchTaskRunningLabel(busyText);
     lastBranchTaskHistoryEntryRef.current = null;
     const taskKind = branchModeFromCommand(command);
-    const requestedProject = requestFirstProject(request) || selectedProject;
+    const requestedProjects = requestProjects(request);
+    const requestedProject = requestedProjects[0] || selectedProject;
     const requestedProjectName =
       projects.find((project) => project.key === requestedProject)?.name ||
       requestedProject;
-    const activityId =
-      recordActivity?.({
-        kind: "branch",
-        status: "running",
-        title: branchActivityTitle(command),
-        summary: busyText,
-        executionKey: branchActivityExecutionKey(command, request),
-        chainId: options.chainId ?? null,
-        parentId: options.parentId ?? null,
-        stepLabel: options.stepLabel ?? branchActivityTitle(command),
-        chainLabel: options.chainId ? "联动链路" : null,
+    const activityId = createClientOperationId("branch");
+    const operationProjects = (
+      requestedProjects.length > 0 ? requestedProjects : [requestedProject]
+    ).map((projectKey) => ({
+      key: projectKey,
+      name:
+        projects.find((project) => project.key === projectKey)?.name ||
+        projectKey,
+    }));
+    const pendingEntry = createPendingBranchTaskEntry({
+      id: activityId,
+      taskKind,
+      summary: busyText,
+      projects: operationProjects,
+    });
+    setCurrentBranchTask(pendingEntry);
+    setCurrentBranchTaskHistoryId(activityId);
+    recordActivity?.({
+      id: activityId,
+      kind: "branch",
+      status: "running",
+      title: branchActivityTitle(command),
+      summary: busyText,
+      executionKey: branchActivityExecutionKey(command, request),
+      chainId: options.chainId ?? null,
+      parentId: options.parentId ?? null,
+      stepLabel: options.stepLabel ?? branchActivityTitle(command),
+      chainLabel: options.chainId ? "联动链路" : null,
+      projectKey: requestedProject,
+      projectName: requestedProjectName,
+      target: {
+        page: "merge",
         projectKey: requestedProject,
-        projectName: requestedProjectName,
-        target: {
-          page: "merge",
-          projectKey: requestedProject,
-          branchMode: taskKind,
-        },
-      }) || "";
+        branchMode: taskKind,
+      },
+    });
     lastBranchActivityIdRef.current = activityId;
     try {
       const result = await invoke<BranchTaskResponse>(command, {
@@ -872,75 +996,103 @@ export function useBranchWorkflowModule({
         operationOrigin: options.origin ?? "app",
       });
       const recoveryReplay = branchTaskFailureReplay(result, replay);
-      const historyEntry = await persistHistory(
+      const historyReplay = result.success ? replay : recoveryReplay;
+      const historyPromise = persistHistory(
         result,
-        recoveryReplay,
+        historyReplay,
         options.workspaceKey ?? activeProjectWorkspaceKey,
         activityId,
       );
-      setCurrentBranchTaskHistoryId(historyEntry.id);
-      setCurrentBranchTaskRunningLabel("");
-      lastBranchTaskHistoryEntryRef.current = historyEntry;
-      if (activityId) {
-        const resultProjectKey = result.items[0]?.projectKey || requestedProject;
-        const resultProjectName =
-          result.items[0]?.projectName ||
-          projects.find((project) => project.key === resultProjectKey)?.name ||
-          resultProjectKey;
-        updateActivity?.(activityId, {
-          status: result.success ? "success" : "failed",
-          summary: result.summary,
-          detail: branchTaskDisplayDetail(result),
-          chainId: options.chainId ?? undefined,
-          parentId: options.parentId ?? undefined,
-          stepLabel: options.stepLabel ?? branchActivityTitle(command),
-          chainLabel: options.chainId ? "联动链路" : undefined,
-          projectKey: resultProjectKey,
-          projectName: resultProjectName,
-          diagnostics: branchTaskDiagnosticSteps(result),
-          warnings: !result.success && !recoveryReplay
-            ? ["当前批次包含同一项目的部分成功结果，请打开 Git 页面核对后按剩余目标执行。"]
+      setCurrentBranchTask(null);
+      const resultProjectKey = result.items[0]?.projectKey || requestedProject;
+      const resultProjectName =
+        result.items[0]?.projectName ||
+        projects.find((project) => project.key === resultProjectKey)?.name ||
+        resultProjectKey;
+      updateActivity?.(activityId, {
+        status: result.success ? "success" : "failed",
+        summary: result.summary,
+        detail: branchTaskDisplayDetail(result),
+        chainId: options.chainId ?? undefined,
+        parentId: options.parentId ?? undefined,
+        stepLabel: options.stepLabel ?? branchActivityTitle(command),
+        chainLabel: options.chainId ? "联动链路" : undefined,
+        projectKey: resultProjectKey,
+        projectName: resultProjectName,
+        diagnostics: branchTaskDiagnosticSteps(result),
+        warnings:
+          !result.success && !recoveryReplay
+            ? [
+                "当前批次包含同一项目的部分成功结果，请打开 Git 页面核对后按剩余目标执行。",
+              ]
             : [],
-          resource: branchResultResource(result),
-          target: {
-            page: "merge",
-            projectKey: resultProjectKey,
-            branchMode: result.taskKind,
-          },
-          action: recoveryReplay
-            ? {
-                kind: "branchReplay",
-                label: "检查并重试 Git 操作",
-                replay: recoveryReplay,
-              }
-            : null,
-        });
+        resource: branchResultResource(result),
+        target: {
+          page: "merge",
+          projectKey: resultProjectKey,
+          branchMode: result.taskKind,
+        },
+        action: recoveryReplay
+          ? {
+              kind: "branchReplay",
+              label: "检查并重试 Git 操作",
+              replay: recoveryReplay,
+            }
+          : null,
+      });
+      try {
+        lastBranchTaskHistoryEntryRef.current = await historyPromise;
+      } catch (historyReason) {
+        setError(
+          `Git 操作已完成，但保存本地记录失败：${String(historyReason)}`,
+        );
       }
       return result;
     } catch (reason) {
-      setCurrentBranchTaskRunningLabel("");
-      lastBranchTaskHistoryEntryRef.current = null;
-      if (activityId) {
-        updateActivity?.(activityId, {
-          status: "failed",
-          summary: `${branchActivityTitle(command)}失败`,
-          detail: String(reason),
-          diagnostics: [{
+      const failureDetail = String(reason);
+      const failedEntry = createFailedBranchTaskEntry({
+        pending: pendingEntry,
+        title: branchActivityTitle(command),
+        detail: failureDetail,
+        workspaceKey: options.workspaceKey ?? activeProjectWorkspaceKey,
+        projects: operationProjects,
+        sourceBranch:
+          typeof request.sourceBranch === "string" ? request.sourceBranch : "",
+        targetBranch:
+          typeof request.targetBranch === "string"
+            ? request.targetBranch
+            : null,
+        remote:
+          command === "execute_branch_sync_task" ||
+          command === "execute_branch_push_task",
+        replay,
+      });
+      setBranchTaskHistory((current) =>
+        mergeBranchTaskHistory([failedEntry], current),
+      );
+      setCurrentBranchTask(null);
+      lastBranchTaskHistoryEntryRef.current = failedEntry;
+      updateActivity?.(activityId, {
+        status: "failed",
+        summary: failedEntry.summary,
+        detail: failureDetail,
+        diagnostics: [
+          {
             id: `${taskKind}:${requestedProject}:invoke`,
             type: `git.${taskKind}`,
             label: requestedProjectName,
             status: "failed",
-            summary: `${branchActivityTitle(command)}失败`,
-            risks: [String(reason)],
-          }],
-          action: {
-            kind: "branchReplay",
-            label: "检查并重试 Git 操作",
-            replay,
+            summary: failedEntry.summary,
+            risks: [failureDetail],
           },
-        });
-      }
-      setError(String(reason));
+        ],
+        action: {
+          kind: "branchReplay",
+          label: "检查并重试 Git 操作",
+          replay,
+        },
+      });
+      setError(failureDetail);
       return null;
     } finally {
       setBusy("");
@@ -983,7 +1135,8 @@ export function useBranchWorkflowModule({
       sourceEntry ?? lastBranchTaskHistoryEntryRef.current ?? undefined,
       {
         sourceActivityId: lastBranchActivityIdRef.current,
-        sourceStepLabel: options.stepLabel ?? branchActivityTitle(replay.command),
+        sourceStepLabel:
+          options.stepLabel ?? branchActivityTitle(replay.command),
         chainId: options.chainId ?? undefined,
       },
     );
@@ -1038,7 +1191,11 @@ export function useBranchWorkflowModule({
   }
 
   useEffect(() => {
-    if (!enabled || (mode !== "push" && mode !== "switch") || !selectedProject) {
+    if (
+      !enabled ||
+      (mode !== "push" && mode !== "switch") ||
+      !selectedProject
+    ) {
       return;
     }
 
@@ -1051,7 +1208,8 @@ export function useBranchWorkflowModule({
       }
       if (
         pushStatusUpdatedAtMs > 0 &&
-        Date.now() - pushStatusUpdatedAtMs < PUSH_STATUS_AUTO_REFRESH_COOLDOWN_MS
+        Date.now() - pushStatusUpdatedAtMs <
+          PUSH_STATUS_AUTO_REFRESH_COOLDOWN_MS
       ) {
         return;
       }
@@ -1071,7 +1229,10 @@ export function useBranchWorkflowModule({
     return () => {
       window.removeEventListener("focus", refreshIfVisible);
       if (typeof document !== "undefined") {
-        document.removeEventListener("visibilitychange", handleVisibilityChange);
+        document.removeEventListener(
+          "visibilitychange",
+          handleVisibilityChange,
+        );
       }
     };
   }, [
@@ -1094,7 +1255,8 @@ export function useBranchWorkflowModule({
           .map((item) => item.path),
       );
       const next = current.filter((path) => selectable.has(path));
-      return next.length === current.length && next.every((path, index) => path === current[index])
+      return next.length === current.length &&
+        next.every((path, index) => path === current[index])
         ? current
         : next;
     });
@@ -1118,27 +1280,28 @@ export function useBranchWorkflowModule({
       result.items[0]?.projectName ||
       projects.find((project) => project.key === projectKey)?.name ||
       projectKey;
-    const sourceBranch = result.items.find((item) => item.sourceBranch)?.sourceBranch || "";
+    const sourceBranch =
+      result.items.find((item) => item.sourceBranch)?.sourceBranch || "";
     const targetBranches = normalizeValues(
-      result.items
-        .map((item) => item.targetBranch || "")
-        .filter(Boolean),
+      result.items.map((item) => item.targetBranch || "").filter(Boolean),
     );
 
     try {
-      const nextChainId = chain?.chainId || (chain?.sourceActivityId ? `chain:${chain.sourceActivityId}` : "");
+      const nextChainId =
+        chain?.chainId ||
+        (chain?.sourceActivityId ? `chain:${chain.sourceActivityId}` : "");
       const signals = createBranchTaskSignals({
-          broadcasts: workflowBroadcastRules,
-          replay: entry ? workflowReplayFromBranchHistory(entry) : null,
-          projectKey,
-          projectName,
-          sourceBranch,
-          targetBranches,
-          result,
-          chainId: nextChainId,
-          parentActivityId: chain?.sourceActivityId,
-          sourceStepLabel: chain?.sourceStepLabel,
-        });
+        broadcasts: workflowBroadcastRules,
+        replay: entry ? workflowReplayFromBranchHistory(entry) : null,
+        projectKey,
+        projectName,
+        sourceBranch,
+        targetBranches,
+        result,
+        chainId: nextChainId,
+        parentActivityId: chain?.sourceActivityId,
+        sourceStepLabel: chain?.sourceStepLabel,
+      });
       if (signals.length > 0 && chain?.sourceActivityId && nextChainId) {
         updateActivity?.(chain.sourceActivityId, {
           chainId: nextChainId,
@@ -1198,11 +1361,15 @@ export function useBranchWorkflowModule({
   }
 
   async function handleExecuteCreate() {
-    const result = await runBranchTask("正在创建分支", "execute_branch_create_task", {
-      projects: normalizeValues(createProjects),
-      sourceBranch: createSource,
-      targetBranch: createTarget,
-    });
+    const result = await runBranchTask(
+      "正在创建分支",
+      "execute_branch_create_task",
+      {
+        projects: normalizeValues(createProjects),
+        sourceBranch: createSource,
+        targetBranch: createTarget,
+      },
+    );
     await emitBranchTaskWorkflowSignals(
       result,
       lastBranchTaskHistoryEntryRef.current ?? undefined,
@@ -1214,11 +1381,15 @@ export function useBranchWorkflowModule({
   }
 
   async function handleExecuteCheckout() {
-    const result = await runBranchTask("正在克隆分支", "checkout_branch_to_directory_task", {
-      project: selectedProject,
-      sourceBranch: checkoutSource,
-      destinationDir: checkoutDestinationDir,
-    });
+    const result = await runBranchTask(
+      "正在克隆分支",
+      "checkout_branch_to_directory_task",
+      {
+        project: selectedProject,
+        sourceBranch: checkoutSource,
+        destinationDir: checkoutDestinationDir,
+      },
+    );
     await emitBranchTaskWorkflowSignals(
       result,
       lastBranchTaskHistoryEntryRef.current ?? undefined,
@@ -1301,7 +1472,8 @@ export function useBranchWorkflowModule({
       lastBranchTaskHistoryEntryRef.current ?? undefined,
       {
         sourceActivityId: lastBranchActivityIdRef.current,
-        sourceStepLabel: pushAction === "commitAndPush" ? "提交并推送" : "推送分支",
+        sourceStepLabel:
+          pushAction === "commitAndPush" ? "提交并推送" : "推送分支",
       },
     );
   }
@@ -1359,7 +1531,7 @@ export function useBranchWorkflowModule({
     selectedWorktreePath,
     setSelectedWorktreePath: handleWorktreePathChange,
     currentBranchTaskHistoryId,
-    currentBranchTaskRunningLabel,
+    currentBranchTask,
     visibleBranchTaskHistory,
     loadBranchTaskHistory,
     loadProjectWorktrees,

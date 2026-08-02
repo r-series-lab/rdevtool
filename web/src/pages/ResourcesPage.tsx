@@ -27,6 +27,7 @@ export type ResourcesPageProps = Pick<
   | "updateActivity"
 > & {
   resourceConfigOpenSignal?: number;
+  onResourceConfigOpenHandled?: (signal: number) => void;
   activeProjectWorkspaceKey: string;
   projectWorkspaces: ProjectWorkspaceSummary[];
   onOpenNavigationConfigFile: () => void;
@@ -34,6 +35,7 @@ export type ResourcesPageProps = Pick<
 
 export function ResourcesPage({
   resourceConfigOpenSignal,
+  onResourceConfigOpenHandled,
   activeProjectWorkspaceKey,
   projectWorkspaces,
   onOpenNavigationConfigFile,
@@ -43,10 +45,13 @@ export function ResourcesPage({
   const [resourceConfigOpen, setResourceConfigOpen] = useState(false);
 
   useEffect(() => {
-    if ((resourceConfigOpenSignal ?? 0) > 0) {
-      setResourceConfigOpen(true);
+    const signal = resourceConfigOpenSignal ?? 0;
+    if (signal <= 0) {
+      return;
     }
-  }, [resourceConfigOpenSignal]);
+    setResourceConfigOpen(true);
+    onResourceConfigOpenHandled?.(signal);
+  }, [onResourceConfigOpenHandled, resourceConfigOpenSignal]);
 
   return (
     <>
@@ -60,6 +65,7 @@ export function ResourcesPage({
         favoriteProjectKeys={[]}
         recentProjectKeys={[]}
         selectedDebugProfileKeys={{}}
+        runtimeStartPromptMode="auto"
         workflowReceiveRules={[]}
         workflowBroadcastRules={[]}
         workflowSignalOptions={[]}
@@ -75,6 +81,7 @@ export function ResourcesPage({
         onWorkflowSignalsClear={() => undefined}
         onToggleProjectFavorite={() => undefined}
         onProjectDebugProfileChange={() => undefined}
+        onRuntimeStartPromptModeChange={() => undefined}
         onStartRuntime={() => undefined}
         onStopRuntime={() => undefined}
         onAdoptRuntime={() => undefined}

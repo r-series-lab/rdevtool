@@ -2,6 +2,31 @@ import type { PageKey } from "./app-shell";
 
 export type ProjectManagementViewKey = "projects" | "build" | "git";
 
+export type ProjectSettingsSectionKey =
+  | "projectBasics"
+  | "projectLocal"
+  | "projectRuntime";
+
+export type ProjectRuntimePanelTabKey =
+  | "overview"
+  | "config"
+  | "logs"
+  | "webActions";
+
+export type ProjectManagementOpenRequest = {
+  nonce: number;
+  projectKey: string;
+  target:
+    | {
+        kind: "projectSettings";
+        section: ProjectSettingsSectionKey;
+      }
+    | {
+        kind: "runtimePanel";
+        tab: ProjectRuntimePanelTabKey;
+      };
+};
+
 export type CommitInfo = {
   shortHash: string;
   subject: string;
@@ -164,6 +189,15 @@ export type BranchTaskHistoryEntry = BranchTaskResponse & {
   replay?: BranchTaskReplayRequest | null;
 };
 
+export type BranchTaskPendingEntry = {
+  id: string;
+  taskKind: BranchWorkflowMode;
+  summary: string;
+  detail: string;
+  projectNames: string[];
+  createdAt: string;
+};
+
 export type OperationEventEntry = {
   version: number;
   id: string;
@@ -178,6 +212,10 @@ export type OperationEventEntry = {
   projectKey?: string | null;
   projectName?: string | null;
   relatedHistoryKeys: string[];
+  chainId?: string | null;
+  parentId?: string | null;
+  stepLabel?: string | null;
+  chainLabel?: string | null;
   payload?: unknown;
   createdAt: string;
   updatedAt: string;
@@ -192,12 +230,17 @@ export type WorkspaceAppPreferences = {
 
 export type AppExitRuntimePolicy = "ask" | "keep" | "stop";
 
+export type ProjectRuntimeStartPromptMode = "auto" | "always" | "never";
+
 export type ProjectWorkspaceSummary = {
   key: string;
   name: string;
   description?: string | null;
   active: boolean;
   system: boolean;
+  archived: boolean;
+  archivedAt?: string | null;
+  archiveReason?: string | null;
   workspaceType: string;
   workspaceTypeLabel: string;
   projectCount: number;
@@ -218,6 +261,31 @@ export type ProjectWorkspaceState = {
   activeKey: string;
   workspacesDir: string;
   workspaces: ProjectWorkspaceSummary[];
+  archivedWorkspaces: ProjectWorkspaceSummary[];
+};
+
+export type WorkspaceConfigFocusRequest = {
+  nonce: number;
+  view: "open" | "archived";
+  workspaceKey: string;
+};
+
+export type WorkspaceArchiveBlocker = {
+  kind: "runtime" | "build" | "proxy" | string;
+  id: string;
+  label: string;
+  managed: boolean;
+  detail: string;
+};
+
+export type WorkspaceArchivePlan = {
+  workspaceKey: string;
+  workspaceName: string;
+  alreadyArchived: boolean;
+  active: boolean;
+  canArchive: boolean;
+  blockers: WorkspaceArchiveBlocker[];
+  warnings: string[];
 };
 
 export type CreateProjectWorkspacePayload = {
@@ -805,6 +873,33 @@ export type ProjectRuntimePreflightCheck = {
   statusLabel: string;
   detail: string;
   action?: string | null;
+  fix?: ProjectRuntimePreflightFix | null;
+};
+
+export type ProjectRuntimePreflightFix = {
+  kind:
+    | "startProxy"
+    | "changePort"
+    | "createProfile"
+    | "resetProfile"
+    | string;
+  label: string;
+  description: string;
+  confirmationRequired: boolean;
+  sourceId?: string | null;
+  sourceName?: string | null;
+  profileId?: string | null;
+  profileName?: string | null;
+  listenUrl?: string | null;
+  currentPort?: number | null;
+  suggestedPort?: number | null;
+  profileKey?: string | null;
+  profileLabel?: string | null;
+  command?: string | null;
+  cwd?: string | null;
+  focusUrl?: string | null;
+  nodeVersion?: string | null;
+  packageManager?: string | null;
 };
 
 export type OperationStatus = {
@@ -961,7 +1056,30 @@ export type ProjectRuntimeContextEffective = {
   debugProfileLabel?: string | null;
   runtimeProfileKey?: string | null;
   runtimeProfileLabel?: string | null;
+  environment: ProjectRuntimeEnvPreview[];
+  browserSource: string;
+  proxySource: string;
   target?: ProjectRuntimeTargetSummary | null;
+};
+
+export type ProjectRuntimeEnvPreview = {
+  key: string;
+  value: string;
+  source: string;
+  masked: boolean;
+};
+
+export type ProjectRuntimeWorkspaceContext = {
+  key: string;
+  name: string;
+  system: boolean;
+  projectInstancePath?: string | null;
+  projectInstanceManaged: boolean;
+  runtimeConfigSourceId: string;
+  runtimeConfigSourceName: string;
+  runtimeConfigSourceKind: string;
+  runtimeConfigPath?: string | null;
+  runtimeProfileScope: string;
 };
 
 export type ProjectRuntimeSessionObservation = {
@@ -982,6 +1100,7 @@ export type ProjectRuntimeSessionObservation = {
 
 export type ProjectRuntimeContextSnapshot = {
   schemaVersion: number;
+  workspace?: ProjectRuntimeWorkspaceContext | null;
   requested: ProjectRuntimeContextRequest;
   effective: ProjectRuntimeContextEffective;
   observed: {
@@ -993,6 +1112,18 @@ export type ProjectRuntimeContextSnapshot = {
   risks: OperationRisk[];
   managedArtifacts: ManagedArtifact[];
   recommendedActions: RecommendedAction[];
+};
+
+export type SaveProjectRuntimeLaunchProfileResponse = {
+  projectKey: string;
+  profileKey: string;
+  profileLabel: string;
+  mode: "create" | "update" | string;
+  envCount: number;
+  expectedPort?: number | null;
+  configPath: string;
+  scope: "project" | string;
+  availableInAllWorkspaces: boolean;
 };
 
 export type ProjectRuntimePreflightResponse = {
@@ -1171,6 +1302,8 @@ export type ConfigSource = {
   id: string;
   name: string;
   kind: string;
+  workspaceKey?: string | null;
+  workspaceArchived?: boolean;
   baseDir: string;
   files: ConfigSourceFiles;
   uiProfile: string;

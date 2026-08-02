@@ -10,6 +10,7 @@ import {
   Box,
   Button,
   Chip,
+  Collapse,
   Dialog,
   DialogActions,
   DialogContent,
@@ -42,6 +43,7 @@ import type {
   NavigationEditorEntry,
   NavigationEditorState,
   ProjectDebugProfileSummary,
+  ProjectManagementOpenRequest,
   ProjectWorkspaceSummary,
   ProjectWorkflowAction,
   ProjectRuntimeEntry,
@@ -52,11 +54,14 @@ import type {
   ProjectRuntimePreflightCheck,
   ProjectRuntimePreflightResponse,
   ProjectRuntimeReadySummary,
+  ProjectRuntimeStartPromptMode,
   ProxyProfile,
   RuntimeProfileDraft,
+  SaveProjectRuntimeLaunchProfileResponse,
 } from "../app-types";
 import type { AppStyleMode } from "../theme";
 import {
+  ActivityIcon,
   AppWindowIcon,
   CheckIcon,
   ClearIcon,
@@ -79,15 +84,20 @@ import {
   WorkflowIcon,
 } from "../components/AppIcons";
 import { AppEmptyState } from "../components/AppEmptyState";
+import { AppActionDialog } from "../components/AppActionDialog";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import { AppListEndState } from "../components/AppListEndState";
 import { RuntimeContextCard } from "../components/RuntimeContextCard";
+import { RuntimeStartPromptModeControl } from "../components/ProjectRuntimeStartDialog";
 import {
   LinkPlanDialog,
   type LinkPlanDialogAction,
   type LinkPlanDialogState,
 } from "../components/LinkPlanDialog";
-import { SettingsPanel } from "../components/SettingsPanel";
+import {
+  SettingsPanel,
+  type SettingsSection,
+} from "../components/SettingsPanel";
 import { ConfigSourceBar } from "../components/ConfigSourceBar";
 import { ConfigSourceManagerDialog } from "../components/ConfigSourceManagerDialog";
 import { WorkflowLinkSummaryButton } from "../components/WorkflowLinkButton";
@@ -116,18 +126,26 @@ import {
 import { useConfigSource } from "../hooks/useConfigSource";
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
 import { useRuntimeProfiles } from "../hooks/useRuntimeProfiles";
+import { useProjectRuntimeStartDialog } from "../hooks/useProjectRuntimeStartDialog";
 import type { ActivityRecorder, ActivityUpdater } from "../lib/activityCenter";
 import {
   linkActivityDraft,
   linkActivityFailurePatch,
   linkActivityResultPatch,
 } from "../lib/linkActivities";
+import { buildProjectRuntimeResolutionArgs } from "../lib/projectRuntimeLaunch";
+import { uniqueProjectLaunchProfileKey } from "../lib/projectRuntimeProfiles";
+import {
+  runtimeValueSourceLabel,
+} from "../lib/runtimeContext";
+import { useI18n, type AppLanguage, type Translate } from "../i18n";
 
 type FinderType = "项目" | "网站" | "目录" | "工具";
 type ProjectsPageMode = "projectManagement" | "resources";
 type RuntimePanelTab = "overview" | "config" | "logs" | "webActions";
 type ProjectConfigPanelPageKey =
   | "overview"
+  | "knowledge"
   | "projectManagement"
   | "resources"
   | "merge"
@@ -223,6 +241,7 @@ export type ProjectsPageProps = {
   favoriteShortcutKeys: string[];
   recentShortcutKeys: string[];
   selectedDebugProfileKeys: Record<string, string>;
+  runtimeStartPromptMode: ProjectRuntimeStartPromptMode;
   workflowReceiveRules: WorkflowReceiveRule[];
   workflowBroadcastRules: WorkflowBroadcastRule[];
   workflowSignalOptions: string[];
@@ -252,6 +271,9 @@ export type ProjectsPageProps = {
   onToggleProjectFavorite: (projectKey: string) => void;
   onToggleShortcutFavorite: (item: FinderShortcutItem) => void;
   onProjectDebugProfileChange: (projectKey: string, profileKey: string) => void;
+  onRuntimeStartPromptModeChange: (
+    mode: ProjectRuntimeStartPromptMode,
+  ) => void;
   onMarkShortcutUsed: (item: FinderShortcutItem) => void;
   onRefresh: () => void;
   onOpenFinderEntry: (entry: FinderEntry) => Promise<boolean> | boolean;
@@ -259,7 +281,8 @@ export type ProjectsPageProps = {
     projectKey: string,
     debugProfileKey?: string,
     envOverrides?: Record<string, string>,
-  ) => void;
+    expectedPort?: number | null,
+  ) => Promise<unknown> | unknown;
   onStopRuntime: (projectKey: string) => void;
   onAdoptRuntime: (projectKey: string, debugProfileKey?: string) => void;
   onOpenBuildOutput: (projectKey: string) => void;
@@ -270,6 +293,8 @@ export type ProjectsPageProps = {
   updateActivity?: ActivityUpdater;
   configWorkspaceKey?: string;
   projectConfigPanel?: ProjectConfigPanelProps;
+  openRequest?: ProjectManagementOpenRequest | null;
+  onOpenRequestHandled?: (nonce: number) => void;
 };
 
 const SHORTCUT_CONFIRM_MS = 1100;
@@ -299,17 +324,13 @@ type RuntimeProfileDialogState = {
   draft: RuntimeProfileDraft;
 };
 
-function formatRuntimeEnvText(env?: Record<string, string> | null) {
-  if (!env) {
-    return "";
-  }
-  return Object.entries(env)
-    .sort(([left], [right]) => left.localeCompare(right))
-    .map(([key, value]) => `${key}=${value}`)
-    .join("\n");
-}
+type RuntimeLaunchProfileSaveDialogState = {
+  mode: "create" | "update";
+  profileKey: string;
+  label: string;
+};
 
-function parseRuntimeEnvText(text: string): RuntimeEnvParseResult {
+function parseRuntimeEnvText(text: string, t: Translate): RuntimeEnvParseResult {
   const values: Record<string, string> = {};
   const lines = text.split(/\r?\n/);
   for (const [index, sourceLine] of lines.entries()) {
@@ -324,7 +345,7 @@ function parseRuntimeEnvText(text: string): RuntimeEnvParseResult {
     if (separatorIndex < 0) {
       return {
         values: {},
-        error: `第 ${index + 1} 行缺少 =`,
+        error: t("第 {line} 行缺少 =", { line: index + 1 }),
       };
     }
     const key = line.slice(0, separatorIndex).trim();
@@ -332,7 +353,7 @@ function parseRuntimeEnvText(text: string): RuntimeEnvParseResult {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
       return {
         values: {},
-        error: `第 ${index + 1} 行变量名无效`,
+        error: t("第 {line} 行变量名无效", { line: index + 1 }),
       };
     }
     values[key] = value;
@@ -355,7 +376,7 @@ function emptyRuntimeProfileDraft(profiles: RuntimeProfileDraft[]): RuntimeProfi
   const key = uniqueRuntimeProfileKey(profiles);
   return {
     key,
-    label: "通用运行配置",
+    label: "共享运行环境",
     browser: "Google Chrome",
     browserProfile: null,
     browserUserDataDir: "",
@@ -655,6 +676,76 @@ function preflightPriority(check: ProjectRuntimePreflightCheck) {
   }
 }
 
+function preflightCheckVisual(check: ProjectRuntimePreflightCheck) {
+  const signature = `${check.key} ${check.title} ${check.category}`.toLowerCase();
+  if (signature.includes("node")) {
+    return {
+      icon: <PackageIcon fontSize="small" />,
+      tone: "green",
+    };
+  }
+  if (
+    signature.includes("browser") ||
+    signature.includes("web") ||
+    signature.includes("网页")
+  ) {
+    return {
+      icon: <WebsiteIcon fontSize="small" />,
+      tone: "blue",
+    };
+  }
+  if (
+    signature.includes("focus") ||
+    signature.includes("page") ||
+    signature.includes("页面")
+  ) {
+    return {
+      icon: <AppWindowIcon fontSize="small" />,
+      tone: "violet",
+    };
+  }
+  if (signature.includes("command") || signature.includes("命令")) {
+    return {
+      icon: <TerminalIcon fontSize="small" />,
+      tone: "green",
+    };
+  }
+  if (
+    signature.includes("cwd") ||
+    signature.includes("directory") ||
+    signature.includes("目录")
+  ) {
+    return {
+      icon: <FolderIcon fontSize="small" />,
+      tone: "blue",
+    };
+  }
+  if (
+    signature.includes("ready") ||
+    signature.includes("probe") ||
+    signature.includes("检测")
+  ) {
+    return {
+      icon: <ActivityIcon fontSize="small" />,
+      tone: "green",
+    };
+  }
+  if (
+    signature.includes("proxy") ||
+    signature.includes("network") ||
+    signature.includes("代理")
+  ) {
+    return {
+      icon: <WorkflowIcon fontSize="small" />,
+      tone: "amber",
+    };
+  }
+  return {
+    icon: <ActivityIcon fontSize="small" />,
+    tone: "neutral",
+  };
+}
+
 function buildProjectsTone(mono: boolean) {
   const shared = {
     outerBorder: "var(--line)",
@@ -851,16 +942,16 @@ function buildProjectsTone(mono: boolean) {
   };
 }
 
-function finderPlaceholder(type: FinderType): string {
+function finderPlaceholder(type: FinderType, t: Translate): string {
   switch (type) {
     case "网站":
-      return "搜索网站、地址或备注";
+      return t("搜索网站、地址或备注");
     case "目录":
-      return "搜索目录、路径或备注";
+      return t("搜索目录、路径或备注");
     case "工具":
-      return "搜索应用、脚本、Link 或备注";
+      return t("搜索应用、脚本、Link 或备注");
     default:
-      return "搜索项目、路径、命令";
+      return t("搜索项目、路径、命令");
   }
 }
 
@@ -887,20 +978,20 @@ function buildRuntimeHaystack(item: ProjectRuntimeEntry): string {
     .toLowerCase();
 }
 
-function finderEntryKindLabel(kind: string): string {
+function finderEntryKindLabel(kind: string, t: Translate): string {
   switch (kind) {
     case "app":
-      return "应用";
+      return t("应用");
     case "script":
-      return "脚本";
+      return t("脚本");
     case "tool":
-      return "工具";
+      return t("工具");
     case "directory":
-      return "目录";
+      return t("目录");
     case "file":
-      return "文件";
+      return t("文件");
     default:
-      return "网站";
+      return t("网站");
   }
 }
 
@@ -976,10 +1067,10 @@ function finderTypeIcon(type: FinderType): ReactElement {
   }
 }
 
-function buildFinderEntryDetails(item: FinderShortcutItem): string[] {
+function buildFinderEntryDetails(item: FinderShortcutItem, t: Translate): string[] {
   const entry = item.entry;
   const detailLines: string[] = [
-    `${finderEntryKindLabel(entry.kind)} · ${item.categoryLabel || item.categoryTitle}`,
+    `${finderEntryKindLabel(entry.kind, t)} · ${item.categoryLabel || item.categoryTitle}`,
   ];
   const seen = new Set(detailLines);
   const addDetail = (label: string, value?: string | null) => {
@@ -987,7 +1078,7 @@ function buildFinderEntryDetails(item: FinderShortcutItem): string[] {
     if (!normalized) {
       return;
     }
-    const line = `${label}：${normalized}`;
+    const line = `${t(label)}: ${normalized}`;
     if (!seen.has(line)) {
       seen.add(line);
       detailLines.push(line);
@@ -999,7 +1090,7 @@ function buildFinderEntryDetails(item: FinderShortcutItem): string[] {
   addDetail("地址", entry.url);
   addDetail("浏览器", entry.browser);
   addDetail("Profile", entry.browserProfile);
-  addDetail("运行配置", entry.runtimeProfile);
+  addDetail("运行环境", entry.runtimeProfile);
   addDetail("Bundle ID", entry.bundleId);
   addDetail("应用", entry.appName);
   addDetail("脚本", entry.script);
@@ -1028,52 +1119,56 @@ function linkSummaryForEntry(
   return key ? summaries.get(key) ?? null : null;
 }
 
-function linkEntrySubtitle(entry: FinderEntry, summary: LinkSummary | null): string {
+function linkEntrySubtitle(
+  entry: FinderEntry,
+  summary: LinkSummary | null,
+  t: Translate,
+): string {
   if (summary) {
-    const parts = [`${summary.stepCount} 步骤`];
+    const parts = [t("{count} 个步骤", { count: summary.stepCount })];
     const proxyPorts = summary.proxyProfiles
       .map((profile) => {
         const match = profile.listenUrl.match(/:(\d+)(?:\/)?$/);
-        return match?.[1] ? `代理 ${match[1]}` : profile.name;
+        return match?.[1] ? t("代理 {port}", { port: match[1] }) : profile.name;
       })
       .filter(Boolean);
     if (proxyPorts.length > 0) {
       parts.push(proxyPorts.join(" / "));
     }
     if (summary.project) {
-      parts.push(`运行 ${summary.project}`);
+      parts.push(t("运行 {project}", { project: summary.project }));
     }
     if (summary.runtime?.label && summary.runtime.status !== "planned") {
       parts.push(summary.runtime.label);
     }
     if (summary.warnings.length > 0) {
-      parts.push(`${summary.warnings.length} 条提示`);
+      parts.push(t("{count} 条提示", { count: summary.warnings.length }));
     }
     return parts.join(" · ");
   }
   return entry.note?.trim() || linkToolKey(entry) || entry.targetLabel;
 }
 
-function linkEntryStatusLabel(summary: LinkSummary | null): string {
+function linkEntryStatusLabel(summary: LinkSummary | null, t: Translate): string {
   if (!summary) {
-    return "计划";
+    return t("计划");
   }
   if (summary.runtime?.status === "running") {
-    return "运行中";
+    return t("运行中");
   }
   if (summary.runtime?.status === "partial") {
-    return "部分运行";
+    return t("部分运行");
   }
   if (summary.runtime?.status === "warning") {
-    return "有风险";
+    return t("有风险");
   }
   if (summary.runtime?.status === "invalid") {
-    return "配置异常";
+    return t("配置异常");
   }
   if (summary.warnings.length > 0) {
-    return `${summary.warnings.length} 提示`;
+    return t("{count} 条提示", { count: summary.warnings.length });
   }
-  return "可执行";
+  return t("可执行");
 }
 
 function navigationEditorEntryMatchesShortcut(
@@ -1140,29 +1235,35 @@ function runtimeProfileLabel(profile: RuntimeProfileDraft | null | undefined) {
   return profile?.label?.trim() || profile?.key || "";
 }
 
-function runtimeProfileScopeLabel(scope?: string | null) {
+function runtimeProfileScopeLabel(
+  scope: string | null | undefined,
+  t: Translate,
+) {
   switch (scope) {
     case "override":
-      return "工作区覆盖";
+      return t("工作区模板");
     case "inherited":
-      return "继承全局";
+      return t("继承全局");
     case "unsupported":
-      return "不支持覆盖";
+      return t("只读");
     default:
-      return "全局定义";
+      return t("全局模板");
   }
 }
 
-function runtimeProfileScopeDescription(scope?: string | null) {
+function runtimeProfileScopeDescription(
+  scope: string | null | undefined,
+  t: Translate,
+) {
   switch (scope) {
     case "override":
-      return "当前工作区使用独立运行配置。";
+      return t("保存在当前工作区。");
     case "inherited":
-      return "当前继承全局配置，保存后会创建工作区覆盖。";
+      return t("当前使用全局模板，修改后会创建工作区版本。");
     case "unsupported":
-      return "当前配置源未声明运行配置能力。";
+      return t("当前配置源不支持编辑运行环境模板。");
     default:
-      return "运行配置保存在全局项目配置中。";
+      return t("可被多个项目启动档案复用。");
   }
 }
 
@@ -1226,11 +1327,15 @@ async function copyPlainText(value: string) {
   textarea.remove();
 }
 
-function formatDateTime(value?: number | null): string {
+function formatDateTime(
+  value: number | null | undefined,
+  language: AppLanguage,
+  t: Translate,
+): string {
   if (!value || !Number.isFinite(value)) {
-    return "未记录";
+    return t("未记录");
   }
-  return new Date(value).toLocaleString("zh-CN", {
+  return new Date(value).toLocaleString(language, {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
@@ -1239,9 +1344,13 @@ function formatDateTime(value?: number | null): string {
   });
 }
 
-function formatElapsedTime(startedAtMs?: number | null, nowMs = Date.now()): string {
+function formatElapsedTime(
+  startedAtMs: number | null | undefined,
+  nowMs: number,
+  t: Translate,
+): string {
   if (!startedAtMs || !Number.isFinite(startedAtMs)) {
-    return "未运行";
+    return t("未运行");
   }
   const totalSeconds = Math.max(0, Math.floor((nowMs - startedAtMs) / 1000));
   const hours = Math.floor(totalSeconds / 3600);
@@ -1256,10 +1365,10 @@ function formatElapsedTime(startedAtMs?: number | null, nowMs = Date.now()): str
   return `${seconds}s`;
 }
 
-function projectDisplayPath(item: ProjectRuntimeEntry): string {
+function projectDisplayPath(item: ProjectRuntimeEntry, t: Translate): string {
   const rawPath = (item.cwd || item.repoPath || "").trim();
   if (!rawPath) {
-    return "未配置目录";
+    return t("未配置目录");
   }
   const homeCompact = rawPath.replace(/^\/Users\/[^/]+/, "~");
   const parts = homeCompact.split("/").filter(Boolean);
@@ -1269,10 +1378,10 @@ function projectDisplayPath(item: ProjectRuntimeEntry): string {
   return `${parts[0]}/.../${parts.slice(-2).join("/")}`;
 }
 
-function projectDisplayCommand(item: ProjectRuntimeEntry): string {
+function projectDisplayCommand(item: ProjectRuntimeEntry, t: Translate): string {
   const command = (item.command || item.buildCommand || "").trim();
   if (!command) {
-    return "未配置启动命令";
+    return t("未配置启动命令");
   }
   return command.replace(/\s+/g, " ");
 }
@@ -1347,6 +1456,7 @@ export function ProjectsPage({
   recentProjectKeys,
   favoriteShortcutKeys,
   selectedDebugProfileKeys,
+  runtimeStartPromptMode,
   workflowReceiveRules,
   workflowBroadcastRules,
   workflowSignalOptions,
@@ -1363,6 +1473,7 @@ export function ProjectsPage({
   onToggleProjectFavorite,
   onToggleShortcutFavorite,
   onProjectDebugProfileChange,
+  onRuntimeStartPromptModeChange,
   onMarkShortcutUsed,
   onRefresh,
   onOpenFinderEntry,
@@ -1377,8 +1488,11 @@ export function ProjectsPage({
   updateActivity,
   configWorkspaceKey,
   projectConfigPanel,
+  openRequest,
+  onOpenRequestHandled,
 }: ProjectsPageProps) {
   const theme = useTheme();
+  const { language, t } = useI18n();
   const mono = theme.palette.mode === "dark";
   const tone = buildProjectsTone(mono);
   const runtimePanelActionButtonSx = {
@@ -1420,6 +1534,9 @@ export function ProjectsPage({
   const [shortcutRuntimeError, setShortcutRuntimeError] = useState("");
   const [runtimeOptionsProfileKey, setRuntimeOptionsProfileKey] = useState("");
   const [runtimeOptionsEnvText, setRuntimeOptionsEnvText] = useState("");
+  const [runtimeOverridesOpen, setRuntimeOverridesOpen] = useState(false);
+  const [runtimeTemplateManagerOpen, setRuntimeTemplateManagerOpen] =
+    useState(false);
   const [detailsProjectKey, setDetailsProjectKey] = useState("");
   const [detailsPanelTab, setDetailsPanelTab] =
     useState<RuntimePanelTab>("overview");
@@ -1430,6 +1547,9 @@ export function ProjectsPage({
     useState<ProjectWorkflowAction>("project.runtime.start");
   const [projectConfigOpen, setProjectConfigOpen] = useState(false);
   const [projectConfigKey, setProjectConfigKey] = useState("");
+  const handledRuntimeRequestNonce = useRef(0);
+  const [projectConfigInitialSection, setProjectConfigInitialSection] =
+    useState<SettingsSection>("projectBasics");
   const [copiedProjectAction, setCopiedProjectAction] = useState("");
   const [runtimeLogKind, setRuntimeLogKind] =
     useState<ProjectRuntimeLogKind>("dev");
@@ -1461,7 +1581,20 @@ export function ProjectsPage({
   );
   const [runtimeProfileDialog, setRuntimeProfileDialog] =
     useState<RuntimeProfileDialogState | null>(null);
+  const [runtimeLaunchProfileSaveDialog, setRuntimeLaunchProfileSaveDialog] =
+    useState<RuntimeLaunchProfileSaveDialogState | null>(null);
+  const [runtimeLaunchProfileSaving, setRuntimeLaunchProfileSaving] =
+    useState(false);
+  const [runtimeLaunchProfileSaveError, setRuntimeLaunchProfileSaveError] =
+    useState("");
   const [confirm, confirmDialog] = useAppConfirmDialog();
+  const runtimeStartLauncher = useProjectRuntimeStartDialog({
+    promptMode: runtimeStartPromptMode,
+    selectedDebugProfileKeys,
+    onStart: onStartRuntime,
+    onSetDefaultProfile: onProjectDebugProfileChange,
+    onPromptModeChange: onRuntimeStartPromptModeChange,
+  });
   const [linkPlanDialog, setLinkPlanDialog] = useState<LinkPlanDialogState | null>(null);
   const [linkSummaries, setLinkSummaries] = useState<LinkSummary[]>([]);
   const resolvedConfigWorkspaceKey =
@@ -1469,10 +1602,22 @@ export function ProjectsPage({
   const {
     selectedSourceId: linkConfigSourceId,
     preferredSourceId: preferredLinkConfigSourceId,
+    sourceError: linkConfigSourceError,
+    sourceStatus: linkConfigSourceStatus,
     refreshSources: refreshLinkConfigSources,
   } = useConfigSource({
     workspaceKey: resolvedConfigWorkspaceKey,
     requiredCapability: "link",
+  });
+  const {
+    selectedSourceId: proxyConfigSourceId,
+    preferredSourceId: preferredProxyConfigSourceId,
+    sourceError: proxyConfigSourceError,
+    sourceStatus: proxyConfigSourceStatus,
+    refreshSources: refreshProxyConfigSources,
+  } = useConfigSource({
+    workspaceKey: resolvedConfigWorkspaceKey,
+    requiredCapability: "proxy",
   });
   const {
     sources: runtimeConfigSources,
@@ -1526,6 +1671,10 @@ export function ProjectsPage({
   }, [preferredLinkConfigSourceId, refreshLinkConfigSources]);
 
   useEffect(() => {
+    void refreshProxyConfigSources().catch(() => undefined);
+  }, [preferredProxyConfigSourceId, refreshProxyConfigSources]);
+
+  useEffect(() => {
     void refreshRuntimeConfigSources().catch((reason) =>
       setRuntimeProfilesError(String(reason)),
     );
@@ -1555,20 +1704,20 @@ export function ProjectsPage({
     ? [
         {
           key: "projects",
-          label: "项目",
+          label: t("项目"),
           value: runtimeEntries.length,
           icon: <PackageIcon fontSize="small" />,
           tone: "blue",
         },
         {
           key: "running",
-          label: "运行中",
+          label: t("运行中"),
           value: runningCount,
           tone: "green",
         },
         {
           key: "configurable",
-          label: "可启动",
+          label: t("可启动"),
           value: configurableCount,
           icon: <PlayIcon fontSize="small" />,
           tone: "violet",
@@ -1577,7 +1726,7 @@ export function ProjectsPage({
     : [
         {
           key: "entries",
-          label: "入口",
+          label: t("入口"),
           value: totalShortcutCount,
           icon: <AppWindowIcon fontSize="small" />,
           tone: "blue",
@@ -1586,7 +1735,7 @@ export function ProjectsPage({
           .filter((type) => finderTypeOptions.includes(type))
           .map((type) => ({
             key: type,
-            label: type,
+            label: t(type),
             value: finderTypeCounts[type] ?? 0,
             icon:
               type === "网站" ? (
@@ -1608,26 +1757,26 @@ export function ProjectsPage({
     switch (finderType) {
       case "网站":
         return {
-          title: "暂无网站入口",
-          description: "当前工作区还没有可打开的网站入口。",
+          title: t("暂无网站入口"),
+          description: t("当前工作区还没有可打开的网站入口。"),
         };
       case "目录":
         return {
-          title: "暂无目录入口",
-          description: "当前工作区还没有本地目录入口。",
+          title: t("暂无目录入口"),
+          description: t("当前工作区还没有本地目录入口。"),
         };
       case "工具":
         return {
-          title: "暂无工具入口",
-          description: "当前工作区还没有脚本、应用或链路类工具入口。",
+          title: t("暂无工具入口"),
+          description: t("当前工作区还没有脚本、应用或链路类工具入口。"),
         };
       default:
         return {
-          title: "暂无入口",
-          description: "当前工作区还没有快捷入口。",
+          title: t("暂无入口"),
+          description: t("当前工作区还没有快捷入口。"),
         };
     }
-  }, [finderType]);
+  }, [finderType, t]);
   const favoriteProjectKeySet = new Set(favoriteProjectKeys);
   const recentProjectKeySet = new Set(recentProjectKeys);
   const projectRuntimeEntries = useMemo(() => {
@@ -1711,7 +1860,10 @@ export function ProjectsPage({
       return;
     }
     let active = true;
-    void invoke<LinkSummary[]>("list_links", { sourceId: linkConfigSourceId })
+    void invoke<LinkSummary[]>("list_links", {
+      sourceId: linkConfigSourceId,
+      workspaceKey: resolvedConfigWorkspaceKey,
+    })
       .then((summaries) => {
         if (active) {
           setLinkSummaries(summaries);
@@ -1725,7 +1877,12 @@ export function ProjectsPage({
     return () => {
       active = false;
     };
-  }, [finderIsProjects, linkConfigSourceId, linkToolKeysSignature]);
+  }, [
+    finderIsProjects,
+    linkConfigSourceId,
+    linkToolKeysSignature,
+    resolvedConfigWorkspaceKey,
+  ]);
   const projectMenuFavorite = projectMenuEntry
     ? favoriteProjectKeySet.has(projectMenuEntry.key)
     : false;
@@ -1750,9 +1907,119 @@ export function ProjectsPage({
     ? runtimeProxyProfileById.get(runtimePanelProfile.rdevProxyProfileId) ?? null
     : null;
   const runtimeOptionsParseResult = useMemo(
-    () => parseRuntimeEnvText(runtimeOptionsEnvText),
-    [runtimeOptionsEnvText],
+    () => parseRuntimeEnvText(runtimeOptionsEnvText, t),
+    [runtimeOptionsEnvText, t],
   );
+  const runtimeOptionsOverrideCount = Object.keys(
+    runtimeOptionsParseResult.values,
+  ).length;
+  const runtimeOptionsRuntimeProfileKey =
+    runtimeOptionsSelectedProfile?.runtimeProfile?.trim() || "";
+  const runtimeOptionsRuntimeProfile = runtimeOptionsRuntimeProfileKey
+    ? runtimeProfileDrafts.find(
+        (profile) => profile.key === runtimeOptionsRuntimeProfileKey,
+      ) ?? null
+    : null;
+  const runtimeOptionsBoundProxy = runtimeOptionsRuntimeProfile?.rdevProxyProfileId
+    ? runtimeProxyProfileById.get(
+        runtimeOptionsRuntimeProfile.rdevProxyProfileId,
+      ) ?? null
+    : null;
+  const runtimeOptionsProfileLabel =
+    runtimePreflight.context?.effective.debugProfileLabel?.trim() ||
+    runtimePreflight.context?.effective.debugProfileKey?.trim() ||
+    runtimeOptionsSelectedProfile?.label?.trim() ||
+    runtimeOptionsSelectedProfile?.key ||
+    t("项目基础启动");
+  const runtimeOptionsEnvironmentLabel =
+    runtimePreflight.context?.effective.runtimeProfileLabel?.trim() ||
+    runtimePreflight.context?.effective.runtimeProfileKey?.trim() ||
+    (runtimeOptionsRuntimeProfile
+      ? runtimeProfileLabel(runtimeOptionsRuntimeProfile)
+      : runtimeOptionsRuntimeProfileKey
+        ? t("模板缺失：{key}", { key: runtimeOptionsRuntimeProfileKey })
+        : t("未绑定共享环境"));
+  const runtimeOptionsEffectiveTarget =
+    runtimePreflight.context?.effective.target ||
+    runtimePreflight.response?.target ||
+    null;
+  const runtimeOptionsEffectiveCommand =
+    runtimeOptionsEffectiveTarget?.command?.trim() ||
+    runtimeOptionsSelectedProfile?.command?.trim() ||
+    runtimeOptionsEntry?.command?.trim() ||
+    t("未配置启动命令");
+  const runtimeOptionsEffectiveCwd =
+    runtimeOptionsEffectiveTarget?.cwd?.trim() ||
+    runtimeOptionsSelectedProfile?.cwd?.trim() ||
+    runtimeOptionsEntry?.cwd?.trim() ||
+    runtimeOptionsEntry?.repoPath?.trim() ||
+    t("未配置工作目录");
+  const runtimeOptionsEffectivePort =
+    runtimeOptionsEffectiveTarget?.expectedPort ??
+    runtimeOptionsSelectedProfile?.expectedPort ??
+    null;
+  const runtimeOptionsEffectiveBrowser =
+    runtimeOptionsSelectedProfile?.browser?.trim() ||
+    runtimeOptionsRuntimeProfile?.browser?.trim() ||
+    t("系统默认浏览器");
+  const runtimeOptionsProxyLabel = runtimeOptionsSelectedProfile?.networkProxy?.enabled
+    ? runtimeOptionsSelectedProfile.networkProxy.nodeHook
+      ? t("项目网络代理 · Node Hook")
+      : t("项目网络代理")
+    : runtimeOptionsRuntimeProfile?.rdevProxyProfileId
+      ? runtimeOptionsBoundProxy
+        ? t("代理服务 {name}", {
+            name: proxyProfileLabel(runtimeOptionsBoundProxy),
+          })
+        : t("代理服务缺失")
+      : runtimeOptionsRuntimeProfile?.networkProxy?.enabled
+        ? runtimeOptionsRuntimeProfile.networkProxy.nodeHook
+          ? t("共享环境网络代理 · Node Hook")
+          : t("共享环境网络代理")
+      : runtimeOptionsRuntimeProfile?.proxyUrl
+        ? t("浏览器代理")
+        : t("直连");
+  const runtimeOptionsWorkspace = runtimePreflight.context?.workspace ?? null;
+  const runtimeOptionsWorkspaceFallback =
+    projectConfigPanel?.projectWorkspaces.find(
+      (workspace) => workspace.key === resolvedConfigWorkspaceKey,
+    ) ?? null;
+  const runtimeOptionsWorkspaceLabel =
+    runtimeOptionsWorkspace?.name ||
+    runtimeOptionsWorkspaceFallback?.name ||
+    resolvedConfigWorkspaceKey;
+  const runtimeOptionsEffectiveEnvironment =
+    runtimePreflight.context?.effective.environment ??
+    Object.entries({
+      ...(runtimeOptionsSelectedProfile?.env ?? {}),
+      ...runtimeOptionsParseResult.values,
+    }).map(([key, value]) => ({
+      key,
+      value,
+      masked: false,
+      source: Object.prototype.hasOwnProperty.call(runtimeOptionsParseResult.values, key)
+        ? "launchOverride"
+        : runtimeOptionsSelectedProfile
+          ? `debugProfile.${runtimeOptionsSelectedProfile.key}`
+          : "project.dev.env",
+    }));
+  const runtimeOptionsBrowserSource =
+    runtimePreflight.context?.effective.browserSource ||
+    (runtimeOptionsSelectedProfile?.browser ? "debugProfile" : runtimeOptionsRuntimeProfile?.browser
+      ? "runtimeProfile"
+      : "systemDefault");
+  const runtimeOptionsProxySource =
+    runtimePreflight.context?.effective.proxySource ||
+    (runtimeOptionsSelectedProfile?.networkProxy?.enabled ||
+    runtimeOptionsSelectedProfile?.localProxy?.enabled
+      ? "debugProfile"
+      : runtimeOptionsRuntimeProfile?.networkProxy?.enabled ||
+          runtimeOptionsRuntimeProfile?.rdevProxyProfileId ||
+          runtimeOptionsRuntimeProfile?.proxyUrl
+        ? "runtimeProfile"
+        : "direct");
+  const runtimeOptionsPreflightFailed =
+    runtimePreflight.response?.statusKey === "error";
   const detailsProjectPath =
     detailsProjectEntry?.cwd || detailsProjectEntry?.repoPath || "";
   const detailsWebActionsContext = useMemo<WebActionsDialogContext | null>(() => {
@@ -1913,19 +2180,42 @@ export function ProjectsPage({
   }, [detailsProjectEntry, detailsProjectKey]);
 
   useEffect(() => {
+    if (
+      mode !== "projectManagement" ||
+      !openRequest ||
+      openRequest.target.kind !== "runtimePanel" ||
+      openRequest.nonce <= handledRuntimeRequestNonce.current
+    ) {
+      return;
+    }
+    const entry = runtimeEntries.find(
+      (item) => item.key === openRequest.projectKey,
+    );
+    if (!entry) {
+      return;
+    }
+    handledRuntimeRequestNonce.current = openRequest.nonce;
+    openRuntimePanel(entry, openRequest.target.tab);
+    onOpenRequestHandled?.(openRequest.nonce);
+  }, [mode, onOpenRequestHandled, openRequest, runtimeEntries]);
+
+  useEffect(() => {
     if (!detailsProjectEntry) {
       setRuntimeOptionsProfileKey("");
       setRuntimeOptionsEnvText("");
+      setRuntimeOverridesOpen(false);
+      setRuntimeTemplateManagerOpen(false);
       return;
     }
     const profileKey = projectSelectedProfileKey(
       detailsProjectEntry,
       selectedDebugProfileKeys,
     );
-    const profile = findDebugProfile(detailsProjectEntry.debugProfiles ?? [], profileKey);
     setRuntimeOptionsProfileKey(profileKey);
-    setRuntimeOptionsEnvText(formatRuntimeEnvText(profile?.env));
-  }, [detailsProjectEntry?.key]);
+    setRuntimeOptionsEnvText("");
+    setRuntimeOverridesOpen(false);
+    setRuntimeTemplateManagerOpen(false);
+  }, [detailsProjectEntry?.key, runtimeOptionsSavedProfileKey]);
 
   useEffect(() => {
     if (!detailsProjectEntry) {
@@ -1936,6 +2226,17 @@ export function ProjectsPage({
         context: null,
         loading: false,
         error: "",
+      });
+      return;
+    }
+    if (runtimeOptionsParseResult.error) {
+      setRuntimePreflight({
+        projectKey: detailsProjectEntry.key,
+        debugProfileKey: runtimeOptionsProfileKey || "",
+        response: null,
+        context: null,
+        loading: false,
+        error: runtimeOptionsParseResult.error,
       });
       return;
     }
@@ -1951,48 +2252,60 @@ export function ProjectsPage({
       loading: true,
       error: "",
     }));
-    void Promise.all([
-      invoke<ProjectRuntimePreflightResponse>("preflight_project_runtime", {
+    const timer = window.setTimeout(() => {
+      const launchArgs = buildProjectRuntimeResolutionArgs({
         project: detailsProjectEntry.key,
         debugProfile: profileKey || null,
-      }),
-      invoke<ProjectRuntimeContextSnapshot>("get_project_runtime_context", {
-        project: detailsProjectEntry.key,
-        debugProfile: profileKey || null,
-        runtimeProfile: null,
-      }),
-    ])
-      .then(([response, context]) => {
-        if (cancelled) {
-          return;
-        }
-        setRuntimePreflight({
-          projectKey: detailsProjectEntry.key,
-          debugProfileKey: profileKey,
-          response,
-          context,
-          loading: false,
-          error: "",
-        });
-      })
-      .catch((reason) => {
-        if (cancelled) {
-          return;
-        }
-        setRuntimePreflight({
-          projectKey: detailsProjectEntry.key,
-          debugProfileKey: profileKey,
-          response: null,
-          context: null,
-          loading: false,
-          error: String(reason),
-        });
+        envOverrides: runtimeOptionsParseResult.values,
       });
+      void Promise.all([
+        invoke<ProjectRuntimePreflightResponse>(
+          "preflight_project_runtime",
+          launchArgs,
+        ),
+        invoke<ProjectRuntimeContextSnapshot>(
+          "get_project_runtime_context",
+          launchArgs,
+        ),
+      ])
+        .then(([response, context]) => {
+          if (cancelled) {
+            return;
+          }
+          setRuntimePreflight({
+            projectKey: detailsProjectEntry.key,
+            debugProfileKey: profileKey,
+            response,
+            context,
+            loading: false,
+            error: "",
+          });
+        })
+        .catch((reason) => {
+          if (cancelled) {
+            return;
+          }
+          setRuntimePreflight({
+            projectKey: detailsProjectEntry.key,
+            debugProfileKey: profileKey,
+            response: null,
+            context: null,
+            loading: false,
+            error: String(reason),
+          });
+        });
+    }, 220);
 
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
-  }, [detailsProjectEntry?.key, runtimeOptionsProfileKey, runtimePreflightRefreshKey]);
+  }, [
+    detailsProjectEntry?.key,
+    runtimeOptionsEnvText,
+    runtimeOptionsProfileKey,
+    runtimePreflightRefreshKey,
+  ]);
 
   useEffect(() => {
     if (detailsPanelTab === "webActions" && !detailsWebActionsContext) {
@@ -2304,7 +2617,7 @@ export function ProjectsPage({
         nextRuntimeProfile,
       );
       if (!nextEditor) {
-        throw new Error("未找到可更新的访达入口");
+        throw new Error(t("未找到可更新的访达入口"));
       }
       await invoke("save_navigation_editor", { data: nextEditor });
       const nextItem: FinderShortcutItem = {
@@ -2339,7 +2652,9 @@ export function ProjectsPage({
       return;
     }
     if (runtimeProfileDialog) {
-      setRuntimeProfilesError("请先保存或取消当前运行配置改动，再切换配置源。");
+      setRuntimeProfilesError(
+        t("请先保存或取消当前运行环境改动，再切换配置源。"),
+      );
       return;
     }
     setRuntimeProfilesError("");
@@ -2372,7 +2687,7 @@ export function ProjectsPage({
         error={runtimeConfigSourceError}
         showReadyStatus
         manageDisabled={Boolean(runtimeProfileDialog)}
-        manageDisabledReason="请先保存或取消当前运行配置改动"
+        manageDisabledReason={t("请先保存或取消当前运行环境改动")}
         onSourceChange={(sourceId) => void handleRuntimeConfigSourceChange(sourceId)}
         onManage={() => setRuntimeConfigSourceManagerOpen(true)}
       />
@@ -2381,7 +2696,7 @@ export function ProjectsPage({
 
   function addRuntimePanelProfile() {
     if (runtimeProfilesReadOnly) {
-      setRuntimeProfilesError("当前配置源不支持运行配置覆盖。");
+      setRuntimeProfilesError(t("当前配置源不支持运行环境模板覆盖。"));
       return;
     }
     setRuntimeProfileDialog({
@@ -2409,7 +2724,7 @@ export function ProjectsPage({
 
   function editRuntimePanelProfileByKey(profileKey?: string | null) {
     if (runtimeProfilesReadOnly) {
-      setRuntimeProfilesError("当前配置源不支持运行配置覆盖。");
+      setRuntimeProfilesError(t("当前配置源不支持运行环境模板覆盖。"));
       return;
     }
     const key = profileKey?.trim();
@@ -2450,9 +2765,11 @@ export function ProjectsPage({
   async function restoreRuntimeProfileInheritance() {
     if (runtimeProfileScope !== "override") return;
     const accepted = await confirm({
-      title: "恢复继承全局运行配置？",
-      description: "当前工作区的 runtime_overrides.toml 会被删除，并立即改用全局运行配置。",
-      confirmLabel: "恢复继承",
+      title: t("恢复继承全局运行环境？"),
+      description: t(
+        "当前工作区的 runtime_overrides.toml 会被删除，并立即改用全局运行环境模板。",
+      ),
+      confirmLabel: t("恢复继承"),
       tone: "danger",
       preferenceKey: "destructive.delete",
     });
@@ -2480,7 +2797,7 @@ export function ProjectsPage({
           index !== runtimeProfileDialog.index),
     );
     if (duplicate) {
-      setRuntimeProfilesError("运行配置 Key 已存在");
+      setRuntimeProfilesError(t("运行环境模板 Key 已存在"));
       return;
     }
     const nextProfiles =
@@ -2498,9 +2815,9 @@ export function ProjectsPage({
   function handleRuntimeOptionsProfileChange(profileKey: string) {
     const nextProfileKey =
       profileKey === DEFAULT_RUNTIME_PROFILE_VALUE ? "" : profileKey;
-    const profile = findDebugProfile(runtimeOptionsProfiles, nextProfileKey);
     setRuntimeOptionsProfileKey(nextProfileKey);
-    setRuntimeOptionsEnvText(formatRuntimeEnvText(profile?.env));
+    setRuntimeOptionsEnvText("");
+    setRuntimeOverridesOpen(false);
   }
 
   function showProjectActionFeedback(label: string) {
@@ -2522,11 +2839,97 @@ export function ProjectsPage({
     showProjectActionFeedback("runtime-default");
   }
 
+  function openRuntimeLaunchProfileSaveDialog() {
+    if (!runtimeOptionsEntry || runtimeOptionsOverrideCount === 0) {
+      return;
+    }
+    const profileKey = uniqueProjectLaunchProfileKey(
+      runtimeOptionsProfiles,
+      runtimeOptionsSelectedProfile?.key,
+    );
+    const baseLabel =
+      runtimeOptionsSelectedProfile?.label?.trim() ||
+      runtimeOptionsEntry.name.trim() ||
+      "本地启动";
+    setRuntimeLaunchProfileSaveError("");
+    setRuntimeLaunchProfileSaveDialog({
+      mode: "create",
+      profileKey,
+      label: `${baseLabel} 自定义`,
+    });
+  }
+
+  function changeRuntimeLaunchProfileSaveMode(mode: "create" | "update") {
+    if (!runtimeOptionsEntry) {
+      return;
+    }
+    if (mode === "update" && runtimeOptionsSelectedProfile) {
+      setRuntimeLaunchProfileSaveDialog({
+        mode,
+        profileKey: runtimeOptionsSelectedProfile.key,
+        label:
+          runtimeOptionsSelectedProfile.label || runtimeOptionsSelectedProfile.key,
+      });
+      return;
+    }
+    const profileKey = uniqueProjectLaunchProfileKey(
+      runtimeOptionsProfiles,
+      runtimeOptionsSelectedProfile?.key,
+    );
+    setRuntimeLaunchProfileSaveDialog({
+      mode: "create",
+      profileKey,
+      label: `${
+        runtimeOptionsSelectedProfile?.label || runtimeOptionsEntry.name
+      } 自定义`,
+    });
+  }
+
+  async function saveRuntimeLaunchProfile() {
+    if (
+      !runtimeOptionsEntry ||
+      !runtimeLaunchProfileSaveDialog ||
+      runtimeOptionsParseResult.error ||
+      runtimeOptionsOverrideCount === 0
+    ) {
+      return;
+    }
+    setRuntimeLaunchProfileSaving(true);
+    setRuntimeLaunchProfileSaveError("");
+    try {
+      const response = await invoke<SaveProjectRuntimeLaunchProfileResponse>(
+        "save_project_runtime_launch_profile",
+        {
+          request: {
+            projectKey: runtimeOptionsEntry.key,
+            mode: runtimeLaunchProfileSaveDialog.mode,
+            profileKey: runtimeLaunchProfileSaveDialog.profileKey.trim(),
+            label: runtimeLaunchProfileSaveDialog.label.trim(),
+            baseProfileKey: runtimeOptionsSelectedProfile?.key || null,
+            envOverrides: runtimeOptionsParseResult.values,
+          },
+        },
+      );
+      await projectConfigPanel?.onProjectConfigSaved();
+      onProjectDebugProfileChange(runtimeOptionsEntry.key, response.profileKey);
+      setRuntimeOptionsProfileKey(response.profileKey);
+      setRuntimeOptionsEnvText("");
+      setRuntimeOverridesOpen(false);
+      setRuntimeLaunchProfileSaveDialog(null);
+      setRuntimePreflightRefreshKey((current) => current + 1);
+      onRefresh();
+      showProjectActionFeedback("runtime-profile-saved");
+    } catch (reason) {
+      setRuntimeLaunchProfileSaveError(String(reason));
+    } finally {
+      setRuntimeLaunchProfileSaving(false);
+    }
+  }
+
   function handleRuntimeOptionsStart() {
     if (!runtimeOptionsEntry || runtimeOptionsParseResult.error) {
       return;
     }
-    onProjectDebugProfileChange(runtimeOptionsEntry.key, runtimeOptionsProfileKey);
     onStartRuntime(
       runtimeOptionsEntry.key,
       runtimeOptionsProfileKey || undefined,
@@ -2582,17 +2985,48 @@ export function ProjectsPage({
   async function openLinkPlan(entry: FinderEntry) {
     const key = linkToolKey(entry);
     const summary = key ? linkSummaryMap.get(key) ?? null : null;
+    const workspaceKey = resolvedConfigWorkspaceKey;
     if (!key) {
       setLinkPlanDialog({
         entryName: entry.name,
         key: "",
         sourceId: linkConfigSourceId,
+        proxySourceId: proxyConfigSourceId,
+        runtimeSourceId: runtimeConfigSourceId,
+        workspaceKey,
         plan: null,
         report: null,
         runtime: null,
         loading: false,
         action: null,
-        error: "缺少 Link Key",
+        error: t("缺少 Link Key"),
+      });
+      return false;
+    }
+    const sourceLoadError =
+      linkConfigSourceError ||
+      proxyConfigSourceError ||
+      runtimeConfigSourceError;
+    if (
+      linkConfigSourceStatus !== "ready" ||
+      proxyConfigSourceStatus !== "ready" ||
+      runtimeConfigSourceStatus !== "ready"
+    ) {
+      setLinkPlanDialog({
+        entryName: entry.name,
+        key,
+        sourceId: linkConfigSourceId,
+        proxySourceId: proxyConfigSourceId,
+        runtimeSourceId: runtimeConfigSourceId,
+        workspaceKey,
+        plan: null,
+        report: null,
+        runtime: summary?.runtime ?? null,
+        loading: false,
+        action: null,
+        error:
+          sourceLoadError ||
+          t("正在确认 Link、Proxy 和 Runtime 配置源，请稍后重试。"),
       });
       return false;
     }
@@ -2600,6 +3034,9 @@ export function ProjectsPage({
       entryName: entry.name,
       key,
       sourceId: linkConfigSourceId,
+      proxySourceId: proxyConfigSourceId,
+      runtimeSourceId: runtimeConfigSourceId,
+      workspaceKey,
       plan: null,
       report: null,
       runtime: summary?.runtime ?? null,
@@ -2608,11 +3045,22 @@ export function ProjectsPage({
       error: "",
     });
     try {
-      const plan = await invoke<LinkPlan>("plan_link", { sourceId: linkConfigSourceId, key });
+      const plan = await invoke<LinkPlan>("plan_link", {
+        sourceId: linkConfigSourceId,
+        proxySourceId: proxyConfigSourceId,
+        runtimeSourceId: runtimeConfigSourceId,
+        workspaceKey,
+        key,
+      });
       setLinkPlanDialog({
         entryName: entry.name,
         key,
-        sourceId: linkConfigSourceId,
+        sourceId: plan.sourceContext?.linkSourceId || linkConfigSourceId,
+        proxySourceId:
+          plan.sourceContext?.proxySourceId || proxyConfigSourceId,
+        runtimeSourceId:
+          plan.sourceContext?.runtimeSourceId || runtimeConfigSourceId,
+        workspaceKey,
         plan,
         report: null,
         runtime: summary?.runtime ?? null,
@@ -2626,6 +3074,9 @@ export function ProjectsPage({
         entryName: entry.name,
         key,
         sourceId: linkConfigSourceId,
+        proxySourceId: proxyConfigSourceId,
+        runtimeSourceId: runtimeConfigSourceId,
+        workspaceKey,
         plan: null,
         report: null,
         runtime: summary?.runtime ?? null,
@@ -2645,6 +3096,12 @@ export function ProjectsPage({
     const command =
       action === "check" ? "check_link" : action === "run" ? "run_link" : "stop_link";
     const sourceId = linkPlanDialog?.sourceId ?? linkConfigSourceId;
+    const proxySourceId =
+      linkPlanDialog?.proxySourceId ?? proxyConfigSourceId;
+    const runtimeSourceId =
+      linkPlanDialog?.runtimeSourceId ?? runtimeConfigSourceId;
+    const workspaceKey =
+      linkPlanDialog?.workspaceKey ?? resolvedConfigWorkspaceKey;
     const linkName = linkPlanDialog?.entryName.trim() || key;
     const activityId =
       action === "check"
@@ -2663,16 +3120,29 @@ export function ProjectsPage({
       const report = await invoke<LinkExecutionReport>(
         command,
         action === "check"
-          ? { sourceId, key }
+          ? { sourceId, proxySourceId, runtimeSourceId, workspaceKey, key }
           : {
               sourceId,
+              proxySourceId,
+              runtimeSourceId,
+              workspaceKey,
               key,
               activityId: activityId || null,
               operationOrigin: "app",
             },
       );
       if (activityId && action !== "check") {
-        updateActivity?.(activityId, linkActivityResultPatch(report, action, sourceId));
+        updateActivity?.(
+          activityId,
+          linkActivityResultPatch(
+            report,
+            action,
+            sourceId,
+            workspaceKey,
+            proxySourceId,
+            runtimeSourceId,
+          ),
+        );
       }
       setLinkPlanDialog((current) =>
         current
@@ -2688,6 +3158,7 @@ export function ProjectsPage({
         try {
           const summaries = await invoke<LinkSummary[]>("list_links", {
             sourceId,
+            workspaceKey,
           });
           setLinkSummaries(summaries);
         } catch {
@@ -2698,7 +3169,16 @@ export function ProjectsPage({
       if (activityId && action !== "check") {
         updateActivity?.(
           activityId,
-          linkActivityFailurePatch(key, linkName, action, sourceId, reason),
+          linkActivityFailurePatch(
+            key,
+            linkName,
+            action,
+            sourceId,
+            reason,
+            workspaceKey,
+            proxySourceId,
+            runtimeSourceId,
+          ),
         );
       }
       setLinkPlanDialog((current) =>
@@ -2782,11 +3262,15 @@ export function ProjectsPage({
     setWorkflowOpen(true);
   }
 
-  function openProjectConfig(projectKey = "") {
+  function openProjectConfig(
+    projectKey = "",
+    section: SettingsSection = "projectBasics",
+  ) {
     if (!projectConfigPanel) {
       return;
     }
     setProjectConfigKey(projectKey);
+    setProjectConfigInitialSection(section);
     setProjectConfigOpen(true);
   }
 
@@ -2845,7 +3329,11 @@ export function ProjectsPage({
         >
           <WorkspacePageToolbar
             className={`finder-toolbar finder-toolbar--${mode}`}
-            ariaLabel={finderIsProjects ? "项目概览与配置" : "资源入口概览与配置"}
+            ariaLabel={
+              finderIsProjects
+                ? t("项目概览与配置")
+                : t("资源入口概览与配置")
+            }
             metrics={pageToolbarMetrics}
             actions={
               <>
@@ -2860,7 +3348,7 @@ export function ProjectsPage({
                   startIcon={<SettingsIcon sx={{ fontSize: 14 }} />}
                   onClick={() => openProjectConfig()}
                 >
-                  项目配置
+                  {t("项目配置")}
                 </WorkspacePageToolbarAction>
               ) : null}
               {!finderIsProjects && onOpenResourceConfig ? (
@@ -2868,7 +3356,7 @@ export function ProjectsPage({
                   startIcon={<SettingsIcon sx={{ fontSize: 14 }} />}
                   onClick={onOpenResourceConfig}
                 >
-                  入口配置
+                  {t("入口配置")}
                 </WorkspacePageToolbarAction>
               ) : null}
               </>
@@ -2923,7 +3411,11 @@ export function ProjectsPage({
                     onChange={(event) =>
                       onFinderQueryChange(event.target.value)
                     }
-                    placeholder={finderIsProjects ? finderPlaceholder("项目") : finderPlaceholder(finderType)}
+                    placeholder={
+                      finderIsProjects
+                        ? finderPlaceholder("项目", t)
+                        : finderPlaceholder(finderType, t)
+                    }
                     sx={{
                       "& .MuiOutlinedInput-root": {
                         minHeight: 40,
@@ -2950,12 +3442,16 @@ export function ProjectsPage({
                       },
                     }}
                   />
-                  <Tooltip title="清空搜索">
+                  <Tooltip title={t("清空搜索")}>
                     <span>
                       <IconButton
                         onClick={() => onFinderQueryChange("")}
                         disabled={!finderQuery}
-                        aria-label={finderIsProjects ? "清空项目搜索" : "清空入口搜索"}
+                        aria-label={
+                          finderIsProjects
+                            ? t("清空项目搜索")
+                            : t("清空入口搜索")
+                        }
                         sx={{
                           width: 30,
                           height: 30,
@@ -2973,10 +3469,18 @@ export function ProjectsPage({
                       </IconButton>
                     </span>
                   </Tooltip>
-                  <Tooltip title={finderIsProjects ? "刷新项目状态" : "刷新入口"}>
+                  <Tooltip
+                    title={
+                      finderIsProjects ? t("刷新项目状态") : t("刷新入口")
+                    }
+                  >
                     <span>
                       <IconButton
-                        aria-label={finderIsProjects ? "刷新项目状态" : "刷新入口"}
+                        aria-label={
+                          finderIsProjects
+                            ? t("刷新项目状态")
+                            : t("刷新入口")
+                        }
                         onClick={onRefresh}
                         sx={{
                           width: 30,
@@ -3005,7 +3509,7 @@ export function ProjectsPage({
                   value={finderType}
                   onChange={(_, value) => onFinderTypeChange(value as FinderType)}
                   variant="fullWidth"
-                  aria-label="入口类型筛选"
+                  aria-label={t("入口类型筛选")}
                   sx={{
                     mb: 0.52,
                     minHeight: 40,
@@ -3104,13 +3608,21 @@ export function ProjectsPage({
               ) : null}
 
               {finderIsProjects && runtimeEntries.length === 0 ? (
-                <AppEmptyState compact title="暂无项目" description="检查 projects.toml 是否可读。" />
+                <AppEmptyState
+                  compact
+                  title={t("暂无项目")}
+                  description={t("检查 projects.toml 是否可读。")}
+                />
               ) : null}
 
               {finderIsProjects &&
               runtimeEntries.length > 0 &&
               projectRuntimeEntries.length === 0 ? (
-                <AppEmptyState compact title="没有匹配项目" description="调整搜索词再试。" />
+                <AppEmptyState
+                  compact
+                  title={t("没有匹配项目")}
+                  description={t("调整搜索词再试。")}
+                />
               ) : null}
 
               {finderIsProjects &&
@@ -3143,15 +3655,15 @@ export function ProjectsPage({
                     const runtimeAvailable =
                       item.canStart || item.canStop || item.canAdopt;
                     const runtimeTooltip = item.canAdopt
-                      ? "认领外部项目"
+                      ? t("认领外部项目")
                       : runtimeRunning
-                      ? "停止项目"
-                      : "启动项目";
+                      ? t("停止项目")
+                      : t("启动项目");
                     const runtimeAriaLabel = item.canAdopt
-                      ? `认领 ${item.name}`
+                      ? t("认领 {name}", { name: item.name })
                       : runtimeRunning
-                      ? `停止 ${item.name}`
-                      : `启动 ${item.name}`;
+                      ? t("停止 {name}", { name: item.name })
+                      : t("启动 {name}", { name: item.name });
                     const statusPalette = buildStatusPalette(
                       item.statusKey,
                       mono,
@@ -3174,31 +3686,39 @@ export function ProjectsPage({
                     const commonRuntimeProfileLabel =
                       runtimeProfileLabel(selectedRuntimeProfile) ||
                       selectedRuntimeProfileKey ||
-                      "默认";
+                      t("默认");
                     const projectDebugProfileLabel =
-                      selectedDebugProfile?.label?.trim() || "默认";
-                    const commonRuntimeChipLabel = `通用 ${commonRuntimeProfileLabel}`;
-                    const projectDebugChipLabel = `项目 ${projectDebugProfileLabel}`;
+                      selectedDebugProfile?.label?.trim() || t("基础启动");
+                    const commonRuntimeChipLabel = t("环境 {name}", {
+                      name: commonRuntimeProfileLabel,
+                    });
+                    const projectDebugChipLabel = t("档案 {name}", {
+                      name: projectDebugProfileLabel,
+                    });
                     const runtimeStartTooltip =
                       !runtimeRunning && selectedDebugProfile
-                        ? `启动项目 · ${selectedDebugProfile.label}`
+                        ? t("启动项目 · {name}", {
+                            name: selectedDebugProfile.label,
+                          })
                         : runtimeTooltip;
                     const focusableRuntimeRow =
                       runtimeRunning && item.canFocusRuntime;
                     const runtimeFocusTooltip = item.canFocusRuntime
-                      ? "打开运行中的项目"
-                      : "未配置打开地址，且未识别到启动 URL";
+                      ? t("打开运行中的项目")
+                      : t("未配置打开地址，且未识别到启动 URL");
                     const runtimeFocusGlow = mono
                       ? "rgba(117, 151, 255, 0.2)"
                       : "rgba(77, 123, 214, 0.16)";
                     const projectAccent = projectAccentColor(item);
-                    const projectPath = projectDisplayPath(item);
-                    const projectCommand = projectDisplayCommand(item);
+                    const projectPath = projectDisplayPath(item, t);
+                    const projectCommand = projectDisplayCommand(item, t);
                     return (
                       <Box
                         key={item.key}
                         className={`project-runtime-row${runtimeRunning ? " is-running" : ""}${focusableRuntimeRow ? " is-focusable" : ""}${projectFavorite ? " is-favorite" : ""}`}
-                        title={focusableRuntimeRow ? "点击唤起项目" : undefined}
+                        title={
+                          focusableRuntimeRow ? t("点击唤起项目") : undefined
+                        }
                         onClick={(event) => {
                           if (
                             !focusableRuntimeRow ||
@@ -3321,13 +3841,17 @@ export function ProjectsPage({
                             size="small"
                             className="project-runtime-common-chip"
                             label={commonRuntimeChipLabel}
-                            title={`通用运行配置：${commonRuntimeProfileLabel}`}
+                            title={t("共享运行环境：{name}", {
+                              name: commonRuntimeProfileLabel,
+                            })}
                           />
                           <Chip
                             size="small"
                             className="project-runtime-profile-chip"
                             label={projectDebugChipLabel}
-                            title={`项目运行配置：${projectDebugProfileLabel}`}
+                            title={t("项目启动档案：{name}", {
+                              name: projectDebugProfileLabel,
+                            })}
                           />
                         </Box>
 
@@ -3343,7 +3867,9 @@ export function ProjectsPage({
                               <span>
                                 <IconButton
                                   className="project-runtime-action is-focus"
-                                  aria-label={`打开 ${item.name}`}
+                                  aria-label={t("打开 {name}", {
+                                    name: item.name,
+                                  })}
                                   disabled={!item.canFocusRuntime}
                                   onClick={(event) => {
                                     event.stopPropagation();
@@ -3380,10 +3906,7 @@ export function ProjectsPage({
                                     onStopRuntime(item.key);
                                     return;
                                   }
-                                  onStartRuntime(
-                                    item.key,
-                                    selectedDebugProfileKey || undefined,
-                                  );
+                                  void runtimeStartLauncher.requestStart(item);
                                 }}
                               >
                                 {item.canAdopt ? (
@@ -3396,11 +3919,19 @@ export function ProjectsPage({
                               </IconButton>
                             </span>
                           </Tooltip>
-                          <Tooltip title={item.cwd || item.repoPath ? "打开项目目录" : "未配置项目目录"}>
+                          <Tooltip
+                            title={
+                              item.cwd || item.repoPath
+                                ? t("打开项目目录")
+                                : t("未配置项目目录")
+                            }
+                          >
                             <span>
                               <IconButton
                                 className="project-runtime-action is-muted"
-                                aria-label={`打开 ${item.name} 的项目目录`}
+                                aria-label={t("打开 {name} 的项目目录", {
+                                  name: item.name,
+                                })}
                                 disabled={!item.cwd && !item.repoPath}
                                 onClick={(event) => {
                                   event.stopPropagation();
@@ -3411,11 +3942,13 @@ export function ProjectsPage({
                               </IconButton>
                             </span>
                           </Tooltip>
-                          <Tooltip title="更多操作">
+                          <Tooltip title={t("更多操作")}>
                             <span>
                               <IconButton
                                 className="project-runtime-action is-muted"
-                                aria-label={`${item.name} 更多操作`}
+                                aria-label={t("{name} 更多操作", {
+                                  name: item.name,
+                                })}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   setProjectMenuAnchor(event.currentTarget);
@@ -3445,7 +3978,7 @@ export function ProjectsPage({
                           onClick={loadMoreFinderEntries}
                           className="workflow-history-footer-action"
                         >
-                          下滑加载更多
+                          {t("下滑加载更多")}
                         </Button>
                       ) : (
                         <AppListEndState />
@@ -3500,7 +4033,30 @@ export function ProjectsPage({
                     <AppWindowIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary="运行面板"
+                    primary={t("运行面板")}
+                    primaryTypographyProps={{
+                      fontSize: "0.82rem",
+                      fontWeight: 650,
+                    }}
+                  />
+                </MenuItem>
+                <MenuItem
+                  disabled={!projectMenuEntry?.canStart}
+                  onClick={() => {
+                    if (!projectMenuEntry) {
+                      return;
+                    }
+                    closeProjectMenu();
+                    void runtimeStartLauncher.requestStart(projectMenuEntry, {
+                      forceConfirm: true,
+                    });
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
+                    <PlayIcon fontSize="small" />
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={t("选择档案启动")}
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -3521,7 +4077,7 @@ export function ProjectsPage({
                     <SettingsIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary="项目配置"
+                    primary={t("项目配置")}
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -3549,7 +4105,9 @@ export function ProjectsPage({
                     <StarIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary={projectMenuFavorite ? "取消标记" : "标记项目"}
+                    primary={
+                      projectMenuFavorite ? t("取消标记") : t("标记项目")
+                    }
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -3570,7 +4128,7 @@ export function ProjectsPage({
                     <WorkflowIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary="配置联动"
+                    primary={t("配置联动")}
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -3579,7 +4137,7 @@ export function ProjectsPage({
                 </MenuItem>
               </Menu>
 
-              {detailsProjectEntry ? (
+              {detailsProjectEntry && !projectConfigOpen ? (
                 <RuntimePanelDrawer
                   open
                   onClose={closeRuntimePanel}
@@ -3595,9 +4153,11 @@ export function ProjectsPage({
                   headerActions={
                     <Stack direction="row" spacing={0.5}>
                       {detailsProjectEntry.canAdopt && detailsProjectEntry.pid ? (
-                        <Tooltip title="认领外部项目">
+                        <Tooltip title={t("认领外部项目")}>
                           <IconButton
-                            aria-label={`认领 ${detailsProjectEntry.name}`}
+                            aria-label={t("认领 {name}", {
+                              name: detailsProjectEntry.name,
+                            })}
                             onClick={() =>
                               onAdoptRuntime(
                                 detailsProjectEntry.key,
@@ -3622,12 +4182,14 @@ export function ProjectsPage({
                       ) : null}
                       <Tooltip
                         title={
-                          detailsProjectPath ? "打开项目目录" : "未配置项目目录"
+                          detailsProjectPath
+                            ? t("打开项目目录")
+                            : t("未配置项目目录")
                         }
                       >
                         <span>
                           <IconButton
-                            aria-label="打开项目目录"
+                            aria-label={t("打开项目目录")}
                             disabled={!detailsProjectPath}
                             onClick={() =>
                               onOpenProjectDirectory(detailsProjectEntry.key)
@@ -3697,24 +4259,24 @@ export function ProjectsPage({
                   tabs={[
                     {
                       value: "overview",
-                      label: "概览",
+                      label: t("概览"),
                       icon: <AppWindowIcon fontSize="small" />,
                     },
                     {
                       value: "config",
-                      label: "运行配置",
+                      label: t("运行配置"),
                       icon: <SettingsIcon fontSize="small" />,
                     },
                     {
                       value: "logs",
-                      label: "日志",
+                      label: t("日志"),
                       icon: <TerminalIcon fontSize="small" />,
                     },
                     ...(detailsWebActionsContext
                       ? [
                           {
                             value: "webActions" as const,
-                            label: "网页动作",
+                            label: t("网页动作"),
                             icon: <WebsiteIcon fontSize="small" />,
                           },
                         ]
@@ -3722,10 +4284,17 @@ export function ProjectsPage({
                   ]}
                   activeTab={detailsPanelTab}
                   onTabChange={(value) => setDetailsPanelTab(value)}
-                  bodyOverflow={detailsPanelTab === "logs" ? "hidden" : "auto"}
+                  bodyOverflow={
+                    detailsPanelTab === "logs" || detailsPanelTab === "webActions"
+                      ? "hidden"
+                      : "auto"
+                  }
                 >
                       {detailsPanelTab === "overview" ? (
-                        <>
+                        <Stack
+                          className="runtime-panel-page runtime-panel-overview-page"
+                          spacing={0.85}
+                        >
                           {(() => {
                             const preflight = runtimePreflight.response;
                             const summaryPalette = buildPreflightPalette(
@@ -3738,6 +4307,9 @@ export function ProjectsPage({
                                 (left, right) =>
                                   preflightPriority(left) - preflightPriority(right),
                               );
+                            const visibleChecks = checks.filter(
+                              (check) => check.statusKey !== "info",
+                            );
                             const checkStats = {
                               error: checks.filter((check) => check.statusKey === "error")
                                 .length,
@@ -3748,6 +4320,7 @@ export function ProjectsPage({
                             };
                             return (
                               <Box
+                                className="runtime-preflight-panel"
                                 sx={{
                                   border: `1px solid ${tone.searchWrapBorder}`,
                                   borderRadius: "14px",
@@ -3757,6 +4330,7 @@ export function ProjectsPage({
                                 }}
                               >
                                 <Stack
+                                  className="runtime-preflight-header"
                                   direction="row"
                                   alignItems="center"
                                   spacing={0.8}
@@ -3769,7 +4343,7 @@ export function ProjectsPage({
                                   <Box
                                     sx={{
                                       width: 5,
-                                      height: 34,
+                                      height: 24,
                                       borderRadius: "999px",
                                       bgcolor: summaryPalette.dot,
                                       opacity: 0.72,
@@ -3791,15 +4365,17 @@ export function ProjectsPage({
                                           letterSpacing: 0,
                                         }}
                                       >
-                                        链路预检
+                                        {t("链路预检")}
                                       </Typography>
                                       <Chip
                                         size="small"
                                         label={
                                           runtimePreflight.loading
-                                            ? "检查中"
+                                            ? t("检查中")
                                             : preflight?.statusLabel ||
-                                              (runtimePreflight.error ? "异常" : "未检查")
+                                              (runtimePreflight.error
+                                                ? t("异常")
+                                                : t("未检查"))
                                         }
                                         sx={{
                                           height: 22,
@@ -3814,41 +4390,30 @@ export function ProjectsPage({
                                         }}
                                       />
                                       {[
-                                        { label: "异常", value: checkStats.error },
-                                        { label: "关注", value: checkStats.warning },
-                                        { label: "正常", value: checkStats.ok },
-                                      ].map((item) => (
-                                        <Typography
-                                          key={item.label}
-                                          variant="caption"
-                                          sx={{
-                                            color: tone.rowHint,
-                                            fontWeight: 760,
-                                            fontVariantNumeric: "tabular-nums",
-                                          }}
-                                        >
-                                          {item.label} {item.value}
-                                        </Typography>
-                                      ))}
+                                        { label: t("异常"), value: checkStats.error },
+                                        { label: t("关注"), value: checkStats.warning },
+                                        { label: t("正常"), value: checkStats.ok },
+                                      ]
+                                        .filter((item) => item.value > 0)
+                                        .map((item) => (
+                                          <Typography
+                                            key={item.label}
+                                            variant="caption"
+                                            sx={{
+                                              color: tone.rowHint,
+                                              fontWeight: 760,
+                                              fontVariantNumeric: "tabular-nums",
+                                            }}
+                                          >
+                                            {item.label} {item.value}
+                                          </Typography>
+                                        ))}
                                     </Stack>
-                                    <Typography
-                                      variant="caption"
-                                      noWrap
-                                      sx={{
-                                        display: "block",
-                                        color: tone.rowHint,
-                                        mt: 0.12,
-                                      }}
-                                    >
-                                      {runtimePreflight.error ||
-                                        preflight?.summary ||
-                                        "检查启动命令、调试档案、代理和受控浏览器"}
-                                    </Typography>
                                   </Box>
-                                  <Tooltip title="刷新预检">
+                                  <Tooltip title={t("刷新预检")}>
                                     <span>
                                       <IconButton
-                                        aria-label="刷新链路预检"
+                                        aria-label={t("刷新链路预检")}
                                         disabled={runtimePreflight.loading}
                                         onClick={() =>
                                           setRuntimePreflightRefreshKey(
@@ -3876,6 +4441,7 @@ export function ProjectsPage({
                                 </Stack>
 
                                 <Box
+                                  className="runtime-preflight-grid"
                                   sx={{
                                     display: "grid",
                                     gridTemplateColumns: {
@@ -3885,14 +4451,16 @@ export function ProjectsPage({
                                     gap: 0,
                                   }}
                                 >
-                                  {checks.slice(0, 8).map((check) => {
+                                  {visibleChecks.slice(0, 8).map((check) => {
                                     const palette = buildPreflightPalette(
                                       check.statusKey,
                                       mono,
                                     );
+                                    const visual = preflightCheckVisual(check);
                                     return (
                                       <Box
                                         key={check.key}
+                                        className={`runtime-preflight-check runtime-preflight-check--${visual.tone}`}
                                         sx={{
                                           minWidth: 0,
                                           px: 1,
@@ -3906,22 +4474,15 @@ export function ProjectsPage({
                                           },
                                         }}
                                       >
-                                        <Stack
-                                          direction="row"
-                                          alignItems="center"
-                                          spacing={0.5}
-                                          sx={{ minWidth: 0 }}
+                                        <Box
+                                          className="runtime-preflight-check-icon"
+                                          aria-hidden="true"
                                         >
-                                          <Box
-                                            sx={{
-                                              width: 6,
-                                              height: 6,
-                                              borderRadius: "50%",
-                                              bgcolor: palette.dot,
-                                              flex: "0 0 auto",
-                                              opacity: 0.9,
-                                            }}
-                                          />
+                                          {visual.icon}
+                                        </Box>
+                                        <Box
+                                          className="runtime-preflight-check-copy"
+                                        >
                                           <Typography
                                             variant="caption"
                                             noWrap
@@ -3936,44 +4497,41 @@ export function ProjectsPage({
                                           </Typography>
                                           <Typography
                                             variant="caption"
+                                            noWrap
+                                            sx={{
+                                              display: "block",
+                                              mt: 0.16,
+                                              color: tone.rowMeta,
+                                              lineHeight: 1.45,
+                                            }}
+                                          >
+                                            {check.detail}
+                                          </Typography>
+                                        </Box>
+                                        <Stack
+                                          className="runtime-preflight-check-status"
+                                          direction="row"
+                                          alignItems="center"
+                                          spacing={0.35}
+                                        >
+                                          <Typography
+                                            variant="caption"
                                             sx={{
                                               color: palette.pillColor,
-                                              fontWeight: 760,
-                                              flex: "0 0 auto",
+                                              fontWeight: 780,
                                             }}
                                           >
                                             {check.statusLabel}
                                           </Typography>
-                                        </Stack>
-                                        <Typography
-                                          variant="caption"
-                                          sx={{
-                                            display: "block",
-                                            mt: 0.16,
-                                            color: tone.rowMeta,
-                                            overflowWrap: "anywhere",
-                                            lineHeight: 1.45,
-                                          }}
-                                        >
-                                          {check.detail}
-                                        </Typography>
-                                        {check.action ? (
-                                          <Typography
-                                            variant="caption"
+                                          <Box
                                             sx={{
-                                              display: "block",
-                                              mt: 0.12,
-                                              color:
-                                                check.statusKey === "ok"
-                                                  ? tone.rowHint
-                                                  : summaryPalette.pillColor,
-                                              overflowWrap: "anywhere",
-                                              lineHeight: 1.35,
+                                              width: 5,
+                                              height: 5,
+                                              borderRadius: "50%",
+                                              bgcolor: palette.dot,
                                             }}
-                                          >
-                                              {check.action}
-                                          </Typography>
-                                        ) : null}
+                                          />
+                                        </Stack>
                                       </Box>
                                     );
                                   })}
@@ -3982,166 +4540,221 @@ export function ProjectsPage({
                             );
                           })()}
                           <RuntimeContextCard
-                            title="运行目标与 daemon 观测"
+                            title={t("运行上下文")}
                             context={runtimePreflight.context}
                             loading={runtimePreflight.loading}
                             error={runtimePreflight.error}
+                            summary
                           />
                           <Box
+                            className="runtime-state-sections"
                             sx={{
                               display: "grid",
-                              gridTemplateColumns: {
-                                xs: "minmax(0, 1fr)",
-                                lg: "repeat(2, minmax(0, 1fr))",
-                              },
+                              gridTemplateColumns: "minmax(0, 1fr)",
                               gap: 0.75,
+                              alignItems: "start",
                             }}
                           >
                             {[
                               {
-                                title: "运行",
+                                title: t("运行"),
                                 rows: [
-                                  ["状态详情", detailsProjectEntry.detail || "无"],
-                                  ["PID", detailsProjectEntry.pid?.toString() || "未运行"],
                                   [
-                                    "启动时间",
-                                    formatDateTime(detailsProjectEntry.startedAtMs),
+                                    t("状态详情"),
+                                    detailsProjectEntry.detail || t("无"),
+                                    false,
                                   ],
                                   [
-                                    "运行时长",
+                                    "PID",
+                                    detailsProjectEntry.pid?.toString() ||
+                                      t("未运行"),
+                                    true,
+                                  ],
+                                  [
+                                    t("启动时间"),
+                                    formatDateTime(
+                                      detailsProjectEntry.startedAtMs,
+                                      language,
+                                      t,
+                                    ),
+                                    false,
+                                  ],
+                                  [
+                                    t("运行时长"),
                                     formatElapsedTime(
                                       detailsProjectEntry.startedAtMs,
                                       nowMs,
+                                      t,
                                     ),
+                                    false,
                                   ],
-                                  ["工作目录", detailsProjectEntry.cwd || "未配置"],
-                                  ["仓库目录", detailsProjectEntry.repoPath || "未配置"],
-                                  ["启动命令", detailsProjectEntry.command || "未配置"],
-                                  ["日志路径", detailsProjectEntry.logPath || "未生成"],
+                                  [
+                                    t("日志路径"),
+                                    detailsProjectEntry.logPath || t("未生成"),
+                                    true,
+                                  ],
                                 ],
                               },
                               {
-                                title: "构建",
+                                title: t("构建"),
                                 rows: [
                                   [
-                                    "构建状态",
-                                    detailsProjectEntry.buildStatusLabel || "未配置",
-                                  ],
-                                  ["构建详情", detailsProjectEntry.buildDetail || "无"],
-                                  [
-                                    "构建 PID",
-                                    detailsProjectEntry.buildPid?.toString() || "未运行",
+                                    t("构建状态"),
+                                    detailsProjectEntry.buildStatusLabel ||
+                                      t("未配置"),
+                                    false,
                                   ],
                                   [
-                                    "开始时间",
-                                    formatDateTime(detailsProjectEntry.buildStartedAtMs),
+                                    t("构建详情"),
+                                    detailsProjectEntry.buildDetail || t("无"),
+                                    false,
                                   ],
                                   [
-                                    "输出目录",
-                                    detailsProjectEntry.buildOutputDir || "未配置",
+                                    t("构建 PID"),
+                                    detailsProjectEntry.buildPid?.toString() ||
+                                      t("未运行"),
+                                    true,
                                   ],
                                   [
-                                    "构建命令",
-                                    detailsProjectEntry.buildCommand || "未配置",
+                                    t("开始时间"),
+                                    formatDateTime(
+                                      detailsProjectEntry.buildStartedAtMs,
+                                      language,
+                                      t,
+                                    ),
+                                    false,
                                   ],
                                   [
-                                    "日志路径",
-                                    detailsProjectEntry.buildLogPath || "未生成",
+                                    t("输出目录"),
+                                    detailsProjectEntry.buildOutputDir ||
+                                      t("未配置"),
+                                    true,
+                                  ],
+                                  [
+                                    t("构建命令"),
+                                    detailsProjectEntry.buildCommand ||
+                                      t("未配置"),
+                                    true,
+                                  ],
+                                  [
+                                    t("日志路径"),
+                                    detailsProjectEntry.buildLogPath ||
+                                      t("未生成"),
+                                    true,
                                   ],
                                 ],
                               },
-                            ].map((section) => (
-                              <Box
-                                key={section.title}
-                                sx={{
-                                  border: `1px solid ${tone.searchWrapBorder}`,
-                                  borderRadius: "14px",
-                                  bgcolor: tone.searchWrapBg,
-                                  boxShadow: tone.searchWrapShadow,
-                                  overflow: "hidden",
-                                }}
-                              >
-                                <Typography
-                                  variant="caption"
+                            ].map((section) => {
+                              const hiddenValues = new Set([
+                                t("无"),
+                                t("未运行"),
+                                t("未记录"),
+                                t("未配置"),
+                                t("未生成"),
+                              ]);
+                              const visibleRows = section.rows.filter(
+                                ([, value]) =>
+                                  !hiddenValues.has(String(value)),
+                              );
+                              return (
+                                <Box
+                                  key={section.title}
+                                  className="runtime-state-section"
                                   sx={{
-                                    display: "block",
-                                    px: 1,
-                                    py: 0.72,
-                                    color: tone.rowHint,
-                                    fontWeight: 800,
-                                    letterSpacing: "0.06em",
-                                    borderBottom: `1px solid ${tone.actionGroupBorder}`,
+                                    border: `1px solid ${tone.searchWrapBorder}`,
+                                    borderRadius: "14px",
+                                    bgcolor: tone.searchWrapBg,
+                                    boxShadow: tone.searchWrapShadow,
+                                    overflow: "hidden",
                                   }}
                                 >
-                                  {section.title}
-                                </Typography>
-                                {section.rows.map(([label, value], index) => (
-                                  <Box
-                                    key={`${section.title}-${label}`}
+                                  <Typography
+                                    className="runtime-state-section-title"
+                                    variant="caption"
                                     sx={{
-                                      display: "grid",
-                                      gridTemplateColumns: "72px minmax(0, 1fr)",
-                                      gap: 0.8,
-                                      alignItems: "start",
+                                      display: "block",
                                       px: 1,
-                                      py: 0.58,
-                                      borderTop:
-                                        index === 0
-                                          ? "none"
-                                          : `1px solid ${tone.actionGroupBorder}`,
+                                      py: 0.72,
+                                      color: tone.rowHint,
+                                      fontWeight: 800,
+                                      letterSpacing: "0.06em",
+                                      borderBottom: `1px solid ${tone.actionGroupBorder}`,
                                     }}
                                   >
-                                    <Typography
-                                      variant="caption"
+                                    {section.title}
+                                  </Typography>
+                                  {visibleRows.map(
+                                    ([label, value, monospace], index) => (
+                                    <Box
+                                      key={`${section.title}-${label}`}
+                                      className="runtime-state-row"
                                       sx={{
-                                        color: tone.rowKey,
-                                        fontWeight: 720,
+                                        display: "grid",
+                                        gridTemplateColumns: "72px minmax(0, 1fr)",
+                                        gap: 0.8,
+                                        alignItems: "start",
+                                        px: 1,
+                                        py: 0.58,
+                                        borderTop:
+                                          index === 0
+                                            ? "none"
+                                            : `1px solid ${tone.actionGroupBorder}`,
                                       }}
                                     >
-                                      {label}
-                                    </Typography>
-                                    <Typography
-                                      variant="caption"
-                                      sx={{
-                                        minWidth: 0,
-                                        color: tone.rowMeta,
-                                        overflowWrap: "anywhere",
-                                        fontFamily:
-                                          label.includes("目录") ||
-                                          label.includes("日志") ||
-                                          label.includes("命令") ||
-                                          label.includes("PID")
-                                            ? '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace'
-                                            : undefined,
-                                      }}
-                                    >
-                                      {value}
-                                    </Typography>
-                                  </Box>
-                                ))}
-                              </Box>
-                            ))}
+                                      <Typography
+                                        variant="caption"
+                                        sx={{
+                                          color: tone.rowKey,
+                                          fontWeight: 720,
+                                        }}
+                                      >
+                                        {label}
+                                      </Typography>
+                                      <Typography
+                                        variant="caption"
+                                        sx={{
+                                          minWidth: 0,
+                                          color: tone.rowMeta,
+                                          overflowWrap: "anywhere",
+                                          fontFamily:
+                                            monospace
+                                              ? '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace'
+                                              : undefined,
+                                        }}
+                                      >
+                                        {value}
+                                      </Typography>
+                                    </Box>
+                                    ),
+                                  )}
+                                </Box>
+                              );
+                            })}
                           </Box>
-                        </>
+                        </Stack>
                       ) : null}
 
                       {detailsPanelTab === "config" && runtimeOptionsEntry ? (
-                        <>
+                        <Stack
+                          className="runtime-panel-page runtime-panel-config-page"
+                          spacing={1}
+                        >
                         <Box
+                          className="runtime-config-environment-card"
                           sx={{
                             p: 1,
-                            borderRadius: "16px",
+                            borderRadius: "8px",
                             border: `1px solid ${tone.searchWrapBorder}`,
                             bgcolor: tone.searchWrapBg,
                             boxShadow: tone.searchWrapShadow,
-                            mb: 1,
+                            order: 2,
                           }}
                         >
-                          <Stack spacing={1}>
-                            {renderRuntimeConfigSourceBar()}
+                          <Stack spacing={0.8}>
                             <Stack
-                              direction={{ xs: "column", sm: "row" }}
-                              alignItems={{ xs: "stretch", sm: "flex-start" }}
+                              className="runtime-config-card-header runtime-config-environment-header"
+                              direction="row"
+                              alignItems="center"
                               justifyContent="space-between"
                               spacing={0.8}
                             >
@@ -4157,12 +4770,15 @@ export function ProjectsPage({
                                     variant="caption"
                                     sx={{ color: tone.rowMeta, fontWeight: 750 }}
                                   >
-                                    通用运行配置
+                                    {t("共享运行环境")}
                                   </Typography>
                                   <Chip
                                     size="small"
                                     variant="outlined"
-                                    label={runtimeProfileScopeLabel(runtimeProfileScope)}
+                                    label={runtimeProfileScopeLabel(
+                                      runtimeProfileScope,
+                                      t,
+                                    )}
                                     sx={{ height: 22 }}
                                   />
                                 </Stack>
@@ -4175,10 +4791,47 @@ export function ProjectsPage({
                                     overflowWrap: "anywhere",
                                   }}
                                 >
-                                  浏览器、代理和域名映射。
-                                  {runtimeProfileScopeDescription(runtimeProfileScope)}
+                                  {t("浏览器、代理、域名映射与网页动作。")}
+                                  {runtimeProfileScopeDescription(
+                                    runtimeProfileScope,
+                                    t,
+                                  )}
                                 </Typography>
                               </Box>
+                              <Button
+                                size="small"
+                                color="inherit"
+                                startIcon={<SettingsIcon fontSize="small" />}
+                                onClick={() =>
+                                  setRuntimeTemplateManagerOpen((current) => !current)
+                                }
+                                aria-expanded={runtimeTemplateManagerOpen}
+                                sx={{
+                                  minWidth: 0,
+                                  height: 30,
+                                  px: 1.1,
+                                  borderRadius: "8px",
+                                  whiteSpace: "nowrap",
+                                  color: tone.rowMeta,
+                                  border: `1px solid ${tone.toolButtonBorder}`,
+                                  bgcolor: tone.toolButtonBg,
+                                }}
+                              >
+                                {runtimeTemplateManagerOpen
+                                  ? t("收起")
+                                  : t("管理模板")}
+                              </Button>
+                            </Stack>
+
+                            <Collapse in={runtimeTemplateManagerOpen} unmountOnExit>
+                              <Stack spacing={1} sx={{ pt: 0.35 }}>
+                                {renderRuntimeConfigSourceBar()}
+                            <Stack
+                              direction="row"
+                              alignItems="center"
+                              justifyContent="flex-end"
+                              spacing={0.8}
+                            >
                               <Stack
                                 direction="row"
                                 spacing={0.55}
@@ -4187,10 +4840,10 @@ export function ProjectsPage({
                                 justifyContent={{ xs: "flex-start", sm: "flex-end" }}
                               >
                                 {runtimeProfileScope === "override" ? (
-                                  <Tooltip title="恢复继承全局运行配置">
+                                  <Tooltip title={t("恢复继承全局运行环境")}>
                                     <span>
                                       <IconButton
-                                        aria-label="恢复继承全局运行配置"
+                                        aria-label={t("恢复继承全局运行环境")}
                                         disableRipple
                                         disableFocusRipple
                                         disabled={runtimeProfilesSaving}
@@ -4202,10 +4855,10 @@ export function ProjectsPage({
                                     </span>
                                   </Tooltip>
                                 ) : null}
-                                <Tooltip title="刷新运行配置">
+                                <Tooltip title={t("刷新运行环境模板")}>
                                   <span>
                                     <IconButton
-                                      aria-label="刷新运行配置"
+                                      aria-label={t("刷新运行环境模板")}
                                       disableRipple
                                       disableFocusRipple
                                       disabled={runtimeProfilesSaving}
@@ -4220,10 +4873,10 @@ export function ProjectsPage({
                                     </IconButton>
                                   </span>
                                 </Tooltip>
-                                <Tooltip title="新增运行配置">
+                                <Tooltip title={t("新增运行环境模板")}>
                                   <span>
                                     <IconButton
-                                      aria-label="新增运行配置"
+                                      aria-label={t("新增运行环境模板")}
                                       disableRipple
                                       disableFocusRipple
                                       disabled={runtimeProfilesSaving || runtimeProfilesReadOnly}
@@ -4234,10 +4887,10 @@ export function ProjectsPage({
                                     </IconButton>
                                   </span>
                                 </Tooltip>
-                                <Tooltip title="编辑运行配置">
+                                <Tooltip title={t("编辑运行环境模板")}>
                                   <span>
                                     <IconButton
-                                      aria-label="编辑运行配置"
+                                      aria-label={t("编辑运行环境模板")}
                                       disableRipple
                                       disableFocusRipple
                                       disabled={
@@ -4268,7 +4921,7 @@ export function ProjectsPage({
                             <TextField
                               select
                               size="small"
-                              label="运行配置"
+                              label={t("环境模板")}
                               value={
                                 runtimePanelProfile?.key ||
                                 DEFAULT_RUNTIME_PROFILE_VALUE
@@ -4282,14 +4935,14 @@ export function ProjectsPage({
                               disabled={runtimeProfilesLoading || runtimeProfileDrafts.length === 0}
                               fullWidth
                               inputProps={{
-                                "aria-label": "通用运行配置",
+                                "aria-label": t("共享运行环境模板"),
                                 name: "runtime-profile",
                                 autoComplete: "off",
                               }}
                             >
                               {runtimeProfileDrafts.length === 0 ? (
                                 <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
-                                  暂无运行配置
+                                  {t("暂无环境模板")}
                                 </MenuItem>
                               ) : null}
                               {runtimeProfileDrafts.map((profile) => (
@@ -4316,40 +4969,63 @@ export function ProjectsPage({
                                   />
                                 ) : null}
                                 {runtimePanelProfile.browserUserDataDir ? (
-                                  <Chip size="small" label="独立数据目录" variant="outlined" />
+                                  <Chip
+                                    size="small"
+                                    label={t("独立数据目录")}
+                                    variant="outlined"
+                                  />
                                 ) : null}
                                 {runtimePanelProfile.rdevProxyProfileId ? (
                                   <Chip
                                     size="small"
                                     label={
                                       runtimePanelBoundProxy
-                                        ? `代理服务 ${proxyProfileLabel(runtimePanelBoundProxy)}`
-                                        : "代理服务缺失"
+                                        ? t("代理服务 {name}", {
+                                            name: proxyProfileLabel(
+                                              runtimePanelBoundProxy,
+                                            ),
+                                          })
+                                        : t("代理服务缺失")
                                     }
                                     variant="outlined"
                                   />
                                 ) : runtimePanelProfile.proxyUrl ? (
-                                  <Chip size="small" label="浏览器代理" variant="outlined" />
+                                  <Chip
+                                    size="small"
+                                    label={t("浏览器代理")}
+                                    variant="outlined"
+                                  />
                                 ) : null}
                                 {runtimePanelProfile.hostResolverRulesText?.trim() ? (
-                                  <Chip size="small" label="域名映射" variant="outlined" />
+                                  <Chip
+                                    size="small"
+                                    label={t("域名映射")}
+                                    variant="outlined"
+                                  />
                                 ) : null}
                                 {runtimePanelProfile.webActionsEnabled ? (
                                   <Chip
                                     size="small"
-                                    label={`受控 ${runtimePanelProfile.webActionsPort || 9223}`}
+                                    label={t("受控 {port}", {
+                                      port:
+                                        runtimePanelProfile.webActionsPort ||
+                                        9223,
+                                    })}
                                     variant="outlined"
                                   />
                                 ) : null}
                               </Stack>
                             ) : null}
+                              </Stack>
+                            </Collapse>
                           </Stack>
                         </Box>
 
                         <Box
+                          className="runtime-config-launch-card"
                           sx={{
                             p: 1,
-                            borderRadius: "16px",
+                            borderRadius: "8px",
                             border: `1px solid ${tone.searchWrapBorder}`,
                             bgcolor: tone.searchWrapBg,
                             boxShadow: tone.searchWrapShadow,
@@ -4357,27 +5033,73 @@ export function ProjectsPage({
                         >
                           <Stack spacing={1.05}>
                             <Stack
+                              className="runtime-config-card-header runtime-config-launch-header"
                               direction="row"
-                              alignItems="center"
+                              alignItems="flex-start"
                               justifyContent="space-between"
                               spacing={0.8}
                             >
-                              <Typography
-                                variant="caption"
-                                sx={{ color: tone.rowMeta, fontWeight: 750 }}
-                              >
-                                项目运行配置
-                              </Typography>
+                              <Box sx={{ minWidth: 0 }}>
+                                <Stack
+                                  direction="row"
+                                  spacing={0.55}
+                                  alignItems="center"
+                                  flexWrap="wrap"
+                                  useFlexGap
+                                >
+                                  <Typography
+                                    variant="caption"
+                                    sx={{ color: tone.rowMeta, fontWeight: 800 }}
+                                  >
+                                    {t("项目启动")}
+                                  </Typography>
+                                  <Chip
+                                    size="small"
+                                    variant="outlined"
+                                    label={
+                                      runtimePreflight.loading
+                                        ? t("检查中")
+                                        : runtimePreflight.response?.statusLabel ||
+                                          t("待检查")
+                                    }
+                                    color={
+                                      runtimeOptionsPreflightFailed
+                                        ? "error"
+                                        : runtimePreflight.response?.statusKey ===
+                                            "warning"
+                                          ? "warning"
+                                          : "default"
+                                    }
+                                    sx={{ height: 21 }}
+                                  />
+                                </Stack>
+                                <Typography
+                                  variant="caption"
+                                  sx={{
+                                    display: "block",
+                                    mt: 0.12,
+                                    color: tone.rowKey,
+                                  }}
+                                >
+                                  {t("选择启动档案，确认本次最终生效项。")}
+                                </Typography>
+                              </Box>
                               <Button
                                 size="small"
                                 color="inherit"
-                                onClick={() => setRuntimeOptionsEnvText("")}
-                                disabled={!runtimeOptionsEnvText.trim()}
+                                startIcon={<EditIcon fontSize="small" />}
+                                onClick={() =>
+                                  openProjectConfig(
+                                    runtimeOptionsEntry.key,
+                                    "projectRuntime",
+                                  )
+                                }
                                 sx={{
                                   minWidth: 0,
-                                  height: 28,
-                                  px: 1.15,
-                                  borderRadius: "10px",
+                                  height: 30,
+                                  px: 1.1,
+                                  borderRadius: "8px",
+                                  whiteSpace: "nowrap",
                                   color: tone.rowKey,
                                   border: `1px solid ${tone.toolButtonBorder}`,
                                   bgcolor: tone.toolButtonBg,
@@ -4385,17 +5107,19 @@ export function ProjectsPage({
                                     bgcolor: tone.toolButtonHoverBg,
                                     borderColor: tone.toolButtonHoverBorder,
                                   },
-                                  "&.Mui-disabled": {
-                                    color: tone.rowHint,
-                                    borderColor: tone.actionGroupBorder,
-                                  },
                                 }}
                               >
-                                清空变量
+                                {t("编辑档案")}
                               </Button>
                             </Stack>
 
                             <Stack spacing={0.55}>
+                              <Typography
+                                variant="caption"
+                                sx={{ color: tone.rowMeta, fontWeight: 750 }}
+                              >
+                                {t("启动档案")}
+                              </Typography>
                               <Stack
                                 direction={{ xs: "column", sm: "row" }}
                                 spacing={0.65}
@@ -4414,7 +5138,9 @@ export function ProjectsPage({
                                     )
                                   }
                                   fullWidth
-                                  inputProps={{ "aria-label": "项目运行配置" }}
+                                  inputProps={{
+                                    "aria-label": t("项目启动档案"),
+                                  }}
                                   sx={{
                                     flex: "1 1 auto",
                                     "& .MuiSelect-select": {
@@ -4426,16 +5152,20 @@ export function ProjectsPage({
                                   }}
                                 >
                                   <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
-                                    默认启动
+                                    {t("项目基础启动")}
                                   </MenuItem>
                                   {runtimeOptionsProfiles.map((profile) => (
                                     <MenuItem key={profile.key} value={profile.key}>
                                       {profile.label || profile.key}
                                       {profile.envCount > 0
-                                        ? ` · ${profile.envCount} env`
+                                        ? t(" · {count} 变量", {
+                                            count: profile.envCount,
+                                          })
                                         : ""}
                                       {profile.localFileCount > 0
-                                        ? ` · ${profile.localFileCount} 文件`
+                                        ? t(" · {count} 文件", {
+                                            count: profile.localFileCount,
+                                          })
                                         : ""}
                                     </MenuItem>
                                   ))}
@@ -4452,118 +5182,541 @@ export function ProjectsPage({
                                   }
                                   onClick={handleRuntimeOptionsSaveDefault}
                                   sx={{
-                                    minWidth: { xs: "100%", sm: 112 },
-                                    borderRadius: "10px",
+                                    minWidth: { xs: "100%", sm: 128 },
+                                    borderRadius: "8px",
                                     fontWeight: 780,
                                     whiteSpace: "nowrap",
                                   }}
                                 >
                                   {copiedProjectAction === "runtime-default"
-                                    ? "已设为默认"
+                                    ? t("已设为默认")
                                     : runtimeOptionsDefaultSaved
-                                      ? "当前默认"
-                                      : "设为默认"}
+                                      ? t("工作区默认")
+                                      : t("设为工作区默认")}
                                 </Button>
                               </Stack>
                             </Stack>
 
-                            <Stack spacing={0.55}>
-                              <Typography
-                                variant="caption"
-                                sx={{ color: tone.rowMeta, fontWeight: 750 }}
-                              >
-                                环境变量
-                              </Typography>
-                              <TextField
-                                value={runtimeOptionsEnvText}
-                                onChange={(event) =>
-                                  setRuntimeOptionsEnvText(event.target.value)
-                                }
-                                fullWidth
-                                multiline
-                                minRows={8}
-                                placeholder={"APP_ENV=local\nFEATURE_FLAG=true"}
-                                error={Boolean(runtimeOptionsParseResult.error)}
-                                helperText={
-                                  runtimeOptionsParseResult.error ||
-                                  "每行 KEY=VALUE；同名变量会覆盖档案默认值，仅本次启动生效。"
-                                }
-                                inputProps={{ "aria-label": "环境变量" }}
-                                sx={{
-                                  "& .MuiInputBase-root": {
-                                    fontFamily:
-                                      '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                                    fontSize: "0.74rem",
-                                    lineHeight: 1.45,
-                                  },
-                                  "& .MuiFormHelperText-root": {
-                                    mx: 0.2,
-                                    fontSize: "0.66rem",
-                                  },
-                                }}
+                            <Box className="runtime-start-behavior-row">
+                              <Box sx={{ minWidth: 0 }}>
+                                <Typography
+                                  variant="caption"
+                                  sx={{ color: tone.rowMeta, fontWeight: 750 }}
+                                >
+                                  {t("快捷启动确认")}
+                                </Typography>
+                                <Typography
+                                  variant="caption"
+                                  sx={{
+                                    display: "block",
+                                    color: tone.rowKey,
+                                    mt: 0.1,
+                                  }}
+                                >
+                                  {t("控制项目卡片和工作区播放按钮。")}
+                                </Typography>
+                              </Box>
+                              <RuntimeStartPromptModeControl
+                                value={runtimeStartPromptMode}
+                                onChange={onRuntimeStartPromptModeChange}
+                                label={t("确认方式")}
                               />
-                            </Stack>
+                            </Box>
 
-                            {runtimeOptionsSelectedProfile?.browser ||
-                            runtimeOptionsSelectedProfile?.browserProfile ||
-                            runtimeOptionsSelectedProfile?.browserUserDataDir ||
-                            runtimeOptionsSelectedProfile?.browserArgs?.length ||
-                            runtimeOptionsSelectedProfile?.runtimeProfile ||
-                            runtimeOptionsSelectedProfile?.networkProxy?.enabled ? (
+                            <Box
+                              aria-label={t("本次启动生效配置")}
+                              sx={{
+                                border: `1px solid ${tone.actionGroupBorder}`,
+                                borderRadius: "8px",
+                                overflow: "hidden",
+                                bgcolor: tone.searchInputBg,
+                              }}
+                            >
                               <Stack
                                 direction="row"
-                                spacing={0.55}
+                                spacing={0.45}
+                                alignItems="center"
                                 flexWrap="wrap"
                                 useFlexGap
+                                sx={{
+                                  px: 1,
+                                  py: 0.72,
+                                  borderBottom: `1px solid ${tone.actionGroupBorder}`,
+                                }}
                               >
-                                {runtimeOptionsSelectedProfile.browser ? (
+                                <Typography
+                                  variant="caption"
+                                  sx={{ color: tone.rowKey, fontWeight: 760, mr: 0.2 }}
+                                >
+                                  {t("解析链")}
+                                </Typography>
+                                {[
+                                  t("工作区 · {name}", {
+                                    name: runtimeOptionsWorkspaceLabel,
+                                  }),
+                                  t("项目基础"),
+                                  runtimeOptionsSelectedProfile
+                                    ? t("启动档案 · {name}", {
+                                        name: runtimeOptionsProfileLabel,
+                                      })
+                                    : t("无启动档案覆盖"),
+                                  runtimeOptionsRuntimeProfileKey
+                                    ? t("共享环境 · {name}", {
+                                        name: runtimeOptionsEnvironmentLabel,
+                                      })
+                                    : t("无共享环境"),
+                                  runtimeOptionsOverrideCount > 0
+                                    ? t("本次覆盖 · {count}", {
+                                        count: runtimeOptionsOverrideCount,
+                                      })
+                                    : t("无本次覆盖"),
+                                ].map((label) => (
                                   <Chip
+                                    key={label}
                                     size="small"
-                                    label={`浏览器 ${runtimeOptionsSelectedProfile.browser}`}
                                     variant="outlined"
+                                    label={label}
+                                    sx={{
+                                      height: 20,
+                                      "& .MuiChip-label": {
+                                        px: 0.72,
+                                        fontSize: "0.64rem",
+                                      },
+                                    }}
                                   />
-                                ) : null}
-                                {runtimeOptionsSelectedProfile.browserProfile ? (
-                                  <Chip
-                                    size="small"
-                                    label={`Profile ${runtimeOptionsSelectedProfile.browserProfile}`}
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimeOptionsSelectedProfile.browserUserDataDir ? (
-                                  <Chip
-                                    size="small"
-                                    label="独立数据目录"
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimeOptionsSelectedProfile.browserArgs?.length ? (
-                                  <Chip
-                                    size="small"
-                                    label={`浏览器参数 ${runtimeOptionsSelectedProfile.browserArgs?.length ?? 0}`}
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimeOptionsSelectedProfile.runtimeProfile ? (
-                                  <Chip
-                                    size="small"
-                                    label={`继承 ${runtimeOptionsSelectedProfile.runtimeProfile}`}
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimeOptionsSelectedProfile.networkProxy?.enabled ? (
-                                  <Chip
-                                    size="small"
-                                    label={
-                                      runtimeOptionsSelectedProfile.networkProxy.nodeHook
-                                        ? "网络代理 · Node Hook"
-                                        : "网络代理"
-                                    }
-                                    variant="outlined"
-                                  />
-                                ) : null}
+                                ))}
                               </Stack>
+                              {([
+                                {
+                                  key: "workspace",
+                                  label: t("工作区"),
+                                  value: runtimeOptionsWorkspace?.projectInstancePath
+                                    ? `${runtimeOptionsWorkspaceLabel} · ${runtimeOptionsWorkspace.projectInstancePath}`
+                                    : runtimeOptionsWorkspaceLabel,
+                                  source: "workspaceContext",
+                                },
+                                {
+                                  key: "launchProfile",
+                                  label: t("启动档案"),
+                                  value: runtimeOptionsProfileLabel,
+                                  source: runtimeOptionsSelectedProfile
+                                    ? "debugProfile"
+                                    : "projectDev",
+                                },
+                                {
+                                  key: "runtimeProfile",
+                                  label: t("共享环境"),
+                                  value: runtimeOptionsWorkspace
+                                    ? t("{name} · 配置源 {source}", {
+                                        name: runtimeOptionsEnvironmentLabel,
+                                        source:
+                                          runtimeOptionsWorkspace.runtimeConfigSourceName,
+                                      })
+                                    : runtimeOptionsEnvironmentLabel,
+                                  source: runtimeOptionsRuntimeProfileKey
+                                    ? "runtimeProfile"
+                                    : "direct",
+                                },
+                                {
+                                  key: "command",
+                                  label: t("启动命令"),
+                                  value: runtimeOptionsEffectiveCommand,
+                                  source:
+                                    runtimeOptionsEffectiveTarget?.commandSource ||
+                                    (runtimeOptionsSelectedProfile?.command
+                                      ? "debugProfile"
+                                      : "projectDev"),
+                                },
+                                {
+                                  key: "cwd",
+                                  label: t("工作目录"),
+                                  value: runtimeOptionsEffectiveCwd,
+                                  source:
+                                    runtimeOptionsEffectiveTarget?.cwdSource ||
+                                    (runtimeOptionsSelectedProfile?.cwd
+                                      ? "debugProfile"
+                                      : "projectRepo"),
+                                },
+                                ...(runtimeOptionsEffectivePort
+                                  ? [
+                                      {
+                                        key: "port",
+                                        label: t("预期端口"),
+                                        value: String(runtimeOptionsEffectivePort),
+                                        source:
+                                          runtimeOptionsEffectiveTarget
+                                            ?.expectedPortSource || "debugProfile",
+                                      },
+                                    ]
+                                  : []),
+                                {
+                                  key: "localFiles",
+                                  label: t("本地文件"),
+                                  value: t("{count} 个", {
+                                    count:
+                                      runtimeOptionsSelectedProfile
+                                        ?.localFileCount ?? 0,
+                                  }),
+                                  source: runtimeOptionsSelectedProfile
+                                    ? "debugProfile"
+                                    : "projectDev",
+                                },
+                                {
+                                  key: "browser",
+                                  label: t("浏览器"),
+                                  value: runtimeOptionsEffectiveBrowser,
+                                  source: runtimeOptionsBrowserSource,
+                                },
+                                {
+                                  key: "proxy",
+                                  label: t("代理"),
+                                  value: runtimeOptionsProxyLabel,
+                                  source: runtimeOptionsProxySource,
+                                },
+                              ] as Array<{
+                                key: string;
+                                label: string;
+                                value: string;
+                                source: string;
+                              }>).map(({ key, label, value, source }) => (
+                                <Box
+                                  key={key}
+                                  sx={{
+                                    display: "grid",
+                                    gridTemplateColumns: "88px minmax(0, 1fr)",
+                                    gap: 0.8,
+                                    alignItems: "start",
+                                    px: 1,
+                                    py: 0.68,
+                                    borderBottom: `1px solid ${tone.actionGroupBorder}`,
+                                  }}
+                                >
+                                  <Typography
+                                    variant="caption"
+                                    sx={{ color: tone.rowKey, fontWeight: 720 }}
+                                  >
+                                    {label}
+                                  </Typography>
+                                  <Stack
+                                    direction="row"
+                                    spacing={0.55}
+                                    alignItems="flex-start"
+                                    justifyContent="space-between"
+                                    minWidth={0}
+                                  >
+                                    <Typography
+                                      variant="caption"
+                                      sx={{
+                                        minWidth: 0,
+                                        color:
+                                          key === "runtimeProfile" &&
+                                          runtimeOptionsRuntimeProfileKey &&
+                                          !runtimeOptionsRuntimeProfile
+                                            ? "#dc6262"
+                                            : tone.rowMeta,
+                                        fontFamily:
+                                          key === "command" ||
+                                          key === "cwd"
+                                            ? '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace'
+                                            : undefined,
+                                        overflowWrap: "anywhere",
+                                      }}
+                                    >
+                                      {value}
+                                    </Typography>
+                                    <Chip
+                                      size="small"
+                                      variant="outlined"
+                                      label={t(
+                                        runtimeValueSourceLabel(
+                                          source,
+                                          runtimeOptionsWorkspace,
+                                        ),
+                                      )}
+                                      sx={{
+                                        flex: "0 0 auto",
+                                        height: 19,
+                                        "& .MuiChip-label": {
+                                          px: 0.65,
+                                          fontSize: "0.61rem",
+                                        },
+                                      }}
+                                    />
+                                  </Stack>
+                                </Box>
+                              ))}
+                              <Box
+                                component="details"
+                                sx={{
+                                  "& summary": {
+                                    cursor: "pointer",
+                                    listStyle: "none",
+                                  },
+                                }}
+                              >
+                                <Stack
+                                  component="summary"
+                                  direction="row"
+                                  spacing={0.6}
+                                  alignItems="center"
+                                  justifyContent="space-between"
+                                  sx={{ px: 1, py: 0.72 }}
+                                >
+                                  <Typography
+                                    variant="caption"
+                                    sx={{ color: tone.rowKey, fontWeight: 720 }}
+                                  >
+                                    {t("环境变量")}
+                                  </Typography>
+                                  <Chip
+                                    size="small"
+                                    variant="outlined"
+                                    label={t("{count} 个最终值", {
+                                      count:
+                                        runtimeOptionsEffectiveEnvironment.length,
+                                    })}
+                                    sx={{ height: 19 }}
+                                  />
+                                </Stack>
+                                <Box
+                                  sx={{
+                                    maxHeight: 190,
+                                    overflow: "auto",
+                                    borderTop: `1px solid ${tone.actionGroupBorder}`,
+                                  }}
+                                >
+                                  {runtimeOptionsEffectiveEnvironment.length === 0 ? (
+                                    <Typography
+                                      variant="caption"
+                                      sx={{
+                                        display: "block",
+                                        px: 1,
+                                        py: 0.8,
+                                        color: tone.rowMeta,
+                                      }}
+                                    >
+                                      {t("当前没有项目级运行变量。")}
+                                    </Typography>
+                                  ) : (
+                                    runtimeOptionsEffectiveEnvironment.map((item) => (
+                                      <Box
+                                        key={item.key}
+                                        sx={{
+                                          display: "grid",
+                                          gridTemplateColumns:
+                                            "minmax(90px, 0.72fr) minmax(0, 1.28fr) auto",
+                                          gap: 0.65,
+                                          alignItems: "center",
+                                          px: 1,
+                                          py: 0.55,
+                                          borderBottom: `1px solid ${tone.actionGroupBorder}`,
+                                        }}
+                                      >
+                                        <Typography
+                                          variant="caption"
+                                          sx={{
+                                            color: tone.rowKey,
+                                            fontFamily:
+                                              '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                            overflowWrap: "anywhere",
+                                          }}
+                                        >
+                                          {item.key}
+                                        </Typography>
+                                        <Typography
+                                          variant="caption"
+                                          sx={{
+                                            minWidth: 0,
+                                            color: tone.rowMeta,
+                                            fontFamily:
+                                              '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                            overflowWrap: "anywhere",
+                                          }}
+                                        >
+                                          {item.value}
+                                        </Typography>
+                                        <Chip
+                                          size="small"
+                                          variant="outlined"
+                                          label={t(
+                                            runtimeValueSourceLabel(
+                                              item.source,
+                                              runtimeOptionsWorkspace,
+                                            ),
+                                          )}
+                                          sx={{
+                                            height: 19,
+                                            "& .MuiChip-label": {
+                                              px: 0.65,
+                                              fontSize: "0.61rem",
+                                            },
+                                          }}
+                                        />
+                                      </Box>
+                                    ))
+                                  )}
+                                </Box>
+                              </Box>
+                            </Box>
+
+                            {runtimeOptionsPreflightFailed ? (
+                              <Typography
+                                variant="caption"
+                                role="alert"
+                                sx={{
+                                  color: "#dc6262",
+                                  fontWeight: 700,
+                                  overflowWrap: "anywhere",
+                                }}
+                              >
+                                {runtimePreflight.response?.summary ||
+                                  t("启动前检查未通过，请先修复配置。")}
+                              </Typography>
                             ) : null}
+
+                            <Box
+                              sx={{
+                                border: `1px solid ${tone.actionGroupBorder}`,
+                                borderRadius: "8px",
+                                px: 1,
+                                py: 0.72,
+                              }}
+                            >
+                              <Stack
+                                direction="row"
+                                alignItems="center"
+                                justifyContent="space-between"
+                                spacing={0.8}
+                              >
+                                <Box sx={{ minWidth: 0 }}>
+                                  <Stack
+                                    direction="row"
+                                    spacing={0.55}
+                                    alignItems="center"
+                                    flexWrap="wrap"
+                                    useFlexGap
+                                  >
+                                    <Typography
+                                      variant="caption"
+                                      sx={{ color: tone.rowMeta, fontWeight: 750 }}
+                                    >
+                                      {t("本次启动覆盖")}
+                                    </Typography>
+                                    {runtimeOptionsOverrideCount > 0 ? (
+                                      <Chip
+                                        size="small"
+                                        label={t("{count} 个变量", {
+                                          count: runtimeOptionsOverrideCount,
+                                        })}
+                                        variant="outlined"
+                                        sx={{ height: 21 }}
+                                      />
+                                    ) : null}
+                                  </Stack>
+                                  <Typography
+                                    variant="caption"
+                                    sx={{ display: "block", color: tone.rowKey }}
+                                  >
+                                    {runtimeOptionsOverrideCount > 0
+                                      ? t("仅覆盖同名变量，不修改启动档案。")
+                                      : t(
+                                          "未设置，直接使用项目与启动档案中的变量。",
+                                        )}
+                                  </Typography>
+                                </Box>
+                                <Button
+                                  size="small"
+                                  color="inherit"
+                                  onClick={() =>
+                                    setRuntimeOverridesOpen((current) => !current)
+                                  }
+                                  aria-expanded={runtimeOverridesOpen}
+                                  sx={{
+                                    minWidth: 0,
+                                    height: 28,
+                                    px: 1,
+                                    borderRadius: "8px",
+                                    whiteSpace: "nowrap",
+                                    color: tone.rowKey,
+                                    border: `1px solid ${tone.toolButtonBorder}`,
+                                    bgcolor: tone.toolButtonBg,
+                                  }}
+                                >
+                                  {runtimeOverridesOpen
+                                    ? t("收起")
+                                    : runtimeOptionsOverrideCount > 0
+                                      ? t("调整")
+                                      : t("添加")}
+                                </Button>
+                              </Stack>
+                              <Collapse in={runtimeOverridesOpen}>
+                                <Stack spacing={0.55} sx={{ pt: 0.8 }}>
+                                  <TextField
+                                    value={runtimeOptionsEnvText}
+                                    onChange={(event) =>
+                                      setRuntimeOptionsEnvText(event.target.value)
+                                    }
+                                    fullWidth
+                                    multiline
+                                    minRows={4}
+                                    placeholder={"APP_ENV=local\nFEATURE_FLAG=true"}
+                                    error={Boolean(runtimeOptionsParseResult.error)}
+                                    helperText={
+                                      runtimeOptionsParseResult.error ||
+                                      t("每行 KEY=VALUE；留空表示不覆盖。")
+                                    }
+                                    inputProps={{
+                                      "aria-label": t("本次启动环境变量覆盖"),
+                                    }}
+                                    sx={{
+                                      "& .MuiInputBase-root": {
+                                        fontFamily:
+                                          '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                        fontSize: "0.74rem",
+                                        lineHeight: 1.45,
+                                      },
+                                      "& .MuiFormHelperText-root": {
+                                        mx: 0.2,
+                                        fontSize: "0.66rem",
+                                      },
+                                    }}
+                                  />
+                                  <Stack
+                                    direction="row"
+                                    spacing={0.55}
+                                    justifyContent="flex-end"
+                                    flexWrap="wrap"
+                                    useFlexGap
+                                  >
+                                    <Button
+                                      size="small"
+                                      variant="outlined"
+                                      color="inherit"
+                                      startIcon={<CheckIcon fontSize="small" />}
+                                      disabled={
+                                        runtimeOptionsOverrideCount === 0 ||
+                                        Boolean(runtimeOptionsParseResult.error)
+                                      }
+                                      onClick={openRuntimeLaunchProfileSaveDialog}
+                                      sx={{ borderRadius: "8px", fontWeight: 740 }}
+                                    >
+                                      {copiedProjectAction === "runtime-profile-saved"
+                                        ? t("已保存")
+                                        : t("保存为启动档案")}
+                                    </Button>
+                                    <Button
+                                      size="small"
+                                      color="inherit"
+                                      disabled={!runtimeOptionsEnvText.trim()}
+                                      onClick={() => setRuntimeOptionsEnvText("")}
+                                      sx={{ minWidth: 0, px: 1 }}
+                                    >
+                                      {t("清空覆盖")}
+                                    </Button>
+                                  </Stack>
+                                </Stack>
+                              </Collapse>
+                            </Box>
 
                             <Stack
                               direction="row"
@@ -4576,29 +5729,32 @@ export function ProjectsPage({
                                 startIcon={<PlayIcon fontSize="small" />}
                                 disabled={
                                   !runtimeOptionsEntry.canStart ||
-                                  Boolean(runtimeOptionsParseResult.error)
+                                  Boolean(runtimeOptionsParseResult.error) ||
+                                  runtimePreflight.loading ||
+                                  runtimeOptionsPreflightFailed
                                 }
                                 onClick={handleRuntimeOptionsStart}
                                 fullWidth
                                 sx={{
                                   minHeight: 42,
-                                  borderRadius: "12px",
+                                  borderRadius: "8px",
                                   fontWeight: 820,
                                   boxShadow: mono
                                     ? "0 10px 24px rgba(0,0,0,0.22)"
                                     : "0 12px 28px rgba(84,111,140,0.16)",
                                 }}
                               >
-                                使用此配置启动
+                                {t("启动项目")}
                               </Button>
                             </Stack>
                           </Stack>
                         </Box>
-                        </>
+                        </Stack>
                       ) : null}
 
                       {detailsPanelTab === "logs" ? (
                         <Box
+                          className="runtime-panel-page runtime-panel-logs-page"
                           sx={{
                             border: `1px solid ${tone.searchWrapBorder}`,
                             borderRadius: "16px",
@@ -4633,7 +5789,7 @@ export function ProjectsPage({
                                 letterSpacing: "0.07em",
                               }}
                             >
-                              日志
+                              {t("日志")}
                             </Typography>
                             {[
                               { key: "dev" as const, label: "dev" },
@@ -4678,10 +5834,10 @@ export function ProjectsPage({
                             })}
                           </Stack>
                           <Stack direction="row" spacing={0.45}>
-                            <Tooltip title="刷新日志">
+                            <Tooltip title={t("刷新日志")}>
                               <span>
                                 <IconButton
-                                  aria-label="刷新运行日志"
+                                  aria-label={t("刷新运行日志")}
                                   disabled={runtimeLog.loading || runtimeLogClearing}
                                   onClick={() =>
                                     setRuntimeLogRefreshKey((current) => current + 1)
@@ -4699,10 +5855,16 @@ export function ProjectsPage({
                                 </IconButton>
                               </span>
                             </Tooltip>
-                            <Tooltip title={runtimeLog.path ? "清空当前日志" : "日志尚未生成"}>
+                            <Tooltip
+                              title={
+                                runtimeLog.path
+                                  ? t("清空当前日志")
+                                  : t("日志尚未生成")
+                              }
+                            >
                               <span>
                                 <IconButton
-                                  aria-label="清空当前运行日志"
+                                  aria-label={t("清空当前运行日志")}
                                   disabled={
                                     !runtimeLog.path ||
                                     runtimeLog.loading ||
@@ -4725,10 +5887,16 @@ export function ProjectsPage({
                                 </IconButton>
                               </span>
                             </Tooltip>
-                            <Tooltip title={runtimeLog.path ? "复制日志路径" : "日志尚未生成"}>
+                            <Tooltip
+                              title={
+                                runtimeLog.path
+                                  ? t("复制日志路径")
+                                  : t("日志尚未生成")
+                              }
+                            >
                               <span>
                                 <IconButton
-                                  aria-label="复制日志路径"
+                                  aria-label={t("复制日志路径")}
                                   disabled={!runtimeLog.path || runtimeLogClearing}
                                   onClick={() =>
                                     void handleCopyProjectValue(runtimeLog.path, "log")
@@ -4767,7 +5935,7 @@ export function ProjectsPage({
                               '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
                           }}
                         >
-                          {runtimeLog.path || "日志会在下次运行后生成"}
+                          {runtimeLog.path || t("日志会在下次运行后生成")}
                         </Typography>
 
                         <Stack
@@ -4782,8 +5950,14 @@ export function ProjectsPage({
                             size="small"
                             label={
                               runtimeLog.sessionSummary.active
-                                ? `会话 ${formatDateTime(runtimeLog.sessionSummary.startedAtMs)}`
-                                : "会话 未记录"
+                                ? t("会话 {time}", {
+                                    time: formatDateTime(
+                                      runtimeLog.sessionSummary.startedAtMs,
+                                      language,
+                                      t,
+                                    ),
+                                  })
+                                : t("会话 未记录")
                             }
                             sx={{
                               height: 22,
@@ -4804,7 +5978,7 @@ export function ProjectsPage({
                               (runtimeLog.kind === "build"
                                 ? detailsProjectEntry.buildPid
                                 : detailsProjectEntry.pid) ??
-                              "未运行"
+                              t("未运行")
                             }`}
                             sx={{
                               height: 22,
@@ -4822,8 +5996,12 @@ export function ProjectsPage({
                             size="small"
                             label={
                               runtimeLogAutoRefreshMs
-                                ? `自动刷新 ${Math.round(runtimeLogAutoRefreshMs / 1000)}s`
-                                : "自动刷新 暂停"
+                                ? t("自动刷新 {seconds}s", {
+                                    seconds: Math.round(
+                                      runtimeLogAutoRefreshMs / 1000,
+                                    ),
+                                  })
+                                : t("自动刷新 暂停")
                             }
                             sx={{
                               height: 22,
@@ -4847,7 +6025,12 @@ export function ProjectsPage({
                           />
                           <Chip
                             size="small"
-                            label={`行 ${runtimeLog.sessionSummary.currentLineCount}/${runtimeLog.sessionSummary.totalLineCount}`}
+                            label={t("行 {current}/{total}", {
+                              current:
+                                runtimeLog.sessionSummary.currentLineCount,
+                              total:
+                                runtimeLog.sessionSummary.totalLineCount,
+                            })}
                             sx={{
                               height: 22,
                               bgcolor: tone.categoryChipBg,
@@ -4970,15 +6153,15 @@ export function ProjectsPage({
                           }}
                         >
                           {runtimeLogClearing ? (
-                            "正在清空日志..."
+                            t("正在清空日志...")
                           ) : runtimeLog.loading ? (
-                            "正在读取日志..."
+                            t("正在读取日志...")
                           ) : runtimeLog.error ? (
                             runtimeLog.error
                           ) : runtimeLog.lines.length > 0 ? (
-                            `${runtimeLog.truncated ? "... 仅显示最近日志\n" : ""}${runtimeLog.lines.join("\n")}`
+                            `${runtimeLog.truncated ? t("... 仅显示最近日志\n") : ""}${runtimeLog.lines.join("\n")}`
                           ) : (
-                            "暂无日志输出"
+                            t("暂无日志输出")
                           )}
                         </Box>
                       </Box>
@@ -4986,7 +6169,10 @@ export function ProjectsPage({
 
                       {detailsPanelTab === "webActions" &&
                       detailsWebActionsContext ? (
-                        <Stack spacing={0.85}>
+                        <Stack
+                          className="runtime-panel-page runtime-panel-web-actions-page"
+                          spacing={0.85}
+                        >
                           {(() => {
                             const preflight = runtimePreflight.response;
                             const webChecks = (preflight?.checks ?? []).filter(
@@ -4998,6 +6184,7 @@ export function ProjectsPage({
                             );
                             return (
                               <Box
+                                className="runtime-panel-web-actions-status"
                                 sx={{
                                   px: 0.9,
                                   py: 0.72,
@@ -5031,7 +6218,7 @@ export function ProjectsPage({
                                       flex: "0 0 auto",
                                     }}
                                   >
-                                    受控链路
+                                    {t("受控链路")}
                                   </Typography>
                                   <Typography
                                     variant="caption"
@@ -5043,7 +6230,7 @@ export function ProjectsPage({
                                     }}
                                   >
                                     {runtimePreflight.loading
-                                      ? "检查中"
+                                      ? t("检查中")
                                       : webChecks
                                           .map(
                                             (check) =>
@@ -5051,10 +6238,10 @@ export function ProjectsPage({
                                           )
                                           .join(" · ") ||
                                         preflight?.summary ||
-                                        "未检查"}
+                                        t("未检查")}
                                   </Typography>
                                   <IconButton
-                                    aria-label="刷新受控链路预检"
+                                    aria-label={t("刷新受控链路预检")}
                                     disabled={runtimePreflight.loading}
                                     onClick={() =>
                                       setRuntimePreflightRefreshKey(
@@ -5108,6 +6295,7 @@ export function ProjectsPage({
 	                        size="small"
 	                        label={finderEntryKindLabel(
 	                          shortcutRuntimePanelCurrentItem.entry.kind,
+                            t,
 	                        )}
 	                        variant="outlined"
 	                      />
@@ -5116,7 +6304,7 @@ export function ProjectsPage({
 	                        label={
 	                          shortcutRuntimeProfile
 	                            ? runtimeProfileLabel(shortcutRuntimeProfile)
-	                            : shortcutRuntimeProfileKey || "默认打开"
+	                            : shortcutRuntimeProfileKey || t("默认打开")
 	                        }
 	                        variant={shortcutRuntimeProfileKey ? "filled" : "outlined"}
 	                      />
@@ -5125,17 +6313,17 @@ export function ProjectsPage({
 	                  tabs={[
 	                    {
 	                      value: "overview",
-	                      label: "概览",
+	                      label: t("概览"),
 	                      icon: <AppWindowIcon fontSize="small" />,
 	                    },
 	                    {
 	                      value: "config",
-	                      label: "运行配置",
+	                      label: t("运行环境"),
 	                      icon: <SettingsIcon fontSize="small" />,
 	                    },
 	                    {
 	                      value: "webActions",
-	                      label: "网页动作",
+	                      label: t("网页动作"),
 	                      icon: <WebsiteIcon fontSize="small" />,
 	                    },
 	                  ]}
@@ -5144,6 +6332,7 @@ export function ProjectsPage({
 	                >
 	                  {shortcutPanelTab === "overview" ? (
 	                    <Box
+                        className="runtime-panel-page runtime-panel-entry-overview-page"
 	                      sx={{
 	                        border: `1px solid ${tone.searchWrapBorder}`,
 	                        borderRadius: "16px",
@@ -5162,34 +6351,56 @@ export function ProjectsPage({
 	                          letterSpacing: "0.07em",
 	                        }}
 	                      >
-	                        入口
+	                        {t("入口")}
 	                      </Typography>
 	                      <Box sx={{ display: "grid", gap: 0.55 }}>
 	                        {[
-	                          [
-	                            "分类",
+	                          {
+                              key: "category",
+	                            label: t("分类"),
+	                            value:
 	                            shortcutRuntimePanelCurrentItem.categoryLabel ||
 	                              shortcutRuntimePanelCurrentItem.categoryTitle,
-	                          ],
-	                          ["地址", shortcutRuntimePanelCurrentItem.entry.url || "未配置"],
-	                          [
-	                            "打开方式",
-	                            shortcutRuntimeProfile
+                            },
+	                          {
+                              key: "url",
+                              label: t("地址"),
+                              value:
+                                shortcutRuntimePanelCurrentItem.entry.url ||
+                                t("未配置"),
+                            },
+	                          {
+                              key: "openMode",
+	                            label: t("打开方式"),
+	                            value: shortcutRuntimeProfile
 	                              ? runtimeProfileLabel(shortcutRuntimeProfile)
-	                              : shortcutRuntimeProfileKey || "当前 Chrome",
-	                          ],
-	                          [
-	                            "浏览器",
-	                            shortcutRuntimePanelCurrentItem.entry.browser || "当前 Chrome",
-	                          ],
-	                          [
-	                            "Profile",
-	                            shortcutRuntimePanelCurrentItem.entry.browserProfile || "未指定",
-	                          ],
-	                          ["说明", shortcutRuntimePanelCurrentItem.entry.note || "无"],
-	                        ].map(([label, value]) => (
+	                              : shortcutRuntimeProfileKey ||
+                                  t("当前 Chrome"),
+                            },
+	                          {
+                              key: "browser",
+	                            label: t("浏览器"),
+	                            value:
+                              shortcutRuntimePanelCurrentItem.entry.browser ||
+                              t("当前 Chrome"),
+                            },
+	                          {
+                              key: "profile",
+	                            label: "Profile",
+	                            value:
+                              shortcutRuntimePanelCurrentItem.entry
+                                .browserProfile || t("未指定"),
+                            },
+	                          {
+                              key: "note",
+                              label: t("说明"),
+                              value:
+                                shortcutRuntimePanelCurrentItem.entry.note ||
+                                t("无"),
+                            },
+	                        ].map(({ key, label, value }) => (
 	                          <Box
-	                            key={label}
+	                            key={key}
 	                            sx={{
 	                              display: "grid",
 	                              gridTemplateColumns: "74px minmax(0, 1fr)",
@@ -5217,7 +6428,7 @@ export function ProjectsPage({
 	                                color: tone.rowMeta,
 	                                overflowWrap: "anywhere",
 	                                fontFamily:
-	                                  label === "地址"
+	                                  key === "url"
 	                                    ? '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace'
 	                                    : undefined,
 	                              }}
@@ -5232,6 +6443,7 @@ export function ProjectsPage({
 
 	                  {shortcutPanelTab === "config" ? (
 	                    <Box
+                        className="runtime-panel-page runtime-panel-entry-config-page"
 	                      sx={{
 	                        p: 1,
 	                        borderRadius: "16px",
@@ -5253,7 +6465,7 @@ export function ProjectsPage({
 	                              variant="caption"
 	                              sx={{ color: tone.rowMeta, fontWeight: 750 }}
 	                            >
-	                              网站运行配置
+	                              {t("网站运行环境")}
 	                            </Typography>
 	                            <Typography
 	                              variant="caption"
@@ -5274,10 +6486,10 @@ export function ProjectsPage({
 	                            useFlexGap
 	                            justifyContent={{ xs: "flex-start", sm: "flex-end" }}
 	                          >
-	                            <Tooltip title="刷新运行配置">
+	                            <Tooltip title={t("刷新运行环境")}>
 	                              <span>
 	                                <IconButton
-	                                  aria-label="刷新运行配置"
+	                                  aria-label={t("刷新运行环境")}
 	                                  disableRipple
 	                                  disableFocusRipple
 	                                  disabled={runtimeProfilesSaving || shortcutRuntimeSaving}
@@ -5290,10 +6502,10 @@ export function ProjectsPage({
 	                                </IconButton>
 	                              </span>
 	                            </Tooltip>
-	                            <Tooltip title="新增运行配置">
+	                            <Tooltip title={t("新增运行环境模板")}>
 	                              <span>
 	                                <IconButton
-	                                  aria-label="新增运行配置"
+	                                  aria-label={t("新增运行环境模板")}
 	                                  disableRipple
 	                                  disableFocusRipple
 	                                  disabled={runtimeProfilesSaving || shortcutRuntimeSaving}
@@ -5304,10 +6516,10 @@ export function ProjectsPage({
 	                                </IconButton>
 	                              </span>
 	                            </Tooltip>
-	                            <Tooltip title="编辑运行配置">
+	                            <Tooltip title={t("编辑运行环境模板")}>
 	                              <span>
 	                                <IconButton
-	                                  aria-label="编辑运行配置"
+	                                  aria-label={t("编辑运行环境模板")}
 	                                  disableRipple
 	                                  disableFocusRipple
 	                                  disabled={
@@ -5340,7 +6552,7 @@ export function ProjectsPage({
 	                        <TextField
 	                          select
 	                          size="small"
-	                          label="入口运行配置"
+	                          label={t("入口运行环境")}
 	                          value={
 	                            shortcutRuntimeProfileKey || DEFAULT_RUNTIME_PROFILE_VALUE
 	                          }
@@ -5354,13 +6566,13 @@ export function ProjectsPage({
 	                          disabled={runtimeProfilesLoading || shortcutRuntimeSaving}
 	                          fullWidth
 	                          inputProps={{
-	                            "aria-label": "入口运行配置",
+	                            "aria-label": t("入口运行环境"),
 	                            name: "shortcut-runtime-profile",
 	                            autoComplete: "off",
 	                          }}
 	                        >
 	                          <MenuItem value={DEFAULT_RUNTIME_PROFILE_VALUE}>
-	                            不使用运行配置
+	                            {t("不使用运行环境")}
 	                          </MenuItem>
 	                          {runtimeProfileDrafts.map((profile) => (
 	                            <MenuItem key={profile.key} value={profile.key}>
@@ -5386,28 +6598,48 @@ export function ProjectsPage({
 	                              />
 	                            ) : null}
 	                            {shortcutRuntimeProfile.browserUserDataDir ? (
-	                              <Chip size="small" label="独立数据目录" variant="outlined" />
+	                              <Chip
+                                  size="small"
+                                  label={t("独立数据目录")}
+                                  variant="outlined"
+                                />
 	                            ) : null}
 	                            {shortcutRuntimeProfile.rdevProxyProfileId ? (
 	                              <Chip
 	                                size="small"
 	                                label={
 	                                  shortcutBoundProxy
-	                                    ? `代理服务 ${proxyProfileLabel(shortcutBoundProxy)}`
-	                                    : "代理服务缺失"
+	                                    ? t("代理服务 {name}", {
+                                          name: proxyProfileLabel(
+                                            shortcutBoundProxy,
+                                          ),
+                                        })
+	                                    : t("代理服务缺失")
 	                                }
 	                                variant="outlined"
 	                              />
 	                            ) : shortcutRuntimeProfile.proxyUrl ? (
-	                              <Chip size="small" label="浏览器代理" variant="outlined" />
+	                              <Chip
+                                  size="small"
+                                  label={t("浏览器代理")}
+                                  variant="outlined"
+                                />
 	                            ) : null}
 	                            {shortcutRuntimeProfile.hostResolverRulesText?.trim() ? (
-	                              <Chip size="small" label="域名映射" variant="outlined" />
+	                              <Chip
+                                  size="small"
+                                  label={t("域名映射")}
+                                  variant="outlined"
+                                />
 	                            ) : null}
 	                            {runtimeProfileHasCdp(shortcutRuntimeProfile) ? (
 	                              <Chip
 	                                size="small"
-	                                label={`受控 ${shortcutRuntimeProfile.webActionsPort || 9223}`}
+	                                label={t("受控 {port}", {
+                                    port:
+                                      shortcutRuntimeProfile.webActionsPort ||
+                                      9223,
+                                  })}
 	                                variant="outlined"
 	                              />
 	                            ) : null}
@@ -5417,7 +6649,9 @@ export function ProjectsPage({
 	                            variant="caption"
 	                            sx={{ color: "#b91c1c", overflowWrap: "anywhere" }}
 	                          >
-	                            运行配置不存在：{shortcutRuntimeProfileKey}
+	                            {t("运行环境模板不存在：{key}", {
+                                key: shortcutRuntimeProfileKey,
+                              })}
 	                          </Typography>
 	                        ) : null}
 
@@ -5442,8 +6676,8 @@ export function ProjectsPage({
 	                            }
 	                          >
 	                            {isLinkToolEntry(shortcutRuntimePanelCurrentItem.entry)
-                              ? "查看计划"
-                              : "打开入口"}
+                              ? t("查看计划")
+                              : t("打开入口")}
 	                          </Button>
 	                        </Stack>
 	                      </Stack>
@@ -5460,7 +6694,217 @@ export function ProjectsPage({
 	                </RuntimePanelDrawer>
 	              ) : null}
 
-	              <Dialog
+                      <AppActionDialog
+                        open={Boolean(runtimeLaunchProfileSaveDialog)}
+                        onClose={() => {
+                          if (!runtimeLaunchProfileSaving) {
+                            setRuntimeLaunchProfileSaveDialog(null);
+                            setRuntimeLaunchProfileSaveError("");
+                          }
+                        }}
+                        busy={runtimeLaunchProfileSaving}
+                        title={t("保存为启动档案")}
+                        subtitle={t(
+                          "把本次 {count} 个变量沉淀到项目“{project}”。当前工作区仍可单独选择默认档案。",
+                          {
+                            count: runtimeOptionsOverrideCount,
+                            project: runtimeOptionsEntry?.name || "",
+                          },
+                        )}
+                        icon={<SettingsIcon />}
+                        contentIcon={false}
+                        tone="neutral"
+                        className="runtime-launch-profile-save-dialog"
+                        headerActions={
+                          <Stack
+                            direction="row"
+                            spacing={0.45}
+                            alignItems="center"
+                          >
+                            <Chip
+                              size="small"
+                              variant="outlined"
+                              label={t("项目级")}
+                            />
+                            <Chip
+                              size="small"
+                              variant="outlined"
+                              label={t("所有工作区可用")}
+                            />
+                          </Stack>
+                        }
+                        actions={
+                          <>
+                            <Button
+                              variant="outlined"
+                              color="inherit"
+                              disabled={runtimeLaunchProfileSaving}
+                              onClick={() => {
+                                setRuntimeLaunchProfileSaveDialog(null);
+                                setRuntimeLaunchProfileSaveError("");
+                              }}
+                              className="app-action-dialog-cancel"
+                            >
+                              {t("取消")}
+                            </Button>
+                            <Button
+                              autoFocus
+                              variant="contained"
+                              disabled={
+                                runtimeLaunchProfileSaving ||
+                                !runtimeLaunchProfileSaveDialog?.profileKey.trim() ||
+                                !runtimeLaunchProfileSaveDialog?.label.trim()
+                              }
+                              onClick={() => void saveRuntimeLaunchProfile()}
+                              className="app-action-dialog-confirm"
+                            >
+                              {runtimeLaunchProfileSaving
+                                ? t("保存中…")
+                                : t("保存档案")}
+                            </Button>
+                          </>
+                        }
+                      >
+                        {runtimeLaunchProfileSaveDialog ? (
+                          <Stack spacing={1.05} sx={{ mt: 0.25 }}>
+                              {runtimeLaunchProfileSaveError ? (
+                                <Typography
+                                  variant="caption"
+                                  role="alert"
+                                  sx={{
+                                    color: "#dc6262",
+                                    fontWeight: 700,
+                                    overflowWrap: "anywhere",
+                                  }}
+                                >
+                                  {runtimeLaunchProfileSaveError}
+                                </Typography>
+                              ) : null}
+                              <TextField
+                                select
+                                size="small"
+                                label={t("保存方式")}
+                                value={runtimeLaunchProfileSaveDialog.mode}
+                                onChange={(event) =>
+                                  changeRuntimeLaunchProfileSaveMode(
+                                    event.target.value as "create" | "update",
+                                  )
+                                }
+                              >
+                                <MenuItem value="create">
+                                  {t("另存为新档案")}
+                                </MenuItem>
+                                <MenuItem
+                                  value="update"
+                                  disabled={!runtimeOptionsSelectedProfile}
+                                >
+                                  {t("更新当前档案")}
+                                </MenuItem>
+                              </TextField>
+                              <TextField
+                                size="small"
+                                label={t("档案 Key")}
+                                value={runtimeLaunchProfileSaveDialog.profileKey}
+                                disabled={
+                                  runtimeLaunchProfileSaveDialog.mode === "update"
+                                }
+                                onChange={(event) =>
+                                  setRuntimeLaunchProfileSaveDialog((current) =>
+                                    current
+                                      ? {
+                                          ...current,
+                                          profileKey: event.target.value,
+                                        }
+                                      : current,
+                                  )
+                                }
+                                inputProps={{
+                                  autoComplete: "off",
+                                  name: "runtime-launch-profile-key",
+                                }}
+                              />
+                              <TextField
+                                size="small"
+                                label={t("档案名称")}
+                                value={runtimeLaunchProfileSaveDialog.label}
+                                onChange={(event) =>
+                                  setRuntimeLaunchProfileSaveDialog((current) =>
+                                    current
+                                      ? { ...current, label: event.target.value }
+                                      : current,
+                                  )
+                                }
+                                inputProps={{
+                                  autoComplete: "off",
+                                  name: "runtime-launch-profile-label",
+                                }}
+                              />
+                              <Box
+                                component="details"
+                                sx={{
+                                  borderTop: "1px solid",
+                                  borderColor: "divider",
+                                  pt: 0.8,
+                                  "& summary": {
+                                    cursor: "pointer",
+                                    color: "text.secondary",
+                                    fontSize: "0.72rem",
+                                    fontWeight: 740,
+                                  },
+                                }}
+                              >
+                                <Box component="summary">
+                                  {t("查看将保存的变量")}
+                                </Box>
+                                <Stack spacing={0.35} sx={{ mt: 0.65 }}>
+                                  {Object.entries(
+                                    runtimeOptionsParseResult.values,
+                                  ).map(([key, value]) => (
+                                    <Stack
+                                      key={key}
+                                      direction="row"
+                                      spacing={0.65}
+                                      justifyContent="space-between"
+                                      minWidth={0}
+                                    >
+                                      <Typography
+                                        variant="caption"
+                                        sx={{
+                                          fontFamily:
+                                            '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                          fontWeight: 720,
+                                        }}
+                                      >
+                                        {key}
+                                      </Typography>
+                                      <Typography
+                                        variant="caption"
+                                        color="text.secondary"
+                                        sx={{
+                                          minWidth: 0,
+                                          overflowWrap: "anywhere",
+                                          textAlign: "right",
+                                          fontFamily:
+                                            '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
+                                        }}
+                                      >
+                                        {value}
+                                      </Typography>
+                                    </Stack>
+                                  ))}
+                                </Stack>
+                              </Box>
+                              <Typography variant="caption" color="text.secondary">
+                                {t(
+                                  "来源：工作区 {workspace} 的本次启动覆盖。保存位置为项目配置，不复制工作区项目目录或共享运行环境。",
+                                  { workspace: runtimeOptionsWorkspaceLabel },
+                                )}
+                              </Typography>
+                          </Stack>
+                        ) : null}
+                      </AppActionDialog>
+
+		              <Dialog
                 className="runtime-profile-dialog"
                 open={Boolean(runtimeProfileDialog)}
                 onClose={() => {
@@ -5482,13 +6926,16 @@ export function ProjectsPage({
                     <Stack direction="row" spacing={0.65} alignItems="center" minWidth={0}>
                       <Typography variant="subtitle1" noWrap>
                         {runtimeProfileDialog?.mode === "create"
-                          ? "新增运行配置"
-                          : "编辑运行配置"}
+                          ? t("新增运行环境模板")
+                          : t("编辑运行环境模板")}
                       </Typography>
                       <Chip
                         size="small"
                         variant="outlined"
-                        label={runtimeProfileScopeLabel(runtimeProfileScope)}
+                        label={runtimeProfileScopeLabel(
+                          runtimeProfileScope,
+                          t,
+                        )}
                       />
                     </Stack>
                     <Typography
@@ -5497,7 +6944,7 @@ export function ProjectsPage({
                       noWrap
                       title={runtimeProfileConfigPath || undefined}
                     >
-                      {runtimeProfileScopeDescription(runtimeProfileScope)}
+                      {runtimeProfileScopeDescription(runtimeProfileScope, t)}
                       {runtimeProfileConfigPath ? ` · ${runtimeProfileConfigPath}` : ""}
                     </Typography>
                   </Stack>
@@ -5535,7 +6982,7 @@ export function ProjectsPage({
                         />
                         <TextField
                           size="small"
-                          label="名称"
+                          label={t("名称")}
                           value={runtimeProfileDialog.draft.label}
                           onChange={(event) =>
                             updateRuntimeProfileDialog({ label: event.target.value })
@@ -5544,7 +6991,7 @@ export function ProjectsPage({
                         />
                         <TextField
                           size="small"
-                          label="浏览器"
+                          label={t("浏览器")}
                           value={runtimeProfileDialog.draft.browser ?? ""}
                           onChange={(event) =>
                             updateRuntimeProfileDialog({ browser: event.target.value })
@@ -5570,7 +7017,7 @@ export function ProjectsPage({
                         <TextField
                           select
                           size="small"
-                          label="代理服务"
+                          label={t("代理服务")}
                           value={
                             runtimeProfileDialog.draft.rdevProxyProfileId ??
                             RUNTIME_PROXY_MANUAL_VALUE
@@ -5597,12 +7044,14 @@ export function ProjectsPage({
                           }}
                         >
                           <MenuItem value={RUNTIME_PROXY_MANUAL_VALUE}>
-                            手动代理或不使用
+                            {t("手动代理或不使用")}
                           </MenuItem>
                           {runtimeProfileDialog.draft.rdevProxyProfileId &&
                           !runtimeProxyProfileById.has(runtimeProfileDialog.draft.rdevProxyProfileId) ? (
                             <MenuItem value={runtimeProfileDialog.draft.rdevProxyProfileId}>
-                              已缺失：{runtimeProfileDialog.draft.rdevProxyProfileId}
+                              {t("已缺失：{id}", {
+                                id: runtimeProfileDialog.draft.rdevProxyProfileId,
+                              })}
                             </MenuItem>
                           ) : null}
                           {runtimeProxyProfiles.map((profile) => (
@@ -5613,7 +7062,7 @@ export function ProjectsPage({
                         </TextField>
                         <TextField
                           size="small"
-                          label="浏览器代理地址"
+                          label={t("浏览器代理地址")}
                           value={runtimeProfileDialog.draft.proxyUrl}
                           onChange={(event) =>
                             updateRuntimeProfileDialog({ proxyUrl: event.target.value })
@@ -5621,8 +7070,12 @@ export function ProjectsPage({
                           placeholder="http://127.0.0.1:7897…"
                           helperText={
                             runtimeProfileDialog.draft.rdevProxyProfileId
-                              ? "打开项目或访达入口前会自动启动代理服务并使用最新地址。"
-                              : "手动填写时不会自动启动 rDevTool 代理服务。"
+                              ? t(
+                                  "打开项目或访达入口前会自动启动代理服务并使用最新地址。",
+                                )
+                              : t(
+                                  "手动填写时不会自动启动 rDevTool 代理服务。",
+                                )
                           }
                           disabled={Boolean(runtimeProfileDialog.draft.rdevProxyProfileId)}
                           inputProps={{
@@ -5632,7 +7085,7 @@ export function ProjectsPage({
                         />
                         <TextField
                           size="small"
-                          label="代理绕过"
+                          label={t("代理绕过")}
                           value={runtimeProfileDialog.draft.proxyBypass}
                           onChange={(event) =>
                             updateRuntimeProfileDialog({ proxyBypass: event.target.value })
@@ -5645,7 +7098,7 @@ export function ProjectsPage({
                         />
                         <TextField
                           size="small"
-                          label="浏览器数据目录"
+                          label={t("浏览器数据目录")}
                           value={runtimeProfileDialog.draft.browserUserDataDir ?? ""}
                           onChange={(event) =>
                             updateRuntimeProfileDialog({
@@ -5690,7 +7143,7 @@ export function ProjectsPage({
                                 }
                               />
                             }
-                            label="网页动作受控模式"
+                            label={t("网页动作受控模式")}
                             sx={{
                               m: 0,
                               alignSelf: "center",
@@ -5703,7 +7156,7 @@ export function ProjectsPage({
                           <TextField
                             size="small"
                             type="number"
-                            label="调试端口"
+                            label={t("调试端口")}
                             value={runtimeProfileDialog.draft.webActionsPort || 9223}
                             onChange={(event) =>
                               updateRuntimeProfileDialog({
@@ -5719,7 +7172,7 @@ export function ProjectsPage({
                           />
                           <TextField
                             size="small"
-                            label="受控数据目录"
+                            label={t("受控数据目录")}
                             value={runtimeProfileDialog.draft.webActionsUserDataDir ?? ""}
                             onChange={(event) =>
                               updateRuntimeProfileDialog({
@@ -5727,7 +7180,7 @@ export function ProjectsPage({
                               })
                             }
                             disabled={!runtimeProfileDialog.draft.webActionsEnabled}
-                            placeholder="空则使用 rDevTool 默认受控目录"
+                            placeholder={t("空则使用 rDevTool 默认受控目录")}
                             inputProps={{
                               name: "runtime-profile-web-actions-user-data-dir",
                               autoComplete: "off",
@@ -5737,7 +7190,7 @@ export function ProjectsPage({
                         </Box>
                         <TextField
                           size="small"
-                          label="域名映射"
+                          label={t("域名映射")}
                           value={runtimeProfileDialog.draft.hostResolverRulesText}
                           onChange={(event) =>
                             updateRuntimeProfileDialog({
@@ -5756,7 +7209,7 @@ export function ProjectsPage({
                         />
                         <TextField
                           size="small"
-                          label="浏览器参数"
+                          label={t("浏览器参数")}
                           value={runtimeProfileDialog.draft.browserArgsText}
                           onChange={(event) =>
                             updateRuntimeProfileDialog({
@@ -5783,7 +7236,7 @@ export function ProjectsPage({
                     onClick={() => setRuntimeProfileDialog(null)}
                     disabled={runtimeProfilesSaving}
                   >
-                    取消
+                    {t("取消")}
                   </Button>
                   <Button
                     variant="contained"
@@ -5795,12 +7248,13 @@ export function ProjectsPage({
                       !runtimeProfileDialog?.draft.key.trim()
                     }
                   >
-                    保存运行配置
+                    {t("保存运行环境")}
                   </Button>
                 </DialogActions>
               </Dialog>
 
               {confirmDialog}
+              {runtimeStartLauncher.dialog}
 
               <LinkPlanDialog
                 state={linkPlanDialog}
@@ -5822,7 +7276,11 @@ export function ProjectsPage({
               {!finderIsProjects &&
               currentResourceTypeCount > 0 &&
               filteredShortcutEntries.length === 0 ? (
-                <AppEmptyState compact title="没有匹配入口" description="切换分类或调整搜索词。" />
+                <AppEmptyState
+                  compact
+                  title={t("没有匹配入口")}
+                  description={t("切换分类或调整搜索词。")}
+                />
               ) : null}
 
               {!finderIsProjects && filteredShortcutEntries.length > 0 ? (
@@ -5846,20 +7304,23 @@ export function ProjectsPage({
                     }}
                   >
                     {visibleShortcutEntries.map((item, index) => {
-                    const detailLines = buildFinderEntryDetails(item);
+                    const detailLines = buildFinderEntryDetails(item, t);
                     const shortcutKey = buildFinderShortcutKey(item);
                     const linkShortcut = isLinkToolEntry(item.entry);
                     const shortcutLinkSummary = linkShortcut
                       ? linkSummaryForEntry(item.entry, linkSummaryMap)
                       : null;
                     const shortcutSubtitle = linkShortcut
-                      ? linkEntrySubtitle(item.entry, shortcutLinkSummary)
+                      ? linkEntrySubtitle(item.entry, shortcutLinkSummary, t)
                       : item.entry.targetLabel;
                     const shortcutConfirmed =
                       confirmedShortcutKey === shortcutKey;
                     const shortcutFavorite =
                       favoriteShortcutKeySet.has(shortcutKey);
-                    const shortcutKindLabel = finderEntryKindLabel(item.entry.kind);
+                    const shortcutKindLabel = finderEntryKindLabel(
+                      item.entry.kind,
+                      t,
+                    );
                     const shortcutCategoryLabel =
                       item.categoryTitle && item.categoryTitle !== shortcutKindLabel
                         ? item.categoryTitle
@@ -5897,7 +7358,9 @@ export function ProjectsPage({
                           className={`finder-entry-row${linkShortcut ? " is-link-tool" : ""}${
                             shortcutConfirmed ? " is-confirmed" : ""
                           }`}
-                          aria-label={`打开 ${item.entry.name}`}
+                          aria-label={t("打开 {name}", {
+                            name: item.entry.name,
+                          })}
                           onClick={() =>
                             void handleOpenShortcut(item, shortcutKey)
                           }
@@ -5997,7 +7460,10 @@ export function ProjectsPage({
                                     className={`finder-link-state-chip ${
                                       shortcutLinkSummary?.warnings.length ? "is-warning" : "is-ready"
                                     }`}
-                                    label={linkEntryStatusLabel(shortcutLinkSummary)}
+                                    label={linkEntryStatusLabel(
+                                      shortcutLinkSummary,
+                                      t,
+                                    )}
                                   />
                                 ) : null}
                               </Stack>
@@ -6033,10 +7499,19 @@ export function ProjectsPage({
                               zIndex: 1,
                             }}
                           >
-                            <Tooltip title={`打开${finderEntryKindLabel(item.entry.kind)}`}>
+                            <Tooltip
+                              title={t("打开{type}", {
+                                type: finderEntryKindLabel(
+                                  item.entry.kind,
+                                  t,
+                                ),
+                              })}
+                            >
                               <IconButton
                                 className="finder-entry-action is-primary"
-                                aria-label={`打开 ${item.entry.name}`}
+                                aria-label={t("打开 {name}", {
+                                  name: item.entry.name,
+                                })}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   void handleOpenShortcut(item, shortcutKey);
@@ -6045,10 +7520,12 @@ export function ProjectsPage({
                                 {finderEntryActionIcon(item.entry.kind)}
                               </IconButton>
                             </Tooltip>
-                            <Tooltip title="更多操作">
+                            <Tooltip title={t("更多操作")}>
                               <IconButton
                                 className="finder-entry-action is-muted"
-                                aria-label={`${item.entry.name} 更多操作`}
+                                aria-label={t("{name} 更多操作", {
+                                  name: item.entry.name,
+                                })}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   setShortcutMenuAnchor(event.currentTarget);
@@ -6077,7 +7554,7 @@ export function ProjectsPage({
                           onClick={loadMoreFinderEntries}
                           className="workflow-history-footer-action"
                         >
-                          下滑加载更多
+                          {t("下滑加载更多")}
                         </Button>
                       ) : (
                         <AppListEndState />
@@ -6138,8 +7615,8 @@ export function ProjectsPage({
                   <ListItemText
                     primary={
                       shortcutMenuItem && isLinkToolEntry(shortcutMenuItem.entry)
-                        ? "查看计划"
-                        : "打开入口"
+                        ? t("查看计划")
+                        : t("打开入口")
                     }
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
@@ -6165,7 +7642,7 @@ export function ProjectsPage({
                     <AppWindowIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary="运行面板"
+                    primary={t("运行面板")}
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -6193,7 +7670,9 @@ export function ProjectsPage({
                     <StarIcon fontSize="small" />
                   </ListItemIcon>
                   <ListItemText
-                    primary={shortcutMenuFavorite ? "取消标记" : "标记入口"}
+                    primary={
+                      shortcutMenuFavorite ? t("取消标记") : t("标记入口")
+                    }
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
                       fontWeight: 650,
@@ -6203,7 +7682,7 @@ export function ProjectsPage({
               </Menu>
 	              <WorkflowRulesConfigDialog
                 open={workflowOpen}
-                title="联动配置"
+                title={t("联动配置")}
                 context={
                   workflowProjectEntry ? (
                     <Stack spacing={1}>
@@ -6214,7 +7693,7 @@ export function ProjectsPage({
                       <TextField
                         select
                         size="small"
-                        label="动作"
+                        label={t("动作")}
                         value={workflowAction}
                         onChange={(event) =>
                           setWorkflowAction(event.target.value as ProjectWorkflowAction)
@@ -6226,7 +7705,7 @@ export function ProjectsPage({
                             value={action}
                             disabled={!projectWorkflowActionAvailable(workflowProjectEntry, action)}
                           >
-                            {workflowProjectActionLabel(action)}
+                            {t(workflowProjectActionLabel(action))}
                           </MenuItem>
                         ))}
                       </TextField>
@@ -6263,7 +7742,7 @@ export function ProjectsPage({
               />
               <WorkflowLinksDialog
                 open={workflowListOpen}
-                title="联动清单"
+                title={t("联动清单")}
                 items={workflowGroups}
                 onClose={() => setWorkflowListOpen(false)}
                 onEnabledChange={(item, enabled) => {
@@ -6318,7 +7797,7 @@ export function ProjectsPage({
                     <SettingsPanel
                       {...projectConfigPanel}
                       surface="projectManagement"
-                      initialSection="projectBasics"
+                      initialSection={projectConfigInitialSection}
                       selectedProjectKey={
                         projectConfigKey || projectConfigPanel.selectedProjectKey
                       }

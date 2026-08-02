@@ -4,6 +4,7 @@ import {
   Button,
   type ButtonProps,
 } from "@mui/material";
+import { useI18n } from "../i18n";
 
 export type WorkspacePageMetricTone =
   | "blue"
@@ -34,10 +35,12 @@ export function WorkspacePageToolbar({
   className = "",
   ariaLabel = "页面概览与操作",
 }: WorkspacePageToolbarProps) {
+  const { t } = useI18n();
+
   return (
     <Box
       className={`workspace-page-toolbar${className ? ` ${className}` : ""}`}
-      aria-label={ariaLabel}
+      aria-label={t(ariaLabel)}
     >
       <Box className="workspace-page-toolbar-content">
         <Box className="workspace-page-toolbar-metrics">
@@ -45,7 +48,7 @@ export function WorkspacePageToolbar({
             <Box
               key={metric.key}
               className={`workspace-page-toolbar-metric workspace-page-toolbar-metric--${metric.tone ?? "neutral"}`}
-              title={metric.title}
+              title={metric.title ? t(metric.title) : undefined}
             >
               <Box
                 component="span"
@@ -60,7 +63,7 @@ export function WorkspacePageToolbar({
                 )}
               </Box>
               <Box component="span" className="workspace-page-toolbar-metric-label">
-                {metric.label}
+                {t(metric.label)}
               </Box>
               <Box component="span" className="workspace-page-toolbar-metric-value">
                 {metric.value}

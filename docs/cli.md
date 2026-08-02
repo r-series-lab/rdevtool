@@ -209,8 +209,9 @@ rdevtool --json git merge --project imop-admin --source feature-x --target relea
 rdevtool --json git merge-many --project imop-admin --project message-center --source feature-x --target pre --plan
 rdevtool --json git merge-many --project imop-admin --project message-center --source feature-x --target pre --target release
 rdevtool --json git create --project imop-admin --source release-a --target feature-b
-rdevtool --json git clone --project imop-admin --source release-a --destination /tmp/imop-admin-release-a
+rdevtool --json git clone --project imop-admin --source release-a /tmp/imop-admin-release-a
 rdevtool --json git switch --project imop-admin --target feature-x
+rdevtool --workspace feature-a --json git switch --project imop-admin --target feature-x --repo-path /path/to/workspace/imop-admin
 rdevtool --json git push-status --project imop-admin
 rdevtool --json git push --project imop-admin --message "update"
 rdevtool --json git history --project imop-admin --limit 12
@@ -229,6 +230,21 @@ CLI 执行批量合并、创建分支、创建工作副本、切换分支和推�
 App、CLI 和托盘触发的 Git、构建、Runtime、本地代理与 Link 操作会写入统一操作事件流。Runtime 记录启动、停止、重启和外部进程认领，本地代理记录启动、停止和重启；只读状态查询不会产生活动。构建从排队或运行开始记录，后续状态刷新会按同一事件 ID 更新为成功或失败；活动中心会保留关键状态、记录链接和失败原因，并与旧版 Git/构建历史自动去重。失败的 Git、Runtime、代理和 Link 活动会在参数可精确恢复且安全检查可执行时提供“检查并重试”；使用 App 暂不支持的 CLI 一次性启动覆盖时只保留诊断，不会生成不精确的重试动作。`history operations` 默认读取当前工作区，可用 `--domain git|build|runtime|proxy|link`、`--origin app|cli|tray`、`--project` 和 `--limit` 过滤；`history operations show <event-id>` 可查看单条事件及其结构化诊断数据。旧版 Git/构建历史继续保留，供对应页面展示详细记录与重放入口。
 
 `git branches` 使用有界的分层读取：有本地仓库时先在 8 秒边界内执行非交互式 `fetch`，成功后读取本地/远端引用；刷新失败但已有引用时返回 `degraded + cached`，不会清空列表。无本地仓库时再依次尝试总时限 12 秒的 GitLab API 和 8 秒的 `git ls-remote`。JSON 保留兼容的 `branches` 字符串数组，并增加 `requested`、`effective`、`observed`、`status`、`evidence`、`risks`、`recommendedActions` 与 `branchOptions`，可据此区分实际来源、新鲜度、耗时和降级原因。
+
+## Workflow
+
+工作区“联动操作”与 CLI 读取同一份配置。Git、构建、Runtime 启停、代理启停和 Link 启停都使用各自已有的领域命令；可先查看计划，再按配置顺序执行：
+
+```bash
+rdevtool --json workflow chain list
+rdevtool --workspace feature-a --json workflow chain list
+rdevtool --json workflow chain show <chain-id>
+rdevtool --json workflow chain plan <chain-id>
+rdevtool --json workflow chain run <chain-id>
+rdevtool --json workflow chain run <chain-id> --follow --timeout-secs 900
+```
+
+`workflow chain run` 严格按配置顺序执行，任一步失败后停止后续步骤，并返回本次 `runId`、已完成步骤、失败步骤、退出码和原命令输出。每一步仍使用原领域 CLI 执行器，并将同一 `runId`、流程名称和步骤名称写入统一操作事件；App 活动中心会把它们分组，工作区面板也能恢复 CLI 触发的进度与结果。停用的联动默认不可运行；确需执行时可为 `plan` 或 `run` 增加 `--force`。
 
 ## Navigation
 
@@ -250,13 +266,29 @@ rdevtool --json navigation delete --category "办公平台" --name "Jenkins"
 ## Link
 
 ```bash
+rdevtool --json link path
 rdevtool --json link list
-rdevtool --json link show <link-key>
-rdevtool --json link plan <link-key>
-rdevtool --json link check <link-key>
-rdevtool --json link run <link-key>
-rdevtool --json link stop <link-key>
+rdevtool --json link inspect local-debug
+rdevtool --json link show local-debug
+rdevtool --json link plan local-debug
+rdevtool --json link check local-debug
+rdevtool --json link run local-debug
+rdevtool --json link stop local-debug
+rdevtool --json link --source workspace-feature-a plan local-debug
+rdevtool --json link save --key local-debug --name "本地联调" --workspace feature-a --project imop-admin --step type=proxy.start,profile=api-proxy
+rdevtool --json link attach local-debug --workspace feature-a --category "工具" --name "本地联调"
+rdevtool --json link delete local-debug
+rdevtool --json link migrate local-debug --from default --to workspace-feature-a --dry-run
+rdevtool --json link migrate local-debug --from default --to workspace-feature-a
+rdevtool --json link migrate local-debug --from default --to workspace-feature-a --copy
+rdevtool --json link migrate local-debug --from default --to workspace-feature-a --replace --dry-run
 ```
+
+Link 默认使用当前工作区为 `link` 能力选择的配置源；Proxy 和 Runtime 依赖分别使用该工作区对应能力的配置源。`--source` 只临时覆盖本次 Link 文件，不修改持久化偏好。`migrate/move` 必须显式指定 `--from` 和 `--to`，并建议先执行 `--dry-run`。
+
+`link inspect` 会返回当前文件状态、执行计划和所有配置源中的同名 Link 位置。当前源缺失时不会跨源回退执行；计划和活动记录中的 `sourceContext` 会保留实际 Link、Proxy、Runtime 来源，保证稍后重试仍使用原上下文。
+
+`link migrate` 默认移动单个 Link，`--copy` 保留来源，`--replace` 才允许覆盖内容不同的同名目标。迁移使用有序双文件锁、原子写入、回读校验和失败回滚，不会替换目标文件中的其他 Link。
 
 `link plan` 是默认预览入口。对于 `runtime.start` 和 `runtime.focus`，计划步骤会携带与 Agent Context 相同的 `runtime` 快照，直接给出请求参数、有效 Runtime Target、daemon 观测、状态和证据；配置错误或不安全的运行态会进入步骤风险并阻止执行。`link check` 的 runtime 启动步骤同时返回 `preflight` 与该快照，页面聚焦步骤也返回有效 `focusUrl`。`link run` / `link stop` 只在用户明确要求执行链路时使用，并会记录一条整链活动，包含完成、失败、跳过统计及失败步骤；`link check` 保持只读，不产生活动。
 
@@ -350,6 +382,8 @@ rdevtool --json runtime adopt --project demo-web --pid 4242
 rdevtool --json runtime focus --project demo-web
 rdevtool --json runtime log --project demo-web --kind dev --current
 rdevtool --json runtime log --project demo-web --kind dev --run-id <run-id>
+rdevtool --json runtime log --project demo-web --tail 300 --errors-only
+rdevtool --json runtime log --project demo-web --tail 500 --grep "ECONNRESET"
 rdevtool --json runtime wait --project demo-web --run-id <run-id> --until listener-ready
 rdevtool --json runtime wait --project demo-web --run-id <run-id> --until http-verified --probe-path /health --expect-status 204
 ```
@@ -358,7 +392,11 @@ rdevtool --json runtime wait --project demo-web --run-id <run-id> --until http-v
 
 `diagnose` 返回 daemon diagnosis；需要更完整的启动条件与联调状态时，再配合 `runtime preflight` 和 `runtime inspect`。`adopt` 仅在 PID、cwd、命令和监听端口身份都能验证时接管外部进程；身份不一致时会拒绝，不会把任意 PID 伪装成受管运行时。
 
-`runtime log --current` 只返回最新会话标记之后的日志；`--run-id` 可读取指定历史会话。`runtime wait` 分别报告 `processStarted`、`listenerReady` 和 `httpVerified`。命令行 `--probe-url/--probe-path/--expect-status/--timeout-ms` 优先于会话启动时持久化的 Debug Profile `readyProbe`；未配置状态码时默认接受 200–399。响应采用 `requested/effective/observed` 和 `status/evidence/risks/managedArtifacts/recommendedActions`，TCP 监听不会被描述成 HTTP 已验证。
+`runtime log --current` 只返回最新会话标记之后的日志；`--run-id` 可读取指定历史会话。`--tail`（兼容旧名 `--max-lines`）先限制读取尾部行数，再由 `--grep`、`--errors-only` 和可选的 `--case-sensitive` 做筛选；响应同时报告文件字节数、扫描行数和命中行数。运行日志在项目下次启动或重启时按默认 32 MB 阈值轮转并保留有限归档，不会为轮转强制中断当前进程。
+
+`runtime wait` 分别报告 `processStarted`、`listenerReady` 和 `httpVerified`。命令行 `--probe-url/--probe-path/--expect-status/--timeout-ms` 优先于会话启动时持久化的 Debug Profile `readyProbe`；未配置状态码时默认接受 200–399。响应采用 `requested/effective/observed` 和 `status/evidence/risks/managedArtifacts/recommendedActions`，TCP 监听不会被描述成 HTTP 已验证。
+
+跨配置域诊断可使用 `rdevtool --workspace <key> --json doctor --project <project> --debug-profile <profile>`。Doctor 会尊重命令级工作区、返回当前执行文件/源码身份与受管存储健康，并复用 Runtime preflight；代理自环是 error，同一端点同时被进程代理与显式应用环境变量引用是带证据的 warning，不会从端口名称推断某一种代理软件。
 
 生命周期命令的 JSON `command` 名固定为 `runtime.status`、`runtime.list`、`runtime.stop`、`runtime.restart`、`runtime.adopt` 和 `runtime.diagnose`。不带 `--json` 时会输出适合终端阅读的状态摘要。
 
@@ -401,6 +439,8 @@ rdevtool --json web-actions script --target <target-id> --file ./action.js --par
 ```bash
 rdevtool --json notes list --limit 24
 rdevtool --json notes search "构建"
+rdevtool --json notes index --project imop-admin --limit 12
+rdevtool --json notes file-search "代理" --project imop-admin --limit 6
 rdevtool --json notes get <id>
 rdevtool --json notes create --title "构建记录"
 rdevtool --json notes save <id> --title "构建记录" --content "..."
@@ -409,7 +449,7 @@ rdevtool --json notes save <id> --title "构建记录" --stdin
 rdevtool --json notes delete <id>
 ```
 
-`notes save` 只能选择 `--content`、`--file`、`--stdin` 其中一种内容来源。
+`notes list/search/get/create/save/delete` 操作兼容保留的 SQLite 全局便笺；应用内知识库与 `notes index/file-search` 使用应用数据目录下 `notes/inbox/`、`notes/projects/<project>/`、`notes/playbooks/` 和 `notes/environments/` 的 Markdown。Markdown 是长期知识事实源；应用只负责检索、预览、模板新建和调用外部编辑器。文件检索不跟随符号链接、不读取超过 512 KB 的单篇笔记，只返回标题、路径、作用域、相关度和最多 240 字摘要。`notes save` 只能选择 `--content`、`--file`、`--stdin` 其中一种内容来源。
 
 ## History
 

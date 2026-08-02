@@ -71,6 +71,24 @@ function optionalString(value: unknown) {
   return typeof value === "string" ? value : null;
 }
 
+function operationChainFields(event: OperationEventEntry) {
+  return {
+    chainId: event.chainId ?? null,
+    parentId: event.parentId ?? null,
+    stepLabel: event.stepLabel ?? null,
+    chainLabel: event.chainLabel ?? null,
+  };
+}
+
+function runtimePort(value: unknown) {
+  return typeof value === "number" &&
+    Number.isInteger(value) &&
+    value > 0 &&
+    value <= 65_535
+    ? value
+    : null;
+}
+
 function stringList(value: unknown) {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
@@ -264,6 +282,7 @@ export function activityFromOperationEvent(event: OperationEventEntry) {
     summary: event.summary,
     detail: response ? branchTaskDisplayDetail(response) : event.detail,
     executionKey: `operation:${event.id}`,
+    ...operationChainFields(event),
     projectKey: project?.projectKey || event.projectKey || null,
     projectName: project?.projectName || event.projectName || null,
     diagnostics: response ? branchTaskDiagnosticSteps(response) : [],
@@ -299,12 +318,12 @@ export function activityFromLifecycleOperationEvent(
     const logPath = optionalString(payload?.logPath)?.trim() || "";
     const debugProfileKey = optionalString(payload?.debugProfile)?.trim() || null;
     const envOverrides = stringRecord(payload?.envOverrides);
+    const expectedPort = runtimePort(
+      payload?.expectedPort ?? payload?.requestedExpectedPort,
+    );
     const unsupportedReplayOverrides = [
       optionalString(payload?.requestedRuntimeProfile)?.trim() || "",
       optionalString(payload?.requestedCommand)?.trim() || "",
-      payload?.requestedExpectedPort == null
-        ? ""
-        : String(payload.requestedExpectedPort).trim(),
     ].filter(Boolean);
     const replayAction = event.action === "stop" ? "stop" : "start";
     const recoverable =
@@ -320,6 +339,7 @@ export function activityFromLifecycleOperationEvent(
       summary: event.summary,
       detail: event.detail || null,
       executionKey: `runtime:${event.action}:${projectKey || event.id}`,
+      ...operationChainFields(event),
       projectKey,
       projectName,
       diagnostics: event.state === "failed"
@@ -354,6 +374,7 @@ export function activityFromLifecycleOperationEvent(
             projectName: projectName || projectKey!,
             debugProfileKey,
             envOverrides,
+            expectedPort,
             replayAction,
           }
         : null,
@@ -375,6 +396,7 @@ export function activityFromLifecycleOperationEvent(
       summary: event.summary,
       detail: event.detail || optionalString(payload?.listenUrl) || null,
       executionKey: `proxy:${event.action}:${profileId}`,
+      ...operationChainFields(event),
       parameters: [{ key: "profile", label: "代理", value: profileName }],
       diagnostics: event.state === "failed"
         ? [{
@@ -405,6 +427,8 @@ export function activityFromLifecycleOperationEvent(
     const linkKey = optionalString(payload?.linkKey)?.trim() || event.id;
     const linkName = optionalString(payload?.linkName)?.trim() || linkKey;
     const sourceId = optionalString(payload?.sourceId)?.trim() || null;
+    const proxySourceId = optionalString(payload?.proxySourceId)?.trim() || null;
+    const runtimeSourceId = optionalString(payload?.runtimeSourceId)?.trim() || null;
     const diagnostics = linkDiagnosticSteps(
       payload?.diagnosticSteps ?? payload?.failedSteps,
     );
@@ -419,6 +443,7 @@ export function activityFromLifecycleOperationEvent(
       summary: event.summary,
       detail: event.detail || null,
       executionKey: `link:${event.action}:${linkKey}`,
+      ...operationChainFields(event),
       projectKey: event.projectKey ?? null,
       projectName: event.projectName ?? null,
       parameters: [
@@ -435,9 +460,44 @@ export function activityFromLifecycleOperationEvent(
             linkKey,
             linkName,
             sourceId,
+            proxySourceId,
+            runtimeSourceId,
+            workspaceKey: event.workspaceKey || null,
             replayAction,
           }
         : null,
+      createdAt: event.createdAt,
+      updatedAt: event.updatedAt,
+    });
+  }
+  if (event.domain === "workspace") {
+    return createActivityEntry({
+      id: event.id,
+      kind: "config",
+      origin: event.origin,
+      status: event.state,
+      title: event.title,
+      summary: event.summary,
+      detail: event.detail || null,
+      executionKey: `workspace:${event.action}:${event.workspaceKey}`,
+      ...operationChainFields(event),
+      parameters: [
+        {
+          key: "workspace",
+          label: "工作区",
+          value: event.workspaceKey,
+        },
+        {
+          key: "action",
+          label: "动作",
+          value: event.action === "restore" ? "恢复" : "归档",
+        },
+      ],
+      target: {
+        page: "overview",
+        workspaceKey: event.workspaceKey,
+        workspaceView: event.action === "restore" ? "open" : "archived",
+      },
       createdAt: event.createdAt,
       updatedAt: event.updatedAt,
     });

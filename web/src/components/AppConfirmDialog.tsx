@@ -1,12 +1,9 @@
-import { useCallback, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   Button,
   Checkbox,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
   FormControlLabel,
+  Stack,
 } from "@mui/material";
 import {
   confirmationCanBeDisabled,
@@ -17,23 +14,46 @@ import {
   saveConfirmationPreferences,
   type ConfirmationPreferenceKey,
 } from "../lib/confirmationPreferences";
-
-type ConfirmTone = "primary" | "danger";
+import { translateNode, useI18n } from "../i18n";
+import {
+  AppActionDialog,
+  type AppActionDialogProps,
+  type AppActionDialogTone,
+} from "./AppActionDialog";
 
 export type AppConfirmDialogOptions = {
   title: ReactNode;
   description?: ReactNode;
+  content?: ReactNode;
   confirmLabel?: ReactNode;
   cancelLabel?: ReactNode;
-  tone?: ConfirmTone;
+  confirmIcon?: ReactNode;
+  icon?: ReactNode;
+  contentIcon?: ReactNode | false;
+  tone?: AppActionDialogTone;
+  hideCancel?: boolean;
   preferenceKey?: ConfirmationPreferenceKey;
+  maxWidth?: AppActionDialogProps["maxWidth"];
+  dialogClassName?: string;
+  paperClassName?: string;
+  contentClassName?: string;
+  actionsClassName?: string;
 };
 
 export function useAppConfirmDialog() {
+  const { t } = useI18n();
   const [options, setOptions] = useState<AppConfirmDialogOptions | null>(null);
   const [allowDisable, setAllowDisable] = useState(false);
   const [disableFuture, setDisableFuture] = useState(false);
   const resolverRef = useRef<((confirmed: boolean) => void) | null>(null);
+
+  useEffect(
+    () => () => {
+      resolverRef.current?.(false);
+      resolverRef.current = null;
+    },
+    [],
+  );
 
   const settle = useCallback((confirmed: boolean) => {
     const preferenceKey = options?.preferenceKey;
@@ -75,17 +95,49 @@ export function useAppConfirmDialog() {
   }, []);
 
   const dialog = (
-    <Dialog
+    <AppActionDialog
       open={Boolean(options)}
       onClose={() => settle(false)}
-      maxWidth="xs"
-      fullWidth
-      className="app-confirm-dialog"
+      title={options?.title}
+      description={options?.description}
+      icon={options?.icon}
+      contentIcon={options?.contentIcon}
+      tone={options?.tone}
+      maxWidth={options?.maxWidth}
+      className={["app-confirm-dialog", options?.dialogClassName]
+        .filter(Boolean)
+        .join(" ")}
+      paperClassName={options?.paperClassName}
+      contentClassName={options?.contentClassName}
+      actionsClassName={options?.actionsClassName}
+      actions={
+        <>
+          {!options?.hideCancel ? (
+            <Button
+              variant="outlined"
+              color="inherit"
+              onClick={() => settle(false)}
+              className="app-action-dialog-cancel"
+            >
+              {translateNode(options?.cancelLabel ?? "取消", t)}
+            </Button>
+          ) : null}
+          <Button
+            autoFocus
+            variant="contained"
+            color={options?.tone === "danger" ? "error" : "primary"}
+            startIcon={options?.confirmIcon}
+            onClick={() => settle(true)}
+            className="app-action-dialog-confirm"
+          >
+            {translateNode(options?.confirmLabel ?? "确认", t)}
+          </Button>
+        </>
+      }
     >
-      <DialogTitle>{options?.title}</DialogTitle>
-      {options?.description || allowDisable ? (
-        <DialogContent sx={{ color: "text.secondary", pt: 0.5 }}>
-          {options?.description}
+      {options?.content || allowDisable ? (
+        <Stack className="app-confirm-dialog-custom-content" spacing={1}>
+          {options?.content}
           {allowDisable ? (
             <FormControlLabel
               className="app-confirm-dialog-disable-future"
@@ -96,24 +148,12 @@ export function useAppConfirmDialog() {
                   onChange={(event) => setDisableFuture(event.target.checked)}
                 />
               }
-              label="以后不再确认此类操作"
+              label={t("以后不再确认此类操作")}
             />
           ) : null}
-        </DialogContent>
+        </Stack>
       ) : null}
-      <DialogActions>
-        <Button color="inherit" onClick={() => settle(false)}>
-          {options?.cancelLabel ?? "取消"}
-        </Button>
-        <Button
-          variant="contained"
-          color={options?.tone === "danger" ? "error" : "primary"}
-          onClick={() => settle(true)}
-        >
-          {options?.confirmLabel ?? "确认"}
-        </Button>
-      </DialogActions>
-    </Dialog>
+    </AppActionDialog>
   );
 
   return [confirm, dialog] as const;

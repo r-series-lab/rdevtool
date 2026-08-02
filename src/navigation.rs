@@ -26,7 +26,7 @@ pub fn navigation_file_path() -> String {
     default_navigation_path().display().to_string()
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct NavigationEntry {
     pub name: String,
@@ -1069,7 +1069,7 @@ fn resolve_runtime_profile<'a>(
         .iter()
         .find(|profile| profile.key == key)
         .map(Some)
-        .ok_or_else(|| anyhow!("运行配置不存在: {}", key))
+        .ok_or_else(|| anyhow!("运行环境不存在: {}", key))
 }
 
 fn with_runtime_profile_detail(
@@ -1078,7 +1078,7 @@ fn with_runtime_profile_detail(
 ) -> NavigationOpenResult {
     if let Some(profile) = runtime_profile {
         result.detail = format!(
-            "{} · 运行配置 {}",
+            "{} · 运行环境 {}",
             result.detail,
             if profile.label.trim().is_empty() {
                 profile.key.as_str()
@@ -1206,7 +1206,7 @@ fn open_chromium_instance(
     url: &str,
 ) -> Result<NavigationOpenResult> {
     if !browser_supports_profile(app_name) {
-        anyhow::bail!("{} 暂不支持运行配置打开方式", app_name);
+        anyhow::bail!("{} 暂不支持运行环境打开方式", app_name);
     }
 
     let mut command = Command::new("open");
@@ -1231,7 +1231,7 @@ fn open_chromium_instance(
 
     Ok(NavigationOpenResult {
         url: url.to_string(),
-        detail: format!("已使用 {} 运行配置打开入口", app_name),
+        detail: format!("已使用 {} 运行环境打开入口", app_name),
     })
 }
 

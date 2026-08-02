@@ -79,7 +79,7 @@ pub fn bind_proxy_runtime_profile(
         .runtime_profile_label
         .as_deref()
         .and_then(normalize_text)
-        .unwrap_or_else(|| format!("{} 运行配置", proxy_profile.name));
+        .unwrap_or_else(|| format!("{} 运行环境", proxy_profile.name));
     let proxy_url = proxy_profile.listen_url();
 
     let runtime_profile_index = config

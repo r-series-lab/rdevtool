@@ -23,6 +23,8 @@
 - **本地代理**：维护代理 profile、规则、Mock、转发、阻断和导入导出，可绑定到运行时 profile。
 - **项目运行时**：检查、预检、启动、查看、停止、重启和诊断由 App 与 CLI 共享 daemon 托管的项目运行时；项目详情和 Link 计划/检查会直接展示有效运行目标与当前 daemon 观测，支持状态恢复、外部进程检测、受限认领评估、进程归属校验、聚焦页面与读取运行日志。
 - **托管产物**：按工作区和项目盘点 rDevTool 明确拥有的工作区实例、Runtime 状态与日志，并把仅被配置引用的路径单独列出；可生成带活动状态、Git 工作树和目录边界检查的只读清理计划。
+- **知识库**：按收件箱、项目、通用手册和环境约定检索 Markdown 长期知识；支持正文预览、范围筛选、模板新建和外部编辑，Markdown 文件始终是事实源。
+- **系统诊断**：在设置中只读查看当前可执行文件/源码身份、受管存储占用与健康风险。
 - **活动中心**：集中显示构建、Git、Runtime、代理、Link 和外部配置变更；连续执行按最新一次结果呈现外层状态，同时保留每次明细、结构化诊断和“检查并重试”入口。
 - **系统托盘**：以工作区作为一级菜单，按入口、项目、代理、Link、构建和 Git 组织二级/三级快捷动作；支持打开工作区、固定动作和重复上次操作。
 - **命令面板**：使用 `Cmd/Ctrl + K` 快速搜索项目、入口和常用动作。
@@ -89,7 +91,10 @@ rdevtool --json runtime status --project <project>
 rdevtool --json runtime inspect --project <project> --debug-profile <profile>
 rdevtool --json runtime list --running-only
 rdevtool --json runtime log --project <project> --current
+rdevtool --json runtime log --project <project> --tail 300 --errors-only
 rdevtool --json runtime wait --project <project> --run-id <run-id> --until http-verified
+rdevtool --workspace <key> --json doctor --project <project> --debug-profile <profile>
+rdevtool --workspace <key> --json notes file-search "代理" --project <project>
 rdevtool --json history replay-plan <action-id>
 ```
 
@@ -127,6 +132,7 @@ SQLite 使用 `PRAGMA user_version` 执行只向前迁移；新版本不会尝�
 | `proxy.toml` | 本地代理 profile、规则和工作区归属 |
 | `runtime_overrides.toml` | 配置源提供的 Runtime profile 覆盖 |
 | `web_actions.toml` | Chrome DevTools Protocol 网页动作 |
+| `notes/` | 收件箱、项目经验、通用手册与环境约定的 Markdown 长期知识 |
 
 详细配置见 [docs/config.md](docs/config.md)。
 

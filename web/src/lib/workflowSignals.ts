@@ -38,6 +38,8 @@ export type WorkflowBroadcastRule = {
   replayKey?: string;
   label?: string;
   replay?: WorkflowReplay;
+  chainId?: string | null;
+  stepIndex?: number | null;
 };
 
 export type WorkflowBuildReplay = {
@@ -77,6 +79,8 @@ export type WorkflowReceiveRule = {
   replayKey: string;
   label: string;
   replay: WorkflowReplay;
+  chainId?: string | null;
+  stepIndex?: number | null;
 };
 
 export type WorkflowRules = {
@@ -221,6 +225,14 @@ function normalizeBroadcastRule(value: unknown): WorkflowBroadcastRule | null {
         ? workflowReplayKey(replay)
         : undefined;
 
+  const chainId =
+    typeof candidate.chainId === "string" && candidate.chainId.trim()
+      ? candidate.chainId.trim()
+      : null;
+  const stepIndex = Number.isInteger(candidate.stepIndex)
+    ? Number(candidate.stepIndex)
+    : null;
+
   return {
     id: typeof candidate.id === "string" && candidate.id ? candidate.id : makeRuleId("broadcast"),
     enabled: Boolean(candidate.enabled),
@@ -234,6 +246,8 @@ function normalizeBroadcastRule(value: unknown): WorkflowBroadcastRule | null {
           ? workflowReplayLabel(replay)
           : undefined,
     replay,
+    ...(chainId ? { chainId } : {}),
+    ...(stepIndex !== null ? { stepIndex } : {}),
   };
 }
 
@@ -253,6 +267,14 @@ function normalizeReceiveRule(value: unknown): WorkflowReceiveRule | null {
       ? normalizeReplayKeyPrefix(candidate.replayKey)
       : workflowReplayKey(replay);
 
+  const chainId =
+    typeof candidate.chainId === "string" && candidate.chainId.trim()
+      ? candidate.chainId.trim()
+      : null;
+  const stepIndex = Number.isInteger(candidate.stepIndex)
+    ? Number(candidate.stepIndex)
+    : null;
+
   return {
     id: typeof candidate.id === "string" && candidate.id ? candidate.id : makeRuleId("receive"),
     enabled: Boolean(candidate.enabled),
@@ -264,6 +286,8 @@ function normalizeReceiveRule(value: unknown): WorkflowReceiveRule | null {
         ? candidate.label
         : workflowReplayLabel(replay),
     replay,
+    ...(chainId ? { chainId } : {}),
+    ...(stepIndex !== null ? { stepIndex } : {}),
   };
 }
 
@@ -679,7 +703,9 @@ export function workflowProjectActionLabel(action: ProjectWorkflowAction) {
   }
 }
 
-function workflowSourceForReplay(replay: WorkflowReplay): WorkflowSignalSource | null {
+export function workflowSourceForReplay(
+  replay: WorkflowReplay,
+): WorkflowSignalSource | null {
   if (replay.target === "branch.replay") {
     return workflowSourceForBranchTask(replay.entry.taskKind);
   }

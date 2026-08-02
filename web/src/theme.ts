@@ -11,13 +11,13 @@ const lightTokens = {
   lineSoft: "rgba(52,76,96,0.08)",
   text: "#17202b",
   muted: "rgba(63,79,97,0.68)",
-  accent: "#5c7085",
-  accentHover: "#455a70",
-  accentSoft: "rgba(92,112,133,0.11)",
-  accentBorder: "rgba(92,112,133,0.24)",
+  accent: "#667c92",
+  accentHover: "#536b83",
+  accentSoft: "rgba(102,124,146,0.12)",
+  accentBorder: "rgba(102,124,146,0.26)",
   secondary: "#687386",
   success: "#3f8269",
-  info: "#5c7085",
+  info: "#667c92",
   warning: "#a86c1c",
   error: "#aa6069",
   shadow: "0 22px 58px rgba(28,48,68,0.14)",
@@ -202,7 +202,7 @@ export function createAppTheme(styleMode: AppResolvedStyleMode) {
               backgroundColor: tokens.accentHover,
               boxShadow: mono
                 ? "0 14px 30px rgba(50,98,148,0.32), inset 0 1px 0 rgba(255,255,255,0.34)"
-                : "0 10px 20px rgba(49,95,187,0.16)",
+                : "0 10px 20px rgba(54,76,98,0.18)",
             },
             "&.Mui-disabled": {
               borderColor: tokens.lineSoft,

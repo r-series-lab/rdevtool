@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { InputBase, Menu, MenuItem } from "@mui/material";
 import type { ProjectWorkspaceSummary } from "../app-types";
+import { useI18n } from "../i18n";
 import {
+  AppWindowIcon,
   CheckIcon,
   ClearIcon,
   ExpandIcon,
@@ -27,13 +29,14 @@ export function workspaceDisplayName(workspace: ProjectWorkspaceSummary | null) 
   return workspace.system ? "全局" : workspace.name;
 }
 
-function workspaceMeta(workspace: ProjectWorkspaceSummary) {
-  return workspace.system ? "全部项目" : `${workspace.projectCount} 个项目`;
-}
-
-function matchesWorkspace(workspace: ProjectWorkspaceSummary, query: string) {
+function matchesWorkspace(
+  workspace: ProjectWorkspaceSummary,
+  query: string,
+  translatedSystemName: string,
+) {
   const haystack = [
     workspaceDisplayName(workspace),
+    workspace.system ? translatedSystemName : "",
     workspace.name,
     workspace.key,
     workspace.description,
@@ -55,6 +58,7 @@ export function WorkspaceSwitcherMenu({
   onSelect,
   onManage,
 }: WorkspaceSwitcherMenuProps) {
+  const { t } = useI18n();
   const [searchValue, setSearchValue] = useState("");
   const searchInputRef = useRef<HTMLInputElement>(null);
   const open = Boolean(anchorEl);
@@ -63,9 +67,11 @@ export function WorkspaceSwitcherMenu({
   const visibleWorkspaces = useMemo(
     () =>
       searching
-        ? workspaces.filter((workspace) => matchesWorkspace(workspace, normalizedSearch))
+        ? workspaces.filter((workspace) =>
+            matchesWorkspace(workspace, normalizedSearch, t("全局")),
+          )
         : workspaces,
-    [normalizedSearch, searching, workspaces],
+    [normalizedSearch, searching, t, workspaces],
   );
 
   useEffect(() => {
@@ -86,7 +92,7 @@ export function WorkspaceSwitcherMenu({
       transformOrigin={{ vertical: "bottom", horizontal: "left" }}
       disableAutoFocusItem
       MenuListProps={{
-        "aria-label": "切换工作区",
+        "aria-label": t("切换工作区"),
         className: "workspace-menu-list",
       }}
       slotProps={{
@@ -95,20 +101,24 @@ export function WorkspaceSwitcherMenu({
         },
       }}
     >
+      <div className="workspace-menu-head">
+        <span className="workspace-menu-title">{t("切换工作区")}</span>
+        <span className="workspace-menu-count">{workspaces.length}</span>
+      </div>
       <div className="workspace-menu-search" onKeyDown={(event) => event.stopPropagation()}>
         <SearchIcon className="workspace-menu-search-icon" fontSize="small" />
         <InputBase
           inputRef={searchInputRef}
           value={searchValue}
           onChange={(event) => setSearchValue(event.target.value)}
-          placeholder="搜索工作区名称或 ID"
-          inputProps={{ "aria-label": "搜索工作区名称或 ID" }}
+          placeholder={t("搜索工作区名称或 ID")}
+          inputProps={{ "aria-label": t("搜索工作区名称或 ID") }}
           className="workspace-menu-search-input"
         />
         <button
           type="button"
           className="workspace-menu-search-clear"
-          aria-label="清空搜索"
+          aria-label={t("清空搜索")}
           disabled={!searchValue}
           onMouseDown={(event) => event.preventDefault()}
           onClick={() => {
@@ -135,11 +145,22 @@ export function WorkspaceSwitcherMenu({
                 disabled={switching}
                 onClick={() => onSelect(workspace.key)}
               >
+                <span className="workspace-menu-item-icon" aria-hidden="true">
+                  {workspace.system ? (
+                    <AppWindowIcon fontSize="small" />
+                  ) : (
+                    <PackageIcon fontSize="small" />
+                  )}
+                </span>
                 <span className="workspace-menu-item-copy">
                   <span className="workspace-menu-item-name">
-                    {workspaceDisplayName(workspace)}
+                    {workspace.system ? t("全局") : workspace.name}
                   </span>
-                  <span className="workspace-menu-item-meta">{workspaceMeta(workspace)}</span>
+                  <span className="workspace-menu-item-meta">
+                    {workspace.system
+                      ? t("全部项目")
+                      : t("{count} 个项目", { count: workspace.projectCount })}
+                  </span>
                 </span>
                 {selected ? (
                   <CheckIcon className="workspace-menu-item-check" fontSize="small" />
@@ -154,8 +175,8 @@ export function WorkspaceSwitcherMenu({
             <PackageIcon className="workspace-menu-empty-base-icon" fontSize="small" />
             <SearchIcon className="workspace-menu-empty-search-icon" fontSize="small" />
           </span>
-          <strong>未找到相关工作区</strong>
-          <span>请尝试其他关键词</span>
+          <strong>{t("未找到相关工作区")}</strong>
+          <span>{t("请尝试其他关键词")}</span>
         </div>
       )}
 
@@ -168,7 +189,7 @@ export function WorkspaceSwitcherMenu({
             searchInputRef.current?.focus();
           }}
         >
-          <span>查看全部结果</span>
+          <span>{t("查看全部结果")}</span>
           <ExpandIcon fontSize="small" />
         </button>
       ) : null}
@@ -179,8 +200,8 @@ export function WorkspaceSwitcherMenu({
             <SettingsIcon fontSize="small" />
           </span>
           <span className="workspace-menu-item-copy">
-            <span className="workspace-menu-item-name">工作区设置...</span>
-            <span className="workspace-menu-item-meta">范围、目录与入口配置</span>
+            <span className="workspace-menu-item-name">{t("工作区设置...")}</span>
+            <span className="workspace-menu-item-meta">{t("范围、目录与入口配置")}</span>
           </span>
         </MenuItem>
       ) : null}

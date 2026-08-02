@@ -282,6 +282,15 @@ impl Drop for ProjectRuntimeRegistry {
 
 impl ProjectRuntimeState {
     pub fn list(&self, config: &AppConfig) -> Result<Vec<ProjectRuntimeSnapshot>, String> {
+        let daemon_statuses = runtime_daemon::list().map_err(|error| error.to_string())?;
+        self.list_with_daemon_statuses(config, &daemon_statuses)
+    }
+
+    pub fn list_with_daemon_statuses(
+        &self,
+        config: &AppConfig,
+        daemon_statuses: &[RuntimeDaemonStatus],
+    ) -> Result<Vec<ProjectRuntimeSnapshot>, String> {
         let mut store = self
             .inner
             .state
@@ -290,7 +299,9 @@ impl ProjectRuntimeState {
         config
             .projects
             .iter()
-            .map(|project| snapshot_for_project(&mut store, project))
+            .map(|project| {
+                snapshot_for_project_with_daemon_statuses(&mut store, project, daemon_statuses)
+            })
             .collect()
     }
 
@@ -299,6 +310,7 @@ impl ProjectRuntimeState {
         config: &AppConfig,
         project_keys: &[String],
     ) -> Result<Vec<ProjectRuntimeSnapshot>, String> {
+        let daemon_statuses = runtime_daemon::list().map_err(|error| error.to_string())?;
         let mut store = self
             .inner
             .state
@@ -314,22 +326,13 @@ impl ProjectRuntimeState {
             let project = config
                 .find_project(project_key)
                 .map_err(|error| error.to_string())?;
-            snapshots.push(snapshot_for_project(&mut store, project)?);
+            snapshots.push(snapshot_for_project_with_daemon_statuses(
+                &mut store,
+                project,
+                &daemon_statuses,
+            )?);
         }
         Ok(snapshots)
-    }
-
-    pub fn preflight(
-        &self,
-        config: &AppConfig,
-        project_key: &str,
-        debug_profile_key: Option<&str>,
-    ) -> Result<ProjectRuntimePreflightResponse, String> {
-        let options = ProjectRuntimeLaunchOptions {
-            debug_profile: optional_owned(debug_profile_key),
-            ..ProjectRuntimeLaunchOptions::default()
-        };
-        self.preflight_with_options(config, project_key, &options)
     }
 
     pub fn preflight_with_options(
@@ -764,7 +767,7 @@ impl ProjectRuntimeState {
         project_key: &str,
         debug_profile_key: Option<&str>,
     ) -> Result<ProjectRuntimeSnapshot, String> {
-        self.focus_runtime_with_profile(config, project_key, debug_profile_key, None)
+        self.focus_runtime_with_profile_and_url(config, project_key, debug_profile_key, None, None)
     }
 
     pub fn focus_runtime_with_profile(
@@ -774,6 +777,23 @@ impl ProjectRuntimeState {
         debug_profile_key: Option<&str>,
         runtime_profile_key: Option<&str>,
     ) -> Result<ProjectRuntimeSnapshot, String> {
+        self.focus_runtime_with_profile_and_url(
+            config,
+            project_key,
+            debug_profile_key,
+            runtime_profile_key,
+            None,
+        )
+    }
+
+    pub fn focus_runtime_with_profile_and_url(
+        &self,
+        config: &AppConfig,
+        project_key: &str,
+        debug_profile_key: Option<&str>,
+        runtime_profile_key: Option<&str>,
+        url_override: Option<&str>,
+    ) -> Result<ProjectRuntimeSnapshot, String> {
         let project = config
             .find_project(project_key)
             .map_err(|error| error.to_string())?;
@@ -781,7 +801,11 @@ impl ProjectRuntimeState {
         let runtime_profile =
             resolve_runtime_profile(config, debug_profile.as_ref(), runtime_profile_key)?;
 
-        match resolve_focus_target(project).or_else(|| ready_focus_target(project)) {
+        let override_target = url_override
+            .map(str::trim)
+            .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+            .map(|value| ProjectFocusTarget::Url(value.to_string()));
+        match override_target.or_else(|| preferred_runtime_focus_target(project)) {
             Some(ProjectFocusTarget::AppBundle(bundle_id)) => {
                 log_project_runtime_event(format!(
                     "focus runtime key={} bundle_id={}",
@@ -825,6 +849,13 @@ impl ProjectRuntimeState {
     }
 }
 
+fn preferred_runtime_focus_target(project: &ProjectConfig) -> Option<ProjectFocusTarget> {
+    match resolve_focus_target(project) {
+        bundle @ Some(ProjectFocusTarget::AppBundle(_)) => bundle,
+        configured => ready_focus_target(project).or(configured),
+    }
+}
+
 fn app_owns_runtime_status(
     session: &AppStartedRuntimeSession,
     status: &RuntimeDaemonStatus,
@@ -843,10 +874,23 @@ fn snapshot_for_project(
     store: &mut ProjectRuntimeStore,
     project: &ProjectConfig,
 ) -> Result<ProjectRuntimeSnapshot, String> {
+    let daemon_statuses = runtime_daemon::list().map_err(|error| error.to_string())?;
+    snapshot_for_project_with_daemon_statuses(store, project, &daemon_statuses)
+}
+
+fn snapshot_for_project_with_daemon_statuses(
+    store: &mut ProjectRuntimeStore,
+    project: &ProjectConfig,
+    daemon_statuses: &[RuntimeDaemonStatus],
+) -> Result<ProjectRuntimeSnapshot, String> {
     let display = runtime_display_config(project);
     let build_output_dir = resolve_build_output_dir(project);
-    let dev_state =
-        runtime_daemon_task_state(project, &display.dev, &mut store.external_runtime_cache)?;
+    let dev_state = runtime_daemon_task_state_with_daemon_statuses(
+        project,
+        &display.dev,
+        &mut store.external_runtime_cache,
+        daemon_statuses,
+    )?;
     let can_focus_runtime = resolve_focus_target(project).is_some()
         || focus_target_from_ready_url(&dev_state.ready_url).is_some();
     let build_state = {
@@ -1045,10 +1089,26 @@ fn runtime_daemon_status_for_project_candidates(
         })
 }
 
+#[cfg(test)]
 fn runtime_daemon_task_state(
     project: &ProjectConfig,
     display: &TaskDisplayConfig,
     external_runtime_cache: &mut HashMap<ExternalRuntimeCacheKey, ExternalRuntimeCacheEntry>,
+) -> Result<TaskSnapshotState, String> {
+    let daemon_statuses = runtime_daemon::list().map_err(|error| error.to_string())?;
+    runtime_daemon_task_state_with_daemon_statuses(
+        project,
+        display,
+        external_runtime_cache,
+        &daemon_statuses,
+    )
+}
+
+fn runtime_daemon_task_state_with_daemon_statuses(
+    project: &ProjectConfig,
+    display: &TaskDisplayConfig,
+    external_runtime_cache: &mut HashMap<ExternalRuntimeCacheKey, ExternalRuntimeCacheEntry>,
+    daemon_statuses: &[RuntimeDaemonStatus],
 ) -> Result<TaskSnapshotState, String> {
     let candidate_cwds = match project_runtime_candidate_cwds(project) {
         Ok(candidates) => candidates,
@@ -1061,7 +1121,12 @@ fn runtime_daemon_task_state(
             return Ok(unavailable_task_state(display, detail));
         }
     };
-    let latest_status = runtime_daemon_status_for_project_candidates(project, &candidate_cwds)?;
+    let latest_status = daemon_statuses.iter().find(|status| {
+        status.project_key == project.key
+            && candidate_cwds
+                .iter()
+                .any(|cwd| Path::new(&status.canonical_cwd) == cwd)
+    });
     let cwd = latest_status
         .as_ref()
         .map(|status| PathBuf::from(&status.canonical_cwd))
@@ -1073,7 +1138,7 @@ fn runtime_daemon_task_state(
         ));
     };
     let status = match latest_status {
-        Some(status) => status,
+        Some(status) => status.clone(),
         None => runtime_daemon::status(&project.key, &cwd).map_err(|error| error.to_string())?,
     };
     if !status.running {
@@ -2186,7 +2251,7 @@ fn selected_debug_profile(
         .find(|profile| profile.key == profile_key)
         .cloned()
         .map(Some)
-        .ok_or_else(|| format!("调试档案不存在: {}", profile_key))
+        .ok_or_else(|| format!("启动档案不存在: {}", profile_key))
 }
 
 fn resolve_runtime_profile(
@@ -2207,7 +2272,7 @@ fn resolve_runtime_profile(
         .find(|runtime_profile| runtime_profile.key == runtime_profile_key)
         .cloned()
         .map(Some)
-        .ok_or_else(|| format!("运行配置不存在: {}", runtime_profile_key))
+        .ok_or_else(|| format!("运行环境不存在: {}", runtime_profile_key))
 }
 
 fn open_focus_url(

@@ -248,20 +248,21 @@ def detach_image_for_path(image_path):
     )
     info = plistlib.loads(result.stdout)
     for image in info.get("images", []):
-        if image.get("image-path") != str(image_path):
+        mounted_image_path = image.get("image-path")
+        if not mounted_image_path or Path(mounted_image_path).resolve() != image_path.resolve():
             continue
         for entity in image.get("system-entities", []):
             mount_point = entity.get("mount-point")
             if mount_point:
-                run(["hdiutil", "detach", mount_point], check=False)
+                run(["hdiutil", "detach", "-force", mount_point], check=False)
 
 
-def finalize_rw_dmg(output_dmg, macos_dir):
-    rw_images = sorted(macos_dir.glob("rw.*.dmg"))
+def finalize_rw_dmg(output_dmg, dmg_dir):
+    rw_images = list(dmg_dir.glob("rw.*.dmg"))
     if not rw_images:
         return False
 
-    rw_image = rw_images[-1]
+    rw_image = max(rw_images, key=lambda path: path.stat().st_mtime)
     detach_image_for_path(rw_image)
     output_dmg.unlink(missing_ok=True)
     run(["hdiutil", "convert", str(rw_image), "-format", "UDZO", "-o", str(output_dmg)])
@@ -311,7 +312,7 @@ def rebuild_dmg(product_name, version, target):
     try:
         run(cmd)
     except subprocess.CalledProcessError:
-        if not finalize_rw_dmg(output_dmg, macos_dir):
+        if not finalize_rw_dmg(output_dmg, dmg_dir):
             raise
 
 

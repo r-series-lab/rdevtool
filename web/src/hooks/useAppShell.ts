@@ -48,7 +48,9 @@ const PROJECT_SELECTION_STORAGE_KEY = "project-selection";
 const LAST_PROJECT_STORAGE_KEY = "last-project";
 const STYLE_MODE_STORAGE_KEY = "style-mode";
 const PROJECT_MENU_SPLIT_MIGRATION_KEY = "project-menu-split-v1";
-const PROJECT_MENU_SECONDARY_NAV_MIGRATION_KEY = "project-menu-secondary-nav-v1";
+const PROJECT_MENU_SECONDARY_NAV_MIGRATION_KEY =
+  "project-menu-secondary-nav-v1";
+const KNOWLEDGE_PAGE_MIGRATION_KEY = "knowledge-page-v1";
 const SYSTEM_STYLE_MEDIA_QUERY = "(prefers-color-scheme: dark)";
 const EXTERNAL_WORKSPACE_FOCUS_REFRESH_INTERVAL_MS = 1200;
 const EXTERNAL_WORKSPACE_REFRESH_RETRY_LIMIT = 3;
@@ -59,11 +61,16 @@ function normalizeExitRuntimePolicy(value: unknown): AppExitRuntimePolicy {
 }
 
 function normalizeStyleMode(value: unknown): AppStyleMode | null {
-  return value === "light" || value === "mono" || value === "system" ? value : null;
+  return value === "light" || value === "mono" || value === "system"
+    ? value
+    : null;
 }
 
 function getSystemStyleMode(): AppResolvedStyleMode {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+  if (
+    typeof window === "undefined" ||
+    typeof window.matchMedia !== "function"
+  ) {
     return "light";
   }
   return window.matchMedia(SYSTEM_STYLE_MEDIA_QUERY).matches ? "mono" : "light";
@@ -73,7 +80,9 @@ function migrateProjectMenuSplit(enabledPages: PageKey[]): PageKey[] {
   const pageSet = new Set<PageKey>(enabledPages);
   pageSet.add("projectManagement");
   pageSet.add("resources");
-  return normalizeEnabledPages(ALL_PAGE_KEYS.filter((page) => pageSet.has(page)));
+  return normalizeEnabledPages(
+    ALL_PAGE_KEYS.filter((page) => pageSet.has(page)),
+  );
 }
 
 function migrateProjectMenuSecondaryNav(enabledPages: PageKey[]): PageKey[] {
@@ -92,7 +101,9 @@ function normalizePrimaryMenuPages(enabledPages: PageKey[]): PageKey[] {
   );
 }
 
-function projectManagementViewForLegacyPage(page: PageKey | null): ProjectManagementViewKey {
+function projectManagementViewForLegacyPage(
+  page: PageKey | null,
+): ProjectManagementViewKey {
   if (page === "build") {
     return "build";
   }
@@ -116,27 +127,41 @@ type UseAppShellOptions = {
 
 export function useAppShell({ setError }: UseAppShellOptions) {
   const [page, setPage] = useState<PageKey>("overview");
-  const [enabledPages, setEnabledPages] = useState<PageKey[]>(normalizeEnabledPages(undefined));
+  const [enabledPages, setEnabledPages] = useState<PageKey[]>(
+    normalizeEnabledPages(undefined),
+  );
   const [defaultPage, setDefaultPage] = useState<PageKey>("overview");
   const [projectManagementView, setProjectManagementView] =
     useState<ProjectManagementViewKey>("projects");
   const [styleMode, setStyleMode] = useState<AppStyleMode>("system");
   const [exitRuntimePolicy, setExitRuntimePolicy] =
     useState<AppExitRuntimePolicy>("ask");
-  const [systemStyleMode, setSystemStyleMode] =
-    useState<AppResolvedStyleMode>(() => getSystemStyleMode());
+  const [systemStyleMode, setSystemStyleMode] = useState<AppResolvedStyleMode>(
+    () => getSystemStyleMode(),
+  );
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
-  const [projectWorkspaces, setProjectWorkspaces] = useState<ProjectWorkspaceSummary[]>([]);
+  const [projectWorkspaces, setProjectWorkspaces] = useState<
+    ProjectWorkspaceSummary[]
+  >([]);
+  const [archivedProjectWorkspaces, setArchivedProjectWorkspaces] = useState<
+    ProjectWorkspaceSummary[]
+  >([]);
   const [projectWorkspacesDir, setProjectWorkspacesDir] = useState("");
-  const [activeProjectWorkspaceKey, setActiveProjectWorkspaceKey] = useState("system");
+  const [activeProjectWorkspaceKey, setActiveProjectWorkspaceKey] =
+    useState("system");
   const [selectedProject, setSelectedProject] = useState("");
   const [lastProjectKey, setLastProjectKey] = useState("");
   const [branchCache, setBranchCache] = useState<BranchCacheMap>({});
-  const [projectSelections, setProjectSelections] = useState<ProjectSelectionMap>({});
+  const [projectSelections, setProjectSelections] =
+    useState<ProjectSelectionMap>({});
   const [storageHydrated, setStorageHydrated] = useState(false);
   const lastProjectKeyRef = useRef(lastProjectKey);
   const activeProjectWorkspaceKeyRef = useRef(activeProjectWorkspaceKey);
-  const workspacePreferencesRef = useRef({ styleMode, defaultPage, enabledPages });
+  const workspacePreferencesRef = useRef({
+    styleMode,
+    defaultPage,
+    enabledPages,
+  });
   const externalWorkspacePreferencesSignatureRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -165,7 +190,10 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     styleMode === "system" ? systemStyleMode : styleMode;
 
   useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    ) {
       return;
     }
     const mediaQuery = window.matchMedia(SYSTEM_STYLE_MEDIA_QUERY);
@@ -175,7 +203,8 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     updateSystemStyleMode();
     if (typeof mediaQuery.addEventListener === "function") {
       mediaQuery.addEventListener("change", updateSystemStyleMode);
-      return () => mediaQuery.removeEventListener("change", updateSystemStyleMode);
+      return () =>
+        mediaQuery.removeEventListener("change", updateSystemStyleMode);
     }
     mediaQuery.addListener(updateSystemStyleMode);
     return () => mediaQuery.removeListener(updateSystemStyleMode);
@@ -205,7 +234,11 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     if (!storageHydrated) {
       return;
     }
-    const signature = workspacePreferencesSignature(styleMode, defaultPage, enabledPages);
+    const signature = workspacePreferencesSignature(
+      styleMode,
+      defaultPage,
+      enabledPages,
+    );
     if (externalWorkspacePreferencesSignatureRef.current) {
       if (externalWorkspacePreferencesSignatureRef.current === signature) {
         externalWorkspacePreferencesSignatureRef.current = null;
@@ -238,14 +271,22 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     if (!storageHydrated) {
       return;
     }
-    void setStoredJson(APP_STORAGE_NAMESPACE, BRANCH_CACHE_STORAGE_KEY, branchCache);
+    void setStoredJson(
+      APP_STORAGE_NAMESPACE,
+      BRANCH_CACHE_STORAGE_KEY,
+      branchCache,
+    );
   }, [branchCache, storageHydrated]);
 
   useEffect(() => {
     if (!storageHydrated) {
       return;
     }
-    void setStoredJson(APP_STORAGE_NAMESPACE, PROJECT_SELECTION_STORAGE_KEY, projectSelections);
+    void setStoredJson(
+      APP_STORAGE_NAMESPACE,
+      PROJECT_SELECTION_STORAGE_KEY,
+      projectSelections,
+    );
   }, [projectSelections, storageHydrated]);
 
   useEffect(() => {
@@ -253,11 +294,19 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       return;
     }
     setLastProjectKey(selectedProject);
-    void setStoredJson(APP_STORAGE_NAMESPACE, LAST_PROJECT_STORAGE_KEY, selectedProject);
+    void setStoredJson(
+      APP_STORAGE_NAMESPACE,
+      LAST_PROJECT_STORAGE_KEY,
+      selectedProject,
+    );
   }, [selectedProject, storageHydrated]);
 
   const applyProjectList = useCallback(
-    (items: ProjectSummary[], preferredProjectKey = "", replaceSelection = false) => {
+    (
+      items: ProjectSummary[],
+      preferredProjectKey = "",
+      replaceSelection = false,
+    ) => {
       setProjects((current) =>
         sameWorkspaceValue(current, items) ? current : items,
       );
@@ -274,7 +323,10 @@ export function useAppShell({ setError }: UseAppShellOptions) {
   );
 
   const loadProjects = useCallback(
-    async (preferredProjectKey = lastProjectKeyRef.current, replaceSelection = false) => {
+    async (
+      preferredProjectKey = lastProjectKeyRef.current,
+      replaceSelection = false,
+    ) => {
       setError("");
       try {
         const items = await invoke<ProjectSummary[]>("list_projects");
@@ -286,29 +338,41 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     [applyProjectList, setError],
   );
 
-  const applyProjectWorkspaceState = useCallback((state: ProjectWorkspaceState | null) => {
-    if (!state) {
-      return;
-    }
-    setProjectWorkspaces((current) =>
-      sameWorkspaceValue(current, state.workspaces) ? current : state.workspaces,
-    );
-    setProjectWorkspacesDir((current) =>
-      current === state.workspacesDir ? current : state.workspacesDir,
-    );
-    setActiveProjectWorkspaceKey((current) => {
-      const next = state.activeKey || "system";
-      activeProjectWorkspaceKeyRef.current = next;
-      return current === next ? current : next;
-    });
-  }, []);
+  const applyProjectWorkspaceState = useCallback(
+    (state: ProjectWorkspaceState | null) => {
+      if (!state) {
+        return;
+      }
+      setProjectWorkspaces((current) =>
+        sameWorkspaceValue(current, state.workspaces)
+          ? current
+          : state.workspaces,
+      );
+      const nextArchivedWorkspaces = state.archivedWorkspaces ?? [];
+      setArchivedProjectWorkspaces((current) =>
+        sameWorkspaceValue(current, nextArchivedWorkspaces)
+          ? current
+          : nextArchivedWorkspaces,
+      );
+      setProjectWorkspacesDir((current) =>
+        current === state.workspacesDir ? current : state.workspacesDir,
+      );
+      setActiveProjectWorkspaceKey((current) => {
+        const next = state.activeKey || "system";
+        activeProjectWorkspaceKeyRef.current = next;
+        return current === next ? current : next;
+      });
+    },
+    [],
+  );
 
   const applyExternalWorkspacePreferences = useCallback(
     (preferences: WorkspaceAppPreferences | null) => {
       if (!preferences) {
         return;
       }
-      const nextStyleMode = normalizeStyleMode(preferences.styleMode) ?? "system";
+      const nextStyleMode =
+        normalizeStyleMode(preferences.styleMode) ?? "system";
       const nextEnabledPages = normalizePrimaryMenuPages(
         normalizeEnabledPages(preferences.enabledPages),
       );
@@ -318,9 +382,10 @@ export function useAppShell({ setError }: UseAppShellOptions) {
           ? "projectManagement"
           : rawDefaultPage;
       const nextDefaultPage =
-        normalizedDefaultPage && nextEnabledPages.includes(normalizedDefaultPage)
+        normalizedDefaultPage &&
+        nextEnabledPages.includes(normalizedDefaultPage)
           ? normalizedDefaultPage
-          : nextEnabledPages[0] ?? "overview";
+          : (nextEnabledPages[0] ?? "overview");
       const current = workspacePreferencesRef.current;
       if (
         current.styleMode === nextStyleMode &&
@@ -330,11 +395,12 @@ export function useAppShell({ setError }: UseAppShellOptions) {
         return;
       }
 
-      externalWorkspacePreferencesSignatureRef.current = workspacePreferencesSignature(
-        nextStyleMode,
-        nextDefaultPage,
-        nextEnabledPages,
-      );
+      externalWorkspacePreferencesSignatureRef.current =
+        workspacePreferencesSignature(
+          nextStyleMode,
+          nextDefaultPage,
+          nextEnabledPages,
+        );
       workspacePreferencesRef.current = {
         styleMode: nextStyleMode,
         defaultPage: nextDefaultPage,
@@ -385,7 +451,8 @@ export function useAppShell({ setError }: UseAppShellOptions) {
         disposed ||
         !storageHydrated ||
         refreshInFlight ||
-        (typeof document !== "undefined" && document.visibilityState !== "visible")
+        (typeof document !== "undefined" &&
+          document.visibilityState !== "visible")
       ) {
         return;
       }
@@ -438,8 +505,14 @@ export function useAppShell({ setError }: UseAppShellOptions) {
         if (!disposed) {
           if (retryDelayMs != null) {
             refreshQueued = false;
-            scheduleExternalWorkspaceRefresh(EMPTY_WORKSPACE_REFRESH_PLAN, retryDelayMs);
-          } else if (refreshQueued || hasWorkspaceRefreshWork(pendingRefreshPlan)) {
+            scheduleExternalWorkspaceRefresh(
+              EMPTY_WORKSPACE_REFRESH_PLAN,
+              retryDelayMs,
+            );
+          } else if (
+            refreshQueued ||
+            hasWorkspaceRefreshWork(pendingRefreshPlan)
+          ) {
             refreshQueued = false;
             scheduleExternalWorkspaceRefresh(EMPTY_WORKSPACE_REFRESH_PLAN, 0);
           }
@@ -454,7 +527,10 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       if (!storageHydrated) {
         return;
       }
-      pendingRefreshPlan = mergeWorkspaceRefreshPlans(pendingRefreshPlan, refreshPlan);
+      pendingRefreshPlan = mergeWorkspaceRefreshPlans(
+        pendingRefreshPlan,
+        refreshPlan,
+      );
       if (refreshInFlight) {
         refreshQueued = true;
         return;
@@ -463,7 +539,8 @@ export function useAppShell({ setError }: UseAppShellOptions) {
         minimumDelayMs ??
         Math.max(
           0,
-          EXTERNAL_WORKSPACE_FOCUS_REFRESH_INTERVAL_MS - (Date.now() - lastRefreshAt),
+          EXTERNAL_WORKSPACE_FOCUS_REFRESH_INTERVAL_MS -
+            (Date.now() - lastRefreshAt),
         );
       const dueAt = Date.now() + delay;
       if (refreshTimer !== undefined) {
@@ -490,15 +567,18 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       }
     }
 
-    void listen<WorkspaceStateChangedPayload>(WORKSPACE_STATE_CHANGED_EVENT, (event) => {
-      scheduleExternalWorkspaceRefresh(
-        workspaceRefreshPlanForEvent(
-          event.payload,
-          activeProjectWorkspaceKeyRef.current,
-        ),
-        0,
-      );
-    })
+    void listen<WorkspaceStateChangedPayload>(
+      WORKSPACE_STATE_CHANGED_EVENT,
+      (event) => {
+        scheduleExternalWorkspaceRefresh(
+          workspaceRefreshPlanForEvent(
+            event.payload,
+            activeProjectWorkspaceKeyRef.current,
+          ),
+          0,
+        );
+      },
+    )
       .then((unlisten) => {
         if (disposed) {
           disposeTauriListener(unlisten);
@@ -532,17 +612,25 @@ export function useAppShell({ setError }: UseAppShellOptions) {
   ]);
 
   async function setActiveProjectWorkspace(workspaceKey: string) {
-    const state = await invoke<ProjectWorkspaceState>("set_active_project_workspace", {
-      workspaceKey,
-    });
+    const state = await invoke<ProjectWorkspaceState>(
+      "set_active_project_workspace",
+      {
+        workspaceKey,
+      },
+    );
     applyProjectWorkspaceState(state);
     await loadProjects("", true);
   }
 
-  async function createProjectWorkspace(payload: CreateProjectWorkspacePayload) {
-    const state = await invoke<ProjectWorkspaceState>("create_project_workspace_config", {
-      payload,
-    });
+  async function createProjectWorkspace(
+    payload: CreateProjectWorkspacePayload,
+  ) {
+    const state = await invoke<ProjectWorkspaceState>(
+      "create_project_workspace_config",
+      {
+        payload,
+      },
+    );
     applyProjectWorkspaceState(state);
     await loadProjects("", true);
     return state;
@@ -560,17 +648,36 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       storedStyleMode,
       projectMenuSplitMigrated,
       projectMenuSecondaryNavMigrated,
+      knowledgePageMigrated,
       workspacePreferences,
       projectWorkspaceState,
       storedExitRuntimePolicy,
     ] = await Promise.all([
-      getStoredJson<Record<string, unknown>>(APP_STORAGE_NAMESPACE, BRANCH_CACHE_STORAGE_KEY),
-      getStoredJson<Record<string, unknown>>(APP_STORAGE_NAMESPACE, PROJECT_SELECTION_STORAGE_KEY),
+      getStoredJson<Record<string, unknown>>(
+        APP_STORAGE_NAMESPACE,
+        BRANCH_CACHE_STORAGE_KEY,
+      ),
+      getStoredJson<Record<string, unknown>>(
+        APP_STORAGE_NAMESPACE,
+        PROJECT_SELECTION_STORAGE_KEY,
+      ),
       getStoredJson<string>(APP_STORAGE_NAMESPACE, LAST_PROJECT_STORAGE_KEY),
       getStoredJson<string>(APP_STORAGE_NAMESPACE, STYLE_MODE_STORAGE_KEY),
-      getStoredJson<boolean>(APP_STORAGE_NAMESPACE, PROJECT_MENU_SPLIT_MIGRATION_KEY),
-      getStoredJson<boolean>(APP_STORAGE_NAMESPACE, PROJECT_MENU_SECONDARY_NAV_MIGRATION_KEY),
-      invoke<WorkspaceAppPreferences>("get_workspace_app_preferences").catch(() => null),
+      getStoredJson<boolean>(
+        APP_STORAGE_NAMESPACE,
+        PROJECT_MENU_SPLIT_MIGRATION_KEY,
+      ),
+      getStoredJson<boolean>(
+        APP_STORAGE_NAMESPACE,
+        PROJECT_MENU_SECONDARY_NAV_MIGRATION_KEY,
+      ),
+      getStoredJson<boolean>(
+        APP_STORAGE_NAMESPACE,
+        KNOWLEDGE_PAGE_MIGRATION_KEY,
+      ),
+      invoke<WorkspaceAppPreferences>("get_workspace_app_preferences").catch(
+        () => null,
+      ),
       invoke<ProjectWorkspaceState>("get_project_workspaces").catch(() => null),
       invoke<string>("get_app_exit_runtime_policy").catch(() => "ask"),
     ]);
@@ -595,18 +702,22 @@ export function useAppShell({ setError }: UseAppShellOptions) {
                 {
                   branches,
                   syncedAt:
-                    typeof syncedAtValue === "number" && Number.isFinite(syncedAtValue)
+                    typeof syncedAtValue === "number" &&
+                    Number.isFinite(syncedAtValue)
                       ? syncedAtValue
                       : 0,
                 },
               ];
             })
-            .filter((item): item is [string, BranchCacheEntry] => Boolean(item)),
+            .filter((item): item is [string, BranchCacheEntry] =>
+              Boolean(item),
+            ),
         )
       : loadLegacyBranchCache();
 
     const nextProjectSelections: ProjectSelectionMap = {};
-    const rawSelections = storedProjectSelections ?? loadLegacyProjectSelections();
+    const rawSelections =
+      storedProjectSelections ?? loadLegacyProjectSelections();
     for (const [project, value] of Object.entries(rawSelections)) {
       const normalized = normalizeProjectSelectionEntry(value);
       if (normalized) {
@@ -616,7 +727,9 @@ export function useAppShell({ setError }: UseAppShellOptions) {
 
     setBranchCache(nextBranchCache);
     setProjectSelections(nextProjectSelections);
-    setLastProjectKey(typeof storedLastProject === "string" ? storedLastProject : "");
+    setLastProjectKey(
+      typeof storedLastProject === "string" ? storedLastProject : "",
+    );
     applyProjectWorkspaceState(projectWorkspaceState);
     setExitRuntimePolicy(normalizeExitRuntimePolicy(storedExitRuntimePolicy));
 
@@ -627,16 +740,22 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       setStyleMode(nextStyleMode);
     }
 
-    const normalizedEnabledPages = normalizeEnabledPages(workspacePreferences?.enabledPages);
+    const normalizedEnabledPages = normalizeEnabledPages(
+      workspacePreferences?.enabledPages,
+    );
     const splitEnabledPages = projectMenuSplitMigrated
       ? normalizedEnabledPages
       : migrateProjectMenuSplit(normalizedEnabledPages);
-    const nextEnabledPages = projectMenuSecondaryNavMigrated
+    const primaryEnabledPages = projectMenuSecondaryNavMigrated
       ? normalizePrimaryMenuPages(splitEnabledPages)
       : migrateProjectMenuSecondaryNav(splitEnabledPages);
+    const nextEnabledPages = knowledgePageMigrated
+      ? primaryEnabledPages
+      : normalizePrimaryMenuPages([...primaryEnabledPages, "knowledge"]);
     setEnabledPages(nextEnabledPages);
     const rawDefaultPage = normalizePageKey(workspacePreferences?.defaultPage);
-    const nextProjectManagementView = projectManagementViewForLegacyPage(rawDefaultPage);
+    const nextProjectManagementView =
+      projectManagementViewForLegacyPage(rawDefaultPage);
     setProjectManagementView(nextProjectManagementView);
     const nextDefaultPage =
       rawDefaultPage === "build" || rawDefaultPage === "merge"
@@ -652,9 +771,16 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     setStorageHydrated(true);
 
     if (!storedBranchCache && Object.keys(nextBranchCache).length > 0) {
-      await setStoredJson(APP_STORAGE_NAMESPACE, BRANCH_CACHE_STORAGE_KEY, nextBranchCache);
+      await setStoredJson(
+        APP_STORAGE_NAMESPACE,
+        BRANCH_CACHE_STORAGE_KEY,
+        nextBranchCache,
+      );
     }
-    if (!storedProjectSelections && Object.keys(nextProjectSelections).length > 0) {
+    if (
+      !storedProjectSelections &&
+      Object.keys(nextProjectSelections).length > 0
+    ) {
       await setStoredJson(
         APP_STORAGE_NAMESPACE,
         PROJECT_SELECTION_STORAGE_KEY,
@@ -662,7 +788,11 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       );
     }
     if (!projectMenuSplitMigrated) {
-      await setStoredJson(APP_STORAGE_NAMESPACE, PROJECT_MENU_SPLIT_MIGRATION_KEY, true);
+      await setStoredJson(
+        APP_STORAGE_NAMESPACE,
+        PROJECT_MENU_SPLIT_MIGRATION_KEY,
+        true,
+      );
     }
     if (!projectMenuSecondaryNavMigrated) {
       await setStoredJson(
@@ -671,9 +801,17 @@ export function useAppShell({ setError }: UseAppShellOptions) {
         true,
       );
     }
+    if (!knowledgePageMigrated) {
+      await setStoredJson(
+        APP_STORAGE_NAMESPACE,
+        KNOWLEDGE_PAGE_MIGRATION_KEY,
+        true,
+      );
+    }
 
     return {
-      preferredProject: typeof storedLastProject === "string" ? storedLastProject : "",
+      preferredProject:
+        typeof storedLastProject === "string" ? storedLastProject : "",
       enabledPages: nextEnabledPages,
       initialPage,
     };
@@ -697,6 +835,7 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     selectedProject,
     setSelectedProject,
     projectWorkspaces,
+    archivedProjectWorkspaces,
     projectWorkspacesDir,
     activeProjectWorkspaceKey,
     loadProjectWorkspaces,
@@ -707,6 +846,7 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     setBranchCache,
     projectSelections,
     setProjectSelections,
+    storageHydrated,
     visibleNavItems,
     selectedProjectInfo,
     hydratePersistedState,

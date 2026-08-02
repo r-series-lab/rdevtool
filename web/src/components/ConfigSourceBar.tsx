@@ -12,6 +12,7 @@ import type { ConfigSource } from "../app-types";
 import type { ConfigSourceStatus } from "../hooks/useConfigSource";
 import { configSourceKindLabel, configSourceSupports } from "../lib/configSources";
 import { SettingsIcon } from "./AppIcons";
+import { useI18n } from "../i18n";
 
 type ConfigSourceBarProps = {
   sources: ConfigSource[];
@@ -42,7 +43,7 @@ export function ConfigSourceBar({
   warningLabel,
   disabled = false,
   manageDisabled = false,
-  manageDisabledReason = "请先保存或取消当前改动",
+  manageDisabledReason,
   className,
   status = "idle",
   error,
@@ -50,12 +51,16 @@ export function ConfigSourceBar({
   onSourceChange,
   onManage,
 }: ConfigSourceBarProps) {
+  const { t } = useI18n();
+  const resolvedManageDisabledReason =
+    manageDisabledReason ?? t("请先保存或取消当前改动");
+
   return (
     <div className={["resource-config-source-strip", className].filter(Boolean).join(" ")}>
       <TextField
         select
         size="small"
-        label="配置源"
+        label={t("配置源")}
         value={selectedSourceId}
         onChange={(event) => onSourceChange(event.target.value)}
         disabled={disabled}
@@ -69,16 +74,18 @@ export function ConfigSourceBar({
             )}
           >
             {source.name}
-            {source.isDefault ? " · 默认" : ""}
+            {source.isDefault ? t(" · 默认") : ""}
           </MenuItem>
         ))}
       </TextField>
       <div className="resource-config-source-main">
         <Stack direction="row" spacing={0.55} alignItems="center" flexWrap="wrap" useFlexGap>
-          <Typography variant="caption">{selectedSource?.name ?? "默认配置"}</Typography>
+          <Typography variant="caption">
+            {selectedSource?.name ?? t("默认配置")}
+          </Typography>
           <Chip
             size="small"
-            label={configSourceKindLabel(selectedSource?.kind)}
+            label={t(configSourceKindLabel(selectedSource?.kind))}
             variant="outlined"
           />
           <Chip
@@ -93,24 +100,40 @@ export function ConfigSourceBar({
             <Chip
               size="small"
               icon={<CircularProgress size={12} color="inherit" />}
-              label={status === "saving" ? "正在切换" : "正在读取"}
+              label={status === "saving" ? t("正在切换") : t("正在读取")}
               variant="outlined"
             />
           ) : null}
           {showReadyStatus && status === "ready" ? (
-            <Chip size="small" color="success" label="已就绪" variant="outlined" />
+            <Chip
+              size="small"
+              color="success"
+              label={t("已就绪")}
+              variant="outlined"
+            />
           ) : null}
           {status === "error" ? (
-            <Tooltip title={error || "配置源同步失败"}>
-              <Chip size="small" color="error" label="同步失败" variant="outlined" />
+            <Tooltip title={error || t("配置源同步失败")}>
+              <Chip
+                size="small"
+                color="error"
+                label={t("同步失败")}
+                variant="outlined"
+              />
             </Tooltip>
           ) : null}
           {onManage ? (
-            <Tooltip title={manageDisabled ? manageDisabledReason : "管理配置源"}>
+            <Tooltip
+              title={
+                manageDisabled
+                  ? resolvedManageDisabledReason
+                  : t("管理配置源")
+              }
+            >
               <span className="resource-config-source-manage-action">
                 <IconButton
                   size="small"
-                  aria-label="管理配置源"
+                  aria-label={t("管理配置源")}
                   onClick={onManage}
                   disabled={disabled || manageDisabled}
                 >

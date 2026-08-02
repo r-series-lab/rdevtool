@@ -20,6 +20,7 @@ import type {
   BranchPushAction,
   BranchPushStatus,
   BranchTaskHistoryEntry,
+  BranchTaskPendingEntry,
   BranchTaskResponse,
   BranchWorkflowMode,
   BranchWorktreeSummary,
@@ -39,12 +40,14 @@ import {
 import { WorkflowRulesConfigDialog } from "../components/WorkflowRulesConfigDialog";
 import { InlineWarningNotice } from "../components/InlineWarningNotice";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
+import { PushCommitConfirmContent } from "../components/branch/PushCommitConfirmContent";
 import {
   ClearIcon,
   FolderIcon,
   RefreshIcon,
 } from "../components/AppIcons";
 import { shouldHandlePrimaryEnter } from "../lib/keyboard";
+import { useI18n } from "../i18n";
 import {
   defaultSignalIdForReplay,
   workflowReplayFromBranchHistory,
@@ -59,7 +62,6 @@ type ProjectOption = {
 };
 
 type LocalBranchOperation = "switch" | "clone";
-type BranchPushFileStatusItem = BranchPushStatus["files"][number];
 
 export type MergePageProps = {
   projects: ProjectOption[];
@@ -119,7 +121,7 @@ export type MergePageProps = {
   targetBranchOptions: string[];
   busy: string;
   currentBranchTaskHistoryId: string;
-  currentBranchTaskRunningLabel: string;
+  currentBranchTask: BranchTaskPendingEntry | null;
   branchTaskHistory: BranchTaskHistoryEntry[];
   onPlanSync: () => Promise<BranchTaskResponse | null>;
   onExecuteSync: () => void;
@@ -155,11 +157,9 @@ export type MergePageProps = {
 
 const PUSH_STATUS_STALE_MS = 60_000;
 const PUSH_STATUS_CLOCK_INTERVAL_MS = 15_000;
-const PUSH_CONFIRM_FILE_PREVIEW_LIMIT = 12;
-
-function formatBranchUpdatedAt(item?: BranchOption) {
+function formatBranchUpdatedAt(item: BranchOption | undefined, unknownLabel: string) {
   if (!item?.updatedAt) {
-    return "未知";
+    return unknownLabel;
   }
   return item.updatedAt;
 }
@@ -176,90 +176,6 @@ export function branchSyncPlanCounts(plan: BranchTaskResponse) {
       (item) => item.success && item.statusKey !== "ready",
     ).length,
   };
-}
-
-function branchPushFileStatusLabel(item: BranchPushFileStatusItem) {
-  if (item.conflicted) return "冲突";
-  if (item.untracked) return "新文件";
-  if (item.staged && item.unstaged) return "已暂存 + 未暂存";
-  if (item.staged) return "已暂存";
-  if (item.unstaged) return "未暂存";
-  return item.code || "变更";
-}
-
-function PushCommitConfirmDescription({
-  files,
-  repoPath,
-  partial,
-  summary,
-}: {
-  files: BranchPushFileStatusItem[];
-  repoPath: string;
-  partial: boolean;
-  summary?: ReactNode;
-}) {
-  const visibleFiles = files.slice(0, PUSH_CONFIRM_FILE_PREVIEW_LIMIT);
-  const hiddenCount = Math.max(0, files.length - visibleFiles.length);
-
-  return (
-    <Stack spacing={1}>
-      {summary ? (
-        <Typography variant="body2">{summary}</Typography>
-      ) : (
-        <Typography variant="body2">
-          {partial
-            ? `将提交已选 ${files.length} 个文件并推送当前分支。`
-            : `将提交当前工作副本全部 ${files.length} 个变更文件并推送。`}
-        </Typography>
-      )}
-      {repoPath ? (
-        <Typography
-          variant="caption"
-          sx={{
-            fontFamily: '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-            overflowWrap: "anywhere",
-          }}
-        >
-          {repoPath}
-        </Typography>
-      ) : null}
-      <Stack spacing={0.45}>
-        {visibleFiles.map((item) => (
-          <Box
-            key={`${item.code}-${item.path}`}
-            sx={{
-              display: "grid",
-              gridTemplateColumns: "minmax(0, 1fr) auto",
-              gap: 0.8,
-              alignItems: "center",
-              px: 0.8,
-              py: 0.55,
-              borderRadius: "9px",
-              border: "1px solid",
-              borderColor: "divider",
-            }}
-          >
-            <Typography
-              variant="caption"
-              sx={{
-                minWidth: 0,
-                fontFamily: '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                overflowWrap: "anywhere",
-              }}
-            >
-              {item.path}
-            </Typography>
-            <Chip size="small" label={branchPushFileStatusLabel(item)} variant="outlined" />
-          </Box>
-        ))}
-      </Stack>
-      {hiddenCount > 0 ? (
-        <Typography variant="caption" color="text.secondary">
-          还有 {hiddenCount} 个文件未在确认框中展开。
-        </Typography>
-      ) : null}
-    </Stack>
-  );
 }
 
 function missingBranchValues(values: string[], options: string[]) {
@@ -369,6 +285,7 @@ function BranchValueWarning({
   options: string[];
   onReset: () => void;
 }) {
+  const { t } = useI18n();
   const missing = missingBranchValues(values, options);
   if (missing.length === 0) {
     return null;
@@ -376,7 +293,7 @@ function BranchValueWarning({
 
   return (
     <InlineWarningNotice
-      title={`${label} 不在当前项目分支列表中`}
+      title={t("{label} 不在当前项目分支列表中", { label: t(label) })}
       details={missing}
       onAction={onReset}
     />
@@ -394,6 +311,7 @@ function PushStatusFreshness({
   loading: boolean;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   const stale = Boolean(updatedAtMs && nowMs - updatedAtMs > PUSH_STATUS_STALE_MS);
   if (!stale) {
     return null;
@@ -406,7 +324,7 @@ function PushStatusFreshness({
         color="text.secondary"
         sx={{ fontSize: "0.7rem", lineHeight: 1.4 }}
       >
-        本地状态可能已过期
+        {t("本地状态可能已过期")}
       </Typography>
       {stale ? (
         <Button
@@ -424,7 +342,7 @@ function PushStatusFreshness({
             lineHeight: 1.2,
           }}
         >
-          刷新
+          {t("刷新")}
         </Button>
       ) : null}
     </Stack>
@@ -465,6 +383,7 @@ export function WorktreeSelector({
   onRepair: (repoPath: string) => void;
   onRefresh: () => void;
 }) {
+  const { t } = useI18n();
   const labelId = useId();
   const selected = items.find((item) => item.repoPath === value) ?? null;
   const canRepair = Boolean(
@@ -474,7 +393,7 @@ export function WorktreeSelector({
     error ||
     selected?.detail ||
     selected?.repoPath ||
-    (loading ? "正在读取项目实例" : "选择项目实例或本地目录后再操作");
+    (loading ? t("正在读取项目实例") : t("选择项目实例或本地目录后再操作"));
 
   return (
     <Stack spacing={0.45}>
@@ -487,17 +406,17 @@ export function WorktreeSelector({
         }}
       >
         <FormControl fullWidth disabled={disabled}>
-          <InputLabel id={labelId}>项目实例</InputLabel>
+          <InputLabel id={labelId}>{t("项目实例")}</InputLabel>
           <Select
             labelId={labelId}
             value={value}
-            label="项目实例"
+            label={t("项目实例")}
             displayEmpty
             onChange={(event: SelectChangeEvent<string>) => onChange(event.target.value)}
             renderValue={(selectedValue) => {
               const item = items.find((entry) => entry.repoPath === selectedValue);
               if (!item) {
-                return loading ? "正在读取项目实例" : "选择项目实例";
+                return loading ? t("正在读取项目实例") : t("选择项目实例");
               }
               return `${item.label} · ${worktreeBranchLabel(item)} · ${item.statusLabel}`;
             }}
@@ -510,10 +429,10 @@ export function WorktreeSelector({
                       {item.label}
                     </Typography>
                     {item.isWorkspaceInstance ? (
-                      <Chip size="small" label="工作区" color="primary" variant="outlined" />
+                      <Chip size="small" label={t("工作区")} color="primary" variant="outlined" />
                     ) : null}
-                    {item.managed ? <Chip size="small" label="托管" variant="outlined" /> : null}
-                    {item.isDefault ? <Chip size="small" label="默认" variant="outlined" /> : null}
+                    {item.managed ? <Chip size="small" label={t("托管")} variant="outlined" /> : null}
+                    {item.isDefault ? <Chip size="small" label={t("默认")} variant="outlined" /> : null}
                     {item.isGitWorktree ? <Chip size="small" label="worktree" variant="outlined" /> : null}
                     <Chip
                       size="small"
@@ -546,22 +465,22 @@ export function WorktreeSelector({
               disabled={disabled || loading}
               sx={{ whiteSpace: "nowrap", minHeight: 32 }}
             >
-              修复副本
+              {t("修复副本")}
             </Button>
           ) : null}
           <IconButton
             onClick={onRefresh}
             disabled={disabled || loading}
-            aria-label="刷新项目实例"
-            title="刷新项目实例"
+            aria-label={t("刷新项目实例")}
+            title={t("刷新项目实例")}
           >
             <RefreshIcon fontSize="small" />
           </IconButton>
           <IconButton
             onClick={onChooseDirectory}
             disabled={disabled}
-            aria-label="选择本地目录"
-            title="选择本地目录"
+            aria-label={t("选择本地目录")}
+            title={t("选择本地目录")}
           >
             <FolderIcon fontSize="small" />
           </IconButton>
@@ -597,6 +516,8 @@ function BranchInput({
   onSyncBranches: () => void;
   disabled: boolean;
 }) {
+  const { t } = useI18n();
+  const translatedLabel = t(label);
   return (
     <Autocomplete<string, false, false, true>
       freeSolo
@@ -633,7 +554,7 @@ function BranchInput({
                 {option}
               </Typography>
               <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
-                {formatBranchUpdatedAt(item)}
+                {formatBranchUpdatedAt(item, t("未知"))}
               </Typography>
             </Stack>
           </Box>
@@ -648,7 +569,7 @@ function BranchInput({
               {...params}
               inputRef={inputRef}
               inputProps={inputProps}
-              label={label}
+              label={translatedLabel}
               sx={{
                 "& .MuiOutlinedInput-root": {
                   pr: value.trim() ? 9.5 : 5.75,
@@ -684,8 +605,8 @@ function BranchInput({
                           }}
                           disabled={disabled}
                           edge="end"
-                          aria-label={`清空${label}`}
-                          title={`清空${label}`}
+                          aria-label={t("清空{label}", { label: translatedLabel })}
+                          title={t("清空{label}", { label: translatedLabel })}
                         >
                           <ClearIcon fontSize="small" />
                         </IconButton>
@@ -702,8 +623,8 @@ function BranchInput({
                         }}
                         disabled={disabled}
                         edge="end"
-                        aria-label="同步分支"
-                        title="同步分支"
+                        aria-label={t("同步分支")}
+                        title={t("同步分支")}
                       >
                         <RefreshIcon fontSize="small" />
                       </IconButton>
@@ -777,7 +698,7 @@ export function MergePage({
   targetBranchOptions,
   busy,
   currentBranchTaskHistoryId,
-  currentBranchTaskRunningLabel,
+  currentBranchTask,
   branchTaskHistory,
   onPlanSync,
   onExecuteSync,
@@ -804,6 +725,7 @@ export function MergePage({
   onOpenTaskOutput,
   formatRelativeTime,
 }: MergePageProps) {
+  const { t } = useI18n();
   const [historyExpanded, setHistoryExpanded] = useState(true);
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [workflowListOpen, setWorkflowListOpen] = useState(false);
@@ -885,9 +807,9 @@ export function MergePage({
   const pushButtonLabel =
     pushAction === "commitAndPush"
       ? pushSelectedPaths.length > 0
-        ? `提交已选 ${pushSelectedPaths.length} 个文件并推送`
-        : "提交全部并推送"
-      : "执行推送";
+        ? t("提交已选 {count} 个文件并推送", { count: pushSelectedPaths.length })
+        : t("提交全部并推送")
+      : t("执行推送");
   const handlePushSelectedPathsChange = useCallback(
     (value: string[]) => {
       const normalized = normalizeBranchValues(value);
@@ -931,18 +853,18 @@ export function MergePage({
   }, [normalizedPushSelectedPaths.length, pushSelectedPathSet, pushStatus]);
   const switchStatusHelper = pushStatusError
     || (pushStatusLoading
-      ? "正在读取本地仓库状态"
+      ? t("正在读取本地仓库状态")
       : pushStatus
         ? switchSameAsCurrent
-          ? "当前已在目标分支"
+          ? t("当前已在目标分支")
           : switchBlockedByStatus
-            ? "工作副本有未提交或未跟踪文件，处理后再切换"
+            ? t("工作副本有未提交或未跟踪文件，处理后再切换")
             : pushStatusStale
-              ? "本地状态可能已过期，建议刷新后再操作"
+              ? t("本地状态可能已过期，建议刷新后再操作")
               : pushStatus.repoPath
           : hasSelectedWorktree
-            ? "读取本地仓库状态后可切换分支"
-          : "先选择项目实例");
+            ? t("读取本地仓库状态后可切换分支")
+          : t("先选择项目实例"));
   const workflowBroadcastGroups = useMemo(
     () => groupWorkflowBroadcastRules(workflowBroadcastRules),
     [workflowBroadcastRules],
@@ -972,6 +894,12 @@ export function MergePage({
     setPushFilesExpanded(false);
     setSwitchFilesExpanded(false);
   }, [mode, selectedProject]);
+
+  useEffect(() => {
+    if (currentBranchTask) {
+      setHistoryExpanded(true);
+    }
+  }, [currentBranchTask?.id]);
 
   useEffect(() => {
     if (
@@ -1036,14 +964,18 @@ export function MergePage({
     const confirmed = await confirm({
       title:
         counts.ready > 0
-          ? `确认合并 ${counts.ready} 项？`
-          : "没有可执行的合并项",
+          ? t("确认合并 {count} 项？", { count: counts.ready })
+          : t("没有可执行的合并项"),
       description: (
         <Stack spacing={1.1}>
           <Typography variant="body2">
-            可合并 {counts.ready} 项
-            {counts.skipped > 0 ? ` · 跳过 ${counts.skipped} 项` : ""}
-            {counts.failed > 0 ? ` · 阻止 ${counts.failed} 项` : ""}
+            {t("可合并 {count} 项", { count: counts.ready })}
+            {counts.skipped > 0
+              ? ` · ${t("跳过 {count} 项", { count: counts.skipped })}`
+              : ""}
+            {counts.failed > 0
+              ? ` · ${t("阻止 {count} 项", { count: counts.failed })}`
+              : ""}
           </Typography>
           <Stack spacing={0}>
             {visibleItems.map((item, index) => (
@@ -1078,13 +1010,13 @@ export function MergePage({
           </Stack>
           {hiddenCount > 0 ? (
             <Typography variant="caption" color="text.secondary">
-              另有 {hiddenCount} 项结果
+              {t("另有 {count} 项结果", { count: hiddenCount })}
             </Typography>
           ) : null}
         </Stack>
       ),
-      confirmLabel: counts.ready > 0 ? "开始合并" : "知道了",
-      cancelLabel: counts.ready > 0 ? "取消" : "关闭",
+      confirmLabel: counts.ready > 0 ? t("开始合并") : t("知道了"),
+      cancelLabel: counts.ready > 0 ? t("取消") : t("关闭"),
       preferenceKey: counts.ready > 0 ? "branch.mutate" : undefined,
     });
     if (confirmed && counts.ready > 0) {
@@ -1105,21 +1037,21 @@ export function MergePage({
 
     if (pushStatus.conflictedCount > 0) {
       await confirm({
-        title: "存在冲突文件",
-        description: "当前工作副本存在冲突文件，请先解决冲突后再提交并推送。",
-        confirmLabel: "知道了",
-        cancelLabel: "关闭",
+        title: t("存在冲突文件"),
+        description: t("当前工作副本存在冲突文件，请先解决冲突后再提交并推送。"),
+        confirmLabel: t("知道了"),
+        cancelLabel: t("关闭"),
       });
       return;
     }
 
     if (pushMissingSelectedPaths.length > 0) {
       await confirm({
-        title: "所选文件已过期",
+        title: t("所选文件已过期"),
         description: (
           <Stack spacing={0.8}>
             <Typography variant="body2">
-              有所选文件已经不在当前变更列表中，请刷新状态后重试。
+              {t("有所选文件已经不在当前变更列表中，请刷新状态后重试。")}
             </Typography>
             <Typography
               variant="caption"
@@ -1132,25 +1064,30 @@ export function MergePage({
             </Typography>
           </Stack>
         ),
-        confirmLabel: "知道了",
-        cancelLabel: "关闭",
+        confirmLabel: t("知道了"),
+        cancelLabel: t("关闭"),
       });
       return;
     }
 
     if (pushUnselectedStagedFiles.length > 0) {
       await confirm({
-        title: "暂存区需要处理",
-        description: (
-          <PushCommitConfirmDescription
+        title: t("暂存区需要处理"),
+        description: t(
+          "以下 {count} 个文件已经暂存但没有被选择。部分提交会被阻止，请先处理暂存区或一并选择这些文件。",
+          { count: pushUnselectedStagedFiles.length },
+        ),
+        content: (
+          <PushCommitConfirmContent
             files={pushUnselectedStagedFiles}
             repoPath={pushStatus.repoPath}
-            partial
-            summary={`以下 ${pushUnselectedStagedFiles.length} 个文件已经暂存但没有被选择。部分提交会被阻止，请先处理暂存区或一并选择这些文件。`}
           />
         ),
-        confirmLabel: "知道了",
-        cancelLabel: "关闭",
+        confirmLabel: t("知道了"),
+        cancelLabel: t("关闭"),
+        maxWidth: false,
+        dialogClassName: "push-commit-confirm-dialog",
+        contentClassName: "push-commit-confirm-dialog-content",
       });
       return;
     }
@@ -1162,18 +1099,27 @@ export function MergePage({
 
     const partial = normalizedPushSelectedPaths.length > 0;
     const confirmed = await confirm({
-      title: partial ? "确认提交已选文件？" : "确认提交全部变更？",
-      description: (
-        <PushCommitConfirmDescription
+      title: partial ? t("确认提交已选文件？") : t("确认提交全部变更？"),
+      description: partial
+        ? t("将提交已选 {count} 个文件并推送当前分支。", {
+            count: pushCommitPreviewFiles.length,
+          })
+        : t("将提交当前工作副本全部 {count} 个变更文件并推送。", {
+            count: pushCommitPreviewFiles.length,
+          }),
+      content: (
+        <PushCommitConfirmContent
           files={pushCommitPreviewFiles}
           repoPath={pushStatus.repoPath}
-          partial={partial}
         />
       ),
       confirmLabel: partial
-        ? `提交 ${pushCommitPreviewFiles.length} 个文件并推送`
-        : "提交全部并推送",
+        ? t("提交 {count} 个文件并推送", { count: pushCommitPreviewFiles.length })
+        : t("提交全部并推送"),
       preferenceKey: "branch.mutate",
+      maxWidth: false,
+      dialogClassName: "push-commit-confirm-dialog",
+      contentClassName: "push-commit-confirm-dialog-content",
     });
     if (confirmed) {
       onExecutePush();
@@ -1202,11 +1148,18 @@ export function MergePage({
                   renderInput={(params) => {
                     const { ref: inputRef, ...inputProps } = params.inputProps;
 
-                    return <TextField {...params} inputRef={inputRef} inputProps={inputProps} label="项目" />;
+                    return (
+                      <TextField
+                        {...params}
+                        inputRef={inputRef}
+                        inputProps={inputProps}
+                        label={t("项目")}
+                      />
+                    );
                   }}
                 />
                 <BranchInput
-                  label="源分支"
+                  label={t("源分支")}
                   value={syncSource}
                   options={sourceBranchOptions}
                   branchEntryMap={sourceBranchEntryMap}
@@ -1216,7 +1169,7 @@ export function MergePage({
                   disabled={!selectedProject || Boolean(busy)}
                 />
                 <BranchValueWarning
-                  label="源分支"
+                  label={t("源分支")}
                   values={[syncSource]}
                   options={sourceBranchOptions}
                   onReset={onClearSyncSource}
@@ -1237,8 +1190,8 @@ export function MergePage({
                         {...params}
                         inputRef={inputRef}
                         inputProps={inputProps}
-                        label="目标分支"
-                        helperText="执行前会逐项目校验远端源分支和目标分支"
+                        label={t("目标分支")}
+                        helperText={t("执行前会逐项目校验远端源分支和目标分支")}
                         sx={{
                           "& .MuiOutlinedInput-root": {
                             pr: 9.5,
@@ -1276,8 +1229,8 @@ export function MergePage({
                                     }}
                                     disabled={Boolean(busy)}
                                     edge="end"
-                                    aria-label="清空目标分支"
-                                    title="清空目标分支"
+                                    aria-label={t("清空目标分支")}
+                                    title={t("清空目标分支")}
                                   >
                                     <ClearIcon fontSize="small" />
                                   </IconButton>
@@ -1294,8 +1247,8 @@ export function MergePage({
                                   }}
                                   disabled={!selectedProject || Boolean(busy)}
                                   edge="end"
-                                  aria-label="同步分支"
-                                  title="同步分支"
+                                  aria-label={t("同步分支")}
+                                  title={t("同步分支")}
                                 >
                                   <RefreshIcon fontSize="small" />
                                 </IconButton>
@@ -1316,7 +1269,7 @@ export function MergePage({
                             {option}
                           </Typography>
                           <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
-                            {formatBranchUpdatedAt(item)}
+                            {formatBranchUpdatedAt(item, t("未知"))}
                           </Typography>
                         </Stack>
                       </Box>
@@ -1324,7 +1277,7 @@ export function MergePage({
                   }}
                 />
                 <BranchValueWarning
-                  label="目标分支"
+                  label={t("目标分支")}
                   values={syncTargets}
                   options={targetBranchOptions}
                   onReset={() => onSyncTargetsChange([])}
@@ -1335,7 +1288,7 @@ export function MergePage({
                   disabled={actionDisabled}
                   sx={{ minHeight: 34, borderRadius: "11px" }}
                 >
-                  批量合并
+                  {t("批量合并")}
                 </Button>
               </Stack>
             ) : null}
@@ -1354,7 +1307,14 @@ export function MergePage({
                   renderInput={(params) => {
                     const { ref: inputRef, ...inputProps } = params.inputProps;
 
-                    return <TextField {...params} inputRef={inputRef} inputProps={inputProps} label="项目" />;
+                    return (
+                      <TextField
+                        {...params}
+                        inputRef={inputRef}
+                        inputProps={inputProps}
+                        label={t("项目")}
+                      />
+                    );
                   }}
                 />
                 <Box
@@ -1365,7 +1325,7 @@ export function MergePage({
                   }}
                 >
                   <BranchInput
-                    label="源分支"
+                    label={t("源分支")}
                     value={createSource}
                     options={sourceBranchOptions}
                     branchEntryMap={sourceBranchEntryMap}
@@ -1375,7 +1335,7 @@ export function MergePage({
                     disabled={!selectedProject || Boolean(busy)}
                   />
                   <BranchInput
-                    label="目标分支"
+                    label={t("目标分支")}
                     value={createTarget}
                     options={targetBranchOptions}
                     branchEntryMap={targetBranchEntryMap}
@@ -1386,7 +1346,7 @@ export function MergePage({
                   />
                 </Box>
                 <BranchValueWarning
-                  label="源分支"
+                  label={t("源分支")}
                   values={[createSource]}
                   options={sourceBranchOptions}
                   onReset={onClearCreateSource}
@@ -1397,7 +1357,7 @@ export function MergePage({
                   disabled={actionDisabled}
                   sx={{ minHeight: 34, borderRadius: "11px" }}
                 >
-                  批量创建
+                  {t("批量创建")}
                 </Button>
               </Stack>
             ) : null}
@@ -1405,10 +1365,10 @@ export function MergePage({
             {mode === "switch" ? (
               <Stack spacing={0.85}>
                 <FormControl fullWidth>
-                  <InputLabel>项目</InputLabel>
+                  <InputLabel>{t("项目")}</InputLabel>
                   <Select
                     value={selectedProject}
-                    label="项目"
+                    label={t("项目")}
                     onChange={(event: SelectChangeEvent<string>) => onProjectChange(event.target.value)}
                   >
                     {projects.map((project) => (
@@ -1454,7 +1414,7 @@ export function MergePage({
                         color: localOperation === item.key ? undefined : "text.secondary",
                       }}
                     >
-                      {item.label}
+                      {t(item.label)}
                     </Button>
                   ))}
                 </Box>
@@ -1490,7 +1450,7 @@ export function MergePage({
                     />
 
                     <BranchInput
-                      label="目标分支"
+                      label={t("目标分支")}
                       value={switchTarget}
                       options={targetBranchOptions}
                       branchEntryMap={targetBranchEntryMap}
@@ -1500,7 +1460,7 @@ export function MergePage({
                       disabled={!selectedProject || Boolean(busy)}
                     />
                     <BranchValueWarning
-                      label="目标分支"
+                      label={t("目标分支")}
                       values={[switchTarget]}
                       options={targetBranchOptions}
                       onReset={onClearSwitchTarget}
@@ -1524,7 +1484,7 @@ export function MergePage({
                       disabled={actionDisabled}
                       sx={{ minHeight: 34, borderRadius: "11px" }}
                     >
-                      切换到目标分支
+                      {t("切换到目标分支")}
                     </Button>
                   </>
                 ) : null}
@@ -1532,7 +1492,7 @@ export function MergePage({
                 {localOperation === "clone" ? (
                   <>
                     <BranchInput
-                      label="源分支"
+                      label={t("源分支")}
                       value={checkoutSource}
                       options={sourceBranchOptions}
                       branchEntryMap={sourceBranchEntryMap}
@@ -1542,15 +1502,15 @@ export function MergePage({
                       disabled={!selectedProject || Boolean(busy)}
                     />
                     <BranchValueWarning
-                      label="源分支"
+                      label={t("源分支")}
                       values={[checkoutSource]}
                       options={sourceBranchOptions}
                       onReset={onClearCheckoutSource}
                     />
                     <TextField
-                      label="目标目录"
+                      label={t("目标目录")}
                       value={checkoutDestinationDir}
-                      placeholder={workspaceInstancePath || "选择一个目录"}
+                      placeholder={workspaceInstancePath || t("选择一个目录")}
                       onChange={(event) => onCheckoutDestinationChange(event.target.value)}
                       InputProps={{
                         endAdornment: (
@@ -1562,8 +1522,8 @@ export function MergePage({
                                   onMouseDown={(event) => event.preventDefault()}
                                   onClick={onClearCheckoutDestination}
                                   edge="end"
-                                  aria-label="清空目标目录"
-                                  title="清空目标目录"
+                                  aria-label={t("清空目标目录")}
+                                  title={t("清空目标目录")}
                                 >
                                   <ClearIcon fontSize="small" />
                                 </IconButton>
@@ -1572,8 +1532,8 @@ export function MergePage({
                                 size="small"
                                 onClick={onChooseCheckoutDirectory}
                                 edge="end"
-                                aria-label="选择目标目录"
-                                title="选择目标目录"
+                                aria-label={t("选择目标目录")}
+                                title={t("选择目标目录")}
                               >
                                 <FolderIcon fontSize="small" />
                               </IconButton>
@@ -1588,7 +1548,7 @@ export function MergePage({
                       disabled={actionDisabled}
                       sx={{ minHeight: 34, borderRadius: "11px" }}
                     >
-                      创建工作区副本
+                      {t("创建工作区副本")}
                     </Button>
                   </>
                 ) : null}
@@ -1598,10 +1558,10 @@ export function MergePage({
             {mode === "push" ? (
               <Stack spacing={0.85}>
                 <FormControl fullWidth>
-                  <InputLabel>项目</InputLabel>
+                  <InputLabel>{t("项目")}</InputLabel>
                   <Select
                     value={selectedProject}
-                    label="项目"
+                    label={t("项目")}
                     onChange={(event: SelectChangeEvent<string>) => onProjectChange(event.target.value)}
                   >
                     {projects.map((project) => (
@@ -1681,7 +1641,7 @@ export function MergePage({
                         color: pushAction === item.key ? undefined : "text.secondary",
                       }}
                     >
-                      {item.label}
+                      {t(item.label)}
                     </Button>
                   ))}
                 </Box>
@@ -1689,10 +1649,10 @@ export function MergePage({
                 {pushAction === "commitAndPush" ? (
                   <TextField
                     fullWidth
-                    label="提交说明"
+                    label={t("提交说明")}
                     value={pushCommitMessage}
                     onChange={(event) => onPushCommitMessageChange(event.target.value)}
-                    placeholder="输入本次提交说明"
+                    placeholder={t("输入本次提交说明")}
                   />
                 ) : null}
 
@@ -1713,7 +1673,7 @@ export function MergePage({
         expanded={historyExpanded}
         history={branchTaskHistory}
         currentHistoryId={currentBranchTaskHistoryId}
-        currentTaskLabel={currentBranchTaskRunningLabel}
+        currentTask={currentBranchTask}
         busy={busy}
         workflowGroupCount={workflowGroups.length}
         workflowSignalIdsForBranchReplay={(entry) => [
@@ -1732,15 +1692,21 @@ export function MergePage({
 
       <WorkflowRulesConfigDialog
         open={workflowOpen}
-        title="联动配置"
+        title={t("联动配置")}
         context={
           workflowEntry ? (
             <Stack direction="row" flexWrap="wrap" gap={0.7}>
-              <Chip size="small" label={branchWorkflowModeLabel(workflowEntry.taskKind)} />
-              <Chip size="small" label={`${workflowEntry.items.length} 项`} variant="outlined" />
+              <Chip size="small" label={t(branchWorkflowModeLabel(workflowEntry.taskKind))} />
               <Chip
                 size="small"
-                label={`${workflowEntry.items.filter((item) => item.success).length} 成功`}
+                label={t("{count} 项", { count: workflowEntry.items.length })}
+                variant="outlined"
+              />
+              <Chip
+                size="small"
+                label={t("{count} 成功", {
+                  count: workflowEntry.items.filter((item) => item.success).length,
+                })}
                 variant="outlined"
               />
             </Stack>
@@ -1770,7 +1736,7 @@ export function MergePage({
       />
       <WorkflowLinksDialog
         open={workflowListOpen}
-        title="联动清单"
+        title={t("联动清单")}
         items={workflowGroups}
         onClose={() => setWorkflowListOpen(false)}
         onEnabledChange={(item, enabled) => {

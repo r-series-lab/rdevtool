@@ -10,6 +10,9 @@ import {
 } from "@mui/material";
 import { useEffect, useState } from "react";
 import type { BuildResult } from "../../hooks/useBuildHistory";
+import { useI18n } from "../../i18n";
+import { translateInternalMessage } from "../../i18n/internalMessages";
+import { isOperationActiveState } from "../../lib/operationLifecycle";
 import {
   CheckIcon,
   CollapseIcon,
@@ -21,10 +24,6 @@ import {
 
 const BUILD_STATUS_STALE_MS = 45_000;
 const BUILD_STATUS_CLOCK_INTERVAL_MS = 15_000;
-
-function isActiveBuildState(stateKey?: string | null) {
-  return stateKey === "accepted" || stateKey === "queued" || stateKey === "running";
-}
 
 type BuildStatusFreshnessProps = {
   updatedAtMs: number;
@@ -43,6 +42,7 @@ function BuildStatusFreshness({
   canRefresh,
   onRefresh,
 }: BuildStatusFreshnessProps) {
+  const { t } = useI18n();
   const stale = Boolean(
     timedOut || (active && updatedAtMs && nowMs - updatedAtMs > BUILD_STATUS_STALE_MS),
   );
@@ -57,7 +57,7 @@ function BuildStatusFreshness({
         color="text.secondary"
         sx={{ fontSize: "0.7rem", lineHeight: 1.4 }}
       >
-        {timedOut ? "自动刷新已暂停" : "状态可能已过期"}
+        {timedOut ? t("自动刷新已暂停") : t("状态可能已过期")}
       </Typography>
       <Button
         size="small"
@@ -74,7 +74,7 @@ function BuildStatusFreshness({
           lineHeight: 1.2,
         }}
       >
-        刷新
+        {t("刷新")}
       </Button>
     </Stack>
   );
@@ -83,20 +83,29 @@ function BuildStatusFreshness({
 type BuildResultRowProps = {
   label: string;
   value?: string | number | null;
+  displayValue?: string | number | null;
   copyKey?: string;
   copied?: boolean;
+  emphasized?: boolean;
   onCopy?: (field: string, value?: string | number | null) => void;
 };
 
 function BuildResultRow({
   label,
   value,
+  displayValue,
   copyKey,
   copied = false,
+  emphasized = false,
   onCopy,
 }: BuildResultRowProps) {
-  const textValue = value === null || value === undefined || value === "" ? "-" : String(value);
-  const canCopy = Boolean(copyKey && textValue !== "-" && onCopy);
+  const { t } = useI18n();
+  const rawTextValue = value === null || value === undefined || value === "" ? "-" : String(value);
+  const textValue =
+    displayValue === null || displayValue === undefined || displayValue === ""
+      ? rawTextValue
+      : String(displayValue);
+  const canCopy = Boolean(copyKey && rawTextValue !== "-" && onCopy);
 
   return (
     <Box
@@ -123,7 +132,7 @@ function BuildResultRow({
             minWidth: 0,
             overflowWrap: "anywhere",
             wordBreak: "break-word",
-            fontWeight: label === "状态" ? 700 : 500,
+            fontWeight: emphasized ? 700 : 500,
           }}
         >
           {textValue}
@@ -131,9 +140,13 @@ function BuildResultRow({
         {canCopy && copyKey ? (
           <IconButton
             size="small"
-            onClick={() => onCopy?.(copyKey, textValue)}
-            title={copied ? "已复制" : "复制"}
-            aria-label={copied ? `已复制${label}` : `复制${label}`}
+            onClick={() => onCopy?.(copyKey, rawTextValue)}
+            title={copied ? t("已复制") : t("复制")}
+            aria-label={
+              copied
+                ? t("已复制{label}", { label })
+                : t("复制{label}", { label })
+            }
             sx={{ mt: -0.45, flexShrink: 0 }}
           >
             {copied ? <CheckIcon fontSize="small" /> : <CopyIcon fontSize="small" />}
@@ -163,10 +176,12 @@ export function BuildResultPanel({
   onRefreshBuild,
   onOpenBuildRecord,
 }: BuildResultPanelProps) {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(true);
   const [nowMs, setNowMs] = useState(Date.now());
   const canRefreshBuild = Boolean(buildResult?.queueUrl || buildResult?.buildUrl);
-  const buildResultActive = isActiveBuildState(buildResult?.stateKey);
+  const buildResultActive =
+    canRefreshBuild && isOperationActiveState(buildResult?.stateKey);
 
   useEffect(() => {
     if (!buildResultUpdatedAtMs) {
@@ -193,13 +208,13 @@ export function BuildResultPanel({
           mb={expanded ? 1.2 : 0}
         >
           <Typography variant="h6" sx={{ flexShrink: 0, fontWeight: 700 }}>
-            结果
+            {t("结果")}
           </Typography>
           <Stack direction="row" spacing={0.8} alignItems="center" flexWrap="wrap" rowGap={0.5} justifyContent="flex-end">
-            <IconButton onClick={onRefreshBuild} disabled={!canRefreshBuild} size="small" title="刷新构建状态">
+            <IconButton onClick={onRefreshBuild} disabled={!canRefreshBuild} size="small" title={t("刷新构建状态")}>
               <RefreshIcon fontSize="small" />
             </IconButton>
-            <IconButton onClick={onOpenBuildRecord} disabled={!canRefreshBuild} size="small" title="打开构建记录页">
+            <IconButton onClick={onOpenBuildRecord} disabled={!canRefreshBuild} size="small" title={t("打开构建记录页")}>
               <OpenExternalIcon fontSize="small" />
             </IconButton>
             {buildResult ? (
@@ -212,7 +227,11 @@ export function BuildResultPanel({
                 onRefresh={onRefreshBuild}
               />
             ) : null}
-            <IconButton size="small" onClick={() => setExpanded((current) => !current)} title={expanded ? "收起构建结果" : "展开构建结果"}>
+            <IconButton
+              size="small"
+              onClick={() => setExpanded((current) => !current)}
+              title={expanded ? t("收起构建结果") : t("展开构建结果")}
+            >
               {expanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
             </IconButton>
           </Stack>
@@ -220,25 +239,31 @@ export function BuildResultPanel({
         <Collapse in={expanded} timeout="auto" unmountOnExit>
           {buildResult ? (
             <Stack spacing={0.1} minWidth={0}>
-              <BuildResultRow label="状态" value={buildResult.stateLabel} />
+              <BuildResultRow
+                label={t("状态")}
+                value={buildResult.stateLabel}
+                displayValue={translateInternalMessage(buildResult.stateLabel, t)}
+                emphasized
+              />
               <BuildResultRow label="HTTP" value={buildResult.status} />
               <BuildResultRow
-                label="队列"
+                label={t("队列")}
                 value={buildResult.queueUrl}
                 copyKey="queueUrl"
                 copied={copiedField === "queueUrl"}
                 onCopy={onCopy}
               />
               <BuildResultRow
-                label="构建"
+                label={t("构建")}
                 value={buildResult.buildUrl}
                 copyKey="buildUrl"
                 copied={copiedField === "buildUrl"}
                 onCopy={onCopy}
               />
               <BuildResultRow
-                label="说明"
+                label={t("说明")}
                 value={buildResult.detail}
+                displayValue={translateInternalMessage(buildResult.detail ?? "", t)}
                 copyKey="detail"
                 copied={copiedField === "detail"}
                 onCopy={onCopy}
@@ -246,7 +271,7 @@ export function BuildResultPanel({
             </Stack>
           ) : (
             <Typography variant="body2" color="text.secondary">
-              构建完成后，这里展示状态和记录地址。
+              {t("构建完成后，这里展示状态和记录地址。")}
             </Typography>
           )}
         </Collapse>

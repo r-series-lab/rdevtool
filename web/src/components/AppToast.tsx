@@ -1,11 +1,15 @@
 import { useEffect, useState } from "react";
 import { Alert, Snackbar } from "@mui/material";
 import type { AlertProps } from "@mui/material/Alert";
+import { useI18n, type TranslationParams } from "../i18n";
+import { translateInternalMessage } from "../i18n/internalMessages";
 
 type AppToastSeverity = NonNullable<AlertProps["severity"]>;
 
 type AppToastProps = {
   message: string;
+  messageKey?: string;
+  messageParams?: TranslationParams;
   severity?: AppToastSeverity;
   autoHideDuration?: number;
   nonce?: number;
@@ -13,11 +17,17 @@ type AppToastProps = {
 
 export function AppToast({
   message,
+  messageKey,
+  messageParams,
   severity = "info",
   autoHideDuration = 3200,
   nonce = 0,
 }: AppToastProps) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(Boolean(message));
+  const localizedMessage = messageKey
+    ? t(messageKey, messageParams)
+    : translateInternalMessage(message, t);
 
   useEffect(() => {
     setOpen(Boolean(message));
@@ -29,7 +39,7 @@ export function AppToast({
 
   return (
     <Snackbar
-      key={`${severity}:${nonce}:${message}`}
+      key={`${severity}:${nonce}:${localizedMessage}`}
       open={open}
       anchorOrigin={{ vertical: "top", horizontal: "center" }}
       autoHideDuration={autoHideDuration}
@@ -91,7 +101,7 @@ export function AppToast({
           },
         })}
       >
-        {message}
+        {localizedMessage}
       </Alert>
     </Snackbar>
   );

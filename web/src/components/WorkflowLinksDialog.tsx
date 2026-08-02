@@ -1,17 +1,16 @@
 import {
   Box,
   Chip,
-  Dialog,
-  DialogContent,
-  DialogTitle,
   IconButton,
   Stack,
   Switch,
   Tooltip,
   Typography,
 } from "@mui/material";
-import { ClearIcon, TrashIcon } from "./AppIcons";
+import { TrashIcon, WorkflowIcon } from "./AppIcons";
+import { AppActionDialog } from "./AppActionDialog";
 import { AppEmptyState } from "./AppEmptyState";
+import { useI18n } from "../i18n";
 
 export type WorkflowLinkListItem = {
   key: string;
@@ -42,88 +41,52 @@ export function WorkflowLinksDialog({
   onDelete,
   onClearAll,
 }: WorkflowLinksDialogProps) {
+  const { t } = useI18n();
   const hasItems = items.length > 0;
 
   return (
-    <Dialog
+    <AppActionDialog
       open={open}
       onClose={onClose}
-      fullWidth
-      maxWidth="xs"
-      PaperProps={{
-        sx: {
-          width: "min(460px, calc(100vw - 28px))",
-          borderRadius: "18px",
-          overflow: "hidden",
-        },
-      }}
-    >
-      <DialogTitle sx={{ px: 2.25, pt: 1.7, pb: 1.25 }}>
-        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1.4}>
-          <Box sx={{ minWidth: 0 }}>
-            <Typography variant="subtitle2" sx={{ fontSize: "1rem", fontWeight: 850 }} noWrap>
-              {title}
-            </Typography>
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ display: "block", mt: 0.25, fontWeight: 700 }}
+      title={title}
+      subtitle={
+        hasItems
+          ? t("{count} 个联动", { count: items.length })
+          : t("暂无联动")
+      }
+      icon={<WorkflowIcon />}
+      contentIcon={false}
+      tone="neutral"
+      className="workflow-links-dialog"
+      headerActions={
+        <Tooltip title={t(hasItems ? "清空全部联动" : "暂无可清空联动")}>
+          <span>
+            <IconButton
+              size="small"
+              disabled={!hasItems || !onClearAll}
+              onClick={() => onClearAll?.(items)}
+              aria-label={t("清空全部联动")}
+              sx={{
+                width: 34,
+                height: 34,
+                borderRadius: "9px",
+                border: "1px solid",
+                borderColor: "divider",
+                color: "text.secondary",
+                "&:hover": {
+                  color: "error.main",
+                  borderColor: "error.main",
+                  bgcolor: "rgba(239,68,68,0.08)",
+                },
+              }}
             >
-              {hasItems ? `${items.length} 个联动` : "暂无联动"}
-            </Typography>
-          </Box>
-          <Stack direction="row" alignItems="center" spacing={0.7}>
-            <Tooltip title={hasItems ? "清空全部联动" : "暂无可清空联动"}>
-              <span>
-                <IconButton
-                  size="small"
-                  disabled={!hasItems || !onClearAll}
-                  onClick={() => onClearAll?.(items)}
-                  aria-label="清空全部联动"
-                  sx={{
-                    width: 34,
-                    height: 34,
-                    borderRadius: "12px",
-                    border: "1px solid",
-                    borderColor: "divider",
-                    color: "text.secondary",
-                    "&:hover": {
-                      color: "error.main",
-                      borderColor: "error.main",
-                      bgcolor: "rgba(239,68,68,0.08)",
-                    },
-                  }}
-                >
-                  <TrashIcon fontSize="small" />
-                </IconButton>
-              </span>
-            </Tooltip>
-            <Tooltip title="关闭">
-              <IconButton
-                size="small"
-                onClick={onClose}
-                aria-label="关闭联动清单"
-                sx={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: "12px",
-                  border: "1px solid",
-                  borderColor: "divider",
-                  color: "text.secondary",
-                  "&:hover": {
-                    color: "text.primary",
-                    bgcolor: "rgba(148,163,184,0.1)",
-                  },
-                }}
-              >
-                <ClearIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          </Stack>
-        </Stack>
-      </DialogTitle>
-      <DialogContent sx={{ px: 1.55, pt: 0.4, pb: 1.55 }}>
-        <Stack spacing={0.85}>
+              <TrashIcon fontSize="small" />
+            </IconButton>
+          </span>
+        </Tooltip>
+      }
+    >
+      <Stack spacing={0.85}>
           {hasItems ? (
             items.map((item) => (
               <Box
@@ -153,7 +116,7 @@ export function WorkflowLinksDialog({
                 <Stack direction="row" alignItems="center" spacing={0.85} minWidth={0}>
                   <Chip
                     size="small"
-                    label={item.ruleKind === "receive" ? "接收" : "广播"}
+                    label={t(item.ruleKind === "receive" ? "接收" : "广播")}
                     sx={{
                       height: 26,
                       flexShrink: 0,
@@ -187,7 +150,7 @@ export function WorkflowLinksDialog({
                     noWrap
                     sx={{ flexShrink: 0, fontWeight: 750 }}
                   >
-                    {item.ruleIds.length} 条
+                    {t("{count} 条", { count: item.ruleIds.length })}
                   </Typography>
                   {item.signalIds[0] ? (
                     <Chip
@@ -221,7 +184,9 @@ export function WorkflowLinksDialog({
                     size="small"
                     checked={item.enabled}
                     onChange={(event) => onEnabledChange(item, event.target.checked)}
-                    inputProps={{ "aria-label": `${item.title} 启用状态` }}
+                    inputProps={{
+                      "aria-label": t("{name} 启用状态", { name: item.title }),
+                    }}
                     sx={{
                       mr: -0.35,
                       "& .MuiSwitch-switchBase": {
@@ -229,11 +194,11 @@ export function WorkflowLinksDialog({
                       },
                     }}
                   />
-                  <Tooltip title="删除联动">
+                  <Tooltip title={t("删除联动")}>
                     <IconButton
                       size="small"
                       onClick={() => onDelete(item)}
-                      aria-label="删除联动"
+                      aria-label={t("删除联动")}
                       sx={{
                         width: 32,
                         height: 32,
@@ -255,10 +220,13 @@ export function WorkflowLinksDialog({
               </Box>
             ))
           ) : (
-            <AppEmptyState compact title="暂无联动" description="关联动作后会显示在这里。" />
+            <AppEmptyState
+              compact
+              title={t("暂无联动")}
+              description={t("关联动作后会显示在这里。")}
+            />
           )}
-        </Stack>
-      </DialogContent>
-    </Dialog>
+      </Stack>
+    </AppActionDialog>
   );
 }

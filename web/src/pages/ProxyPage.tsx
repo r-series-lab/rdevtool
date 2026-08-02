@@ -70,6 +70,7 @@ import {
   WorkspacePageToolbarAction,
 } from "../components/WorkspacePageToolbar";
 import { useConfigSource, type ConfigSourceStatus } from "../hooks/useConfigSource";
+import { useI18n, type Translate } from "../i18n";
 import { configSourceSupports } from "../lib/configSources";
 
 const HTTP_METHODS = ["", "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
@@ -289,7 +290,7 @@ function headersToText(headers?: Record<string, string> | null) {
     .join("\n");
 }
 
-function parseHeaderText(text: string) {
+function parseHeaderText(text: string, t: Translate) {
   const headers: Record<string, string> = {};
   const lines = text.split(/\r?\n/);
   for (const [index, rawLine] of lines.entries()) {
@@ -299,12 +300,12 @@ function parseHeaderText(text: string) {
     }
     const separatorIndex = line.indexOf(":");
     if (separatorIndex < 1) {
-      throw new Error(`第 ${index + 1} 行缺少 header 名称或冒号`);
+      throw new Error(t("第 {line} 行缺少 header 名称或冒号", { line: index + 1 }));
     }
     const key = line.slice(0, separatorIndex).trim();
     const value = line.slice(separatorIndex + 1).trim();
     if (!/^[A-Za-z0-9-]+$/.test(key)) {
-      throw new Error(`第 ${index + 1} 行 header 名称无效`);
+      throw new Error(t("第 {line} 行 header 名称无效", { line: index + 1 }));
     }
     headers[key] = value;
   }
@@ -525,6 +526,7 @@ export function ProxyPage({
   onImportProfilePack,
   onDiagnoseRequest,
 }: ProxyPageProps) {
+  const { t } = useI18n();
   const {
     sources: configSources,
     selectedSource: selectedConfigSource,
@@ -810,11 +812,11 @@ export function ProxyPage({
     }
     const nextSource = configSources.find((source) => source.id === nextSourceId) ?? null;
     if (!configSourceSupports(nextSource, "proxy")) {
-      setFormError("这个配置源不支持代理配置。");
+      setFormError(t("这个配置源不支持代理配置。"));
       return;
     }
     if (configDraftDirty || ruleDialogOpen) {
-      setFormError("请先保存或取消当前代理改动，再切换配置源。");
+      setFormError(t("请先保存或取消当前代理改动，再切换配置源。"));
       return;
     }
     setFormError("");
@@ -924,12 +926,12 @@ export function ProxyPage({
 
   async function diagnoseRequest() {
     if (!selectedProfile) {
-      setFormError("请选择代理服务");
+      setFormError(t("请选择代理服务"));
       return;
     }
     const url = diagnosisUrl.trim();
     if (!url) {
-      setFormError("请输入请求路径或 URL");
+      setFormError(t("请输入请求路径或 URL"));
       return;
     }
     setFormError("");
@@ -958,11 +960,11 @@ export function ProxyPage({
     }
     setFormError("");
     if (!configProfileDraft.name.trim()) {
-      setFormError("代理名称不能为空");
+      setFormError(t("代理名称不能为空"));
       return;
     }
     if (!configProfileDraft.listenHost.trim() || !configProfileDraft.listenPort) {
-      setFormError("监听地址和端口不能为空");
+      setFormError(t("监听地址和端口不能为空"));
       return;
     }
     await onSaveProfile(configProfileDraft, selectedSourceId);
@@ -972,9 +974,11 @@ export function ProxyPage({
 
   async function deleteProfile(profile: ProxyProfile) {
     const confirmed = await confirm({
-      title: "删除代理配置",
-      description: `删除“${profile.name}”后，相关规则和记录也会被移除。`,
-      confirmLabel: "删除",
+      title: t("删除代理配置"),
+      description: t("删除“{name}”后，相关规则和记录也会被移除。", {
+        name: profile.name,
+      }),
+      confirmLabel: t("删除"),
       tone: "danger",
       preferenceKey: "destructive.delete",
     });
@@ -990,25 +994,25 @@ export function ProxyPage({
     }
     setFormError("");
     if (!ruleDraft.name.trim()) {
-      setFormError("规则名称不能为空");
+      setFormError(t("规则名称不能为空"));
       return;
     }
     let action = ruleDraft.action;
     try {
       if (action.kind === "forward") {
         if ((action.outboundMode ?? "inherit") === "proxy" && !action.outboundProxy.trim()) {
-          setFormError("选择指定代理时，上游代理地址不能为空");
+          setFormError(t("选择指定代理时，上游代理地址不能为空"));
           return;
         }
         action = {
           ...action,
-          requestHeaders: parseHeaderText(requestHeadersText),
-          responseHeaders: parseHeaderText(responseHeadersText),
+          requestHeaders: parseHeaderText(requestHeadersText, t),
+          responseHeaders: parseHeaderText(responseHeadersText, t),
         };
       } else if (action.kind === "mock") {
         action = {
           ...action,
-          headers: parseHeaderText(mockHeadersText),
+          headers: parseHeaderText(mockHeadersText, t),
         };
       }
     } catch (reason) {
@@ -1051,9 +1055,9 @@ export function ProxyPage({
 
   async function deleteRule(rule: ProxyRule) {
     const confirmed = await confirm({
-      title: "删除规则",
-      description: `删除“${rule.name}”？`,
-      confirmLabel: "删除",
+      title: t("删除规则"),
+      description: t("删除“{name}”？", { name: rule.name }),
+      confirmLabel: t("删除"),
       tone: "danger",
       preferenceKey: "destructive.delete",
     });
@@ -1067,7 +1071,7 @@ export function ProxyPage({
   async function importProfilePack() {
     try {
       const selected = await open({
-        title: "导入代理包",
+        title: t("导入代理包"),
         multiple: false,
         directory: false,
         filters: [
@@ -1078,9 +1082,9 @@ export function ProxyPage({
         return;
       }
       const confirmed = await confirm({
-        title: "导入代理包",
-        description: "导入会创建一个新的代理服务，并把包内规则归属到新服务，不会覆盖现有服务。",
-        confirmLabel: "导入",
+        title: t("导入代理包"),
+        description: t("导入会创建一个新的代理服务，并把包内规则归属到新服务，不会覆盖现有服务。"),
+        confirmLabel: t("导入"),
         preferenceKey: "configuration.import",
       });
       if (!confirmed) {
@@ -1097,17 +1101,18 @@ export function ProxyPage({
       return;
     }
     const confirmed = await confirm({
-      title: "导出代理包",
-      description:
+      title: t("导出代理包"),
+      description: t(
         "导出的代理包会包含当前服务配置、规则、Header、Mock Body 和上游地址。请确认其中没有敏感信息。",
-      confirmLabel: "继续导出",
+      ),
+      confirmLabel: t("继续导出"),
     });
     if (!confirmed) {
       return;
     }
     try {
       const selected = await save({
-        title: "导出代理包",
+        title: t("导出代理包"),
         defaultPath: `${safeFileName(profile.name)}.rdevproxy.json`,
         filters: [
           { name: "rDevTool Proxy Pack", extensions: ["json"] },
@@ -1125,7 +1130,7 @@ export function ProxyPage({
   if (!visibleDashboard && loading) {
     return (
       <Box className="workspace workspace--narrow proxy-workspace">
-        <Alert severity="info">正在加载代理配置…</Alert>
+        <Alert severity="info">{t("正在加载代理配置…")}</Alert>
       </Box>
     );
   }
@@ -1140,31 +1145,31 @@ export function ProxyPage({
       />
 
       <WorkspacePageToolbar
-        ariaLabel="本地代理概览与配置"
+        ariaLabel={t("本地代理概览与配置")}
         metrics={[
           {
             key: "services",
-            label: "服务",
+            label: t("服务"),
             value: profiles.length,
             icon: <AppWindowIcon fontSize="small" />,
             tone: "blue",
           },
           {
             key: "running",
-            label: "运行中",
+            label: t("运行中"),
             value: runningServiceCount,
             tone: "green",
           },
           {
             key: "rules",
-            label: "规则",
+            label: t("规则"),
             value: totalRuleCount,
             icon: <PackageIcon fontSize="small" />,
             tone: "violet",
           },
           {
             key: "requests",
-            label: "请求",
+            label: t("请求"),
             value: totalRequestCount,
             icon: <ActivityIcon fontSize="small" />,
             tone: "cyan",
@@ -1177,20 +1182,20 @@ export function ProxyPage({
               disabled={!selectedProfile}
               onClick={() => setRequestsDialogOpen(true)}
             >
-              请求记录
+              {t("请求记录")}
             </WorkspacePageToolbarAction>
             <WorkspacePageToolbarAction
               startIcon={<SettingsIcon fontSize="small" />}
               onClick={openProxyConfigDialog}
             >
-              代理配置
+              {t("代理配置")}
             </WorkspacePageToolbarAction>
           </>
         }
       />
 
       <Box className="proxy-main-grid proxy-main-grid--config">
-        <section className="workflow-panel proxy-control-panel" aria-label="代理服务与规则">
+        <section className="workflow-panel proxy-control-panel" aria-label={t("代理服务与规则")}>
           <Box className={`proxy-control-split${servicePanelCollapsed ? " is-service-collapsed" : ""}`}>
             <Box
               component="section"
@@ -1199,12 +1204,16 @@ export function ProxyPage({
             >
               <PanelHeader
                 id="proxy-service-title"
-                title="服务"
+                title={t("服务")}
                 aside={
-                  <Tooltip title={servicePanelCollapsed ? "展开服务列表" : "向左收起服务列表"}>
+                  <Tooltip
+                    title={servicePanelCollapsed ? t("展开服务列表") : t("向左收起服务列表")}
+                  >
                     <IconButton
                       className="proxy-service-collapse-toggle"
-                      aria-label={servicePanelCollapsed ? "展开服务列表" : "向左收起服务列表"}
+                      aria-label={
+                        servicePanelCollapsed ? t("展开服务列表") : t("向左收起服务列表")
+                      }
                       aria-controls={servicePanelCollapsed ? undefined : "proxy-service-list"}
                       aria-expanded={!servicePanelCollapsed}
                       onClick={() => setServicePanelCollapsed((current) => !current)}
@@ -1224,7 +1233,7 @@ export function ProxyPage({
                   id="proxy-service-list"
                   className={`proxy-card-list module-list-scroll${profiles.length === 0 ? " is-empty" : ""}`}
                   role="list"
-                  aria-label="代理服务列表"
+                  aria-label={t("代理服务列表")}
                 >
                 {profiles.length > 0 ? (
                   <>
@@ -1272,27 +1281,27 @@ export function ProxyPage({
                             <Chip
                               className="proxy-service-status-chip"
                               size="small"
-                              label={status?.running ? "运行中" : "已停止"}
+                              label={status?.running ? t("运行中") : t("已停止")}
                               color={status?.running ? "success" : "default"}
                               variant={status?.running ? "filled" : "outlined"}
                             />
                             <Chip
                               className="proxy-service-metric-chip proxy-service-metric-chip--rules"
                               size="small"
-                              label={`${ruleCount} 规则`}
+                              label={t("{count} 规则", { count: ruleCount })}
                               variant="outlined"
                             />
                             <Chip
                               className="proxy-service-metric-chip proxy-service-metric-chip--requests"
                               size="small"
-                              label={`${eventCount} 请求`}
+                              label={t("{count} 请求", { count: eventCount })}
                               variant="outlined"
                             />
                           </span>
                           <span className="proxy-list-actions proxy-service-actions">
-                            <Tooltip title={status?.running ? "停止代理" : "启动代理"}>
+                            <Tooltip title={status?.running ? t("停止代理") : t("启动代理")}>
                               <IconButton
-                                aria-label={status?.running ? "停止代理" : "启动代理"}
+                                aria-label={status?.running ? t("停止代理") : t("启动代理")}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   void (status?.running
@@ -1311,7 +1320,10 @@ export function ProxyPage({
                   <AppListEndState />
                   </>
                 ) : (
-                  <EmptyProxyState title="暂无服务" description="打开代理配置新增服务或导入代理包。" />
+                  <EmptyProxyState
+                    title={t("暂无服务")}
+                    description={t("打开代理配置新增服务或导入代理包。")}
+                  />
                 )}
                 </Box>
               ) : null}
@@ -1320,11 +1332,11 @@ export function ProxyPage({
             <Box component="section" className="proxy-section proxy-rules-panel" aria-labelledby="proxy-rule-title">
               <PanelHeader
                 id="proxy-rule-title"
-                title={selectedProfile ? selectedProfile.name : "规则"}
+                title={selectedProfile ? selectedProfile.name : t("规则")}
                 description={
                   selectedProfile
                     ? selectedStatus?.listenUrl ?? `http://${selectedProfile.listenHost}:${selectedProfile.listenPort}`
-                    : "请先在代理配置中新增服务"
+                    : t("请先在代理配置中新增服务")
                 }
                 aside={
                   <Stack className="proxy-rule-bulk-actions" direction="row" spacing={0.55} alignItems="center">
@@ -1336,7 +1348,7 @@ export function ProxyPage({
                       disabled={!selectedProfile || disabledRuleCount === 0 || blockingBusy || bulkRuleSaving}
                       onClick={() => void setAllRulesEnabled(true)}
                     >
-                      启用
+                      {t("启用")}
                     </Button>
                     <Button
                       className="proxy-rule-bulk-button proxy-tool-button proxy-tool-button--disable"
@@ -1346,13 +1358,13 @@ export function ProxyPage({
                       disabled={!selectedProfile || enabledRuleCount === 0 || blockingBusy || bulkRuleSaving}
                       onClick={() => void setAllRulesEnabled(false)}
                     >
-                      停用
+                      {t("停用")}
                     </Button>
-                    <Tooltip title="新规则">
+                    <Tooltip title={t("新规则")}>
                       <span>
                         <IconButton
                           className="proxy-tool-icon-button proxy-tool-icon-button--add"
-                          aria-label="新规则"
+                          aria-label={t("新规则")}
                           disabled={!selectedProfile}
                           onClick={() => {
                             if (selectedProfile) {
@@ -1364,10 +1376,10 @@ export function ProxyPage({
                         </IconButton>
                       </span>
                     </Tooltip>
-                    <Tooltip title="刷新代理状态">
+                    <Tooltip title={t("刷新代理状态")}>
                       <IconButton
                         onClick={() => void onRefresh({ sourceId: selectedSourceId })}
-                        aria-label="刷新代理状态"
+                        aria-label={t("刷新代理状态")}
                       >
                         <RefreshIcon fontSize="small" />
                       </IconButton>
@@ -1379,15 +1391,18 @@ export function ProxyPage({
               <Box
                 className={`proxy-card-list module-list-scroll${rules.length === 0 ? " is-empty" : ""}`}
                 role="list"
-                aria-label="代理规则列表"
+                aria-label={t("代理规则列表")}
               >
                 {!selectedProfile ? (
-                  <EmptyProxyState title="请选择服务" description="请先在代理配置中新增服务。" />
+                  <EmptyProxyState
+                    title={t("请选择服务")}
+                    description={t("请先在代理配置中新增服务。")}
+                  />
                 ) : rules.length > 0 ? (
                   <>
                   {rules.map((rule) => {
-                    const matchMethod = rule.method || "任意";
-                    const matchTarget = rule.pathPrefix || rule.urlContains || "自定义匹配";
+                    const matchMethod = rule.method || t("任意");
+                    const matchTarget = rule.pathPrefix || rule.urlContains || t("自定义匹配");
                     const methodTone = ruleMethodTone(rule.method);
                     return (
                       <Box
@@ -1410,11 +1425,13 @@ export function ProxyPage({
                               <b>{rule.name}</b>
                               <span className="proxy-rule-badges">
                                 <span className="proxy-rule-badge proxy-rule-badge--kind">
-                                  {actionKindLabel(rule.action.kind)}
+                                  {t(actionKindLabel(rule.action.kind))}
                                 </span>
                                 {rule.action.kind === "forward" ? (
                                   <span className="proxy-rule-badge">
-                                    出站 {outboundModeLabel(forwardOutboundMode(rule.action))}
+                                    {t("出站 {mode}", {
+                                      mode: t(outboundModeLabel(forwardOutboundMode(rule.action))),
+                                    })}
                                   </span>
                                 ) : null}
                                 <span className="proxy-rule-badge">P{rule.priority}</span>
@@ -1434,14 +1451,14 @@ export function ProxyPage({
                         </Box>
                         <span className="proxy-rule-side">
                           <span className="proxy-list-actions proxy-rule-actions">
-                            <Tooltip title={rule.enabled ? "停用规则" : "启用规则"}>
+                            <Tooltip title={rule.enabled ? t("停用规则") : t("启用规则")}>
                               <Box
                                 component="button"
                                 type="button"
                                 className={`proxy-rule-enabled-switch${rule.enabled ? " is-checked" : ""}`}
                                 disabled={blockingBusy || bulkRuleSaving}
                                 aria-pressed={rule.enabled}
-                                aria-label={`${rule.name} 启用状态`}
+                                aria-label={t("{name} 启用状态", { name: rule.name })}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   void toggleRuleEnabled(rule, !rule.enabled);
@@ -1450,9 +1467,9 @@ export function ProxyPage({
                                 <span className="proxy-rule-enabled-thumb" />
                               </Box>
                             </Tooltip>
-                            <Tooltip title="编辑规则">
+                            <Tooltip title={t("编辑规则")}>
                               <IconButton
-                                aria-label="编辑规则"
+                                aria-label={t("编辑规则")}
                                 onClick={(event) => {
                                   event.stopPropagation();
                                   openRuleDialog(rule);
@@ -1469,7 +1486,10 @@ export function ProxyPage({
                   <AppListEndState />
                   </>
                 ) : (
-                  <EmptyProxyState title="暂无规则" description="新建规则后可转发、Mock 或阻断请求。" />
+                  <EmptyProxyState
+                    title={t("暂无规则")}
+                    description={t("新建规则后可转发、Mock 或阻断请求。")}
+                  />
                 )}
               </Box>
             </Box>
@@ -1521,24 +1541,33 @@ export function ProxyPage({
           <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
             <Stack direction="row" alignItems="center" spacing={0.8} minWidth={0}>
               <WebsiteIcon fontSize="small" />
-              <span>请求</span>
+              <span>{t("请求")}</span>
               <Chip
                 className="proxy-request-count-chip"
                 size="small"
-                label={`${visibleEvents.length} / ${filteredEvents.length} 条`}
+                label={t("{visible} / {total} 条", {
+                  visible: visibleEvents.length,
+                  total: filteredEvents.length,
+                })}
                 variant="outlined"
               />
             </Stack>
             <Stack direction="row" spacing={0.6}>
-              <Tooltip title={selectedStatus?.running ? "刷新请求记录（打开时自动刷新）" : "刷新请求记录"}>
-                <IconButton onClick={() => void refreshRequests()} aria-label="刷新请求记录">
+              <Tooltip
+                title={
+                  selectedStatus?.running
+                    ? t("刷新请求记录（打开时自动刷新）")
+                    : t("刷新请求记录")
+                }
+              >
+                <IconButton onClick={() => void refreshRequests()} aria-label={t("刷新请求记录")}>
                   <RefreshIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
-              <Tooltip title="关闭">
+              <Tooltip title={t("关闭")}>
                 <IconButton
                   onClick={() => setRequestsDialogOpen(false)}
-                  aria-label="关闭请求面板"
+                  aria-label={t("关闭请求面板")}
                 >
                   <ClearIcon fontSize="small" />
                 </IconButton>
@@ -1553,15 +1582,15 @@ export function ProxyPage({
                 size="small"
                 value={requestQuery}
                 onChange={(event) => setRequestQuery(event.target.value)}
-                placeholder="搜索接口 / 路径 / 状态 / 规则"
-                inputProps={{ "aria-label": "搜索请求记录" }}
+                placeholder={t("搜索接口 / 路径 / 状态 / 规则")}
+                inputProps={{ "aria-label": t("搜索请求记录") }}
               />
-              <Box className="proxy-request-filter-group" aria-label="筛选请求记录">
+              <Box className="proxy-request-filter-group" aria-label={t("筛选请求记录")}>
                 {REQUEST_FILTERS.map((filter) => (
                   <Chip
                     key={filter.value}
                     className="proxy-request-filter-chip"
-                    label={filter.label}
+                    label={t(filter.label)}
                     color={requestFilter === filter.value ? "primary" : "default"}
                     variant={requestFilter === filter.value ? "filled" : "outlined"}
                     onClick={() => setRequestFilter(filter.value)}
@@ -1579,7 +1608,7 @@ export function ProxyPage({
                   setRequestFilter("all");
                 }}
               >
-                重置
+                {t("重置")}
               </Button>
               <Button
                 variant="outlined"
@@ -1588,7 +1617,7 @@ export function ProxyPage({
                 disabled={!selectedProfile || events.length === 0 || Boolean(busy)}
                 onClick={() => void onClearEvents(selectedProfile?.id, selectedSourceId)}
               >
-                清空
+                {t("清空")}
               </Button>
             </Box>
 
@@ -1620,7 +1649,7 @@ export function ProxyPage({
                   setDiagnosisUrl(event.target.value);
                   setDiagnosisResult(null);
                 }}
-                inputProps={{ "aria-label": "诊断请求路径或 URL" }}
+                inputProps={{ "aria-label": t("诊断请求路径或 URL") }}
                 sx={{ flex: 1, minWidth: 0 }}
               />
               <Button
@@ -1629,7 +1658,7 @@ export function ProxyPage({
                 disabled={!selectedEvent}
                 onClick={useSelectedEventForDiagnosis}
               >
-                使用选中请求
+                {t("使用选中请求")}
               </Button>
               <Button
                 variant="contained"
@@ -1637,7 +1666,7 @@ export function ProxyPage({
                 disabled={!selectedProfile || diagnosisLoading}
                 onClick={() => void diagnoseRequest()}
               >
-                诊断
+                {t("诊断")}
               </Button>
             </Stack>
 
@@ -1652,12 +1681,14 @@ export function ProxyPage({
                     <Chip
                       size="small"
                       variant="outlined"
-                      label={diagnosisResult.profile.listening ? "端口监听中" : "端口未监听"}
+                      label={diagnosisResult.profile.listening ? t("端口监听中") : t("端口未监听")}
                     />
                     <Chip
                       size="small"
                       variant="outlined"
-                      label={`${diagnosisMatchCount(diagnosisResult)} 条规则匹配`}
+                      label={t("{count} 条规则匹配", {
+                        count: diagnosisMatchCount(diagnosisResult),
+                      })}
                     />
                   </Stack>
                   {diagnosisResult.matchedRule ? (
@@ -1684,7 +1715,7 @@ export function ProxyPage({
               className={`proxy-event-list module-list-scroll${filteredEvents.length === 0 ? " is-empty" : ""}`}
               onScroll={handleRequestListScroll}
               role="list"
-              aria-label="代理请求记录"
+              aria-label={t("代理请求记录")}
             >
               {filteredEvents.length > 0 ? (
                 <>
@@ -1718,7 +1749,7 @@ export function ProxyPage({
                             <Chip
                               size="small"
                               className="proxy-event-action-chip"
-                              label={actionLabel(event.action)}
+                              label={t(actionLabel(event.action))}
                               variant="outlined"
                             />
                           </span>
@@ -1743,7 +1774,7 @@ export function ProxyPage({
                         onClick={loadMoreRequestEvents}
                         className="workflow-history-footer-action"
                       >
-                        下滑加载更多
+                        {t("下滑加载更多")}
                       </Button>
                     ) : (
                       <AppListEndState />
@@ -1753,8 +1784,12 @@ export function ProxyPage({
               ) : (
                 <AppEmptyState
                   compact
-                  title={events.length > 0 ? "没有匹配请求" : "暂无请求记录"}
-                  description={events.length > 0 ? "调整搜索或筛选条件。" : "代理收到请求后会显示在这里。"}
+                  title={events.length > 0 ? t("没有匹配请求") : t("暂无请求记录")}
+                  description={
+                    events.length > 0
+                      ? t("调整搜索或筛选条件。")
+                      : t("代理收到请求后会显示在这里。")
+                  }
                 />
               )}
             </Box>
@@ -1798,7 +1833,11 @@ export function ProxyPage({
                   </Box>
                 </Stack>
               ) : (
-                <AppEmptyState compact title="选择请求" description="点击左侧请求查看头信息和响应内容。" />
+                <AppEmptyState
+                  compact
+                  title={t("选择请求")}
+                  description={t("点击左侧请求查看头信息和响应内容。")}
+                />
               )}
             </Box>
           </Box>
@@ -1967,6 +2006,7 @@ function ProxyConfigDialog({
   onSaveProfile: () => void;
   onDelete: (profile: ProxyProfile) => void;
 }) {
+  const { t } = useI18n();
   const selectedStatus = selectedProfile ? statuses.get(selectedProfile.id) : null;
   const selectedRules = selectedProfile ? rulesForProfile(dashboard, selectedProfile.id) : [];
   const selectedEvents = selectedProfile ? eventsForProfile(dashboard, selectedProfile.id) : [];
@@ -1977,7 +2017,9 @@ function ProxyConfigDialog({
   );
   const displayProfiles =
     draftIsUnsaved && profileDraft ? [profileDraft, ...profiles] : profiles;
-  const serviceCountLabel = draftIsUnsaved ? `${profiles.length} 个 + 草稿` : `${profiles.length} 个`;
+  const serviceCountLabel = draftIsUnsaved
+    ? t("{count} 个 + 草稿", { count: profiles.length })
+    : t("{count} 个", { count: profiles.length });
   const canExportSelected = Boolean(selectedProfile && !draftIsUnsaved);
 
   return (
@@ -2002,10 +2044,10 @@ function ProxyConfigDialog({
             </span>
             <Box minWidth={0}>
               <Typography variant="h6" noWrap>
-                代理配置
+                {t("代理配置")}
               </Typography>
               <Typography variant="body2" color="text.secondary" noWrap>
-                管理本地代理服务、默认转发和代理包。
+                {t("管理本地代理服务、默认转发和代理包。")}
               </Typography>
             </Box>
           </Stack>
@@ -2016,7 +2058,7 @@ function ProxyConfigDialog({
               disabled={busyDisabled}
               onClick={onCreateProfile}
             >
-              新建服务
+              {t("新建服务")}
             </Button>
             <Button
               variant="outlined"
@@ -2025,7 +2067,7 @@ function ProxyConfigDialog({
               disabled={busyDisabled}
               onClick={onImport}
             >
-              导入
+              {t("导入")}
             </Button>
             <Button
               variant="outlined"
@@ -2034,12 +2076,12 @@ function ProxyConfigDialog({
               disabled={!canExportSelected || busyDisabled}
               onClick={onExport}
             >
-              导出选中
+              {t("导出选中")}
             </Button>
-            <Tooltip title="关闭">
+            <Tooltip title={t("关闭")}>
               <IconButton
                 className="proxy-config-manager-close"
-                aria-label="关闭代理配置"
+                aria-label={t("关闭代理配置")}
                 onClick={onClose}
               >
                 <ClearIcon fontSize="small" />
@@ -2058,7 +2100,7 @@ function ProxyConfigDialog({
               path={dashboard?.configPath || selectedConfigSource?.files.proxy}
               requiredCapability="proxy"
               profileFallback="proxy"
-              warningLabel={!sourceAllowsProxy ? "不支持代理" : null}
+              warningLabel={!sourceAllowsProxy ? t("不支持代理") : null}
               disabled={busyDisabled}
               status={sourceStatus}
               error={sourceError}
@@ -2078,7 +2120,7 @@ function ProxyConfigDialog({
               justifyContent="space-between"
               spacing={1}
             >
-              <Typography variant="subtitle2">服务配置</Typography>
+              <Typography variant="subtitle2">{t("服务配置")}</Typography>
               <Chip size="small" label={serviceCountLabel} variant="outlined" />
             </Stack>
             <Box
@@ -2086,7 +2128,7 @@ function ProxyConfigDialog({
                 displayProfiles.length === 0 ? " is-empty" : ""
               }`}
               role="list"
-              aria-label="代理服务配置列表"
+              aria-label={t("代理服务配置列表")}
             >
               {displayProfiles.length > 0 ? (
                 displayProfiles.map((profile) => {
@@ -2109,20 +2151,23 @@ function ProxyConfigDialog({
                         <span className="proxy-config-service-title-row">
                           <b>{profile.name}</b>
                           <span className={`proxy-config-service-state${running ? " is-running" : ""}${isDraft ? " is-draft" : ""}`}>
-                            {isDraft ? "未保存" : running ? "运行中" : "已停止"}
+                            {isDraft ? t("未保存") : running ? t("运行中") : t("已停止")}
                           </span>
                         </span>
                         <small translate="no">{listenUrl}</small>
                       </span>
                       <span className="proxy-config-service-meta">
-                        <span>{ruleCount} 规则</span>
-                        <span>{eventCount} 请求</span>
+                        <span>{t("{count} 规则", { count: ruleCount })}</span>
+                        <span>{t("{count} 请求", { count: eventCount })}</span>
                       </span>
                     </Box>
                   );
                 })
               ) : (
-                <EmptyProxyState title="暂无服务" description="新建服务或导入代理包后会显示在这里。" />
+                <EmptyProxyState
+                  title={t("暂无服务")}
+                  description={t("新建服务或导入代理包后会显示在这里。")}
+                />
               )}
             </Box>
           </Box>
@@ -2139,7 +2184,7 @@ function ProxyConfigDialog({
                 >
                   <Box minWidth={0}>
                     <Typography variant="h6" noWrap>
-                      {profileDraft.name || "未命名代理"}
+                      {profileDraft.name || t("未命名代理")}
                     </Typography>
                     <Typography variant="body2" color="text.secondary" noWrap translate="no">
                       {selectedListenUrl}
@@ -2155,12 +2200,30 @@ function ProxyConfigDialog({
                   >
                     <Chip
                       size="small"
-                      label={draftIsUnsaved ? "未保存" : selectedStatus?.running ? "运行中" : "已停止"}
+                      label={
+                        draftIsUnsaved
+                          ? t("未保存")
+                          : selectedStatus?.running
+                            ? t("运行中")
+                            : t("已停止")
+                      }
                       color={selectedStatus?.running ? "success" : "default"}
                       variant={selectedStatus?.running ? "filled" : "outlined"}
                     />
-                    <Chip size="small" label={`${draftIsUnsaved ? 0 : selectedRules.length} 规则`} variant="outlined" />
-                    <Chip size="small" label={`${draftIsUnsaved ? 0 : selectedEvents.length} 请求`} variant="outlined" />
+                    <Chip
+                      size="small"
+                      label={t("{count} 规则", {
+                        count: draftIsUnsaved ? 0 : selectedRules.length,
+                      })}
+                      variant="outlined"
+                    />
+                    <Chip
+                      size="small"
+                      label={t("{count} 请求", {
+                        count: draftIsUnsaved ? 0 : selectedEvents.length,
+                      })}
+                      variant="outlined"
+                    />
                   </Stack>
                 </Stack>
 
@@ -2190,10 +2253,12 @@ function ProxyConfigDialog({
                       disabled={busyDisabled}
                       onClick={onDiscardProfile}
                     >
-                      取消新建
+                      {t("取消新建")}
                     </Button>
                   ) : (
-                    <Tooltip title={profiles.length <= 1 ? "至少保留一个服务" : "删除服务"}>
+                    <Tooltip
+                      title={profiles.length <= 1 ? t("至少保留一个服务") : t("删除服务")}
+                    >
                       <span>
                         <Button
                           variant="outlined"
@@ -2202,7 +2267,7 @@ function ProxyConfigDialog({
                           disabled={!selectedProfile || profiles.length <= 1 || busyDisabled}
                           onClick={() => selectedProfile && onDelete(selectedProfile)}
                         >
-                          删除
+                          {t("删除")}
                         </Button>
                       </span>
                     </Tooltip>
@@ -2213,12 +2278,15 @@ function ProxyConfigDialog({
                     disabled={busyDisabled}
                     onClick={onSaveProfile}
                   >
-                    保存服务
+                    {t("保存服务")}
                   </Button>
                 </Stack>
               </Stack>
             ) : (
-              <EmptyProxyState title="暂无服务" description="请先新建服务或导入代理包。" />
+              <EmptyProxyState
+                title={t("暂无服务")}
+                description={t("请先新建服务或导入代理包。")}
+              />
             )}
           </Box>
         </Box>
@@ -2246,6 +2314,7 @@ function ProfileFormContent({
   onChange: (patch: Partial<ProxyProfile>) => void;
   onCopy: (key: string, value: string) => Promise<void>;
 }) {
+  const { t } = useI18n();
   return (
     <>
       {error ? <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert> : null}
@@ -2254,16 +2323,16 @@ function ProfileFormContent({
           <Box className="proxy-profile-section">
             <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
               <Box minWidth={0}>
-                <Typography variant="subtitle2">监听入口</Typography>
+                <Typography variant="subtitle2">{t("监听入口")}</Typography>
                 <Typography variant="caption" color="text.secondary">
-                  其他应用连接到这个本地地址后，请求会进入 rDevTool 代理服务。
+                  {t("其他应用连接到这个本地地址后，请求会进入 rDevTool 代理服务。")}
                 </Typography>
               </Box>
               <Chip label="HTTP / HTTPS" size="small" />
             </Stack>
             <Stack spacing={1}>
               <TextField
-                label="名称"
+                label={t("名称")}
                 name="proxy-profile-name"
                 autoComplete="off"
                 value={draft.name}
@@ -2271,7 +2340,7 @@ function ProfileFormContent({
               />
               <Box className="proxy-two-fields">
                 <TextField
-                  label="监听地址"
+                  label={t("监听地址")}
                   name="proxy-listen-host"
                   autoComplete="off"
                   value={draft.listenHost}
@@ -2279,7 +2348,7 @@ function ProfileFormContent({
                   inputProps={{ spellCheck: false, translate: "no" }}
                 />
                 <TextField
-                  label="端口"
+                  label={t("端口")}
                   name="proxy-listen-port"
                   type="number"
                   inputMode="numeric"
@@ -2296,32 +2365,36 @@ function ProfileFormContent({
           <Box className="proxy-profile-section proxy-profile-section--route">
             <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
               <Box minWidth={0}>
-                <Typography variant="subtitle2">默认转发</Typography>
+                <Typography variant="subtitle2">{t("默认转发")}</Typography>
                 <Typography variant="caption" color="text.secondary">
-                  没有被规则改写时使用；规则里的出站设置可以覆盖这里。
+                  {t("没有被规则改写时使用；规则里的出站设置可以覆盖这里。")}
                 </Typography>
               </Box>
-              <Chip label={draft.upstreamProxy ? "代理中转" : "默认直连"} size="small" color={draft.upstreamProxy ? "primary" : "default"} />
+              <Chip
+                label={draft.upstreamProxy ? t("代理中转") : t("默认直连")}
+                size="small"
+                color={draft.upstreamProxy ? "primary" : "default"}
+              />
             </Stack>
             <Box className="proxy-two-fields">
               <TextField
-                label="上游地址"
+                label={t("上游地址")}
                 name="proxy-upstream-base-url"
                 autoComplete="off"
                 placeholder="https://api.example.com"
                 value={draft.upstreamBaseUrl}
                 onChange={(event) => onChange({ upstreamBaseUrl: event.target.value })}
-                helperText="可空。用于相对路径请求的默认目标；为空时按请求原目标转发。"
+                helperText={t("可空。用于相对路径请求的默认目标；为空时按请求原目标转发。")}
                 inputProps={{ spellCheck: false, translate: "no" }}
               />
               <TextField
-                label="上游代理"
+                label={t("上游代理")}
                 name="proxy-upstream-proxy"
                 autoComplete="off"
                 placeholder="socks5://127.0.0.1:7890"
                 value={draft.upstreamProxy}
                 onChange={(event) => onChange({ upstreamProxy: event.target.value })}
-                helperText="可空。作为服务默认出站代理；规则选择“继承默认”时使用。"
+                helperText={t("可空。作为服务默认出站代理；规则选择“继承默认”时使用。")}
                 inputProps={{ spellCheck: false, translate: "no" }}
               />
             </Box>
@@ -2330,26 +2403,28 @@ function ProfileFormContent({
           <Box className="proxy-profile-section proxy-profile-section--capture">
             <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
               <Box minWidth={0}>
-                <Typography variant="subtitle2">记录</Typography>
+                <Typography variant="subtitle2">{t("记录")}</Typography>
                 <Typography variant="caption" color="text.secondary">
-                  控制请求面板里是否保存 Body 预览，Header 与基础信息会继续记录。
+                  {t("控制请求面板里是否保存 Body 预览，Header 与基础信息会继续记录。")}
                 </Typography>
               </Box>
               <Switch
                 checked={draft.captureBody}
                 onChange={(event) => onChange({ captureBody: event.target.checked })}
-                inputProps={{ "aria-label": "记录正文" }}
+                inputProps={{ "aria-label": t("记录正文") }}
               />
             </Stack>
             <Box className="proxy-two-fields proxy-profile-capture-grid">
               <Box className="proxy-profile-capture-card">
-                <Typography variant="body2" sx={{ fontWeight: 780 }}>记录正文</Typography>
+                <Typography variant="body2" sx={{ fontWeight: 780 }}>{t("记录正文")}</Typography>
                 <Typography variant="caption" color="text.secondary">
-                  {draft.captureBody ? "已开启，会保存请求与响应正文预览。" : "已关闭，只记录 URL、状态码、耗时和 Header。"}
+                  {draft.captureBody
+                    ? t("已开启，会保存请求与响应正文预览。")
+                    : t("已关闭，只记录 URL、状态码、耗时和 Header。")}
                 </Typography>
               </Box>
               <TextField
-                label="正文预览字节"
+                label={t("正文预览字节")}
                 name="proxy-max-body-bytes"
                 type="number"
                 inputMode="numeric"
@@ -2358,7 +2433,7 @@ function ProfileFormContent({
                 onChange={(event) =>
                   onChange({ maxBodyBytes: Math.max(512, Number(event.target.value) || 512) })
                 }
-                helperText="每个请求/响应最多保留的正文预览大小。"
+                helperText={t("每个请求/响应最多保留的正文预览大小。")}
               />
             </Box>
           </Box>
@@ -2367,9 +2442,9 @@ function ProfileFormContent({
             <Box className="proxy-profile-section proxy-profile-section--env">
               <Stack className="proxy-profile-section-head" direction="row" alignItems="center" justifyContent="space-between" gap={1}>
                 <Box minWidth={0}>
-                  <Typography variant="subtitle2">环境变量</Typography>
+                  <Typography variant="subtitle2">{t("环境变量")}</Typography>
                   <Typography variant="caption" color="text.secondary">
-                    复制到终端或项目运行配置里，让命令行请求走这个代理入口。
+                    {t("复制到终端或项目启动档案里，让命令行请求走这个代理入口。")}
                   </Typography>
                 </Box>
               </Stack>
@@ -2438,25 +2513,26 @@ function RuleDialog({
   onSave: () => void;
   onDelete: (() => void) | null;
 }) {
+  const { t } = useI18n();
   const forwardAction = draft?.action.kind === "forward" ? draft.action : null;
 
   return (
     <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth className="proxy-config-dialog proxy-rule-dialog">
-      <DialogTitle>{draft?.name ? "规则配置" : "新建规则"}</DialogTitle>
+      <DialogTitle>{draft?.name ? t("规则配置") : t("新建规则")}</DialogTitle>
       <DialogContent dividers>
         {error ? <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert> : null}
         {draft ? (
           <Stack spacing={0.85} minWidth={0}>
             <Box className="proxy-two-fields">
               <TextField
-                label="规则名称"
+                label={t("规则名称")}
                 name="proxy-rule-name"
                 autoComplete="off"
                 value={draft.name}
                 onChange={(event) => onChange({ name: event.target.value })}
               />
               <TextField
-                label="优先级"
+                label={t("优先级")}
                 name="proxy-rule-priority"
                 type="number"
                 inputMode="numeric"
@@ -2468,19 +2544,19 @@ function RuleDialog({
             <Box className="proxy-three-fields">
               <TextField
                 select
-                label="方法"
+                label={t("方法")}
                 name="proxy-rule-method"
                 value={draft.method}
                 onChange={(event) => onChange({ method: event.target.value })}
               >
                 {HTTP_METHODS.map((method) => (
                   <MenuItem key={method || "any"} value={method}>
-                    {method || "任意"}
+                    {method || t("任意")}
                   </MenuItem>
                 ))}
               </TextField>
               <TextField
-                label="路径前缀"
+                label={t("路径前缀")}
                 name="proxy-rule-path-prefix"
                 autoComplete="off"
                 value={draft.pathPrefix}
@@ -2488,7 +2564,7 @@ function RuleDialog({
                 inputProps={{ spellCheck: false, translate: "no" }}
               />
               <TextField
-                label="URL 包含"
+                label={t("URL 包含")}
                 name="proxy-rule-url-contains"
                 autoComplete="off"
                 value={draft.urlContains}
@@ -2498,7 +2574,7 @@ function RuleDialog({
             </Box>
             <Box className="proxy-two-fields">
               <TextField
-                label="Header 名"
+                label={t("Header 名")}
                 name="proxy-rule-header-name"
                 autoComplete="off"
                 value={draft.headerName}
@@ -2506,7 +2582,7 @@ function RuleDialog({
                 inputProps={{ spellCheck: false, translate: "no" }}
               />
               <TextField
-                label="Header 包含"
+                label={t("Header 包含")}
                 name="proxy-rule-header-contains"
                 autoComplete="off"
                 value={draft.headerContains}
@@ -2517,14 +2593,14 @@ function RuleDialog({
             <Box className="proxy-three-fields">
               <TextField
                 select
-                label="动作"
+                label={t("动作")}
                 name="proxy-rule-action"
                 value={draft.action.kind}
                 onChange={(event) => onActionChange(event.target.value as ProxyRuleAction["kind"])}
               >
                 {ACTION_KINDS.map((item) => (
                   <MenuItem key={item.value} value={item.value}>
-                    {item.label}
+                    {t(item.label)}
                   </MenuItem>
                 ))}
               </TextField>
@@ -2535,10 +2611,10 @@ function RuleDialog({
                     onChange={(event) => onChange({ enabled: event.target.checked })}
                   />
                 }
-                label="启用"
+                label={t("启用")}
               />
               <TextField
-                label="延迟 ms"
+                label={t("延迟 ms")}
                 name="proxy-rule-delay-ms"
                 type="number"
                 inputMode="numeric"
@@ -2557,24 +2633,24 @@ function RuleDialog({
               <Stack spacing={0.85}>
                 <Box className="proxy-rule-subsection">
                   <span>
-                    <b>目标</b>
-                    <small>只决定请求转发到哪里，不决定是否走代理。</small>
+                    <b>{t("目标")}</b>
+                    <small>{t("只决定请求转发到哪里，不决定是否走代理。")}</small>
                   </span>
                   <Box className="proxy-two-fields">
                     <TextField
-                      label="转发到"
+                      label={t("转发到")}
                       name="proxy-rule-target-base-url"
                       autoComplete="off"
-                      placeholder="为空则使用原请求地址"
+                      placeholder={t("为空则使用原请求地址")}
                       value={forwardAction.targetBaseUrl}
                       onChange={(event) => onForwardChange({ targetBaseUrl: event.target.value })}
                       inputProps={{ spellCheck: false, translate: "no" }}
                     />
                     <TextField
-                      label="路径改写"
+                      label={t("路径改写")}
                       name="proxy-rule-rewrite-prefix"
                       autoComplete="off"
-                      placeholder="例如 /mock-api"
+                      placeholder={t("例如 /mock-api")}
                       value={forwardAction.rewritePrefix}
                       onChange={(event) => onForwardChange({ rewritePrefix: event.target.value })}
                       inputProps={{ spellCheck: false, translate: "no" }}
@@ -2583,13 +2659,19 @@ function RuleDialog({
                 </Box>
                 <Box className="proxy-rule-subsection">
                   <span>
-                    <b>出站</b>
-                    <small>{OUTBOUND_MODES.find((item) => item.value === forwardOutboundMode(forwardAction))?.helper}</small>
+                    <b>{t("出站")}</b>
+                    <small>
+                      {t(
+                        OUTBOUND_MODES.find(
+                          (item) => item.value === forwardOutboundMode(forwardAction),
+                        )?.helper ?? "",
+                      )}
+                    </small>
                   </span>
                   <Box className="proxy-two-fields">
                     <TextField
                       select
-                      label="出站策略"
+                      label={t("出站策略")}
                       name="proxy-rule-outbound-mode"
                       value={forwardOutboundMode(forwardAction)}
                       onChange={(event) =>
@@ -2604,12 +2686,12 @@ function RuleDialog({
                     >
                       {OUTBOUND_MODES.map((item) => (
                         <MenuItem key={item.value} value={item.value}>
-                          {item.label}
+                          {t(item.label)}
                         </MenuItem>
                       ))}
                     </TextField>
                     <TextField
-                      label="指定上游代理"
+                      label={t("指定上游代理")}
                       name="proxy-rule-outbound-proxy"
                       autoComplete="off"
                       placeholder="socks5://127.0.0.1:7890"
@@ -2622,7 +2704,7 @@ function RuleDialog({
                 </Box>
                 <Box className="proxy-two-fields">
                   <TextField
-                    label="追加请求 Header"
+                    label={t("追加请求 Header")}
                     name="proxy-rule-request-headers"
                     multiline
                     minRows={2}
@@ -2632,7 +2714,7 @@ function RuleDialog({
                     inputProps={{ spellCheck: false, translate: "no" }}
                   />
                   <TextField
-                    label="追加响应 Header"
+                    label={t("追加响应 Header")}
                     name="proxy-rule-response-headers"
                     multiline
                     minRows={2}
@@ -2649,7 +2731,7 @@ function RuleDialog({
               <Stack spacing={0.85}>
                 <Box className="proxy-two-fields">
                   <TextField
-                    label="状态码"
+                    label={t("状态码")}
                     name="proxy-rule-mock-status"
                     type="number"
                     inputMode="numeric"
@@ -2667,7 +2749,7 @@ function RuleDialog({
                   />
                 </Box>
                 <TextField
-                  label="响应 Header"
+                  label={t("响应 Header")}
                   name="proxy-rule-mock-headers"
                   multiline
                   minRows={2}
@@ -2677,7 +2759,7 @@ function RuleDialog({
                   inputProps={{ spellCheck: false, translate: "no" }}
                 />
                 <TextField
-                  label="响应正文"
+                  label={t("响应正文")}
                   name="proxy-rule-mock-body"
                   multiline
                   minRows={4}
@@ -2692,7 +2774,7 @@ function RuleDialog({
             {draft.action.kind === "block" ? (
               <Stack spacing={0.85}>
                 <TextField
-                  label="状态码"
+                  label={t("状态码")}
                   name="proxy-rule-block-status"
                   type="number"
                   inputMode="numeric"
@@ -2701,7 +2783,7 @@ function RuleDialog({
                   onChange={(event) => onBlockChange({ status: Number(event.target.value) || 403 })}
                 />
                 <TextField
-                  label="阻断响应"
+                  label={t("阻断响应")}
                   name="proxy-rule-block-body"
                   multiline
                   minRows={3}
@@ -2717,12 +2799,14 @@ function RuleDialog({
       <DialogActions>
         {onDelete ? (
           <Button color="error" startIcon={<TrashIcon fontSize="small" />} onClick={onDelete}>
-            删除
+            {t("删除")}
           </Button>
         ) : null}
         <Box sx={{ flex: 1 }} />
-        <Button color="inherit" onClick={onClose}>取消</Button>
-        <Button variant="contained" onClick={onSave} disabled={Boolean(busy)}>保存规则</Button>
+        <Button color="inherit" onClick={onClose}>{t("取消")}</Button>
+        <Button variant="contained" onClick={onSave} disabled={Boolean(busy)}>
+          {t("保存规则")}
+        </Button>
       </DialogActions>
     </Dialog>
   );

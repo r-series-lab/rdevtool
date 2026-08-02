@@ -6,9 +6,10 @@ use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use crate::config::{
-    ConfigPaths, ProjectWorkspaceConfig, WorkspaceConfig, default_config_dir,
-    load_project_workspace_by_key, load_project_workspaces, load_workspace_config,
-    normalize_project_workspace_key, save_project_workspace_config, save_workspace_config,
+    AppConfig, ConfigPaths, ProjectWorkspaceConfig, RuntimeProfileConfig, WorkspaceConfig,
+    default_config_dir, load_project_workspace_by_key, load_project_workspaces,
+    load_workspace_config, normalize_project_workspace_key, save_project_workspace_config,
+    save_workspace_config,
 };
 use crate::config_store::{
     copy_config_file_atomic, register_internal_config_write, with_config_file_lock,
@@ -63,6 +64,8 @@ pub struct ConfigSource {
     pub id: String,
     pub name: String,
     pub kind: String,
+    pub workspace_key: Option<String>,
+    pub workspace_archived: bool,
     pub base_dir: String,
     pub files: ConfigSourceFiles,
     pub ui_profile: String,
@@ -158,6 +161,12 @@ pub struct ConfigSourceCopyResult {
     pub copied_count: usize,
     pub missing_count: usize,
     pub files: Vec<ConfigSourceCopyFileResult>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct RuntimeOverridesFile {
+    #[serde(default, alias = "runtimeProfiles")]
+    pub runtime_profiles: Vec<RuntimeProfileConfig>,
 }
 
 #[derive(Clone, Copy)]
@@ -292,12 +301,18 @@ pub fn load_config_source_preference(
     capability: &str,
 ) -> Result<String> {
     let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
-    let app_workspace = load_workspace_config(&paths.workspace)?;
-    Ok(preferred_config_source_id_for_scope(
-        &workspace,
-        &app_workspace,
-        capability,
-    ))
+    if workspace.is_system() {
+        let app_workspace = load_workspace_config(&paths.workspace)?;
+        Ok(preferred_config_source_id_for_scope(
+            &workspace,
+            &app_workspace,
+            capability,
+        ))
+    } else {
+        Ok(preferred_config_source_id_for_workspace(
+            &workspace, capability,
+        ))
+    }
 }
 
 pub fn save_config_source_preference(
@@ -306,17 +321,23 @@ pub fn save_config_source_preference(
     capability: &str,
     source_id: &str,
 ) -> Result<ConfigSource> {
+    let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    if workspace.is_archived() {
+        return Err(anyhow!(
+            "project workspace is archived: {}; restore it before changing config sources",
+            workspace.key
+        ));
+    }
     let workspaces = load_project_workspaces(&paths.project_workspaces)?;
     let source = resolve_config_source(Some(source_id), &workspaces)?;
     if !source
         .capabilities
         .iter()
-        .any(|item| item.eq_ignore_ascii_case(capability))
+        .any(|item| item.trim().eq_ignore_ascii_case(capability.trim()))
     {
         return Err(anyhow!("配置源不支持 {}：{}", capability, source.name));
     }
 
-    let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
     let target_path = if workspace.is_system() {
         paths.workspace.clone()
     } else {
@@ -421,24 +442,125 @@ pub fn resolve_config_source(
     source_id: Option<&str>,
     workspaces: &[ProjectWorkspaceConfig],
 ) -> Result<ConfigSource> {
-    let requested = source_id
-        .and_then(normalize_source_id)
-        .unwrap_or_else(|| DEFAULT_SOURCE_ID.to_string());
+    let requested = match source_id {
+        Some(source_id) => {
+            normalize_source_id(source_id).ok_or_else(|| anyhow!("配置源 ID 不能为空或无效"))?
+        }
+        None => DEFAULT_SOURCE_ID.to_string(),
+    };
     if requested == DEFAULT_SOURCE_ID || requested == "global" {
         return Ok(default_config_source());
     }
+    let sources = list_config_sources(workspaces)?;
+    resolve_config_source_from_sources(Some(&requested), &sources)
+}
+
+pub fn resolve_config_source_from_sources(
+    source_id: Option<&str>,
+    sources: &[ConfigSource],
+) -> Result<ConfigSource> {
+    let requested = source_id
+        .and_then(normalize_source_id)
+        .unwrap_or_else(|| DEFAULT_SOURCE_ID.to_string());
+    let requested = if requested == "global" {
+        DEFAULT_SOURCE_ID.to_string()
+    } else {
+        requested
+    };
     let dashed_requested = requested.replace('_', "-");
-    if let Some(source) = workspaces
+    sources
         .iter()
-        .filter_map(workspace_config_source)
-        .find(|source| source.id == requested || source.id.replace('_', "-") == dashed_requested)
-    {
-        return Ok(source);
-    }
-    load_custom_config_sources()?
-        .into_iter()
+        .cloned()
         .find(|source| source.id == requested || source.id.replace('_', "-") == dashed_requested)
         .ok_or_else(|| anyhow!("config source not found: {requested}"))
+}
+
+pub fn resolve_config_source_for_workspace(
+    paths: &ConfigPaths,
+    workspace: &ProjectWorkspaceConfig,
+    workspaces: &[ProjectWorkspaceConfig],
+    capability: &str,
+    source_override: Option<&str>,
+) -> Result<ConfigSource> {
+    let source_id = match source_override {
+        Some(source_id) => {
+            normalize_source_id(source_id).ok_or_else(|| anyhow!("配置源 ID 不能为空或无效"))?
+        }
+        None if workspace.is_system() => {
+            let app_workspace = load_workspace_config(&paths.workspace)?;
+            let configured = config_source_preference_key(capability)
+                .and_then(|key| app_workspace.app.config_source_preferences.get(&key));
+            match configured {
+                Some(source_id) => normalize_source_id(source_id).ok_or_else(|| {
+                    anyhow!("system 工作区的 {capability} 配置源偏好无效：{source_id}")
+                })?,
+                None => DEFAULT_SOURCE_ID.to_string(),
+            }
+        }
+        None => {
+            let configured = config_source_preference_key(capability)
+                .and_then(|key| workspace.metadata.get(&key));
+            match configured {
+                Some(source_id) => normalize_source_id(source_id).ok_or_else(|| {
+                    anyhow!(
+                        "工作区 {} 的 {capability} 配置源偏好无效：{source_id}",
+                        workspace.key
+                    )
+                })?,
+                None => config_source_id_for_workspace(workspace),
+            }
+        }
+    };
+    let source = resolve_config_source(Some(&source_id), workspaces)?;
+    if !config_source_supports(&source, capability) {
+        anyhow::bail!("配置源不支持 {capability}：{} ({})", source.name, source.id);
+    }
+    Ok(source)
+}
+
+pub fn runtime_overrides_path_for_config_source(source: &ConfigSource) -> Result<Option<PathBuf>> {
+    if !config_source_supports(source, "runtime") {
+        return Ok(None);
+    }
+    Ok(source.files.runtime_overrides.as_deref().map(PathBuf::from))
+}
+
+pub fn load_runtime_overrides(path: &Path) -> Result<RuntimeOverridesFile> {
+    if !path.exists() {
+        return Ok(RuntimeOverridesFile::default());
+    }
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("failed to read runtime overrides: {}", path.display()))?;
+    toml::from_str(&content)
+        .with_context(|| format!("failed to parse runtime overrides: {}", path.display()))
+}
+
+pub fn save_runtime_overrides(path: &Path, profiles: Vec<RuntimeProfileConfig>) -> Result<()> {
+    ensure_parent_dir(path)?;
+    let data = RuntimeOverridesFile {
+        runtime_profiles: profiles,
+    };
+    let content = toml::to_string_pretty(&data)
+        .with_context(|| format!("failed to serialize runtime overrides: {}", path.display()))?;
+    with_config_file_lock(path, || write_config_text_atomic(path, content))
+}
+
+pub fn apply_runtime_overrides_for_source(
+    config: &mut AppConfig,
+    source: &ConfigSource,
+) -> Result<()> {
+    if source.is_default {
+        return Ok(());
+    }
+    let Some(path) = runtime_overrides_path_for_config_source(source)? else {
+        return Ok(());
+    };
+    if !path.exists() {
+        return Ok(());
+    }
+    let overrides = load_runtime_overrides(&path)?;
+    config.defaults.runtime_profiles = overrides.runtime_profiles;
+    Ok(())
 }
 
 pub fn compare_config_sources(
@@ -835,7 +957,7 @@ fn config_source_reference(source: &ConfigSource) -> ConfigSourceReference {
     }
 }
 
-fn config_source_supports(source: &ConfigSource, capability: &str) -> bool {
+pub fn config_source_supports(source: &ConfigSource, capability: &str) -> bool {
     source
         .capabilities
         .iter()
@@ -866,6 +988,8 @@ fn default_config_source() -> ConfigSource {
         id: DEFAULT_SOURCE_ID.to_string(),
         name: "默认配置".to_string(),
         kind: "default".to_string(),
+        workspace_key: None,
+        workspace_archived: false,
         base_dir: display_path(&base_dir),
         files: ConfigSourceFiles {
             navigation: display_path(&base_dir.join("navigation.toml")),
@@ -901,6 +1025,8 @@ fn workspace_config_source(workspace: &ProjectWorkspaceConfig) -> Option<ConfigS
         id: source_id,
         name: format!("{} 配置", workspace.name.trim()),
         kind: "workspace".to_string(),
+        workspace_key: Some(workspace.key.clone()),
+        workspace_archived: workspace.is_archived(),
         base_dir: display_path(&base_dir),
         files: ConfigSourceFiles {
             navigation: display_path(&base_dir.join("navigation.toml")),
@@ -1047,6 +1173,8 @@ fn custom_config_source(definition: ConfigSourceDefinition) -> Option<ConfigSour
         id,
         name,
         kind,
+        workspace_key: None,
+        workspace_archived: false,
         base_dir: display_path(&base_dir),
         files: ConfigSourceFiles {
             navigation: display_path(&resolve_source_file(
@@ -1168,6 +1296,8 @@ mod tests {
             id: id.to_string(),
             name: name.to_string(),
             kind: kind.to_string(),
+            workspace_key: None,
+            workspace_archived: false,
             base_dir: display_path(base_dir),
             files: ConfigSourceFiles {
                 navigation: display_path(&base_dir.join("navigation.toml")),
@@ -1269,6 +1399,51 @@ mod tests {
     }
 
     #[test]
+    fn preloaded_source_resolution_preserves_global_and_separator_aliases() {
+        let workspace = ProjectWorkspaceConfig {
+            key: "feature_cr260_ykd_car".to_string(),
+            name: "CR260".to_string(),
+            ..ProjectWorkspaceConfig::default()
+        };
+        let sources = vec![
+            default_config_source(),
+            workspace_config_source(&workspace).unwrap(),
+        ];
+
+        assert_eq!(
+            resolve_config_source_from_sources(Some("global"), &sources)
+                .unwrap()
+                .id,
+            DEFAULT_SOURCE_ID
+        );
+        assert_eq!(
+            resolve_config_source_from_sources(Some("workspace-feature-cr260-ykd-car"), &sources,)
+                .unwrap()
+                .id,
+            "workspace-feature_cr260_ykd_car"
+        );
+    }
+
+    #[test]
+    fn workspace_source_exposes_archive_origin_without_losing_resolution() {
+        let workspace = ProjectWorkspaceConfig {
+            key: "feature-a".to_string(),
+            name: "Feature A".to_string(),
+            archive: Some(crate::config::ProjectWorkspaceArchiveConfig {
+                archived_at: "2026-07-28T08:00:00Z".to_string(),
+                reason: None,
+            }),
+            ..ProjectWorkspaceConfig::default()
+        };
+
+        let source = workspace_config_source(&workspace).expect("workspace config source");
+
+        assert_eq!(source.workspace_key.as_deref(), Some("feature-a"));
+        assert!(source.workspace_archived);
+        assert_eq!(source.id, "workspace-feature-a");
+    }
+
+    #[test]
     fn workspace_can_prefer_an_explicit_source_per_capability() {
         let mut workspace = ProjectWorkspaceConfig {
             key: "feature-cr260".to_string(),
@@ -1360,6 +1535,36 @@ mod tests {
             "workspace-feature-a"
         );
 
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn archived_workspace_rejects_config_source_changes() {
+        let root = test_dir("archived-preference");
+        let paths = ConfigPaths {
+            dir: root.clone(),
+            projects: root.join("projects.toml"),
+            workspace: root.join("workspace.toml"),
+            project_workspaces: root.join("workspaces"),
+        };
+        fs::create_dir_all(&paths.project_workspaces).unwrap();
+        save_workspace_config(&paths.workspace, &WorkspaceConfig::default()).unwrap();
+        let workspace = ProjectWorkspaceConfig {
+            key: "feature-a".to_string(),
+            name: "Feature A".to_string(),
+            archive: Some(crate::config::ProjectWorkspaceArchiveConfig {
+                archived_at: "2026-07-28T08:00:00Z".to_string(),
+                reason: None,
+            }),
+            ..ProjectWorkspaceConfig::default()
+        };
+        save_project_workspace_config(&paths.project_workspaces.join("feature-a.toml"), &workspace)
+            .unwrap();
+
+        let error = save_config_source_preference(&paths, "feature-a", "proxy", "default")
+            .expect_err("archived workspace preference must fail");
+
+        assert!(error.to_string().contains("restore it"));
         fs::remove_dir_all(root).unwrap();
     }
 

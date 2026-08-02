@@ -31,7 +31,9 @@ rdevtool --json agent context --project <project> --for runtime --compact --incl
 rdevtool --json agent context --for artifacts --compact
 ```
 
-只读问答使用对应的 `show`、`inspect` 或源码；跨模块总览才使用 `info`；故障跨越多个配置域或配置写入后再运行 `doctor`。`--include` 支持 `history,notes,navigation,proxy,projects,worklog`，其中 proxy 只表示配置绑定，`observed=false` 时不能当作监听或请求证据。runtime 预设需要 `--project` 才会生成 `runtime.targets`：默认一次返回项目默认目标和各 Debug Profile；使用 `--debug-profile` / `--runtime-profile` 可只读取指定组合。
+只读问答使用对应的 `show`、`inspect` 或源码；跨模块总览才使用 `info`；故障跨越多个配置域或配置写入后再运行 `doctor`。`info.identity` 用于确认当前执行文件、构建 commit 与本地源码是否一致；指定 `--workspace` 的 `doctor` 会使用该命令作用域，而不是 App 持久化的活动工作区。
+
+`--include` 支持 `history,notes,navigation,proxy,projects,worklog`，其中 proxy 只表示配置绑定，`observed=false` 时不能当作监听或请求证据。Agent context schema v2 的 `fileNotes` 只注入最多 4 条非 README Markdown 摘要和路径；需要完整步骤时再读取命中文件。runtime 预设需要 `--project` 才会生成 `runtime.targets`：默认一次返回项目默认目标和各 Debug Profile；使用 `--debug-profile` / `--runtime-profile` 可只读取指定组合。
 
 开发态可替换为：
 

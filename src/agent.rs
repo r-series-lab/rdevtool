@@ -17,6 +17,7 @@ use crate::core::{
 use crate::navigation::{
     NavigationIndexEntry, search_navigation_entries, search_navigation_entries_for_workspace,
 };
+use crate::project_notes::{NoteDocumentSummary, search_note_documents};
 use crate::replay::{ReplayAction, replay_actions_from_history};
 use crate::runtime::{
     ProjectRuntimeContextSnapshot, ProjectRuntimeLaunchOptions, project_runtime_context_snapshot,
@@ -50,6 +51,7 @@ pub struct AgentContext {
     pub projects: Vec<ProjectSummary>,
     pub project: Option<AgentProjectContext>,
     pub notes: Vec<NoteSummary>,
+    pub file_notes: Vec<NoteDocumentSummary>,
     pub build_history: Vec<DeployHistoryEntry>,
     pub deploy_history: Vec<DeployHistoryEntry>,
     pub merge_history: Vec<MergeHistoryEntry>,
@@ -240,6 +242,7 @@ pub fn capabilities() -> AgentCapabilities {
             "workspace-worklog".to_string(),
             "workspace-worklog-auto-record".to_string(),
             "workspace-filtered-history".to_string(),
+            "workspace-workflow-chain".to_string(),
             "navigation-crud".to_string(),
             "doctor".to_string(),
             "project-domain-cli".to_string(),
@@ -254,6 +257,8 @@ pub fn capabilities() -> AgentCapabilities {
             "deploy-domain-compat".to_string(),
             "app-preferences-cli".to_string(),
             "shared-sqlite".to_string(),
+            "project-notes".to_string(),
+            "project-notes-search".to_string(),
             "cli-json-envelope".to_string(),
         ],
         commands: vec![
@@ -266,6 +271,7 @@ pub fn capabilities() -> AgentCapabilities {
             "deploy targets|plan|trigger|status|history".to_string(),
             "git current|branches|overview|merge|merge-many|create|clone|switch|push-status|push|history"
                 .to_string(),
+            "workflow chain list|show|plan|run".to_string(),
             "doctor".to_string(),
             "list".to_string(),
             "info".to_string(),
@@ -284,10 +290,12 @@ pub fn capabilities() -> AgentCapabilities {
             "switch-branch".to_string(),
             "push-status".to_string(),
             "push-branch".to_string(),
-            "notes list|get|create|save|delete|search".to_string(),
+            "notes path|init|project-path|project-init|index|file-search|list|get|create|save|delete|search"
+                .to_string(),
             "history operations|build|deploy|merge|replay-plan|replay-run".to_string(),
             "navigation path|list|search|open|add|update|delete".to_string(),
-            "link path|list|show|plan|check|run|stop|save|delete|attach".to_string(),
+            "link path|list|inspect|show|plan|check|run|stop|save|delete|migrate|attach"
+                .to_string(),
             "config-source list|show|compare|copy|use".to_string(),
             "proxy path|source|list|start|stop|restart|status|show|add|update|delete|export|import|rule-list|rule-show|rule-add|rule-update|rule-delete|diagnose|verify|bind-runtime".to_string(),
             "runtime profiles|profile-show|inspect|preflight|start|status|list|stop|restart|adopt|diagnose|focus|wait|log".to_string(),
@@ -487,7 +495,7 @@ fn context_for_workspace_with_options_and_optional_paths(
     }
 
     Ok(AgentContext {
-        schema_version: 1,
+        schema_version: 2,
         preset: options.preset.map(|preset| preset.key().to_string()),
         compact: options.compact,
         included_sections,
@@ -515,6 +523,11 @@ fn context_for_workspace_with_options_and_optional_paths(
         } else {
             Vec::new()
         },
+        file_notes: if include_notes {
+            bounded_file_notes(filter_project_key, query, normalized_limit.min(4))?
+        } else {
+            Vec::new()
+        },
         build_history: build_history.clone(),
         deploy_history: if legacy_full {
             build_history
@@ -537,6 +550,25 @@ fn context_for_workspace_with_options_and_optional_paths(
         runtime,
         artifacts,
     })
+}
+
+fn bounded_file_notes(
+    project_key: Option<&str>,
+    query: Option<&str>,
+    limit: usize,
+) -> Result<Vec<NoteDocumentSummary>> {
+    let candidate_limit = limit.saturating_mul(3).clamp(1, 24);
+    Ok(search_note_documents(project_key, query, candidate_limit)?
+        .documents
+        .into_iter()
+        .filter(|document| {
+            document
+                .relative_path
+                .file_name()
+                .is_none_or(|name| !name.to_string_lossy().eq_ignore_ascii_case("README.md"))
+        })
+        .take(limit)
+        .collect())
 }
 
 fn build_runtime_context(
@@ -828,9 +860,20 @@ mod tests {
         );
         assert!(
             value
+                .features
+                .iter()
+                .any(|feature| feature == "workspace-workflow-chain")
+        );
+        assert!(value.commands.iter().any(|command| {
+            command.starts_with(
+                "link path|list|inspect|show|plan|check|run|stop|save|delete|migrate|attach",
+            )
+        }));
+        assert!(
+            value
                 .commands
                 .iter()
-                .any(|command| command.starts_with("link path|list|show|plan|check|run|stop"))
+                .any(|command| command == "workflow chain list|show|plan|run")
         );
     }
 
@@ -962,6 +1005,7 @@ mod tests {
             key: "feature-a".to_string(),
             name: "Feature A".to_string(),
             description: None,
+            archive: None,
             workspace_type: "business".to_string(),
             metadata: BTreeMap::new(),
             root_dir: Some(root),

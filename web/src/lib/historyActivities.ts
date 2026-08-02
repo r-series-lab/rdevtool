@@ -203,6 +203,24 @@ function activityUrls(item: ActivityEntry) {
     .filter((value) => /^https?:\/\//i.test(value));
 }
 
+function preserveActivityResolution(
+  matched: ActivityEntry,
+  historyActivity: ActivityEntry,
+) {
+  const acknowledgedAt =
+    matched.acknowledgedAt || historyActivity.acknowledgedAt;
+  return {
+    acknowledgedAt,
+    action: acknowledgedAt
+      ? null
+      : matched.action || historyActivity.action,
+    updatedAt:
+      matched.updatedAt.localeCompare(historyActivity.updatedAt) >= 0
+        ? matched.updatedAt
+        : historyActivity.updatedAt,
+  };
+}
+
 function mergeHistoryParameterSummary(item: MergeHistoryEntry) {
   const projectName = item.projectName.trim() || item.projectKey.trim() || "项目";
   const sourceBranch = item.sourceBranch.trim() || "-";
@@ -272,6 +290,10 @@ function activityFromPersistedOperationEvent(event: OperationEventEntry) {
       summary: event.summary,
       detail: event.detail || null,
       executionKey: `operation:${event.id}`,
+      chainId: event.chainId ?? null,
+      parentId: event.parentId ?? null,
+      stepLabel: event.stepLabel ?? null,
+      chainLabel: event.chainLabel ?? null,
       projectKey: event.projectKey ?? null,
       projectName: event.projectName ?? null,
       target: {
@@ -294,6 +316,10 @@ function activityFromPersistedOperationEvent(event: OperationEventEntry) {
     title: event.title.trim() || activity.title,
     summary: event.summary.trim() || activity.summary,
     executionKey: `operation:${event.id}`,
+    chainId: event.chainId ?? null,
+    parentId: event.parentId ?? null,
+    stepLabel: event.stepLabel ?? null,
+    chainLabel: event.chainLabel ?? null,
     createdAt: event.createdAt,
     updatedAt: event.updatedAt,
   };
@@ -437,6 +463,7 @@ function mergeExistingBuildActivity(
       matched.createdAt.localeCompare(historyActivity.createdAt) <= 0
         ? matched.createdAt
         : historyActivity.createdAt,
+    ...preserveActivityResolution(matched, historyActivity),
   };
 }
 
@@ -487,6 +514,7 @@ function mergeExistingBranchActivity(
       matched.createdAt.localeCompare(historyActivity.createdAt) <= 0
         ? matched.createdAt
         : historyActivity.createdAt,
+    ...preserveActivityResolution(matched, historyActivity),
   };
 }
 
@@ -515,14 +543,11 @@ function mergeExistingOperationActivity(
       ? matched.parameters
       : historyActivity.parameters,
     resource: matched.resource || historyActivity.resource,
-    acknowledgedAt: matched.acknowledgedAt || historyActivity.acknowledgedAt,
-    action: matched.acknowledgedAt
-      ? null
-      : matched.action || historyActivity.action,
     createdAt:
       matched.createdAt.localeCompare(historyActivity.createdAt) <= 0
         ? matched.createdAt
         : historyActivity.createdAt,
+    ...preserveActivityResolution(matched, historyActivity),
   };
 }
 

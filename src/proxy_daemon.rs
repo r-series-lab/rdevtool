@@ -75,11 +75,17 @@ pub struct ProxyDaemonRuntime;
 
 impl ProxyDaemonRuntime {
     pub fn dashboard(&self, path: &Path) -> Result<ProxyDashboard> {
+        let mut dashboard = self.dashboard_summary(path)?;
+        dashboard.events = self.events(path, None);
+        Ok(dashboard)
+    }
+
+    pub fn dashboard_summary(&self, path: &Path) -> Result<ProxyDashboard> {
         let config = load_proxy_config(path)?;
         Ok(ProxyDashboard {
             config_path: path.display().to_string(),
             statuses: self.statuses_for_profiles(path, &config.profiles),
-            events: self.events(path, None),
+            events: Vec::new(),
             config,
         })
     }

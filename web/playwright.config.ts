@@ -1,6 +1,14 @@
 import { defineConfig } from "@playwright/test";
 
-const smokePort = 4174;
+const configuredSmokePort = Number.parseInt(
+  process.env.RDEVTOOL_E2E_PORT ?? "",
+  10,
+);
+const smokePort =
+  Number.isInteger(configuredSmokePort) && configuredSmokePort > 0
+    ? configuredSmokePort
+    : 10_000 + (process.pid % 20_000);
+process.env.RDEVTOOL_E2E_PORT = String(smokePort);
 
 export default defineConfig({
   testDir: "./tests",
@@ -23,6 +31,10 @@ export default defineConfig({
     command: `npm run dev -- --port ${smokePort}`,
     url: `http://127.0.0.1:${smokePort}/smoke.html`,
     reuseExistingServer: false,
+    gracefulShutdown: {
+      signal: "SIGTERM",
+      timeout: 5_000,
+    },
     timeout: 30_000,
   },
 });

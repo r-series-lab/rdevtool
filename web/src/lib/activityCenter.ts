@@ -6,6 +6,7 @@ import type {
   BranchWorkflowMode,
 } from "../app-types";
 import { branchTaskDisplayDetail } from "./branchTaskDetails";
+import { createClientOperationId } from "./operationLifecycle";
 
 export type ActivityKind =
   | "runtime"
@@ -26,6 +27,8 @@ export type ActivityTarget = {
   page: PageKey;
   projectKey?: string | null;
   branchMode?: BranchWorkflowMode | null;
+  workspaceKey?: string | null;
+  workspaceView?: "open" | "archived" | null;
 };
 
 export type ActivityResource = {
@@ -77,6 +80,9 @@ export type ActivityAction =
       linkKey: string;
       linkName: string;
       sourceId?: string | null;
+      proxySourceId?: string | null;
+      runtimeSourceId?: string | null;
+      workspaceKey?: string | null;
       replayAction: "run" | "stop";
     }
   | {
@@ -99,6 +105,7 @@ export type ActivityAction =
       projectName: string;
       debugProfileKey?: string | null;
       envOverrides?: Record<string, string> | null;
+      expectedPort?: number | null;
       replayAction: "start" | "stop";
     }
   | {
@@ -175,6 +182,7 @@ export type ActivityPatch = Partial<
 export type ActivityMatch = {
   kind?: ActivityKind;
   status?: ActivityStatus;
+  actionKind?: ActivityAction["kind"];
   executionKey?: string | null;
   projectKey?: string | null;
   resourceValues?: string[];
@@ -213,10 +221,6 @@ const BRANCH_REPLAY_COMMANDS = new Set<BranchTaskReplayCommand>([
   "execute_branch_switch_task",
   "execute_branch_push_task",
 ]);
-
-function makeActivityId(prefix = "activity") {
-  return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-}
 
 function normalizeString(value: unknown) {
   return typeof value === "string" ? value : "";
@@ -342,7 +346,7 @@ export function activityRequiresAttention(
     "kind" | "status" | "summary" | "action" | "acknowledgedAt"
   >,
 ) {
-  if (item.action) {
+  if (item.action && !item.acknowledgedAt) {
     return true;
   }
   const buildSyncNotice =
@@ -350,6 +354,34 @@ export function activityRequiresAttention(
     (item.summary.startsWith("状态同步失败") ||
       item.summary === "同步 Jenkins 状态中…");
   return item.status === "failed" && !item.acknowledgedAt && !buildSyncNotice;
+}
+
+export function retainActivityEntries(items: ActivityEntry[], limit: number) {
+  const normalizedLimit = Math.max(0, Math.floor(limit));
+  if (normalizedLimit === 0) {
+    return [];
+  }
+  const sorted = [...items].sort((left, right) =>
+    right.updatedAt.localeCompare(left.updatedAt),
+  );
+  if (sorted.length <= normalizedLimit) {
+    return sorted;
+  }
+  const attentionItems = sorted.filter(activityRequiresAttention);
+  const retainedAttentionItems = attentionItems.slice(0, normalizedLimit);
+  if (retainedAttentionItems.length === normalizedLimit) {
+    return retainedAttentionItems;
+  }
+  const attentionIds = new Set(retainedAttentionItems.map((item) => item.id));
+  return [
+    ...retainedAttentionItems,
+    ...sorted
+      .filter(
+        (item) =>
+          !attentionIds.has(item.id) && !activityRequiresAttention(item),
+      )
+      .slice(0, normalizedLimit - retainedAttentionItems.length),
+  ].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
 }
 
 function isStoredBranchTaskHistoryEntry(value: unknown): value is BranchTaskHistoryEntry {
@@ -469,6 +501,7 @@ function normalizeActivityTarget(value: unknown): ActivityTarget | null {
   const rawPageValue = (value as Record<string, unknown>).page;
   const rawPage = typeof rawPageValue === "string" ? rawPageValue : "";
   const projectKey = normalizeNullableString(candidate.projectKey);
+  const workspaceKey = normalizeNullableString(candidate.workspaceKey);
   const page =
     rawPage === "deploy"
       ? "build"
@@ -490,7 +523,7 @@ function normalizeActivityTarget(value: unknown): ActivityTarget | null {
     return null;
   }
 
-  return {
+  const target: ActivityTarget = {
     page,
     projectKey,
     branchMode:
@@ -502,6 +535,15 @@ function normalizeActivityTarget(value: unknown): ActivityTarget | null {
         ? candidate.branchMode
         : null,
   };
+  if (
+    workspaceKey &&
+    (candidate.workspaceView === "open" ||
+      candidate.workspaceView === "archived")
+  ) {
+    target.workspaceKey = workspaceKey;
+    target.workspaceView = candidate.workspaceView;
+  }
+  return target;
 }
 
 function normalizeActivityResource(value: unknown): ActivityResource | null {
@@ -557,11 +599,17 @@ function normalizeActivityAction(value: unknown): ActivityAction | null {
       linkKey?: unknown;
       linkName?: unknown;
       sourceId?: unknown;
+      proxySourceId?: unknown;
+      runtimeSourceId?: unknown;
+      workspaceKey?: unknown;
       replayAction?: unknown;
     };
     const linkKey = normalizeString(raw.linkKey).trim();
     const linkName = normalizeString(raw.linkName).trim() || linkKey;
     const sourceId = normalizeNullableString(raw.sourceId);
+    const proxySourceId = normalizeNullableString(raw.proxySourceId);
+    const runtimeSourceId = normalizeNullableString(raw.runtimeSourceId);
+    const workspaceKey = normalizeNullableString(raw.workspaceKey);
     if (
       !linkKey ||
       !linkName ||
@@ -575,6 +623,9 @@ function normalizeActivityAction(value: unknown): ActivityAction | null {
       linkKey,
       linkName,
       sourceId,
+      proxySourceId,
+      runtimeSourceId,
+      workspaceKey,
       replayAction: raw.replayAction,
     };
   }
@@ -653,6 +704,7 @@ function normalizeActivityAction(value: unknown): ActivityAction | null {
       projectName?: unknown;
       debugProfileKey?: unknown;
       envOverrides?: unknown;
+      expectedPort?: unknown;
       replayAction?: unknown;
     };
     const projectKey = normalizeString(raw.projectKey).trim();
@@ -663,6 +715,13 @@ function normalizeActivityAction(value: unknown): ActivityAction | null {
     ) {
       return null;
     }
+    const expectedPort =
+      typeof raw.expectedPort === "number" &&
+      Number.isInteger(raw.expectedPort) &&
+      raw.expectedPort > 0 &&
+      raw.expectedPort <= 65_535
+        ? raw.expectedPort
+        : null;
     return {
       kind: candidate.kind,
       label,
@@ -670,6 +729,7 @@ function normalizeActivityAction(value: unknown): ActivityAction | null {
       projectName,
       debugProfileKey: normalizeNullableString(raw.debugProfileKey),
       envOverrides: normalizeStringRecord(raw.envOverrides),
+      expectedPort,
       replayAction: raw.replayAction,
     };
   }
@@ -830,7 +890,7 @@ export function normalizeActivityEntries(value: unknown): ActivityEntry[] {
 export function createActivityEntry(draft: ActivityDraft): ActivityEntry {
   const now = new Date().toISOString();
   return normalizeActivityEntry({
-    id: draft.id || makeActivityId(draft.kind),
+    id: draft.id || createClientOperationId(draft.kind),
     kind: draft.kind,
     origin: draft.origin ?? null,
     status: draft.status,

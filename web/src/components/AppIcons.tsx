@@ -117,6 +117,28 @@ export function TrashIcon(props: SvgIconProps) {
   );
 }
 
+export function ArchiveIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M4 4h16l1 4v2h-1v9H4v-9H3V8l1-4Zm2 6v7h12v-7H6Zm-.5-4-.5 2h14l-.5-2h-13ZM9 12h6v2H9v-2Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
+export function RestoreIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M12 4a8 8 0 1 1-7.4 11H7a6 6 0 1 0 1.2-6.7L11 11H4V4l2.8 2.8A8 8 0 0 1 12 4Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
 export function CollapseIcon(props: SvgIconProps) {
   return (
     <SvgIcon viewBox="0 0 24 24" {...props}>
@@ -144,6 +166,39 @@ export function ClearIcon(props: SvgIconProps) {
     <SvgIcon viewBox="0 0 24 24" {...props}>
       <path
         d="m6.4 5 5.6 5.6L17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4 6.4 5Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
+export function InfoIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M12 3.5a8.5 8.5 0 1 1 0 17 8.5 8.5 0 0 1 0-17Zm0 2a6.5 6.5 0 1 0 0 13 6.5 6.5 0 0 0 0-13Zm-1 5h2V17h-2v-6.5Zm0-3h2v2h-2v-2Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
+export function WarningIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M10.3 4.6a2 2 0 0 1 3.4 0l7.4 12.8a2 2 0 0 1-1.7 3H4.6a2 2 0 0 1-1.7-3l7.4-12.8Zm1.7 1-7.4 12.8h14.8L12 5.6Zm-1 3.4h2v5.5h-2V9Zm0 7h2v2h-2v-2Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
+export function PowerIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M11 3h2v9h-2V3Zm-4.6 2.4 1.4 1.4A6.5 6.5 0 1 0 16.2 7l1.4-1.4A8.5 8.5 0 1 1 6.4 5.4Z"
         fill="currentColor"
       />
     </SvgIcon>
@@ -316,6 +371,17 @@ export function FolderIcon(props: SvgIconProps) {
         d="M4 8.2h16l-1.2 7.5a1.5 1.5 0 0 1-1.5 1.3H6.7a1.5 1.5 0 0 1-1.5-1.3L4 8.2Z"
         fill="currentColor"
         opacity=".24"
+      />
+    </SvgIcon>
+  );
+}
+
+export function KnowledgeIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M5 4h5.5c.8 0 1.5.3 2 .8.5-.5 1.2-.8 2-.8H20v15h-5.5c-.6 0-1 .2-1.5.6l-.5.4-.5-.4c-.5-.4-.9-.6-1.5-.6H5V4Zm2 2v11h3.5c.4 0 .7 0 1 .1V7.2c-.2-.7-.5-1.2-1.2-1.2H7Zm6.5 1.2v9.9c.3-.1.6-.1 1-.1H18V6h-3.3c-.7 0-1 .5-1.2 1.2Z"
+        fill="currentColor"
       />
     </SvgIcon>
   );

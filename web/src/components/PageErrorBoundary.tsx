@@ -1,5 +1,10 @@
 import { Component, type ReactNode } from "react";
 import { Alert } from "@mui/material";
+import {
+  readStoredLanguagePreference,
+  resolveLanguage,
+  translateMessage,
+} from "../i18n";
 
 type PageErrorBoundaryProps = {
   children: ReactNode;
@@ -36,7 +41,13 @@ export class PageErrorBoundary extends Component<
 
   override render() {
     if (this.state.errorMessage) {
-      return <Alert severity="error">页面渲染失败：{this.state.errorMessage}</Alert>;
+      const language = resolveLanguage(readStoredLanguagePreference());
+      return (
+        <Alert severity="error">
+          {translateMessage(language, "页面渲染失败：")}
+          {this.state.errorMessage}
+        </Alert>
+      );
     }
 
     return this.props.children;

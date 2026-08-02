@@ -38,6 +38,9 @@ pub struct BranchCommitSummary {
 pub struct BuildChangeSnapshot {
     pub paths: Vec<String>,
     pub sources: Vec<String>,
+    pub working_tree_paths: Vec<String>,
+    pub committed_paths: Vec<String>,
+    pub committed_source: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1760,21 +1763,22 @@ pub fn cached_branch_tip_changed_paths(repo_path: &Path, branch: &str) -> Result
 
 /// Collects local paths that can affect a build-safety decision.
 ///
-/// The snapshot combines every staged, unstaged, conflicted, or untracked path
-/// reported by `git status` with committed paths on `HEAD` relative to the
-/// current branch's upstream. It is deliberately read-only and does not fetch
-/// or mutate refs. `sources` records which observations were attempted so a
-/// caller can distinguish a worktree-only snapshot from one that also checked
-/// an upstream commit range.
+/// The aggregate fields remain for existing callers, while the classified
+/// fields let build planning distinguish local work from deployable commits.
 pub fn build_change_snapshot(repo_path: &Path) -> Result<BuildChangeSnapshot> {
     let status = working_tree_status(repo_path)?;
-    let mut paths = status
+    let working_tree_paths = status
         .files
         .into_iter()
         .map(|item| item.path)
         .filter(|path| !path.trim().is_empty())
-        .collect::<BTreeSet<_>>();
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let mut paths = working_tree_paths.iter().cloned().collect::<BTreeSet<_>>();
     let mut sources = vec!["workingTree".to_string()];
+    let mut committed_paths = Vec::new();
+    let mut committed_source = None;
 
     if let Some(upstream) = status
         .upstream_branch
@@ -1784,19 +1788,26 @@ pub fn build_change_snapshot(repo_path: &Path) -> Result<BuildChangeSnapshot> {
     {
         let range = format!("{upstream}...HEAD");
         let output = run_git_capture(repo_path, &["diff", "--name-only", &range, "--"])?;
-        paths.extend(
-            output
-                .lines()
-                .map(str::trim)
-                .filter(|path| !path.is_empty())
-                .map(ToString::to_string),
-        );
-        sources.push(format!("committedDiff:{range}"));
+        committed_paths = output
+            .lines()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        paths.extend(committed_paths.iter().cloned());
+        let source = format!("committedDiff:{range}");
+        sources.push(source.clone());
+        committed_source = Some(source);
     }
 
     Ok(BuildChangeSnapshot {
         paths: paths.into_iter().collect(),
         sources,
+        working_tree_paths,
+        committed_paths,
+        committed_source,
     })
 }
 
@@ -2437,6 +2448,21 @@ mod worktree_recovery_tests {
                 "workingTree".to_string(),
                 "committedDiff:origin/main...HEAD".to_string(),
             ]
+        );
+        assert_eq!(
+            snapshot.working_tree_paths,
+            vec![
+                "docs/staged.md".to_string(),
+                "imop-admin/src/local.ts".to_string(),
+            ]
+        );
+        assert_eq!(
+            snapshot.committed_paths,
+            vec!["mobile/src/page.ts".to_string()]
+        );
+        assert_eq!(
+            snapshot.committed_source.as_deref(),
+            Some("committedDiff:origin/main...HEAD")
         );
         let _ = fs::remove_dir_all(root);
     }

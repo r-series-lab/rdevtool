@@ -8,9 +8,11 @@ import {
 import {
   Box,
   Button,
+  ButtonBase,
   Chip,
   Dialog,
   IconButton,
+  InputAdornment,
   ListItemIcon,
   ListItemText,
   Menu,
@@ -33,12 +35,14 @@ import type {
 } from "../app-types";
 import {
   AppWindowIcon,
+  CheckIcon,
   ClearIcon,
   CopyIcon,
   OpenExternalIcon,
   PlayIcon,
   PlusIcon,
   RefreshIcon,
+  SearchIcon,
   TerminalIcon,
   UploadIcon,
   WebsiteIcon,
@@ -52,6 +56,7 @@ import {
   validateHttpRequest,
   type EditableHttpRequest,
 } from "../lib/httpRequest";
+import { useI18n, type Translate } from "../i18n";
 import { FetchImportDialog, HttpRequestDraftEditor } from "./web-actions/FetchImportEditor";
 
 const SCRIPT_DRAFT_ACTION_KEY = "__script_draft__";
@@ -170,6 +175,7 @@ function resolveParamInitialValue(
 }
 
 function webActionParamSourceLabel(
+  t: Translate,
   param: WebActionParamSummary,
   contextParams?: Record<string, string>,
 ) {
@@ -181,19 +187,23 @@ function webActionParamSourceLabel(
   const resolved = resolveParamInitialValue(param, contextParams);
   const sourceLabel =
     {
-      project: "项目",
-      workspace: "工作区",
-      debug: "调试档案",
-      debugprofile: "调试档案",
-      debug_profile: "调试档案",
-      "debug-profile": "调试档案",
-      runtime: "运行配置",
-      runtimeprofile: "运行配置",
-      runtime_profile: "运行配置",
-      "runtime-profile": "运行配置",
-      context: "上下文",
+      project: t("项目"),
+      workspace: t("工作区"),
+      debug: t("启动档案"),
+      debugprofile: t("启动档案"),
+      debug_profile: t("启动档案"),
+      "debug-profile": t("启动档案"),
+      runtime: t("运行环境"),
+      runtimeprofile: t("运行环境"),
+      runtime_profile: t("运行环境"),
+      "runtime-profile": t("运行环境"),
+      context: t("上下文"),
     }[source] ?? source;
-  return `来源：${sourceLabel} · ${sourceKey}${resolved ? ` · ${resolved}` : ""}`;
+  return t("来源：{sourceLabel} · {sourceKey}{resolved}", {
+    sourceLabel,
+    sourceKey,
+    resolved: resolved ? ` · ${resolved}` : "",
+  });
 }
 
 function defaultParamValues(
@@ -205,10 +215,6 @@ function defaultParamValues(
     values[param.key] = resolveParamInitialValue(param, contextParams);
   }
   return values;
-}
-
-function formatTargetLabel(target: WebActionTarget) {
-  return [target.title, target.url].filter(Boolean).join(" · ") || target.id;
 }
 
 function webActionTargetListCommand(context: WebActionsDialogContext | null) {
@@ -274,11 +280,11 @@ function findMatchingTarget(targets: WebActionTarget[], contextUrl: string) {
   }, null);
 }
 
-function formatResult(result: WebActionRunResult | null) {
+function formatResult(t: Translate, result: WebActionRunResult | null) {
   if (!result) {
     return "";
   }
-  return result.resultText || "执行完成";
+  return result.resultText || t("执行完成");
 }
 
 function formatActionOption(action: WebActionSummary) {
@@ -292,9 +298,12 @@ function formatActionOption(action: WebActionSummary) {
   }`;
 }
 
-function formatHttpRequestDraftOption(request: EditableHttpRequest) {
+function formatHttpRequestDraftOption(t: Translate, request: EditableHttpRequest) {
   const requestUrl = buildHttpRequestUrl(request).trim();
-  return `草稿 · ${request.method.toUpperCase()} ${requestUrl || "未设置 URL"}`;
+  return t("草稿 · {method} {url}", {
+    method: request.method.toUpperCase(),
+    url: requestUrl || t("未设置 URL"),
+  });
 }
 
 function formatRequestPreview(action: WebActionSummary | null) {
@@ -401,6 +410,8 @@ export function RuntimePanelDrawer<T extends string = string>({
   closeDisabled = false,
   children,
 }: RuntimePanelDrawerProps<T>) {
+  const { t } = useI18n();
+
   return (
     <Dialog
       className="runtime-panel-dialog"
@@ -413,7 +424,12 @@ export function RuntimePanelDrawer<T extends string = string>({
       }}
     >
       <Box
-        className="runtime-panel-shell"
+        className={[
+          "runtime-panel-shell",
+          activeTab ? `runtime-panel-shell--${activeTab}` : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
         sx={{
           height: "100%",
           display: "flex",
@@ -429,7 +445,7 @@ export function RuntimePanelDrawer<T extends string = string>({
           justifyContent="space-between"
           spacing={1}
         >
-          <Stack spacing={0.5} minWidth={0}>
+          <Stack className="runtime-panel-heading" spacing={0.5} minWidth={0}>
             <Stack direction="row" alignItems="center" spacing={0.8} minWidth={0}>
               {statusDotColor ? (
                 <Box
@@ -491,26 +507,19 @@ export function RuntimePanelDrawer<T extends string = string>({
               </Typography>
             ) : null}
           </Stack>
-          <Stack direction="row" spacing={0.45}>
+          <Stack
+            className="runtime-panel-header-actions"
+            direction="row"
+            spacing={0.45}
+          >
             {headerActions}
-            <Tooltip title="关闭">
+            <Tooltip title={t("关闭")}>
               <span>
                 <IconButton
-                  aria-label="关闭运行面板"
+                  className="runtime-panel-close"
+                  aria-label={t("关闭运行面板")}
                   disabled={closeDisabled}
                   onClick={onClose}
-                  sx={{
-                    width: 30,
-                    height: 30,
-                    borderRadius: "999px",
-                    bgcolor: "rgba(255,255,255,0.028)",
-                    color: "var(--muted)",
-                    border: "1px solid var(--line-soft)",
-                    "&:hover": {
-                      bgcolor: "rgba(255,255,255,0.052)",
-                      color: "var(--text)",
-                    },
-                  }}
                 >
                   <ClearIcon fontSize="small" />
                 </IconButton>
@@ -520,7 +529,13 @@ export function RuntimePanelDrawer<T extends string = string>({
         </Stack>
 
         {chips ? (
-          <Stack direction="row" spacing={0.7} flexWrap="wrap" useFlexGap>
+          <Stack
+            className="runtime-panel-status-strip"
+            direction="row"
+            spacing={0.55}
+            flexWrap="wrap"
+            useFlexGap
+          >
             {chips}
           </Stack>
         ) : null}
@@ -531,31 +546,6 @@ export function RuntimePanelDrawer<T extends string = string>({
             value={activeTab}
             onChange={(_, value) => onTabChange?.(value as T)}
             variant="fullWidth"
-            sx={{
-              minHeight: 34,
-              borderRadius: "12px",
-              border: "1px solid var(--line-soft)",
-              bgcolor: "rgba(255,255,255,0.018)",
-              "& .MuiTabs-indicator": {
-                height: 2,
-                borderRadius: "999px",
-                bgcolor: "var(--accent)",
-              },
-              "& .MuiTab-root": {
-                minHeight: 34,
-                minWidth: 0,
-                px: 0.65,
-                py: 0.35,
-                gap: 0.35,
-                color: "var(--muted)",
-                fontSize: "0.72rem",
-                fontWeight: 750,
-                textTransform: "none",
-              },
-              "& .MuiTab-root.Mui-selected": {
-                color: "var(--text)",
-              },
-            }}
           >
             {tabs.map((tab) => (
               <Tab
@@ -571,7 +561,12 @@ export function RuntimePanelDrawer<T extends string = string>({
         ) : null}
 
         <Box
-          className="runtime-panel-body"
+          className={[
+            "runtime-panel-body",
+            activeTab ? `runtime-panel-body--${activeTab}` : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
           sx={{
             display: "flex",
             flexDirection: "column",
@@ -595,6 +590,7 @@ export function WebActionsPanel({
   compact = false,
   onRunningChange,
 }: WebActionsPanelProps) {
+  const { t } = useI18n();
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
@@ -603,6 +599,7 @@ export function WebActionsPanel({
   const [targets, setTargets] = useState<WebActionTarget[]>([]);
   const [selectedActionKey, setSelectedActionKey] = useState("");
   const [selectedTargetId, setSelectedTargetId] = useState("");
+  const [targetFilter, setTargetFilter] = useState("");
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
   const [temporaryScript, setTemporaryScript] = useState(DEFAULT_TEMPORARY_SCRIPT);
   const [temporaryParamsText, setTemporaryParamsText] = useState("{}");
@@ -619,6 +616,17 @@ export function WebActionsPanel({
     () => actions.find((item) => item.key === selectedActionKey) ?? null,
     [actions, selectedActionKey],
   );
+  const filteredTargets = useMemo(() => {
+    const query = targetFilter.trim().toLocaleLowerCase();
+    if (!query) {
+      return targets;
+    }
+    return targets.filter((target) =>
+      [target.title, target.url, target.type]
+        .filter(Boolean)
+        .some((value) => value.toLocaleLowerCase().includes(query)),
+    );
+  }, [targetFilter, targets]);
   const isScriptDraft = selectedActionKey === SCRIPT_DRAFT_ACTION_KEY;
   const isHttpRequestDraft = selectedActionKey === HTTP_REQUEST_DRAFT_ACTION_KEY;
   const selectedActionNeedsTarget =
@@ -708,6 +716,7 @@ export function WebActionsPanel({
     setTargets([]);
     setSelectedActionKey("");
     setSelectedTargetId("");
+    setTargetFilter("");
     setParamValues({});
     setScriptDraftActive(false);
     setHttpRequestDraft(null);
@@ -878,7 +887,7 @@ export function WebActionsPanel({
     try {
       const parsed = JSON.parse(temporaryParamsText.trim() || "{}") as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        throw new Error("请输入 JSON 对象");
+        throw new Error(t("请输入 JSON 对象"));
       }
       return Object.fromEntries(
         Object.entries(parsed).map(([key, value]) => [
@@ -887,7 +896,7 @@ export function WebActionsPanel({
         ]),
       );
     } catch (reason) {
-      setError(`临时参数 JSON 无效：${String(reason)}`);
+      setError(t("临时参数 JSON 无效：{reason}", { reason: String(reason) }));
       return null;
     }
   }
@@ -958,12 +967,13 @@ export function WebActionsPanel({
           ? httpRequestScript
           : selectedAction),
   );
-  const resultText = formatResult(result);
+  const resultText = formatResult(t, result);
   const resultFailed = Boolean(error || (result && !result.success));
 
   return (
     <Stack className="web-actions-panel" spacing={compact ? 1 : 1.15}>
       <Box
+        className="web-actions-target-panel"
         sx={{
           p: compact ? 0.95 : 1.1,
           borderRadius: "14px",
@@ -973,6 +983,7 @@ export function WebActionsPanel({
       >
         <Stack spacing={1}>
           <Stack
+            className="web-actions-panel-header web-actions-target-header"
             direction="row"
             spacing={0.75}
             alignItems="center"
@@ -983,7 +994,7 @@ export function WebActionsPanel({
               variant="caption"
               sx={{ color: "var(--muted)", fontWeight: 850 }}
             >
-              受控页面
+              {t("受控页面")}
             </Typography>
             <Box sx={{ flex: 1, minWidth: 24 }} />
             <Button
@@ -994,7 +1005,7 @@ export function WebActionsPanel({
               disabled={loading || running}
               onClick={() => void refreshTargets()}
             >
-              刷新
+              {t("刷新")}
             </Button>
             <Button
               size="small"
@@ -1004,55 +1015,98 @@ export function WebActionsPanel({
               disabled={loading || running || !context?.url}
               onClick={() => void reopenCurrentTarget()}
             >
-              打开页面
+              {t("打开页面")}
             </Button>
           </Stack>
           <TextField
-            select
+            className="web-actions-target-filter"
             size="small"
-            value={selectedTargetId}
-            onChange={(event) => setSelectedTargetId(event.target.value)}
-            disabled={loading || targets.length === 0}
+            value={targetFilter}
+            onChange={(event) => setTargetFilter(event.target.value)}
+            placeholder={t("筛选标题或 URL")}
+            inputProps={{ "aria-label": t("筛选受控页面") }}
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" />
+                  </InputAdornment>
+                ),
+                endAdornment: targetFilter ? (
+                  <InputAdornment position="end">
+                    <Tooltip title={t("清空筛选")}>
+                      <IconButton
+                        size="small"
+                        aria-label={t("清空受控页面筛选")}
+                        onClick={() => setTargetFilter("")}
+                      >
+                        <ClearIcon fontSize="small" />
+                      </IconButton>
+                    </Tooltip>
+                  </InputAdornment>
+                ) : undefined,
+              },
+            }}
             fullWidth
+          />
+          <Box
+            className="web-actions-target-list"
+            role="listbox"
+            aria-label={t("受控页面")}
           >
-            {!selectedTargetId ? (
-              <MenuItem value="" disabled>
-                {targets.length > 0 ? "请选择受控页面" : "暂无受控页面"}
-              </MenuItem>
-            ) : null}
-            {targets.map((target) => (
-              <MenuItem key={target.id} value={target.id}>
-                {formatTargetLabel(target)}
-              </MenuItem>
-            ))}
-          </TextField>
-          {!selectedTargetId ? (
+            {filteredTargets.map((target) => {
+              const selected = target.id === selectedTargetId;
+              return (
+                <ButtonBase
+                  key={target.id}
+                  className={`web-actions-target-card${
+                    selected ? " web-actions-target-card--selected" : ""
+                  }`}
+                  role="option"
+                  aria-selected={selected}
+                  onClick={() => setSelectedTargetId(target.id)}
+                >
+                  <Box className="web-actions-target-card-icon">
+                    <WebsiteIcon fontSize="small" />
+                  </Box>
+                  <Box className="web-actions-target-card-copy">
+                    <Typography
+                      className="web-actions-target-card-title"
+                      variant="caption"
+                    >
+                      {target.title || t("未命名页面")}
+                    </Typography>
+                    <Typography
+                      className="web-actions-target-card-url"
+                      variant="caption"
+                    >
+                      {target.url}
+                    </Typography>
+                  </Box>
+                  {selected ? (
+                    <CheckIcon
+                      className="web-actions-target-card-check"
+                      fontSize="small"
+                    />
+                  ) : null}
+                </ButtonBase>
+              );
+            })}
+          </Box>
+          {filteredTargets.length === 0 ? (
             <Typography
+              className="web-actions-target-empty"
               variant="caption"
               sx={{ color: "var(--muted)", fontWeight: 700 }}
             >
-              {selectedAction?.kind === "request"
-                ? "请求动作可直接运行；脚本动作需要先打开受控页面。"
-                : targets.length > 0
-                  ? "未找到与当前入口匹配的页面，可手动选择或打开页面。"
-                  : "未发现受控页面，请先打开页面。"}
+              {targets.length > 0 ? t("没有匹配的页面") : t("暂无受控页面")}
             </Typography>
           ) : null}
-          <Typography
-            variant="caption"
-            sx={{
-              color: "var(--muted)",
-              overflowWrap: "anywhere",
-              fontFamily:
-                '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-            }}
-          >
-            {context?.url || "未配置 URL"}
-          </Typography>
         </Stack>
       </Box>
 
       <Box
+        className="web-actions-editor-panel"
         sx={{
           p: compact ? 0.95 : 1.1,
           borderRadius: "14px",
@@ -1061,9 +1115,14 @@ export function WebActionsPanel({
         }}
       >
         <Stack spacing={1}>
-          <Stack direction="row" alignItems="center" spacing={0.65}>
+          <Stack
+            className="web-actions-panel-header web-actions-editor-header"
+            direction="row"
+            alignItems="center"
+            spacing={0.65}
+          >
             <Typography variant="caption" sx={{ color: "var(--muted)", fontWeight: 850 }}>
-              网页动作
+              {t("网页动作")}
             </Typography>
             <Box sx={{ flex: 1 }} />
             <Button
@@ -1077,7 +1136,7 @@ export function WebActionsPanel({
               onClick={(event) => setNewActionMenuAnchor(event.currentTarget)}
               sx={{ minWidth: 0, px: 1 }}
             >
-              新建动作
+              {t("新建动作")}
             </Button>
             <Menu
               id="web-action-create-menu"
@@ -1104,7 +1163,7 @@ export function WebActionsPanel({
                   <UploadIcon fontSize="small" />
                 </ListItemIcon>
                 <ListItemText
-                  primary="导入 Fetch"
+                  primary={t("导入 Fetch")}
                   secondary="Chrome Copy as fetch"
                   primaryTypographyProps={{ fontSize: "0.82rem", fontWeight: 700 }}
                   secondaryTypographyProps={{ fontSize: "0.68rem" }}
@@ -1115,7 +1174,7 @@ export function WebActionsPanel({
                   <WebsiteIcon fontSize="small" />
                 </ListItemIcon>
                 <ListItemText
-                  primary="空白 HTTP 请求"
+                  primary={t("空白 HTTP 请求")}
                   primaryTypographyProps={{ fontSize: "0.82rem", fontWeight: 700 }}
                 />
               </MenuItem>
@@ -1124,7 +1183,7 @@ export function WebActionsPanel({
                   <TerminalIcon fontSize="small" />
                 </ListItemIcon>
                 <ListItemText
-                  primary="临时页面脚本"
+                  primary={t("临时页面脚本")}
                   primaryTypographyProps={{ fontSize: "0.82rem", fontWeight: 700 }}
                 />
               </MenuItem>
@@ -1138,12 +1197,12 @@ export function WebActionsPanel({
             disabled={loading}
             SelectProps={{
               displayEmpty: true,
-              inputProps: { "aria-label": "网页动作" },
+              inputProps: { "aria-label": t("网页动作") },
             }}
             fullWidth
           >
             <MenuItem value="" disabled>
-              请选择网页动作
+              {t("请选择网页动作")}
             </MenuItem>
             {actions.map((action) => (
               <MenuItem key={action.key} value={action.key}>
@@ -1152,11 +1211,13 @@ export function WebActionsPanel({
             ))}
             {httpRequestDraft ? (
               <MenuItem value={HTTP_REQUEST_DRAFT_ACTION_KEY}>
-                {formatHttpRequestDraftOption(httpRequestDraft)}
+                {formatHttpRequestDraftOption(t, httpRequestDraft)}
               </MenuItem>
             ) : null}
             {scriptDraftActive ? (
-              <MenuItem value={SCRIPT_DRAFT_ACTION_KEY}>草稿 · 临时页面脚本</MenuItem>
+              <MenuItem value={SCRIPT_DRAFT_ACTION_KEY}>
+                {t("草稿 · 临时页面脚本")}
+              </MenuItem>
             ) : null}
           </TextField>
 
@@ -1188,6 +1249,7 @@ export function WebActionsPanel({
                       label={param.label || param.key}
                       value={paramValues[param.key] ?? ""}
                       helperText={webActionParamSourceLabel(
+                        t,
                         param,
                         context?.contextParams,
                       )}
@@ -1204,7 +1266,7 @@ export function WebActionsPanel({
               {isScriptDraft ? (
                 <TextField
                   size="small"
-                  label="临时参数 JSON"
+                  label={t("临时参数 JSON")}
                   value={temporaryParamsText}
                   onChange={(event) => setTemporaryParamsText(event.target.value)}
                   fullWidth
@@ -1218,9 +1280,10 @@ export function WebActionsPanel({
                 />
               ) : null}
               <TextField
+                className="web-actions-script-field"
                 value={scriptValue}
                 multiline
-                label={selectedAction?.kind === "request" ? "请求配置" : undefined}
+                label={selectedAction?.kind === "request" ? t("请求配置") : undefined}
                 minRows={selectedAction?.kind === "request" ? 3 : compact ? 4 : 5}
                 maxRows={compact ? 7 : 10}
                 fullWidth
@@ -1232,9 +1295,9 @@ export function WebActionsPanel({
                 InputProps={{ readOnly: !isScriptDraft }}
                 helperText={
                   isScriptDraft
-                    ? "临时脚本不会写入配置文件"
+                    ? t("临时脚本不会写入配置文件")
                     : selectedAction?.kind === "request"
-                      ? "请求动作由 Rust HTTP 客户端执行，支持 GET/POST/PUT/PATCH/DELETE、Header、Body 和参数替换。"
+                      ? t("请求动作由 Rust HTTP 客户端执行，支持 GET/POST/PUT/PATCH/DELETE、Header、Body 和参数替换。")
                       : ""
                 }
                 sx={{
@@ -1267,6 +1330,9 @@ export function WebActionsPanel({
 
       {error || resultText ? (
         <Box
+          className={`web-actions-result-panel${
+            resultFailed ? " is-failed" : " is-success"
+          }`}
           sx={{
             p: 1,
             borderRadius: "13px",
@@ -1309,6 +1375,7 @@ export function WebActionsPanel({
 
       {configPath ? (
         <Typography
+          className="web-actions-config-path"
           variant="caption"
           sx={{
             color: "var(--muted)",
@@ -1353,7 +1420,7 @@ export function WebActionsPanel({
             },
           }}
         >
-          配置
+          {t("配置")}
         </Button>
         <Button
           size="small"
@@ -1375,7 +1442,7 @@ export function WebActionsPanel({
             },
           }}
         >
-          {copiedCliCommand ? "已复制" : "复制命令"}
+          {copiedCliCommand ? t("已复制") : t("复制命令")}
         </Button>
         <Button
           variant="contained"
@@ -1394,7 +1461,7 @@ export function WebActionsPanel({
             },
           }}
         >
-          {running ? "执行中" : "运行动作"}
+          {running ? t("执行中") : t("运行动作")}
         </Button>
       </Stack>
 
@@ -1418,6 +1485,7 @@ export function WebActionsDialog({
   context,
   onClose,
 }: WebActionsDialogProps) {
+  const { t } = useI18n();
   const [running, setRunning] = useState(false);
 
   useEffect(() => {
@@ -1431,14 +1499,14 @@ export function WebActionsDialog({
       open={open}
       onClose={onClose}
       closeDisabled={running}
-      title="运行面板"
-      subtitle={context?.title || "未选择目标"}
+      title={t("运行面板")}
+      subtitle={context?.title || t("未选择目标")}
       icon={<AppWindowIcon fontSize="small" />}
       chips={context?.scope ? <Chip size="small" label={context.scope} /> : null}
       tabs={[
         {
           value: "webActions",
-          label: "网页动作",
+          label: t("网页动作"),
           icon: <WebsiteIcon fontSize="small" />,
         },
       ]}

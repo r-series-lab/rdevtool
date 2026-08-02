@@ -56,7 +56,12 @@ export type ProjectSelectionMap = Record<string, ProjectSelectionEntry>;
 const LEGACY_BRANCH_CACHE_STORAGE_KEY = "ruritool.branch-cache.v1";
 const LEGACY_PROJECT_SELECTION_STORAGE_KEY = "ruritool.project-selection.v1";
 export const DEFAULT_SOURCE_BRANCH_KEYWORDS = ["release", "feature"];
-export const DEFAULT_TARGET_BRANCH_KEYWORDS = ["variant", "pre", "master", "release"];
+export const DEFAULT_TARGET_BRANCH_KEYWORDS = [
+  "variant",
+  "pre",
+  "master",
+  "release",
+];
 const BRANCH_SYNC_TIMEOUT_MS = 30000;
 
 export class BranchSyncRequestTracker {
@@ -101,9 +106,11 @@ function normalizeBranchOption(value: unknown): BranchOption | null {
 
   return {
     name,
-    updatedAt: typeof candidate.updatedAt === "string" ? candidate.updatedAt.trim() : "",
+    updatedAt:
+      typeof candidate.updatedAt === "string" ? candidate.updatedAt.trim() : "",
     updatedTs:
-      typeof candidate.updatedTs === "number" && Number.isFinite(candidate.updatedTs)
+      typeof candidate.updatedTs === "number" &&
+      Number.isFinite(candidate.updatedTs)
         ? candidate.updatedTs
         : 0,
   };
@@ -230,9 +237,11 @@ export function loadLegacyBranchCache(): BranchCacheMap {
         branches,
         syncedAt,
         source: typeof value.source === "string" ? value.source : undefined,
-        freshness: typeof value.freshness === "string" ? value.freshness : undefined,
+        freshness:
+          typeof value.freshness === "string" ? value.freshness : undefined,
         elapsedMs:
-          typeof value.elapsedMs === "number" && Number.isFinite(value.elapsedMs)
+          typeof value.elapsedMs === "number" &&
+          Number.isFinite(value.elapsedMs)
             ? value.elapsedMs
             : undefined,
       };
@@ -243,7 +252,9 @@ export function loadLegacyBranchCache(): BranchCacheMap {
   }
 }
 
-function normalizeScopedSelection(value: unknown): ProjectScopedSelection | undefined {
+function normalizeScopedSelection(
+  value: unknown,
+): ProjectScopedSelection | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
   }
@@ -262,7 +273,9 @@ function normalizeScopedSelection(value: unknown): ProjectScopedSelection | unde
   };
 }
 
-export function normalizeProjectSelectionEntry(value: unknown): ProjectSelectionEntry | undefined {
+export function normalizeProjectSelectionEntry(
+  value: unknown,
+): ProjectSelectionEntry | undefined {
   if (!value || typeof value !== "object") {
     return undefined;
   }
@@ -276,11 +289,15 @@ export function normalizeProjectSelectionEntry(value: unknown): ProjectSelection
   };
 
   const mode =
-    entry.mode === "standard" || entry.mode === "variant" ? entry.mode : undefined;
+    entry.mode === "standard" || entry.mode === "variant"
+      ? entry.mode
+      : undefined;
   const standard = normalizeScopedSelection(entry.standard);
   const variant = normalizeScopedSelection(entry.variant);
-  const mergeSource = typeof entry.mergeSource === "string" ? entry.mergeSource.trim() : "";
-  const mergeTarget = typeof entry.mergeTarget === "string" ? entry.mergeTarget.trim() : "";
+  const mergeSource =
+    typeof entry.mergeSource === "string" ? entry.mergeSource.trim() : "";
+  const mergeTarget =
+    typeof entry.mergeTarget === "string" ? entry.mergeTarget.trim() : "";
 
   if (!mode && !standard && !variant && !mergeSource && !mergeTarget) {
     return undefined;
@@ -300,7 +317,9 @@ export function loadLegacyProjectSelections(): ProjectSelectionMap {
     return {};
   }
   try {
-    const raw = window.localStorage.getItem(LEGACY_PROJECT_SELECTION_STORAGE_KEY);
+    const raw = window.localStorage.getItem(
+      LEGACY_PROJECT_SELECTION_STORAGE_KEY,
+    );
     if (!raw) {
       return {};
     }
@@ -330,11 +349,16 @@ export function formatBranchSyncTime(ts?: number): string {
   }
 }
 
-export function prioritizeBranches(options: string[], keywords: string[]): string[] {
+export function prioritizeBranches(
+  options: string[],
+  keywords: string[],
+): string[] {
   return options
     .map((name, index) => {
       const normalized = name.trim().toLowerCase();
-      const keywordRank = keywords.findIndex((keyword) => normalized.includes(keyword));
+      const keywordRank = keywords.findIndex((keyword) =>
+        normalized.includes(keyword),
+      );
       return {
         name,
         index,
@@ -345,11 +369,16 @@ export function prioritizeBranches(options: string[], keywords: string[]): strin
     .map((item) => item.name);
 }
 
-export function prioritizeBranchOptions(options: BranchOption[], keywords: string[]): BranchOption[] {
+export function prioritizeBranchOptions(
+  options: BranchOption[],
+  keywords: string[],
+): BranchOption[] {
   return options
     .map((item, index) => {
       const normalized = item.name.trim().toLowerCase();
-      const keywordRank = keywords.findIndex((keyword) => normalized.includes(keyword));
+      const keywordRank = keywords.findIndex((keyword) =>
+        normalized.includes(keyword),
+      );
       return {
         item,
         index,
@@ -376,7 +405,10 @@ async function withTimeout<T>(
     return await Promise.race([
       promise,
       new Promise<T>((_, reject) => {
-        timer = globalThis.setTimeout(() => reject(new Error(message)), timeoutMs);
+        timer = globalThis.setTimeout(
+          () => reject(new Error(message)),
+          timeoutMs,
+        );
       }),
     ]);
   } finally {
@@ -406,11 +438,12 @@ export function useBranchContext({
   setError,
 }: UseBranchContextOptions) {
   const selectedBranchCache = useMemo(
-    () => (selectedProject ? branchCache[selectedProject] ?? null : null),
+    () => (selectedProject ? (branchCache[selectedProject] ?? null) : null),
     [branchCache, selectedProject],
   );
   const selectedProjectSelection = useMemo(
-    () => (selectedProject ? projectSelections[selectedProject] ?? null : null),
+    () =>
+      selectedProject ? (projectSelections[selectedProject] ?? null) : null,
     [projectSelections, selectedProject],
   );
   const branchEntries = useMemo(() => {
@@ -419,7 +452,10 @@ export function useBranchContext({
     }
     return normalizeBranchOptions(branchCache[selectedProject]?.branches ?? []);
   }, [branchCache, enabled, selectedProject]);
-  const branchOptions = useMemo(() => branchOptionNames(branchEntries), [branchEntries]);
+  const branchOptions = useMemo(
+    () => branchOptionNames(branchEntries),
+    [branchEntries],
+  );
   const selectedProjectRef = useRef(selectedProject);
   const syncTrackerRef = useRef(new BranchSyncRequestTracker());
   const activeSyncProjectsRef = useRef(new Set<string>());
@@ -443,9 +479,12 @@ export function useBranchContext({
         try {
           const catalog = normalizeBranchCatalogResponse(
             await withTimeout(
-              invoke<BranchCatalogResponse | BranchOption[]>("get_project_branches", {
-                project: projectKey,
-              }),
+              invoke<BranchCatalogResponse | BranchOption[]>(
+                "get_project_branches",
+                {
+                  project: projectKey,
+                },
+              ),
               BRANCH_SYNC_TIMEOUT_MS,
               "分支同步超过 30 秒，rDevTool 后端未在约定时间内返回；已有缓存不会被覆盖",
             ),
@@ -485,8 +524,8 @@ export function useBranchContext({
   );
 
   const handleSyncBranches = useCallback(
-    (projectKey: string) => syncBranches(projectKey),
-    [syncBranches],
+    (projectKey = selectedProject) => syncBranches(projectKey),
+    [selectedProject, syncBranches],
   );
 
   useEffect(() => {

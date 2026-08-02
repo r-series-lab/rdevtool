@@ -358,6 +358,32 @@ describe("history activities", () => {
     });
   });
 
+  it("does not restore a failed build action after the activity was ignored", () => {
+    const history = buildHistory({
+      stateKey: "failed",
+      stateLabel: "构建失败",
+      detail: "目标分支不存在",
+    });
+    const current = createActivityEntry({
+      ...activityFromBuildHistory(history),
+      id: "live-build-ignored",
+      action: null,
+      acknowledgedAt: "2026-07-20T08:10:00.000Z",
+      updatedAt: "2026-07-20T08:10:00.000Z",
+    });
+
+    const reconciled = reconcileHistoryActivities([current], [history], []);
+
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      id: current.id,
+      status: "failed",
+      acknowledgedAt: "2026-07-20T08:10:00.000Z",
+      action: null,
+      updatedAt: "2026-07-20T08:10:00.000Z",
+    });
+  });
+
   it("merges persisted create history into the App activity instead of duplicating it", () => {
     const current = createActivityEntry({
       id: "live-create",
@@ -401,6 +427,38 @@ describe("history activities", () => {
       title: "创建分支",
       status: "success",
       detail: expect.stringContaining("feature -> release"),
+    });
+  });
+
+  it("does not restore a failed Git action after the activity was ignored", () => {
+    const replay = {
+      command: "execute_branch_push_task" as const,
+      busyText: "正在重新推送分支",
+      request: { project: "cooperation-admin", branch: "feature" },
+      refreshPushStatusProject: "cooperation-admin",
+    };
+    const history = branchHistory({ replay });
+    const current = createActivityEntry({
+      ...activityFromBranchTaskHistory(history),
+      action: null,
+      acknowledgedAt: "2026-07-20T08:10:00.000Z",
+      updatedAt: "2026-07-20T08:10:00.000Z",
+    });
+
+    const reconciled = reconcileHistoryActivities(
+      [current],
+      [],
+      [],
+      [history],
+    );
+
+    expect(reconciled).toHaveLength(1);
+    expect(reconciled[0]).toMatchObject({
+      id: current.id,
+      status: "failed",
+      acknowledgedAt: "2026-07-20T08:10:00.000Z",
+      action: null,
+      updatedAt: "2026-07-20T08:10:00.000Z",
     });
   });
 
@@ -521,6 +579,9 @@ describe("history activities", () => {
       summary: `${history.stateLabel} · ${history.detail}`,
       detail: history.detail,
       relatedHistoryKeys: [history.historyKey],
+      chainId: "workspace-chain:delivery:cli-1",
+      stepLabel: "构建 UAT",
+      chainLabel: "发布流程",
       payload: {
         historyKey: history.historyKey,
         workspaceKey: history.workspaceKey,
@@ -552,6 +613,9 @@ describe("history activities", () => {
       kind: "build",
       status: "success",
       title: "触发部署",
+      chainId: "workspace-chain:delivery:cli-1",
+      stepLabel: "构建 UAT",
+      chainLabel: "发布流程",
       resource: { value: history.buildUrl },
     });
   });

@@ -1,0 +1,16 @@
+export const EN_FETCH_IMPORT_MESSAGES: Record<string, string> = {
+  "添加{label}": "Add {label}",
+  "删除{label} {count}": "Delete {label} {count}",
+  "Query": "Query",
+  "Headers": "Headers",
+  "参数": "Parameter",
+  "敏感值": "Sensitive Value",
+  "值": "Value",
+  "HTTP 请求草稿": "HTTP Request Draft",
+  "未保存": "Unsaved",
+  "浏览器登录态": "Browser Session",
+  "导入 Fetch": "Import Fetch",
+  "浏览器默认": "Browser Default",
+  "格式化 JSON": "Format JSON",
+  "解析请求": "Parse Request",
+};

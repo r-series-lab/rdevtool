@@ -19,10 +19,19 @@ function linkActivityParameters(linkName: string, action: LinkActivityAction) {
   ];
 }
 
-const LINK_BLOCKING_STATUSES = new Set(["blocked", "failed", "skipped"]);
+const LINK_HARD_FAILURE_STATUSES = new Set(["blocked", "failed"]);
+
+export function linkExecutionStepBlocks(
+  step: LinkExecutionReport["steps"][number],
+) {
+  return (
+    LINK_HARD_FAILURE_STATUSES.has(step.status) ||
+    (step.status === "skipped" && step.risks.length > 0)
+  );
+}
 
 function linkBlockingSteps(report: LinkExecutionReport) {
-  return report.steps.filter((step) => LINK_BLOCKING_STATUSES.has(step.status));
+  return report.steps.filter(linkExecutionStepBlocks);
 }
 
 export function linkDiagnosticsFromReport(
@@ -52,6 +61,9 @@ export function linkRecoveryAction(
   linkName: string,
   action: LinkActivityAction,
   sourceId?: string | null,
+  workspaceKey?: string | null,
+  proxySourceId?: string | null,
+  runtimeSourceId?: string | null,
 ): ActivityAction {
   return {
     kind: "linkRecover",
@@ -59,6 +71,9 @@ export function linkRecoveryAction(
     linkKey,
     linkName: linkName.trim() || linkKey,
     sourceId: sourceId?.trim() || null,
+    proxySourceId: proxySourceId?.trim() || null,
+    runtimeSourceId: runtimeSourceId?.trim() || null,
+    workspaceKey: workspaceKey?.trim() || null,
     replayAction: action,
   };
 }
@@ -87,19 +102,27 @@ export function linkActivityResultPatch(
   report: LinkExecutionReport,
   action: LinkActivityAction,
   sourceId?: string | null,
+  workspaceKey?: string | null,
+  proxySourceId?: string | null,
+  runtimeSourceId?: string | null,
 ): ActivityPatch {
   const failedSteps = report.steps.filter(
-    (step) => step.status === "failed" || step.status === "blocked",
+    (step) => LINK_HARD_FAILURE_STATUSES.has(step.status),
   );
+  const blockingSteps = report.steps.filter(linkExecutionStepBlocks);
   const skippedCount = report.steps.filter((step) => step.status === "skipped").length;
   const completedCount = Math.max(0, report.steps.length - failedSteps.length - skippedCount);
   const actionLabel = linkActionLabel(action);
   const detailLines = [
-    ...failedSteps.map((step) => `${step.label}：${step.summary}`),
+    ...blockingSteps.map((step) => `${step.label}：${step.summary}`),
     ...report.warnings.map((warning) => `警告：${warning}`),
   ];
+  const sourceContext = report.plan.sourceContext;
+  const resolvedSourceId = sourceContext?.linkSourceId || sourceId;
+  const resolvedProxySourceId = sourceContext?.proxySourceId || proxySourceId;
+  const resolvedRuntimeSourceId = sourceContext?.runtimeSourceId || runtimeSourceId;
   return {
-    status: failedSteps.length > 0 ? "failed" : report.steps.length > 0 ? "success" : "info",
+    status: blockingSteps.length > 0 ? "failed" : report.steps.length > 0 ? "success" : "info",
     title: `${actionLabel}联调链路`,
     summary: `${report.name} · 完成 ${completedCount} / 失败 ${failedSteps.length} / 跳过 ${skippedCount}`,
     detail: detailLines.length > 0 ? detailLines.join("\n") : `联调链路已${actionLabel}`,
@@ -108,8 +131,16 @@ export function linkActivityResultPatch(
     diagnostics: linkDiagnosticsFromReport(report),
     warnings: report.warnings,
     target: { page: "overview", projectKey: report.plan.project ?? null },
-    action: failedSteps.length > 0
-      ? linkRecoveryAction(report.key, report.name, action, sourceId)
+    action: blockingSteps.length > 0
+      ? linkRecoveryAction(
+          report.key,
+          report.name,
+          action,
+          resolvedSourceId,
+          workspaceKey || report.plan.workspaceKey,
+          resolvedProxySourceId,
+          resolvedRuntimeSourceId,
+        )
       : null,
   };
 }
@@ -120,6 +151,9 @@ export function linkActivityFailurePatch(
   action: LinkActivityAction,
   sourceId: string | null | undefined,
   reason: unknown,
+  workspaceKey?: string | null,
+  proxySourceId?: string | null,
+  runtimeSourceId?: string | null,
 ): ActivityPatch {
   const actionLabel = linkActionLabel(action);
   return {
@@ -127,7 +161,15 @@ export function linkActivityFailurePatch(
     title: `${actionLabel}联调链路`,
     summary: `${linkName} · ${actionLabel}失败`,
     detail: String(reason),
-    action: linkRecoveryAction(linkKey, linkName, action, sourceId),
+    action: linkRecoveryAction(
+      linkKey,
+      linkName,
+      action,
+      sourceId,
+      workspaceKey,
+      proxySourceId,
+      runtimeSourceId,
+    ),
   };
 }
 

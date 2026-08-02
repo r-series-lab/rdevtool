@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ConfigSource } from "../app-types";
 import {
+  archivedConfigSourceCount,
   configSourceIdForWorkspace,
   configSourceChangeAffects,
   configSourcePreferenceKey,
@@ -10,6 +11,7 @@ import {
   mergeConfigSourcesChangedPayload,
   normalizeConfigSourceId,
   resolveConfigSource,
+  visibleConfigSources,
 } from "./configSources";
 
 function source(
@@ -70,6 +72,21 @@ describe("config source selection", () => {
       source("team", ["resource"]),
     ];
     expect(resolveConfigSource(sources, "removed-source", "proxy")?.id).toBe("default");
+  });
+
+  it("keeps archived workspace sources resolvable but hidden by default", () => {
+    const sources = [
+      source("default", ["resource"], true),
+      { ...source("workspace-feature-a", ["resource"]), workspaceArchived: true },
+    ];
+
+    expect(archivedConfigSourceCount(sources)).toBe(1);
+    expect(visibleConfigSources(sources, false).map((item) => item.id)).toEqual([
+      "default",
+    ]);
+    expect(
+      resolveConfigSource(sources, "workspace-feature-a", "resource")?.id,
+    ).toBe("workspace-feature-a");
   });
 
   it("skips sources that do not provide the requested capability", () => {

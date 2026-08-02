@@ -9,6 +9,7 @@ import {
   Typography,
   type DialogProps,
 } from "@mui/material";
+import { translateNode, useI18n } from "../i18n";
 import { useAppConfirmDialog } from "./AppConfirmDialog";
 
 type ConfigDialogShellProps = {
@@ -52,6 +53,7 @@ export function ConfigDialogShell({
   actionsClassName,
   onClose,
 }: ConfigDialogShellProps) {
+  const { t } = useI18n();
   const [confirm, confirmDialog] = useAppConfirmDialog();
 
   async function requestClose() {
@@ -87,18 +89,18 @@ export function ConfigDialogShell({
               ) : null}
               <Stack spacing={0.1} minWidth={0}>
                 <Typography variant="subtitle1" noWrap>
-                  {title}
+                  {translateNode(title, t)}
                 </Typography>
                 {subtitle ? (
                   <Typography variant="caption" color="text.secondary" noWrap>
-                    {subtitle}
+                    {translateNode(subtitle, t)}
                   </Typography>
                 ) : null}
               </Stack>
             </Stack>
             {dirty || headerActions ? (
               <Stack direction="row" spacing={0.6} alignItems="center" flexShrink={0}>
-                {dirty ? <Chip size="small" color="primary" label={dirtyLabel} /> : null}
+                {dirty ? <Chip size="small" color="primary" label={t(dirtyLabel)} /> : null}
                 {headerActions}
               </Stack>
             ) : null}

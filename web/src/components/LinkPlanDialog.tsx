@@ -11,6 +11,8 @@ import {
   Typography,
 } from "@mui/material";
 import type { LinkExecutionReport, LinkPlan, LinkRuntimeSummary } from "../app-types";
+import { useI18n, type Translate } from "../i18n";
+import { translateInternalMessage } from "../i18n/internalMessages";
 import { runtimeContextFromExecutionDetail } from "../lib/runtimeContext";
 import {
   ClearIcon,
@@ -27,6 +29,9 @@ export type LinkPlanDialogState = {
   entryName: string;
   key: string;
   sourceId?: string | null;
+  proxySourceId?: string | null;
+  runtimeSourceId?: string | null;
+  workspaceKey?: string | null;
   plan: LinkPlan | null;
   report: LinkExecutionReport | null;
   runtime?: LinkRuntimeSummary | null;
@@ -34,6 +39,22 @@ export type LinkPlanDialogState = {
   action: LinkPlanDialogAction | null;
   error: string;
 };
+
+export function linkExecutionModeSucceeded(
+  report: LinkExecutionReport,
+  mode: "run" | "stop",
+) {
+  return (
+    report.mode === mode &&
+    report.steps.length > 0 &&
+    report.steps.every(
+      (step) =>
+        step.status !== "failed" &&
+        step.status !== "blocked" &&
+        !(step.status === "skipped" && step.risks.length > 0),
+    )
+  );
+}
 
 type LinkPlanStepView = LinkPlan["steps"][number];
 type LinkExecutionStepView = LinkExecutionReport["steps"][number];
@@ -44,24 +65,24 @@ type LinkPlanDialogProps = {
   onAction: (action: LinkPlanDialogAction) => void | Promise<void>;
 };
 
-function linkExecutionStatusLabel(status: string): string {
+function linkExecutionStatusLabel(status: string, t: Translate): string {
   switch (status) {
     case "ready":
-      return "可启动";
+      return t("可启动");
     case "blocked":
-      return "被阻塞";
+      return t("被阻塞");
     case "checked":
-      return "已检查";
+      return t("已检查");
     case "started":
-      return "已启动";
+      return t("已启动");
     case "stopped":
-      return "已停止";
+      return t("已停止");
     case "skipped":
-      return "已跳过";
+      return t("已跳过");
     case "failed":
-      return "失败";
+      return t("失败");
     default:
-      return status || "结果";
+      return status || t("结果");
   }
 }
 
@@ -86,14 +107,14 @@ function linkExecutionStatusColor(
   }
 }
 
-function linkPlanStatusLabel(status: string): string {
+function linkPlanStatusLabel(status: string, t: Translate): string {
   switch (status) {
     case "planned":
-      return "计划";
+      return t("计划");
     case "invalid":
-      return "需检查";
+      return t("需检查");
     default:
-      return status || "计划";
+      return status || t("计划");
   }
 }
 
@@ -107,7 +128,9 @@ function linkStepShortValue(step: LinkPlanStepView | LinkExecutionStepView): str
   if (localFileMatch?.[1]) {
     return localFileMatch[1];
   }
-  const runtimeMatch = summary.match(/运行配置\s+([^\s，,。]+)|用运行配置\s+([^\s，,。]+)/);
+  const runtimeMatch = summary.match(
+    /(?:运行配置|运行环境)\s+([^\s，,。]+)|用(?:运行配置|运行环境)\s+([^\s，,。]+)/,
+  );
   if (runtimeMatch?.[1] || runtimeMatch?.[2]) {
     return runtimeMatch[1] || runtimeMatch[2];
   }
@@ -128,16 +151,15 @@ function linkStepIcon(type: string): ReactElement {
 }
 
 export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps) {
+  const { t } = useI18n();
   const busy = Boolean(state?.loading) || Boolean(state?.action);
   const disabled = !state?.key || busy;
-  const runSucceeded =
-    state?.report?.mode === "run" &&
-    state.report.steps.length > 0 &&
-    state.report.steps.every((step) => step.status !== "failed");
-  const stopSucceeded =
-    state?.report?.mode === "stop" &&
-    state.report.steps.length > 0 &&
-    state.report.steps.every((step) => step.status !== "failed");
+  const runSucceeded = state?.report
+    ? linkExecutionModeSucceeded(state.report, "run")
+    : false;
+  const stopSucceeded = state?.report
+    ? linkExecutionModeSucceeded(state.report, "stop")
+    : false;
   const runtimeRunning = runSucceeded || (!stopSucceeded && Boolean(state?.runtime?.canStop));
   const runtimeAllowsRun = state?.runtime ? state.runtime.canRun : true;
   const runtimeAllowsStop = state?.runtime ? state.runtime.canStop : true;
@@ -156,14 +178,14 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
         {!state ? null : state.loading ? (
           <Box className="link-plan-tray-state">
             <Typography className="link-plan-tray-title">
-              {state.entryName || "Link 计划"}
+              {state.entryName || t("Link 计划")}
             </Typography>
-            <Typography className="link-plan-tray-subtitle">正在生成计划</Typography>
+            <Typography className="link-plan-tray-subtitle">{t("正在生成计划")}</Typography>
           </Box>
         ) : state.error ? (
           <Box className="link-plan-tray-state">
             <Typography className="link-plan-tray-title">
-              {state.entryName || "Link 计划"}
+              {state.entryName || t("Link 计划")}
             </Typography>
             <Typography className="link-plan-tray-error">{state.error}</Typography>
           </Box>
@@ -179,7 +201,7 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                 </Typography>
               </Box>
               <IconButton
-                aria-label="关闭 Link 计划"
+                aria-label={t("关闭 Link 计划")}
                 className="link-plan-tray-close"
                 onClick={onClose}
               >
@@ -197,7 +219,9 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                   size="small"
                   color="info"
                   variant="outlined"
-                  label={`配置源 ${state.plan.sourceContext.linkSourceName}`}
+                  label={t("配置源 {name}", {
+                    name: state.plan.sourceContext.linkSourceName,
+                  })}
                 />
               ) : state.plan.sourceContext ? (
                 <>
@@ -209,12 +233,16 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                   <Chip
                     size="small"
                     variant="outlined"
-                    label={`代理 ${state.plan.sourceContext.proxySourceName}`}
+                    label={t("代理 {name}", {
+                      name: state.plan.sourceContext.proxySourceName,
+                    })}
                   />
                   <Chip
                     size="small"
                     variant="outlined"
-                    label={`运行 ${state.plan.sourceContext.runtimeSourceName}`}
+                    label={t("运行配置 {name}", {
+                      name: state.plan.sourceContext.runtimeSourceName,
+                    })}
                   />
                 </>
               ) : null}
@@ -223,7 +251,7 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
               <Stack className="link-plan-warning-list" spacing={0.4}>
                 {state.plan.warnings.map((warning) => (
                   <Typography key={warning} variant="caption" color="warning.main">
-                    {warning}
+                    {translateInternalMessage(warning, t)}
                   </Typography>
                 ))}
               </Stack>
@@ -236,8 +264,12 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                   role="listitem"
                 >
                   <span className="link-plan-path-index">{index + 1}</span>
-                  <span className="link-plan-path-label">{step.label}</span>
-                  <span className="link-plan-path-status">{linkPlanStatusLabel(step.status)}</span>
+                  <span className="link-plan-path-label">
+                    {translateInternalMessage(step.label, t)}
+                  </span>
+                  <span className="link-plan-path-status">
+                    {linkPlanStatusLabel(step.status, t)}
+                  </span>
                 </Box>
               ))}
             </Box>
@@ -246,17 +278,21 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                 <Box key={step.id} className={`link-plan-summary-row is-${step.status}`}>
                   <span className="link-plan-summary-icon">{linkStepIcon(step.type)}</span>
                   <Box minWidth={0}>
-                    <Typography className="link-plan-summary-label">{step.label}</Typography>
-                    <Typography className="link-plan-summary-text">{step.summary}</Typography>
+                    <Typography className="link-plan-summary-label">
+                      {translateInternalMessage(step.label, t)}
+                    </Typography>
+                    <Typography className="link-plan-summary-text">
+                      {translateInternalMessage(step.summary, t)}
+                    </Typography>
                   </Box>
                   <Typography className="link-plan-summary-value" noWrap>
-                    {linkStepShortValue(step)}
+                    {translateInternalMessage(linkStepShortValue(step), t)}
                   </Typography>
                   {step.risks.length > 0 ? (
                     <Box className="link-plan-risk-list">
                       {step.risks.map((risk) => (
                         <Typography key={risk} variant="caption">
-                          {risk}
+                          {translateInternalMessage(risk, t)}
                         </Typography>
                       ))}
                     </Box>
@@ -265,7 +301,7 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                     <Box sx={{ gridColumn: "1 / -1", minWidth: 0, mt: 0.35 }}>
                       <RuntimeContextCard
                         compact
-                        title="计划运行目标"
+                        title={t("计划运行目标")}
                         context={step.runtime}
                       />
                     </Box>
@@ -275,12 +311,12 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
             </Box>
             {state.report ? (
               <Stack className="link-plan-report" spacing={0.75}>
-                <Typography className="link-plan-report-title">执行结果</Typography>
+                <Typography className="link-plan-report-title">{t("执行结果")}</Typography>
                 {state.report.warnings.length > 0 ? (
                   <Stack spacing={0.25}>
                     {state.report.warnings.map((warning) => (
                       <Typography key={warning} variant="caption" color="warning.main">
-                        {warning}
+                        {translateInternalMessage(warning, t)}
                       </Typography>
                     ))}
                   </Stack>
@@ -296,20 +332,20 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                         <Chip
                           size="small"
                           color={linkExecutionStatusColor(step.status)}
-                          label={linkExecutionStatusLabel(step.status)}
+                          label={linkExecutionStatusLabel(step.status, t)}
                         />
                         <Typography variant="body2" fontWeight={700} noWrap>
-                          {step.label}
+                          {translateInternalMessage(step.label, t)}
                         </Typography>
                       </Stack>
                       <Typography variant="body2" color="text.secondary" sx={{ mt: 0.5 }}>
-                        {step.summary}
+                        {translateInternalMessage(step.summary, t)}
                       </Typography>
                       {step.risks.length > 0 ? (
                         <Stack spacing={0.25} sx={{ mt: 0.7 }}>
                           {step.risks.map((risk) => (
                             <Typography key={risk} variant="caption" color="warning.main">
-                              {risk}
+                              {translateInternalMessage(risk, t)}
                             </Typography>
                           ))}
                         </Stack>
@@ -318,7 +354,7 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
                         <Box sx={{ mt: 0.75 }}>
                           <RuntimeContextCard
                             compact
-                            title="检查运行目标"
+                            title={t("检查运行目标")}
                             context={runtimeContext}
                           />
                         </Box>
@@ -338,14 +374,14 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
           disabled={disabled}
           onClick={() => void onAction("check")}
         >
-          {state?.action === "check" ? "检查中" : "检查"}
+          {state?.action === "check" ? t("检查中") : t("检查")}
         </Button>
         <Button
           variant="contained"
           disabled={runDisabled}
           onClick={() => void onAction("run")}
         >
-          {state?.action === "run" ? "启动中" : runtimeRunning ? "已启动" : "启动"}
+          {state?.action === "run" ? t("启动中") : runtimeRunning ? t("已启动") : t("启动")}
         </Button>
         <Button
           color="error"
@@ -353,7 +389,7 @@ export function LinkPlanDialog({ state, onClose, onAction }: LinkPlanDialogProps
           disabled={stopDisabled}
           onClick={() => void onAction("stop")}
         >
-          {state?.action === "stop" ? "停止中" : "停止"}
+          {state?.action === "stop" ? t("停止中") : t("停止")}
         </Button>
       </DialogActions>
     </Dialog>

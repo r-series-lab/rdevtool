@@ -4,10 +4,6 @@ import {
   Button,
   Chip,
   Divider,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
   Drawer,
   IconButton,
   Pagination,
@@ -28,6 +24,8 @@ import {
   type ActivityOrigin,
   type ActivityStatus,
 } from "../lib/activityCenter";
+import { useI18n, type Translate } from "../i18n";
+import { translateInternalMessage } from "../i18n/internalMessages";
 import {
   ActivityIcon,
   AppWindowIcon,
@@ -49,6 +47,13 @@ import {
   WorkflowIcon,
 } from "./AppIcons";
 import { AppEmptyState } from "./AppEmptyState";
+import { AppActionDialog } from "./AppActionDialog";
+import { ActivityAttentionQueue } from "./ActivityAttentionQueue";
+import {
+  buildActivityQueueGroups,
+  compareActivityPriority,
+} from "./activityCenterQueue";
+import { activityCanBeCleared } from "../lib/activityResolution";
 import type { Theme } from "@mui/material/styles";
 
 type ActivityFilter =
@@ -57,20 +62,6 @@ type ActivityFilter =
   | "success"
   | "failed";
 type ActivityOriginFilter = "all" | ActivityOrigin;
-
-type ActivityQueueGroup = {
-  id: string;
-  label: string;
-  latest: ActivityEntry;
-  failedItems: ActivityEntry[];
-  resourceItem: ActivityEntry | null;
-  targetItem: ActivityEntry | null;
-  actionItem: ActivityEntry | null;
-  detailItem: ActivityEntry | null;
-  failedCount: number;
-  actionCount: number;
-  total: number;
-};
 
 type ActivityChainGroup = {
   id: string;
@@ -114,8 +105,8 @@ type ActivityCenterProps = {
   onOpenResource: (entry: ActivityEntry) => void;
   onRunAction: (entry: ActivityEntry) => Promise<void> | void;
   onRefresh: (options?: { force?: boolean }) => Promise<void> | void;
-  onAcknowledgeEntry: (entry: ActivityEntry) => void;
-  onAcknowledgeEntries: (entries: ActivityEntry[]) => void;
+  onResolveEntry: (entry: ActivityEntry) => void;
+  onResolveEntries: (entries: ActivityEntry[]) => void;
 };
 
 const ACTIVITY_REFRESH_INTERVAL_MS = 10000;
@@ -298,6 +289,7 @@ function activityStatusLabel(item: ActivityEntry) {
 }
 
 function ActivityStatusPill({ item }: { item: ActivityEntry }) {
+  const { t } = useI18n();
   const statusLabel = item.acknowledgedAt ? "已确认" : activityStatusLabel(item);
   const statusTextColor = item.acknowledgedAt ? "var(--muted)" : statusColor(item.status);
   const statusBg = item.acknowledgedAt ? "var(--glass)" : statusTint(item.status);
@@ -330,7 +322,7 @@ function ActivityStatusPill({ item }: { item: ActivityEntry }) {
           whiteSpace: "nowrap",
         }}
       >
-        {KIND_LABELS[item.kind]}
+        {t(KIND_LABELS[item.kind])}
       </Box>
       {item.origin ? (
         <Box
@@ -350,7 +342,7 @@ function ActivityStatusPill({ item }: { item: ActivityEntry }) {
             whiteSpace: "nowrap",
           }}
         >
-          {ORIGIN_LABELS[item.origin]}
+          {t(ORIGIN_LABELS[item.origin])}
         </Box>
       ) : null}
       <Box
@@ -370,7 +362,7 @@ function ActivityStatusPill({ item }: { item: ActivityEntry }) {
           whiteSpace: "nowrap",
         }}
       >
-        {statusLabel}
+        {t(statusLabel)}
       </Box>
     </Box>
   );
@@ -385,10 +377,13 @@ function ActivityTitleCluster({
   extraTags?: ReactNode;
   meta?: string;
 }) {
+  const { t } = useI18n();
+  const title = translateInternalMessage(item.title, t);
+
   return (
     <Stack
       className="activity-title-cluster"
-      spacing={0.42}
+      spacing={0.58}
       alignItems="stretch"
       minWidth={0}
       flex={1}
@@ -404,7 +399,7 @@ function ActivityTitleCluster({
         <Typography
           variant="body2"
           noWrap
-          title={item.title}
+          title={title}
           sx={{
             minWidth: 0,
             flex: "1 1 auto",
@@ -415,7 +410,7 @@ function ActivityTitleCluster({
             fontWeight: 800,
           }}
         >
-          {item.title}
+          {title}
         </Typography>
         {meta ? (
           <Typography
@@ -490,14 +485,14 @@ function ActivityKindGlyph({ item }: { item: ActivityEntry }) {
   );
 }
 
-function displayActivitySummary(item: ActivityEntry) {
+function displayActivitySummary(item: ActivityEntry, t: Translate) {
   if (
     item.kind === "runtime" &&
     item.status === "success" &&
     item.title === "启动 dev 服务" &&
     item.summary.startsWith("运行中")
   ) {
-    return "已启动 · dev 服务启动成功";
+    return translateInternalMessage("已启动 · dev 服务启动成功", t);
   }
   if (
     item.kind === "branch" &&
@@ -507,37 +502,41 @@ function displayActivitySummary(item: ActivityEntry) {
   ) {
     return "";
   }
-  return item.summary;
+  return translateInternalMessage(item.summary, t);
 }
 
 function ActivityParameterSummary({ item }: { item: ActivityEntry }) {
+  const { t } = useI18n();
   const parameters = item.parameters ?? [];
   if (parameters.length === 0) {
     return null;
   }
   return (
-    <Box className="activity-parameter-summary" aria-label="构建参数">
+    <Box className="activity-parameter-summary" aria-label={t("构建参数")}>
       <Typography component="span" className="activity-parameter-heading">
-        参数
+        {t("参数")}
       </Typography>
-      {parameters.map((parameter) => (
-        <Typography
-          component="span"
-          className="activity-parameter-item"
-          key={parameter.key}
-          title={`${parameter.label}: ${parameter.value}`}
-        >
-          <Box component="span" className="activity-parameter-label">
-            {parameter.label}
-          </Box>
-          <Box
+      {parameters.map((parameter) => {
+        const label = translateInternalMessage(parameter.label, t);
+        return (
+          <Typography
             component="span"
-            className={`activity-parameter-value${parameter.masked ? " is-masked" : ""}`}
+            className="activity-parameter-item"
+            key={parameter.key}
+            title={`${label}: ${parameter.value}`}
           >
-            {parameter.value}
-          </Box>
-        </Typography>
-      ))}
+            <Box component="span" className="activity-parameter-label">
+              {label}
+            </Box>
+            <Box
+              component="span"
+              className={`activity-parameter-value${parameter.masked ? " is-masked" : ""}`}
+            >
+              {parameter.value}
+            </Box>
+          </Typography>
+        );
+      })}
     </Box>
   );
 }
@@ -551,17 +550,19 @@ function activityFailureReason(item: ActivityEntry) {
 }
 
 function ActivityTimelineDetail({ item }: { item: ActivityEntry }) {
+  const { t } = useI18n();
   if (!item.detail) {
     return null;
   }
+  const detail = translateInternalMessage(item.detail, t);
   return (
     <Box className={`activity-timeline-detail${item.status === "failed" ? " is-failure" : ""}`}>
       {item.status === "failed" ? (
         <Box component="span" className="activity-failure-reason-label">
-          失败原因
+          {t("失败原因")}
         </Box>
       ) : null}
-      {item.detail}
+      {detail}
     </Box>
   );
 }
@@ -600,49 +601,73 @@ function hasActivityDiagnostics(item: ActivityEntry) {
   );
 }
 
-function recoveryConfirmation(entry: ActivityEntry | null) {
+function recoveryConfirmation(entry: ActivityEntry | null, t: Translate) {
   const action = entry?.action;
   if (action?.kind === "branchReplay") {
     return {
-      title: "确认重试 Git 操作？",
-      content: "将按失败项目的原参数重新执行 Git 操作，并重新进行项目、工作区和分支校验；校验未通过时不会继续。",
+      title: t("确认重试 Git 操作？"),
+      content: t("将按失败项目的原参数重新执行 Git 操作，并重新进行项目、工作区和分支校验；校验未通过时不会继续。"),
     };
   }
   if (action?.kind === "buildRecover") {
     return {
-      title: "确认重新规划并重试构建？",
-      content: `将按失败时的目标和参数重新生成 ${action.projectName} 的构建计划。如当前不在记录所属工作区，将先切换到原工作区；只有工作区、项目、分支、环境和参数检查通过后才会触发新的构建。`,
+      title: t("确认重新规划并重试构建？"),
+      content: t("将按失败时的目标和参数重新生成 {projectName} 的构建计划。如当前不在记录所属工作区，将先切换到原工作区；只有工作区、项目、分支、环境和参数检查通过后才会触发新的构建。", {
+        projectName: action.projectName,
+      }),
     };
   }
   if (action?.kind === "runtimeRecover") {
     if (action.replayAction === "stop") {
       return {
-        title: "确认检查并重新停止？",
-        content: `将重新读取 ${action.projectName} 的运行状态，并校验项目与受管进程后重新停止；归属校验未通过时不会终止进程。`,
+        title: t("确认检查并重新停止？"),
+        content: t("将重新读取 {projectName} 的运行状态，并校验项目与受管进程后重新停止；归属校验未通过时不会终止进程。", {
+          projectName: action.projectName,
+        }),
       };
     }
     return {
-      title: "确认检查并重新启动？",
-      content: `将使用失败时的项目、调试档案和临时参数，对 ${action.projectName} 重新执行启动前检查；只有检查通过后才会启动。`,
+      title: t("确认检查并重新启动？"),
+      content: t("将使用失败时的项目、启动档案和本次覆盖，对 {projectName} 重新执行启动前检查；只有检查通过后才会启动。", {
+        projectName: action.projectName,
+      }),
     };
   }
   if (action?.kind === "proxyRecover") {
+    if (action.replayAction === "stop") {
+      return {
+        title: t("确认检查并重新停止？"),
+        content: t("将重新读取 {profileName} 的代理配置，并由守护进程校验配置、端口和监听归属后重新停止。", {
+          profileName: action.profileName,
+        }),
+      };
+    }
     return {
-      title: action.replayAction === "stop"
-        ? "确认检查并重新停止？"
-        : "确认检查并重新启动？",
-      content: `将重新读取 ${action.profileName} 的代理配置，并由守护进程校验配置、端口和监听归属后重新${action.replayAction === "stop" ? "停止" : "启动"}。`,
+      title: t("确认检查并重新启动？"),
+      content: t("将重新读取 {profileName} 的代理配置，并由守护进程校验配置、端口和监听归属后重新启动。", {
+        profileName: action.profileName,
+      }),
     };
   }
   if (action?.kind === "linkRecover") {
+    if (action.replayAction === "stop") {
+      return {
+        title: t("确认检查并重试？"),
+        content: t("将先对 {linkName} 执行只读检查。只有检查通过后，才会重新停止。", {
+          linkName: action.linkName,
+        }),
+      };
+    }
     return {
-      title: "确认检查并重试？",
-      content: `将先对 ${action.linkName} 执行只读检查。只有检查通过后，才会重新${action.replayAction === "stop" ? "停止" : "启动"}。`,
+      title: t("确认检查并重试？"),
+      content: t("将先对 {linkName} 执行只读检查。只有检查通过后，才会重新启动。", {
+        linkName: action.linkName,
+      }),
     };
   }
   return {
-    title: "确认重试？",
-    content: "将重新检查当前状态，并在检查通过后重试。",
+    title: t("确认重试？"),
+    content: t("将重新检查当前状态，并在检查通过后重试。"),
   };
 }
 
@@ -655,23 +680,6 @@ function isManualRefreshableBuildActivity(item: ActivityEntry) {
     isBuildActivityKind(item.kind) &&
     (item.status === "running" || isBuildSyncFailure(item))
   );
-}
-
-function queueGroupKey(item: ActivityEntry) {
-  return item.chainId ? `chain:${item.chainId}` : activityExecutionKey(item);
-}
-
-function queueGroupLabel(item: ActivityEntry) {
-  return item.projectName || item.projectKey || KIND_LABELS[item.kind];
-}
-
-function compareActivityPriority(left: ActivityEntry, right: ActivityEntry) {
-  const leftFailed = isUnhandledFailure(left) ? 1 : 0;
-  const rightFailed = isUnhandledFailure(right) ? 1 : 0;
-  if (leftFailed !== rightFailed) {
-    return rightFailed - leftFailed;
-  }
-  return right.updatedAt.localeCompare(left.updatedAt);
 }
 
 function compareActivityCreated(left: ActivityEntry, right: ActivityEntry) {
@@ -927,15 +935,17 @@ export function ActivityCenter({
   onOpenResource,
   onRunAction,
   onRefresh,
-  onAcknowledgeEntry,
-  onAcknowledgeEntries,
+  onResolveEntry,
+  onResolveEntries,
 }: ActivityCenterProps) {
+  const { t } = useI18n();
   const [filter, setFilter] = useState<ActivityFilter>("all");
   const [originFilter, setOriginFilter] = useState<ActivityOriginFilter>("all");
   const [listPage, setListPage] = useState(1);
   const [toggledGroupIds, setToggledGroupIds] = useState<Set<string>>(() => new Set());
   const [fullExecutionGroupIds, setFullExecutionGroupIds] = useState<Set<string>>(() => new Set());
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [resolveAllConfirmOpen, setResolveAllConfirmOpen] = useState(false);
   const [detailEntry, setDetailEntry] = useState<ActivityEntry | null>(null);
   const [recoverConfirmEntry, setRecoverConfirmEntry] = useState<ActivityEntry | null>(null);
   const [manualRefreshing, setManualRefreshing] = useState(false);
@@ -1068,46 +1078,18 @@ export function ActivityCenter({
     setFilter(filterOptions[0]?.key ?? "all");
   }, [filter, filterOptions]);
   const queueGroups = useMemo(() => {
-    const grouped = new Map<string, ActivityEntry[]>();
-    for (const item of attentionItems) {
-      const key = queueGroupKey(item);
-      grouped.set(key, [...(grouped.get(key) ?? []), item]);
-    }
-
-    return Array.from(grouped.entries())
-      .map(([id, groupItems]): ActivityQueueGroup => {
-        const sorted = [...groupItems].sort(compareActivityPriority);
-        const groupFailedItems = groupItems.filter(isUnhandledFailure);
-        const actionCount = groupItems.filter((item) => Boolean(item.action)).length;
-        const latest = sorted[0];
-        return {
-          id,
-          label: queueGroupLabel(latest),
-          latest,
-          failedItems: groupFailedItems,
-          resourceItem:
-            sorted.find((item) => isUnhandledFailure(item) && item.resource) ??
-            sorted.find((item) => item.resource) ??
-            null,
-          targetItem:
-            sorted.find((item) => isUnhandledFailure(item) && item.target) ??
-            sorted.find((item) => item.target) ??
-            null,
-          actionItem:
-            sorted.find((item) => isUnhandledFailure(item) && item.action) ??
-            sorted.find((item) => item.action) ??
-            null,
-          detailItem: sorted.find(hasActivityDiagnostics) ?? null,
-          failedCount: groupFailedItems.length,
-          actionCount,
-          total: groupItems.length,
-        };
-      })
-      .sort((left, right) => right.latest.updatedAt.localeCompare(left.latest.updatedAt));
+    return buildActivityQueueGroups(attentionItems);
   }, [attentionItems]);
+  const clearableItems = useMemo(
+    () => items.filter(activityCanBeCleared),
+    [items],
+  );
+  const showQueue =
+    queueGroups.length > 0 && (filter === "all" || filter === "attention");
+  const showActivityList = filter !== "attention" || queueGroups.length === 0;
   const visibleItems = useMemo(() => {
     if (filter === "attention") {
-      return attentionItems;
+      return [];
     }
     if (filter === "success") {
       return successItems;
@@ -1115,7 +1097,7 @@ export function ActivityCenter({
     if (filter === "failed") {
       return failedItems;
     }
-    return originItems;
+    return originItems.filter((item) => !activityRequiresAttention(item));
   }, [attentionItems, failedItems, filter, originItems, successItems]);
   const visibleUnits = useMemo(() => {
     const visibleIds = new Set(visibleItems.map((item) => item.id));
@@ -1123,7 +1105,7 @@ export function ActivityCenter({
       visibleItems.map((item) => item.chainId).filter((value): value is string => Boolean(value)),
     );
     const chainAwareItems =
-      filter === "attention"
+      filter === "attention" || filter === "all"
         ? visibleItems
         : originItems.filter(
             (item) => visibleIds.has(item.id) || (item.chainId && visibleChainIds.has(item.chainId)),
@@ -1152,8 +1134,6 @@ export function ActivityCenter({
     visibleUnits.length,
     listPage * ACTIVITY_LIST_PAGE_SIZE,
   );
-  const visibleQueueGroups = queueGroups.slice(0, 4);
-  const hiddenQueueCount = Math.max(0, queueGroups.length - visibleQueueGroups.length);
   const toggleGroup = useCallback((groupId: string) => {
     setToggledGroupIds((current) => {
       const next = new Set(current);
@@ -1180,11 +1160,15 @@ export function ActivityCenter({
     if (unhandledFailedItems.length === 0) {
       return;
     }
-    onAcknowledgeEntries(unhandledFailedItems);
+    onResolveEntries(unhandledFailedItems);
   };
   const handleClearConfirmed = () => {
     onClear();
     setClearConfirmOpen(false);
+  };
+  const handleResolveAllConfirmed = () => {
+    onResolveEntries(attentionItems);
+    setResolveAllConfirmOpen(false);
   };
   const runActivityAction = useCallback(async (item: ActivityEntry) => {
     if (!item.action || actionRunningId) {
@@ -1197,11 +1181,26 @@ export function ActivityCenter({
       setActionRunningId("");
     }
   }, [actionRunningId, onRunAction]);
+  const requestActivityAction = useCallback((item: ActivityEntry) => {
+    const actionKind = item.action?.kind;
+    if (
+      actionKind === "linkRecover" ||
+      actionKind === "branchReplay" ||
+      actionKind === "buildRecover" ||
+      actionKind === "runtimeRecover" ||
+      actionKind === "proxyRecover"
+    ) {
+      setRecoverConfirmEntry(item);
+      return;
+    }
+    void runActivityAction(item);
+  }, [runActivityAction]);
 
   const renderActivityAction = (item: ActivityEntry) => {
-    if (!item.action) {
+    if (!item.action || item.acknowledgedAt) {
       return null;
     }
+    const actionLabel = translateInternalMessage(item.action.label, t);
     const comparing = item.action.kind === "compareConfigSource";
     const recovering =
       item.action.kind === "linkRecover" ||
@@ -1210,19 +1209,15 @@ export function ActivityCenter({
       item.action.kind === "runtimeRecover" ||
       item.action.kind === "proxyRecover";
     return (
-      <Tooltip title={item.action.label}>
+      <Tooltip title={actionLabel}>
         <span>
           <IconButton
             size="small"
             onClick={() => {
-              if (recovering) {
-                setRecoverConfirmEntry(item);
-                return;
-              }
-              void runActivityAction(item);
+              requestActivityAction(item);
             }}
             disabled={Boolean(actionRunningId)}
-            aria-label={item.action.label}
+            aria-label={actionLabel}
             sx={activityActionIconSx}
           >
             {recovering ? (
@@ -1238,16 +1233,19 @@ export function ActivityCenter({
     );
   };
 
+  const resourceActionLabel = (item: ActivityEntry) =>
+    translateInternalMessage(item.resource?.label ?? t("打开关联资源"), t);
+
   const renderActivityDetailAction = (item: ActivityEntry) => {
     if (!hasActivityDiagnostics(item)) {
       return null;
     }
     return (
-      <Tooltip title="查看诊断详情">
+      <Tooltip title={t("查看诊断详情")}>
         <IconButton
           size="small"
           onClick={() => setDetailEntry(item)}
-          aria-label="查看诊断详情"
+          aria-label={t("查看诊断详情")}
           sx={activityActionIconSx}
         >
           <SearchIcon fontSize="small" />
@@ -1292,7 +1290,7 @@ export function ActivityCenter({
               </Box>
               <Box className="activity-header-text" minWidth={0}>
                 <Typography className="activity-header-title" variant="subtitle1">
-                  活动
+                  {t("活动")}
                 </Typography>
                 <Typography
                   className="activity-header-subtitle"
@@ -1300,7 +1298,7 @@ export function ActivityCenter({
                   color="text.secondary"
                   noWrap
                 >
-                  管理和跟踪所有活动
+                  {t("管理和跟踪所有活动")}
                 </Typography>
               </Box>
             </Stack>
@@ -1310,54 +1308,54 @@ export function ActivityCenter({
               spacing={0}
               sx={{ pt: variant === "panel" ? 0.1 : 0 }}
             >
-              <Tooltip title="处理全部失败">
+              <Tooltip title={t("标记全部失败已处理")}>
                 <span>
                   <IconButton
                     className="activity-header-action activity-header-action--primary"
                     size="small"
                     onClick={handleAcknowledgeAllFailed}
                     disabled={unhandledFailedItems.length === 0}
-                    aria-label="处理全部失败"
+                    aria-label={t("标记全部失败已处理")}
                     sx={activityHeaderIconSx}
                   >
                     <CheckIcon fontSize="small" />
                   </IconButton>
                 </span>
               </Tooltip>
-              <Tooltip title="刷新活动状态">
+              <Tooltip title={t("刷新活动状态")}>
                 <span>
                   <IconButton
                     className="activity-header-action"
                     size="small"
                     onClick={() => void runRefresh({ force: true })}
                     disabled={!hasManualRefreshableBuildActivity || manualRefreshing}
-                    aria-label="刷新活动状态"
+                    aria-label={t("刷新活动状态")}
                     sx={activityHeaderIconSx}
                   >
                     <RefreshIcon fontSize="small" />
                   </IconButton>
                 </span>
               </Tooltip>
-              <Tooltip title="清空活动">
+              <Tooltip title={t("清理已处理记录")}>
                 <span>
                   <IconButton
                     className="activity-header-action"
                     size="small"
                     onClick={() => setClearConfirmOpen(true)}
-                    disabled={items.length === 0}
-                    aria-label="清空活动"
+                    disabled={clearableItems.length === 0}
+                    aria-label={t("清理已处理记录")}
                     sx={activityHeaderIconSx}
                   >
                     <TrashIcon fontSize="small" />
                   </IconButton>
                 </span>
               </Tooltip>
-              <Tooltip title="收起活动中心">
+              <Tooltip title={t("收起活动中心")}>
                 <IconButton
                   className="activity-header-action"
                   size="small"
                   onClick={onClose}
-                  aria-label="收起活动中心"
+                  aria-label={t("收起活动中心")}
                   sx={activityHeaderIconSx}
                 >
                   <PanelSideIcon fontSize="small" />
@@ -1371,7 +1369,7 @@ export function ActivityCenter({
             value={filter}
             onChange={(_, value) => setFilter(value as ActivityFilter)}
             variant="fullWidth"
-            aria-label="活动筛选"
+            aria-label={t("活动筛选")}
           >
             {filterOptions.map((item) => (
               <Tab
@@ -1381,13 +1379,13 @@ export function ActivityCenter({
                 iconPosition="start"
                 label={(
                   <Box component="span" className="activity-filter-label">
-                    <Box component="span">{item.label}</Box>
+                    <Box component="span">{t(item.label)}</Box>
                     <Box component="span" className="activity-filter-count">
                       {item.count}
                     </Box>
                   </Box>
                 )}
-                aria-label={`${item.label} ${item.count}`}
+                aria-label={`${t(item.label)} ${item.count}`}
               />
             ))}
           </Tabs>
@@ -1396,7 +1394,7 @@ export function ActivityCenter({
             onChange={(_, value) => setOriginFilter(value as ActivityOriginFilter)}
             variant="scrollable"
             scrollButtons={false}
-            aria-label="活动来源筛选"
+            aria-label={t("活动来源筛选")}
             sx={{
               mt: 0.58,
               minHeight: 28,
@@ -1427,245 +1425,43 @@ export function ActivityCenter({
               <Tab
                 key={item.key}
                 value={item.key}
-                label={`${item.label} ${item.count}`}
-                aria-label={`${item.label} ${item.count}`}
+                label={`${t(item.label)} ${item.count}`}
+                aria-label={`${t(item.label)} ${item.count}`}
               />
             ))}
           </Tabs>
         </Box>
 
-        {queueGroups.length > 0 ? (
-          <Box
-            className="activity-queue-section"
-            sx={{
-              mt: 0.75,
-              p: 0.9,
-            }}
-          >
-            <Stack
-              className="activity-section-heading"
-              direction="row"
-              justifyContent="space-between"
-              alignItems="center"
-              spacing={1}
-            >
-              <Stack direction="row" spacing={0.55} alignItems="baseline" minWidth={0}>
-                <Typography
-                  variant="caption"
-                  sx={{ flexShrink: 0, color: "var(--text)", fontWeight: 790, fontSize: "0.7rem" }}
-                >
-                  待处理队列
-                </Typography>
-                <Typography
-                  variant="caption"
-                  color="text.secondary"
-                  noWrap
-                  sx={{ minWidth: 0, fontSize: "0.67rem", lineHeight: 1.4 }}
-                >
-                  {queueGroups.length} 个分组需要关注
-                </Typography>
-              </Stack>
-              <Chip
-                size="small"
-                label={`${counts.attention}`}
-                variant="filled"
-                sx={(theme) => {
-                  const dark = theme.palette.mode === "dark";
-                  return {
-                    height: 21,
-                    borderRadius: "7px",
-                    bgcolor: "var(--activity-running-soft)",
-                    color: "var(--activity-running)",
-                    border: dark ? "1px solid rgba(143,184,234,0.09)" : "1px solid rgba(52,76,96,0.09)",
-                    backdropFilter: "blur(18px) saturate(1.16)",
-                    WebkitBackdropFilter: "blur(18px) saturate(1.16)",
-                    "& .MuiChip-label": { px: 0.7, fontSize: "0.64rem", fontWeight: 820 },
-                  };
-                }}
-              />
-            </Stack>
-
-            <Stack spacing={0.65} sx={{ mt: 0.72 }}>
-              {visibleQueueGroups.map((group) => (
-                <Box
-                  className="activity-record-card activity-queue-card"
-                  key={group.id}
-                  sx={(theme) => ({
-                    ...activityRecordCardSx(theme),
-                    px: 0.9,
-                    py: 0.8,
-                  })}
-                >
-                  <Stack direction="row" spacing={0.78} alignItems="flex-start">
-                    <Box
-                      sx={{
-                        width: 2,
-                        alignSelf: "stretch",
-                        minHeight: 42,
-                        borderRadius: 999,
-                        bgcolor: group.failedCount > 0 ? "var(--activity-danger)" : "var(--activity-running)",
-                        opacity: 0.7,
-                      }}
-                    />
-                    <Box minWidth={0} flex={1}>
-                      <Stack
-                        className="activity-record-heading"
-                        direction="row"
-                        alignItems="flex-start"
-                        justifyContent="space-between"
-                        spacing={0.8}
-                      >
-                        <Stack
-                          className="activity-queue-title-cluster"
-                          alignItems="stretch"
-                          spacing={0.48}
-                          minWidth={0}
-                          flex={1}
-                        >
-                          <Typography
-                            variant="body2"
-                            sx={{
-                              color: "color-mix(in srgb, var(--text) 88%, var(--muted))",
-                              fontSize: "0.83rem",
-                              fontWeight: 760,
-                              lineHeight: 1.32,
-                              overflowWrap: "anywhere",
-                            }}
-                          >
-                            {group.label}
-                          </Typography>
-                          <Stack direction="row" spacing={0.4} alignItems="center" flexWrap="wrap" useFlexGap>
-                            {group.failedCount > 0 ? (
-                              <Chip
-                                size="small"
-                                label={`失败 ${group.failedCount}`}
-                                variant="outlined"
-                                sx={(theme) => ({
-                                  ...activityChipSx(theme),
-                                  color: "var(--activity-danger)",
-                                })}
-                              />
-                            ) : null}
-                            {group.actionCount > 0 && group.failedCount === 0 ? (
-                              <Chip
-                                size="small"
-                                label={`待操作 ${group.actionCount}`}
-                                variant="outlined"
-                                sx={(theme) => ({
-                                  ...activityChipSx(theme),
-                                  color: "var(--activity-running)",
-                                })}
-                              />
-                            ) : null}
-                            {group.total > 1 ? (
-                              <Chip
-                                size="small"
-                                label={`执行 ${group.total} 次`}
-                                variant="outlined"
-                                sx={activityChipSx}
-                              />
-                            ) : null}
-                          </Stack>
-                        </Stack>
-                        {group.actionItem || group.detailItem || group.resourceItem || group.targetItem || group.failedItems.length > 0 ? (
-                          <Stack className="activity-card-actions" direction="row" spacing={0.25} flexShrink={0}>
-                            {group.actionItem ? renderActivityAction(group.actionItem) : null}
-                            {group.detailItem ? renderActivityDetailAction(group.detailItem) : null}
-                            {group.resourceItem ? (
-                              <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
-                                <IconButton
-                                  size="small"
-                                  onClick={() => onOpenResource(group.resourceItem!)}
-                                  aria-label={group.resourceItem.resource?.label ?? "打开关联资源"}
-                                  sx={activityActionIconSx}
-                                >
-                                  <OpenExternalIcon fontSize="small" />
-                                </IconButton>
-                              </Tooltip>
-                            ) : null}
-                            {group.targetItem ? (
-                              <Tooltip title="定位">
-                                <IconButton
-                                  size="small"
-                                  onClick={() => onOpenEntry(group.targetItem!)}
-                                  aria-label="定位活动"
-                                  sx={activityActionIconSx}
-                                >
-                                  <SettingsIcon fontSize="small" />
-                                </IconButton>
-                              </Tooltip>
-                            ) : null}
-                            {group.failedItems.length > 0 ? (
-                              <Tooltip title="标记已处理">
-                                <IconButton
-                                  size="small"
-                                  onClick={() => onAcknowledgeEntries(group.failedItems)}
-                                  aria-label="标记已处理"
-                                  sx={activityActionIconSx}
-                                >
-                                  <CheckIcon fontSize="small" />
-                                </IconButton>
-                              </Tooltip>
-                            ) : null}
-                          </Stack>
-                        ) : null}
-                      </Stack>
-                      <Typography
-                        variant="caption"
-                        sx={{
-                          display: "-webkit-box",
-                          mt: 0.42,
-                          color: "color-mix(in srgb, var(--muted) 88%, var(--text))",
-                          overflow: "hidden",
-                          overflowWrap: "anywhere",
-                          WebkitBoxOrient: "vertical",
-                          WebkitLineClamp: 2,
-                          fontSize: "0.67rem",
-                          lineHeight: 1.46,
-                        }}
-                      >
-                        {group.latest.title} · {displayActivitySummary(group.latest)}
-                      </Typography>
-                      <ActivityParameterSummary item={group.latest} />
-                    </Box>
-                  </Stack>
-                </Box>
-              ))}
-              {hiddenQueueCount > 0 ? (
-                <Stack
-                  direction="row"
-                  justifyContent="space-between"
-                  alignItems="center"
-                  spacing={1}
-                  sx={{
-                    px: 0.2,
-                    pt: 0.2,
-                    color: "var(--muted)",
-                  }}
-                >
-                  <Typography variant="caption">
-                    还有 {hiddenQueueCount} 个待处理分组在下方列表中
-                  </Typography>
-                  <Button
-                    size="small"
-                    variant="text"
-                    onClick={() => setFilter("attention")}
-                    sx={{ minHeight: 24, px: 0.8 }}
-                  >
-                    查看
-                  </Button>
-                </Stack>
-              ) : null}
-            </Stack>
-          </Box>
+        {showQueue ? (
+          <ActivityAttentionQueue
+            groups={queueGroups}
+            attentionCount={counts.attention}
+            expanded={filter === "attention"}
+            actionRunningId={actionRunningId}
+            onShowAll={() => setFilter("attention")}
+            onRunAction={requestActivityAction}
+            onOpenDetail={setDetailEntry}
+            onOpenResource={onOpenResource}
+            onOpenEntry={onOpenEntry}
+            onResolveEntries={onResolveEntries}
+            onRequestResolveAll={() => setResolveAllConfirmOpen(true)}
+          />
         ) : null}
 
-        <Divider className="activity-list-divider" sx={{ borderColor: "var(--line-soft)", opacity: 0.78 }} />
+        <Divider
+          className="activity-list-divider"
+          sx={{
+            display: showActivityList ? "block" : "none",
+            borderColor: "var(--line-soft)",
+            opacity: 0.78,
+          }}
+        />
 
         <Stack
           className="activity-list-scroll"
           spacing={1}
           sx={{
+            display: showActivityList ? "flex" : "none",
             mt: 0.9,
             mb: 0.7,
             p: 0.2,
@@ -1712,11 +1508,11 @@ export function ActivityCenter({
         >
           {visibleUnits.length === 0 ? (
             <AppEmptyState
-              title={filter === "attention" ? "暂无待处理" : "没有匹配记录"}
+              title={t(filter === "attention" ? "暂无待处理" : "没有匹配记录")}
               description={
-                filter === "attention"
+                t(filter === "attention"
                   ? "未处理失败和需要人工操作的活动会出现在这里。"
-                  : "换个筛选条件看看其他活动。"
+                  : "换个筛选条件看看其他活动。")
               }
             />
           ) : (
@@ -1763,11 +1559,11 @@ export function ActivityCenter({
                               {group.actionItem ? renderActivityAction(group.actionItem) : null}
                               {group.detailItem ? renderActivityDetailAction(group.detailItem) : null}
                               {group.resourceItem ? (
-                                <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
+                                <Tooltip title={resourceActionLabel(group.resourceItem)}>
                                   <IconButton
                                     size="small"
                                     onClick={() => onOpenResource(group.resourceItem!)}
-                                    aria-label={group.resourceItem.resource?.label ?? "打开关联资源"}
+                                    aria-label={resourceActionLabel(group.resourceItem)}
                                     sx={activityActionIconSx}
                                   >
                                     <OpenExternalIcon fontSize="small" />
@@ -1775,11 +1571,11 @@ export function ActivityCenter({
                                 </Tooltip>
                               ) : null}
                               {group.targetItem ? (
-                                <Tooltip title="定位">
+                                <Tooltip title={t("定位")}>
                                   <IconButton
                                     size="small"
                                     onClick={() => onOpenEntry(group.targetItem!)}
-                                    aria-label="定位活动"
+                                    aria-label={t("定位活动")}
                                     sx={activityActionIconSx}
                                   >
                                     <SettingsIcon fontSize="small" />
@@ -1787,22 +1583,22 @@ export function ActivityCenter({
                                 </Tooltip>
                               ) : null}
                               {unhandledGroupFailures.length > 0 ? (
-                                <Tooltip title="标记已处理">
+                                <Tooltip title={t("标记已处理")}>
                                   <IconButton
                                     size="small"
-                                    onClick={() => onAcknowledgeEntries(unhandledGroupFailures)}
-                                    aria-label="标记已处理"
+                                    onClick={() => onResolveEntries(unhandledGroupFailures)}
+                                    aria-label={t("标记已处理")}
                                     sx={activityActionIconSx}
                                   >
                                     <CheckIcon fontSize="small" />
                                   </IconButton>
                                 </Tooltip>
                               ) : null}
-                              <Tooltip title={groupExpanded ? "收起执行详情" : "展开执行详情"}>
+                              <Tooltip title={t(groupExpanded ? "收起执行详情" : "展开执行详情")}>
                                 <IconButton
                                   size="small"
                                   onClick={() => toggleGroup(group.id)}
-                                  aria-label={groupExpanded ? "收起执行详情" : "展开执行详情"}
+                                  aria-label={t(groupExpanded ? "收起执行详情" : "展开执行详情")}
                                   aria-expanded={groupExpanded}
                                   sx={activityActionIconSx}
                                 >
@@ -1849,7 +1645,7 @@ export function ActivityCenter({
                                   lineHeight: 1.55,
                                 }}
                               >
-                                {activityStepLabel(item)}
+                                {translateInternalMessage(activityStepLabel(item), t)}
                               </Typography>
                               <Box className="activity-timeline-marker" sx={{ color: statusColor(item.status) }}>
                                 <CheckIcon fontSize="small" />
@@ -1866,7 +1662,7 @@ export function ActivityCenter({
                                   }}
                                 >
                                   {[
-                                    displayActivitySummary(item) || STATUS_LABELS[item.status],
+                                    displayActivitySummary(item, t) || t(STATUS_LABELS[item.status]),
                                     formatActivityTime(item.updatedAt),
                                   ].filter(Boolean).join(" · ")}
                                 </Typography>
@@ -1898,7 +1694,10 @@ export function ActivityCenter({
                   unhandledGroupFailures.length === 0
                     ? group.failedItems[0].acknowledgedAt ?? null
                     : null;
-                const collapsedFailureReason = activityFailureReason(group.latest);
+                const collapsedFailureReason = translateInternalMessage(
+                  activityFailureReason(group.latest),
+                  t,
+                );
                 const headlineItem: ActivityEntry = {
                   ...group.latest,
                   title: group.title,
@@ -1928,14 +1727,14 @@ export function ActivityCenter({
                               <>
                                 <Chip
                                   size="small"
-                                  label={`执行 ${group.executionCount} 次`}
+                                  label={t("执行 {count} 次", { count: group.executionCount })}
                                   variant="outlined"
                                   sx={activityChipSx}
                                 />
                                 {group.failedItems.length > 0 && group.status !== "failed" ? (
                                   <Chip
                                     size="small"
-                                    label={`历史失败 ${group.failedItems.length}`}
+                                    label={t("历史失败 {count}", { count: group.failedItems.length })}
                                     variant="outlined"
                                     sx={activityChipSx}
                                   />
@@ -1948,11 +1747,11 @@ export function ActivityCenter({
                               {group.actionItem ? renderActivityAction(group.actionItem) : null}
                               {group.detailItem ? renderActivityDetailAction(group.detailItem) : null}
                               {group.resourceItem ? (
-                                <Tooltip title={group.resourceItem.resource?.label ?? "打开关联资源"}>
+                                <Tooltip title={resourceActionLabel(group.resourceItem)}>
                                   <IconButton
                                     size="small"
                                     onClick={() => onOpenResource(group.resourceItem!)}
-                                    aria-label={group.resourceItem.resource?.label ?? "打开关联资源"}
+                                    aria-label={resourceActionLabel(group.resourceItem)}
                                     sx={activityActionIconSx}
                                   >
                                     <OpenExternalIcon fontSize="small" />
@@ -1960,11 +1759,11 @@ export function ActivityCenter({
                                 </Tooltip>
                               ) : null}
                               {group.targetItem ? (
-                                <Tooltip title="定位">
+                                <Tooltip title={t("定位")}>
                                   <IconButton
                                     size="small"
                                     onClick={() => onOpenEntry(group.targetItem!)}
-                                    aria-label="定位活动"
+                                    aria-label={t("定位活动")}
                                     sx={activityActionIconSx}
                                   >
                                     <SettingsIcon fontSize="small" />
@@ -1972,22 +1771,22 @@ export function ActivityCenter({
                                 </Tooltip>
                               ) : null}
                               {unhandledGroupFailures.length > 0 ? (
-                                <Tooltip title="标记已处理">
+                                <Tooltip title={t("标记已处理")}>
                                   <IconButton
                                     size="small"
-                                    onClick={() => onAcknowledgeEntries(unhandledGroupFailures)}
-                                    aria-label="标记已处理"
+                                    onClick={() => onResolveEntries(unhandledGroupFailures)}
+                                    aria-label={t("标记已处理")}
                                     sx={activityActionIconSx}
                                   >
                                     <CheckIcon fontSize="small" />
                                   </IconButton>
                                 </Tooltip>
                               ) : null}
-                              <Tooltip title={groupExpanded ? "收起执行详情" : "展开执行详情"}>
+                              <Tooltip title={t(groupExpanded ? "收起执行详情" : "展开执行详情")}>
                                 <IconButton
                                   size="small"
                                   onClick={() => toggleGroup(group.id)}
-                                  aria-label={groupExpanded ? "收起执行详情" : "展开执行详情"}
+                                  aria-label={t(groupExpanded ? "收起执行详情" : "展开执行详情")}
                                   aria-expanded={groupExpanded}
                                   sx={activityActionIconSx}
                                 >
@@ -2001,10 +1800,15 @@ export function ActivityCenter({
                         {!groupExpanded ? (
                           <Box className="activity-collapsed-summary">
                             <Typography variant="caption" className="activity-collapsed-counts">
-                              成功 {groupSuccessCount} / 失败 {group.failedItems.length}
+                              {t("成功 {successCount} / 失败 {failureCount}", {
+                                successCount: groupSuccessCount,
+                                failureCount: group.failedItems.length,
+                              })}
                             </Typography>
                             <Typography variant="caption" className="activity-collapsed-copy">
-                              {displayActivitySummary(group.latest) || group.latest.detail || "执行详情已收起"}
+                              {displayActivitySummary(group.latest, t) ||
+                                translateInternalMessage(group.latest.detail ?? "", t) ||
+                                t("执行详情已收起")}
                             </Typography>
                             {collapsedFailureReason ? (
                               <Typography
@@ -2012,7 +1816,7 @@ export function ActivityCenter({
                                 className="activity-collapsed-reason"
                                 title={collapsedFailureReason}
                               >
-                                失败原因：{collapsedFailureReason}
+                                {t("失败原因：{reason}", { reason: collapsedFailureReason })}
                               </Typography>
                             ) : null}
                           </Box>
@@ -2045,7 +1849,7 @@ export function ActivityCenter({
                                   lineHeight: 1.55,
                                 }}
                               >
-                                第{group.executionCount - index}次
+                                {t("第{count}次", { count: group.executionCount - index })}
                               </Typography>
                               <Box className="activity-timeline-marker" sx={{ color: statusColor(item.status) }}>
                                 <CheckIcon fontSize="small" />
@@ -2062,10 +1866,10 @@ export function ActivityCenter({
                                   }}
                                 >
                                   {[
-                                    executionItemTitle(item, group.title),
-                                    activityStatusLabel(item),
+                                    translateInternalMessage(executionItemTitle(item, group.title), t),
+                                    t(activityStatusLabel(item)),
                                     formatActivityTime(item.updatedAt),
-                                    displayActivitySummary(item) || STATUS_LABELS[item.status],
+                                    displayActivitySummary(item, t) || t(STATUS_LABELS[item.status]),
                                   ].filter(Boolean).join(" · ")}
                                 </Typography>
                                 <ActivityTimelineDetail item={item} />
@@ -2082,8 +1886,12 @@ export function ActivityCenter({
                               aria-expanded={fullExecutionGroup}
                             >
                               {fullExecutionGroup
-                                ? `仅显示最近 ${ACTIVITY_EXECUTION_PREVIEW_LIMIT} 次`
-                                : `查看其余 ${group.items.length - ACTIVITY_EXECUTION_PREVIEW_LIMIT} 次记录`}
+                                ? t("仅显示最近 {count} 次", {
+                                    count: ACTIVITY_EXECUTION_PREVIEW_LIMIT,
+                                  })
+                                : t("查看其余 {count} 次记录", {
+                                    count: group.items.length - ACTIVITY_EXECUTION_PREVIEW_LIMIT,
+                                  })}
                             </Button>
                           ) : null}
                           </Stack>
@@ -2094,6 +1902,7 @@ export function ActivityCenter({
                 );
               }
               const item = unit.item;
+              const itemDetail = translateInternalMessage(item.detail ?? "", t);
               return (
                 <Box
                   className={`activity-record-card activity-record-card--${item.status}`}
@@ -2119,11 +1928,11 @@ export function ActivityCenter({
                           {renderActivityAction(item)}
                           {renderActivityDetailAction(item)}
                           {item.resource ? (
-                            <Tooltip title={item.resource.label}>
+                            <Tooltip title={resourceActionLabel(item)}>
                               <IconButton
                                 size="small"
                                 onClick={() => onOpenResource(item)}
-                                aria-label={item.resource.label}
+                                aria-label={resourceActionLabel(item)}
                                 sx={activityActionIconSx}
                               >
                                 <OpenExternalIcon fontSize="small" />
@@ -2131,11 +1940,11 @@ export function ActivityCenter({
                             </Tooltip>
                           ) : null}
                           {item.target ? (
-                            <Tooltip title="定位">
+                            <Tooltip title={t("定位")}>
                               <IconButton
                                 size="small"
                                 onClick={() => onOpenEntry(item)}
-                                aria-label="定位活动"
+                                aria-label={t("定位活动")}
                                 sx={activityActionIconSx}
                               >
                                 <SettingsIcon fontSize="small" />
@@ -2143,11 +1952,11 @@ export function ActivityCenter({
                             </Tooltip>
                           ) : null}
                           {isUnhandledFailure(item) ? (
-                            <Tooltip title="标记已处理">
+                            <Tooltip title={t("标记已处理")}>
                               <IconButton
                                 size="small"
-                                onClick={() => onAcknowledgeEntry(item)}
-                                aria-label="标记已处理"
+                                onClick={() => onResolveEntry(item)}
+                                aria-label={t("标记已处理")}
                                 sx={activityActionIconSx}
                               >
                                 <CheckIcon fontSize="small" />
@@ -2157,7 +1966,7 @@ export function ActivityCenter({
                         </Stack>
                       ) : null}
                     </Stack>
-                    {displayActivitySummary(item) ? (
+                    {displayActivitySummary(item, t) ? (
                       <Typography
                         variant="caption"
                         className="activity-item-summary"
@@ -2173,7 +1982,7 @@ export function ActivityCenter({
                       >
                         {[
                           item.projectName || item.projectKey,
-                          displayActivitySummary(item),
+                          displayActivitySummary(item, t),
                         ].filter(Boolean).join("：")}
                       </Typography>
                     ) : null}
@@ -2191,9 +2000,11 @@ export function ActivityCenter({
                           lineHeight: 1.46,
                           whiteSpace: "pre-wrap",
                         }}
-                        title={item.detail ?? undefined}
+                        title={itemDetail || undefined}
                       >
-                        {item.status === "failed" ? `失败原因：${item.detail}` : item.detail}
+                        {item.status === "failed"
+                          ? t("失败原因：{reason}", { reason: itemDetail })
+                          : itemDetail}
                       </Typography>
                     ) : null}
                   </Box>
@@ -2255,111 +2066,26 @@ export function ActivityCenter({
                 color="text.secondary"
                 sx={{ fontSize: "0.61rem", fontWeight: 720, whiteSpace: "nowrap" }}
               >
-                本页已全部显示
+                {t("本页已全部显示")}
               </Typography>
             )}
           </Stack>
         ) : null}
       </Box>
-      <Dialog
+      <AppActionDialog
         open={Boolean(detailEntry)}
         onClose={() => setDetailEntry(null)}
-        PaperProps={{
-          sx: {
-            bgcolor: (theme: Theme) =>
-              theme.palette.mode === "dark"
-                ? "rgba(15, 19, 25, 0.98)"
-                : "rgba(248, 251, 254, 0.98)",
-            color: "var(--text)",
-            border: "1px solid var(--line)",
-            borderRadius: "8px",
-            width: "min(480px, calc(100vw - 32px))",
-            maxHeight: "min(680px, calc(100dvh - 32px))",
-            backdropFilter: "blur(22px) saturate(1.08)",
-            WebkitBackdropFilter: "blur(22px) saturate(1.08)",
-          },
-        }}
-      >
-        {detailEntry ? (
-          <>
-            <DialogTitle sx={{ pb: 0.8 }}>
-              <Stack spacing={0.7}>
-                <Typography component="span" sx={{ fontSize: 16, fontWeight: 820 }}>
-                  {detailEntry.title}
-                </Typography>
-                <ActivityStatusPill item={detailEntry} />
-              </Stack>
-            </DialogTitle>
-            <DialogContent sx={{ pt: 0.5 }}>
-              <Stack spacing={1.35}>
-                <Box>
-                  <Typography sx={{ fontSize: 13, fontWeight: 760, overflowWrap: "anywhere" }}>
-                    {detailEntry.summary}
-                  </Typography>
-                  {detailEntry.detail ? (
-                    <Typography
-                      component="div"
-                      sx={{
-                        mt: 0.55,
-                        color: "var(--muted)",
-                        fontSize: 12,
-                        lineHeight: 1.55,
-                        overflowWrap: "anywhere",
-                        whiteSpace: "pre-line",
-                      }}
-                    >
-                      {detailEntry.detail}
-                    </Typography>
-                  ) : null}
-                </Box>
-                {detailEntry.diagnostics?.length ? (
-                  <Stack spacing={0} divider={<Divider flexItem sx={{ borderColor: "var(--line-soft)" }} />}>
-                    {detailEntry.diagnostics.map((step) => (
-                      <Box key={`${step.id}:${step.type}`} sx={{ py: 1 }}>
-                        <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-                          <Typography sx={{ minWidth: 0, fontSize: 12.5, fontWeight: 780 }}>
-                            {step.label}
-                          </Typography>
-                          <Chip
-                            size="small"
-                            label={DIAGNOSTIC_STATUS_LABELS[step.status] || step.status}
-                            variant="outlined"
-                            sx={activityChipSx}
-                          />
-                        </Stack>
-                        <Typography
-                          sx={{ mt: 0.45, color: "var(--muted)", fontSize: 12, lineHeight: 1.5, overflowWrap: "anywhere" }}
-                        >
-                          {step.summary}
-                        </Typography>
-                        {step.risks.map((risk) => (
-                          <Typography
-                            key={risk}
-                            sx={{ mt: 0.35, color: "var(--activity-danger)", fontSize: 11.5, lineHeight: 1.45, overflowWrap: "anywhere" }}
-                          >
-                            风险：{risk}
-                          </Typography>
-                        ))}
-                      </Box>
-                    ))}
-                  </Stack>
-                ) : null}
-                {detailEntry.warnings?.length ? (
-                  <Box>
-                    <Typography sx={{ mb: 0.45, fontSize: 12, fontWeight: 780 }}>警告</Typography>
-                    {detailEntry.warnings.map((warning) => (
-                      <Typography
-                        key={warning}
-                        sx={{ color: "var(--muted)", fontSize: 11.5, lineHeight: 1.5, overflowWrap: "anywhere" }}
-                      >
-                        {warning}
-                      </Typography>
-                    ))}
-                  </Box>
-                ) : null}
-              </Stack>
-            </DialogContent>
-            <DialogActions sx={{ px: 2.5, pb: 2 }}>
+        title={detailEntry ? translateInternalMessage(detailEntry.title, t) : t("活动详情")}
+        subtitle={
+          detailEntry ? <ActivityStatusPill item={detailEntry} /> : undefined
+        }
+        icon={<ActivityIcon />}
+        contentIcon={false}
+        tone="neutral"
+        className="activity-detail-dialog"
+        actions={
+          detailEntry ? (
+            <>
               {detailEntry.target ? (
                 <Button
                   startIcon={<SettingsIcon fontSize="small" />}
@@ -2368,81 +2094,218 @@ export function ActivityCenter({
                     setDetailEntry(null);
                   }}
                 >
-                  打开工作区
+                  {t("打开工作区")}
                 </Button>
               ) : null}
-              <Button variant="contained" onClick={() => setDetailEntry(null)}>关闭</Button>
-            </DialogActions>
-          </>
+              <Button
+                variant="contained"
+                onClick={() => setDetailEntry(null)}
+                className="app-action-dialog-confirm"
+              >
+                {t("关闭")}
+              </Button>
+            </>
+          ) : null
+        }
+      >
+        {detailEntry ? (
+          <Stack spacing={1.35}>
+            <Box>
+              <Typography
+                sx={{ fontSize: 13, fontWeight: 760, overflowWrap: "anywhere" }}
+              >
+                {translateInternalMessage(detailEntry.summary, t)}
+              </Typography>
+              {detailEntry.detail ? (
+                <Typography
+                  component="div"
+                  sx={{
+                    mt: 0.55,
+                    color: "var(--muted)",
+                    fontSize: 12,
+                    lineHeight: 1.55,
+                    overflowWrap: "anywhere",
+                    whiteSpace: "pre-line",
+                  }}
+                >
+                  {translateInternalMessage(detailEntry.detail, t)}
+                </Typography>
+              ) : null}
+            </Box>
+            {detailEntry.diagnostics?.length ? (
+              <Stack
+                spacing={0}
+                divider={
+                  <Divider flexItem sx={{ borderColor: "var(--line-soft)" }} />
+                }
+              >
+                {detailEntry.diagnostics.map((step) => (
+                  <Box key={`${step.id}:${step.type}`} sx={{ py: 1 }}>
+                    <Stack
+                      direction="row"
+                      alignItems="center"
+                      justifyContent="space-between"
+                      spacing={1}
+                    >
+                      <Typography
+                        sx={{ minWidth: 0, fontSize: 12.5, fontWeight: 780 }}
+                      >
+                        {translateInternalMessage(step.label, t)}
+                      </Typography>
+                      <Chip
+                        size="small"
+                        label={
+                          t(DIAGNOSTIC_STATUS_LABELS[step.status] || step.status)
+                        }
+                        variant="outlined"
+                        sx={activityChipSx}
+                      />
+                    </Stack>
+                    <Typography
+                      sx={{
+                        mt: 0.45,
+                        color: "var(--muted)",
+                        fontSize: 12,
+                        lineHeight: 1.5,
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      {translateInternalMessage(step.summary, t)}
+                    </Typography>
+                    {step.risks.map((risk) => (
+                      <Typography
+                        key={risk}
+                        sx={{
+                          mt: 0.35,
+                          color: "var(--activity-danger)",
+                          fontSize: 11.5,
+                          lineHeight: 1.45,
+                          overflowWrap: "anywhere",
+                        }}
+                      >
+                        {t("风险：{risk}", {
+                          risk: translateInternalMessage(risk, t),
+                        })}
+                      </Typography>
+                    ))}
+                  </Box>
+                ))}
+              </Stack>
+            ) : null}
+            {detailEntry.warnings?.length ? (
+              <Box>
+                <Typography sx={{ mb: 0.45, fontSize: 12, fontWeight: 780 }}>
+                  {t("警告")}
+                </Typography>
+                {detailEntry.warnings.map((warning) => (
+                  <Typography
+                    key={warning}
+                    sx={{
+                      color: "var(--muted)",
+                      fontSize: 11.5,
+                      lineHeight: 1.5,
+                      overflowWrap: "anywhere",
+                    }}
+                  >
+                    {translateInternalMessage(warning, t)}
+                  </Typography>
+                ))}
+              </Box>
+            ) : null}
+          </Stack>
         ) : null}
-      </Dialog>
-      <Dialog
+      </AppActionDialog>
+      <AppActionDialog
         open={Boolean(recoverConfirmEntry)}
         onClose={() => setRecoverConfirmEntry(null)}
-        PaperProps={{
-          sx: {
-            bgcolor: (theme: Theme) =>
-              theme.palette.mode === "dark"
-                ? "rgba(15, 19, 25, 0.98)"
-                : "rgba(248, 251, 254, 0.98)",
-            color: "var(--text)",
-            border: "1px solid var(--line)",
-            borderRadius: "8px",
-            width: "min(380px, calc(100vw - 32px))",
-            backdropFilter: "blur(22px) saturate(1.08)",
-            WebkitBackdropFilter: "blur(22px) saturate(1.08)",
-          },
-        }}
-      >
-        <DialogTitle sx={{ fontWeight: 800, pb: 0.5 }}>
-          {recoveryConfirmation(recoverConfirmEntry).title}
-        </DialogTitle>
-        <DialogContent sx={{ color: "var(--muted)", fontSize: 13, pt: 0.5, lineHeight: 1.55 }}>
-          {recoveryConfirmation(recoverConfirmEntry).content}
-        </DialogContent>
-        <DialogActions sx={{ px: 2.5, pb: 2 }}>
-          <Button onClick={() => setRecoverConfirmEntry(null)}>取消</Button>
-          <Button
-            variant="contained"
-            startIcon={<ReplayIcon fontSize="small" />}
-            onClick={() => {
-              const entry = recoverConfirmEntry;
-              setRecoverConfirmEntry(null);
-              if (entry) {
-                void runActivityAction(entry);
-              }
-            }}
-          >
-            检查并重试
-          </Button>
-        </DialogActions>
-      </Dialog>
-      <Dialog
-        className="activity-confirm-dialog-root"
+        title={recoveryConfirmation(recoverConfirmEntry, t).title}
+        description={recoveryConfirmation(recoverConfirmEntry, t).content}
+        tone="retry"
+        actions={
+          <>
+            <Button
+              variant="outlined"
+              color="inherit"
+              onClick={() => setRecoverConfirmEntry(null)}
+              className="app-action-dialog-cancel"
+            >
+              {t("取消")}
+            </Button>
+            <Button
+              autoFocus
+              variant="contained"
+              startIcon={<ReplayIcon fontSize="small" />}
+              className="app-action-dialog-confirm"
+              onClick={() => {
+                const entry = recoverConfirmEntry;
+                setRecoverConfirmEntry(null);
+                if (entry) {
+                  void runActivityAction(entry);
+                }
+              }}
+            >
+              {t("检查并重试")}
+            </Button>
+          </>
+        }
+      />
+      <AppActionDialog
+        open={resolveAllConfirmOpen}
+        onClose={() => setResolveAllConfirmOpen(false)}
+        title={t("忽略全部待处理项？")}
+        description={t("共 {count} 条。忽略后不再提醒，记录仍可在“全部”中查看。", {
+          count: attentionItems.length,
+        })}
+        tone="primary"
+        actions={
+          <>
+            <Button
+              variant="outlined"
+              color="inherit"
+              onClick={() => setResolveAllConfirmOpen(false)}
+              className="app-action-dialog-cancel"
+            >
+              {t("取消")}
+            </Button>
+            <Button
+              autoFocus
+              variant="contained"
+              onClick={handleResolveAllConfirmed}
+              className="app-action-dialog-confirm"
+            >
+              {t("忽略全部")}
+            </Button>
+          </>
+        }
+      />
+      <AppActionDialog
         open={clearConfirmOpen}
         onClose={() => setClearConfirmOpen(false)}
-        PaperProps={{
-          className: "activity-confirm-dialog-paper",
-          sx: {
-            bgcolor: "var(--panel-strong)",
-            color: "var(--text)",
-            border: "1px solid var(--line)",
-            borderRadius: "18px",
-            width: "min(360px, calc(100vw - 32px))",
-          },
-        }}
-      >
-        <DialogTitle sx={{ fontWeight: 800, pb: 0.5 }}>清空活动记录？</DialogTitle>
-        <DialogContent sx={{ color: "var(--muted)", fontSize: 13, pt: 0.5 }}>
-          这会移除当前活动中心里的运行、构建、分支等记录。
-        </DialogContent>
-        <DialogActions sx={{ px: 2.5, pb: 2 }}>
-          <Button onClick={() => setClearConfirmOpen(false)}>取消</Button>
-          <Button color="error" variant="contained" onClick={handleClearConfirmed}>
-            清空
-          </Button>
-        </DialogActions>
-      </Dialog>
+        title={t("清理已处理记录？")}
+        description={t("将移除成功、信息和已确认失败记录；待处理与正在运行的任务会保留。")}
+        tone="danger"
+        actions={
+          <>
+            <Button
+              variant="outlined"
+              color="inherit"
+              onClick={() => setClearConfirmOpen(false)}
+              className="app-action-dialog-cancel"
+            >
+              {t("取消")}
+            </Button>
+            <Button
+              autoFocus
+              color="error"
+              variant="contained"
+              onClick={handleClearConfirmed}
+              className="app-action-dialog-confirm"
+            >
+              {t("清理")}
+            </Button>
+          </>
+        }
+      />
     </>
   );
 
@@ -2453,7 +2316,7 @@ export function ActivityCenter({
     return (
       <Box
         component="aside"
-        aria-label="活动中心"
+        aria-label={t("活动中心")}
         className="activity-side-panel"
         sx={{
           height: "auto",

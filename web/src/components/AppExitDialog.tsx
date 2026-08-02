@@ -2,10 +2,6 @@ import { useEffect, useState } from "react";
 import {
   Button,
   Checkbox,
-  Dialog,
-  DialogActions,
-  DialogContent,
-  DialogTitle,
   FormControlLabel,
   Stack,
   Typography,
@@ -14,6 +10,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AppExitRuntimePolicy } from "../app-types";
 import { disposeTauriListener } from "../lib/tauriEvents";
+import { AppActionDialog } from "./AppActionDialog";
+import { PowerIcon } from "./AppIcons";
+import { useI18n } from "../i18n";
 
 const APP_EXIT_REQUESTED_EVENT = "rdevtool://app-exit-requested";
 const APP_EXIT_FAILED_EVENT = "rdevtool://app-exit-failed";
@@ -32,6 +31,7 @@ type AppExitDialogProps = {
 };
 
 export function AppExitDialog({ onError }: AppExitDialogProps) {
+  const { t } = useI18n();
   const [request, setRequest] = useState<AppExitRequestedPayload | null>(null);
   const [remember, setRemember] = useState(false);
   const [busyPolicy, setBusyPolicy] = useState<AppExitRuntimePolicy | null>(null);
@@ -61,7 +61,12 @@ export function AppExitDialog({ onError }: AppExitDialogProps) {
       for (const [result, label] of registeredListeners) {
         if (result.status === "rejected") {
           if (!disposed) {
-            onError(`监听${label}事件失败：${String(result.reason)}`);
+            onError(
+              t("监听{label}事件失败：{reason}", {
+                label: t(label),
+                reason: String(result.reason),
+              }),
+            );
           }
           continue;
         }
@@ -82,7 +87,7 @@ export function AppExitDialog({ onError }: AppExitDialogProps) {
       disposeTauriListener(unlistenRequested);
       disposeTauriListener(unlistenFailed);
     };
-  }, [onError]);
+  }, [onError, t]);
 
   async function cancelExit() {
     if (busyPolicy) {
@@ -105,55 +110,65 @@ export function AppExitDialog({ onError }: AppExitDialogProps) {
   const projectNames = request?.projectNames ?? [];
 
   return (
-    <Dialog
+    <AppActionDialog
       open={Boolean(request)}
       onClose={() => void cancelExit()}
-      maxWidth="xs"
-      fullWidth
+      busy={Boolean(busyPolicy)}
       className="app-confirm-dialog"
+      tone="warning"
+      icon={<PowerIcon />}
+      title={t("退出 rDevTool？")}
+      description={t("本次启动的 {count} 个项目仍在运行。", {
+        count: request?.activeRuntimeCount ?? 0,
+      })}
+      actions={
+        <>
+          <Button
+            variant="outlined"
+            color="inherit"
+            disabled={Boolean(busyPolicy)}
+            onClick={() => void cancelExit()}
+            className="app-action-dialog-cancel"
+          >
+            {t("取消")}
+          </Button>
+          <Button
+            color="inherit"
+            disabled={Boolean(busyPolicy)}
+            onClick={() => void confirmExit("keep")}
+          >
+            {t(busyPolicy === "keep" ? "正在退出" : "保持运行并退出")}
+          </Button>
+          <Button
+            autoFocus
+            variant="contained"
+            color="warning"
+            disabled={Boolean(busyPolicy)}
+            onClick={() => void confirmExit("stop")}
+            className="app-action-dialog-confirm"
+          >
+            {t(busyPolicy === "stop" ? "正在停止" : "停止并退出")}
+          </Button>
+        </>
+      }
     >
-      <DialogTitle>退出 rDevTool？</DialogTitle>
-      <DialogContent>
-        <Stack spacing={1.5}>
-          <Typography color="text.secondary">
-            本次启动的 {request?.activeRuntimeCount ?? 0} 个项目仍在运行。
+      <Stack spacing={1.15}>
+        {projectNames.length > 0 ? (
+          <Typography variant="body2" color="text.secondary" noWrap>
+            {projectNames.join("、")}
           </Typography>
-          {projectNames.length > 0 ? (
-            <Typography variant="body2" color="text.secondary" noWrap>
-              {projectNames.join("、")}
-            </Typography>
-          ) : null}
-          <FormControlLabel
-            control={
-              <Checkbox
-                size="small"
-                checked={remember}
-                onChange={(event) => setRemember(event.target.checked)}
-              />
-            }
-            label="记住我的选择"
-          />
-        </Stack>
-      </DialogContent>
-      <DialogActions>
-        <Button color="inherit" disabled={Boolean(busyPolicy)} onClick={() => void cancelExit()}>
-          取消
-        </Button>
-        <Button
-          color="inherit"
-          disabled={Boolean(busyPolicy)}
-          onClick={() => void confirmExit("keep")}
-        >
-          {busyPolicy === "keep" ? "正在退出" : "保持运行并退出"}
-        </Button>
-        <Button
-          variant="contained"
-          disabled={Boolean(busyPolicy)}
-          onClick={() => void confirmExit("stop")}
-        >
-          {busyPolicy === "stop" ? "正在停止" : "停止并退出"}
-        </Button>
-      </DialogActions>
-    </Dialog>
+        ) : null}
+        <FormControlLabel
+          control={
+            <Checkbox
+              size="small"
+              checked={remember}
+              onChange={(event) => setRemember(event.target.checked)}
+            />
+          }
+          label={t("记住我的选择")}
+        />
+      </Stack>
+    </AppActionDialog>
   );
 }

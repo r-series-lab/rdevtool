@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::config::{
     AppConfig, ConfigPaths, ProjectWorkspaceConfig, active_project_workspace_key,
-    load_project_workspace_by_key, load_project_workspaces, load_workspace_config,
+    load_all_project_workspaces, load_project_workspace_by_key, load_workspace_config,
     normalize_project_workspace_key,
 };
 use crate::git::working_tree_status;
@@ -684,7 +684,7 @@ fn selected_workspaces(
     if query.all_workspaces {
         return Ok((
             active_key,
-            load_project_workspaces(&paths.project_workspaces)?,
+            load_all_project_workspaces(&paths.project_workspaces)?,
         ));
     }
     let key = query
@@ -1277,6 +1277,17 @@ fn cleanup_action(
     } else if !record.ownership_verified {
         eligibility = "blocked".to_string();
         reason = "产物归属尚未验证".to_string();
+    } else if record
+        .workspace_key
+        .as_deref()
+        .is_some_and(|workspace_key| {
+            load_project_workspace_by_key(&paths.project_workspaces, workspace_key)
+                .is_ok_and(|workspace| workspace.is_archived())
+        })
+    {
+        eligibility = "blocked".to_string();
+        reason = "产物属于已归档工作区，恢复或永久删除工作区前必须保留".to_string();
+        prerequisites.push("如需清理，请先恢复工作区并重新审阅清理计划".to_string());
     } else if record.active {
         eligibility = "blocked".to_string();
         reason = "产物仍被活动会话或当前工作区使用".to_string();
@@ -1501,8 +1512,9 @@ mod tests {
         managed_artifact_context_summary, managed_artifact_inventory_with_runtime_statuses,
     };
     use crate::config::{
-        AppConfig, ConfigPaths, ProjectWorkspaceConfig, ProjectWorkspaceProjectInstanceConfig,
-        WorkspaceAppConfig, WorkspaceConfig, save_project_workspace_config, save_workspace_config,
+        AppConfig, ConfigPaths, ProjectWorkspaceArchiveConfig, ProjectWorkspaceConfig,
+        ProjectWorkspaceProjectInstanceConfig, WorkspaceAppConfig, WorkspaceConfig,
+        save_project_workspace_config, save_workspace_config,
     };
     use crate::operation::{
         ManagedArtifact, OperationEvidence, OperationRisk, OperationStatus, RecommendedAction,
@@ -1548,6 +1560,7 @@ mod tests {
             key: "feature-a".to_string(),
             name: "Feature A".to_string(),
             description: None,
+            archive: None,
             workspace_type: "business".to_string(),
             metadata: BTreeMap::new(),
             root_dir: Some(root.to_path_buf()),
@@ -1891,6 +1904,43 @@ mod tests {
         let dirty_action = cleanup_action(&record, std::slice::from_ref(&record), &paths);
         assert_eq!(dirty_action.eligibility, "blocked");
         assert!(dirty_action.reason.contains("Git 工作树"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn archived_workspace_artifacts_are_never_cleanup_eligible() {
+        let (dir, paths) = test_paths();
+        let root = dir.join("feature-a");
+        let instance = root.join("demo");
+        fs::create_dir_all(&instance).unwrap();
+        let mut workspace = workspace(&root, &instance, &dir.join("existing"));
+        workspace.archive = Some(ProjectWorkspaceArchiveConfig {
+            archived_at: "2026-07-28T08:00:00Z".to_string(),
+            reason: Some("shipped".to_string()),
+        });
+        save_project_workspace_config(&paths.project_workspaces.join("feature-a.toml"), &workspace)
+            .unwrap();
+
+        let record = super::artifact_record(
+            "workspaceConfig",
+            ManagedArtifact {
+                kind: "workspaceProjectInstance".to_string(),
+                path: instance.display().to_string(),
+                ownership: "rdevtool".to_string(),
+                lifecycle: "workspace".to_string(),
+            },
+            Some("feature-a".to_string()),
+            Some("demo".to_string()),
+            None,
+            Some(instance.display().to_string()),
+            false,
+            true,
+            "managed".to_string(),
+        );
+
+        let action = cleanup_action(&record, std::slice::from_ref(&record), &paths);
+        assert_eq!(action.eligibility, "blocked");
+        assert!(action.reason.contains("已归档工作区"));
         fs::remove_dir_all(dir).unwrap();
     }
 

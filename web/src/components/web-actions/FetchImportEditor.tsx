@@ -21,6 +21,7 @@ import {
   type EditableHttpPair,
   type EditableHttpRequest,
 } from "../../lib/httpRequest";
+import { useI18n } from "../../i18n";
 import { PlusIcon, TrashIcon, UploadIcon } from "../AppIcons";
 
 type EditableHttpPairListProps = {
@@ -38,6 +39,7 @@ function EditableHttpPairList({
   maskSensitiveValues = false,
   onChange,
 }: EditableHttpPairListProps) {
+  const { t } = useI18n();
   function updateRow(index: number, patch: Partial<EditableHttpPair>) {
     onChange(rows.map((row, rowIndex) => (rowIndex === index ? { ...row, ...patch } : row)));
   }
@@ -53,10 +55,10 @@ function EditableHttpPairList({
           {label}
         </Typography>
         <Box sx={{ flex: 1 }} />
-        <Tooltip title={`添加${label}`}>
+        <Tooltip title={t("添加{label}", { label: t(label) })}>
           <IconButton
             size="small"
-            aria-label={`添加${label}`}
+            aria-label={t("添加{label}", { label: t(label) })}
             onClick={() => onChange([...rows, { name: "", value: "" }])}
             sx={{ width: 28, height: 28, color: "var(--muted)" }}
           >
@@ -66,7 +68,7 @@ function EditableHttpPairList({
       </Stack>
       {rows.length === 0 ? (
         <Typography variant="caption" sx={{ color: "var(--muted)" }}>
-          无
+          {t("无")}
         </Typography>
       ) : null}
       {rows.map((row, index) => {
@@ -89,15 +91,18 @@ function EditableHttpPairList({
             />
             <TextField
               size="small"
-              label={sensitive ? "敏感值" : "值"}
+              label={t(sensitive ? "敏感值" : "值")}
               type={sensitive ? "password" : "text"}
               value={row.value}
               onChange={(event) => updateRow(index, { value: event.target.value })}
             />
-            <Tooltip title="删除">
+            <Tooltip title={t("删除")}>
               <IconButton
                 size="small"
-                aria-label={`删除${label} ${index + 1}`}
+                aria-label={t("删除{label} {count}", {
+                  label: t(label),
+                  count: index + 1,
+                })}
                 onClick={() => removeRow(index)}
                 sx={{ width: 28, height: 28, color: "var(--muted)" }}
               >
@@ -126,14 +131,15 @@ export function HttpRequestDraftEditor({
   onImportFetch,
   onFormatBody,
 }: HttpRequestDraftEditorProps) {
+  const { t } = useI18n();
   return (
     <Stack spacing={0.9}>
       <Stack direction="row" alignItems="center" spacing={0.65} useFlexGap flexWrap="wrap">
         <Typography variant="caption" sx={{ color: "var(--muted)", fontWeight: 850 }}>
-          HTTP 请求草稿
+          {t("HTTP 请求草稿")}
         </Typography>
-        <Chip size="small" label="未保存" />
-        <Chip size="small" label="浏览器登录态" />
+        <Chip size="small" label={t("未保存")} />
+        <Chip size="small" label={t("浏览器登录态")} />
         <Box sx={{ flex: 1 }} />
         <Button
           size="small"
@@ -142,7 +148,7 @@ export function HttpRequestDraftEditor({
           onClick={onImportFetch}
           sx={{ minWidth: 0, px: 1 }}
         >
-          导入 Fetch
+          {t("导入 Fetch")}
         </Button>
       </Stack>
 
@@ -195,7 +201,7 @@ export function HttpRequestDraftEditor({
         >
           {HTTP_REQUEST_MODES.map((mode) => (
             <MenuItem key={mode || "default"} value={mode}>
-              {mode || "浏览器默认"}
+              {mode || t("浏览器默认")}
             </MenuItem>
           ))}
         </TextField>
@@ -211,7 +217,7 @@ export function HttpRequestDraftEditor({
 
       <EditableHttpPairList
         label="Query"
-        nameLabel="参数"
+        nameLabel={t("参数")}
         rows={request.query}
         onChange={(query) => onChange({ ...request, query })}
       />
@@ -236,7 +242,7 @@ export function HttpRequestDraftEditor({
             onClick={onFormatBody}
             sx={{ minWidth: 0, px: 1 }}
           >
-            格式化 JSON
+            {t("格式化 JSON")}
           </Button>
         </Stack>
         <TextField
@@ -286,9 +292,12 @@ export function FetchImportDialog({
   onClose,
   onImport,
 }: FetchImportDialogProps) {
+  const { t } = useI18n();
   return (
     <Dialog open={open} onClose={onClose} fullWidth maxWidth="md">
-      <DialogTitle sx={{ fontSize: "1rem", fontWeight: 800 }}>导入 Fetch</DialogTitle>
+      <DialogTitle sx={{ fontSize: "1rem", fontWeight: 800 }}>
+        {t("导入 Fetch")}
+      </DialogTitle>
       <DialogContent>
         <Stack spacing={0.8} sx={{ pt: 0.4 }}>
           <TextField
@@ -319,10 +328,10 @@ export function FetchImportDialog({
       </DialogContent>
       <DialogActions sx={{ px: 3, pb: 2 }}>
         <Button color="inherit" onClick={onClose}>
-          取消
+          {t("取消")}
         </Button>
         <Button variant="contained" disabled={!source.trim()} onClick={onImport}>
-          解析请求
+          {t("解析请求")}
         </Button>
       </DialogActions>
     </Dialog>

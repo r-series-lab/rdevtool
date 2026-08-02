@@ -39,14 +39,19 @@ import { useAppConfirmDialog } from "./AppConfirmDialog";
 import { AppToast } from "./AppToast";
 import { ConfigDialogShell } from "./ConfigDialogShell";
 import { useConfigSource } from "../hooks/useConfigSource";
-import { configSourceKindLabel } from "../lib/configSources";
+import {
+  archivedConfigSourceCount,
+  configSourceKindLabel,
+  visibleConfigSources,
+} from "../lib/configSources";
 import { UI_PROFILES, uiProfileDefinition } from "../lib/uiProfiles";
+import { useI18n, type Translate } from "../i18n";
 
 const CAPABILITIES = [
   { key: "resource", label: "资源入口" },
   { key: "link", label: "链路" },
   { key: "proxy", label: "代理" },
-  { key: "runtime", label: "运行配置" },
+  { key: "runtime", label: "运行环境" },
 ] as const;
 
 const FILE_FIELDS = [
@@ -55,7 +60,7 @@ const FILE_FIELDS = [
   { key: "proxy", label: "代理", fallback: "proxy.toml" },
   {
     key: "runtimeOverrides",
-    label: "运行配置覆盖",
+    label: "运行环境覆盖",
     fallback: "runtime_overrides.toml",
   },
 ] as const;
@@ -66,24 +71,25 @@ type ConfigSourceManagerDialogProps = {
   compareOnOpen?: boolean;
   onClose: () => void;
   onChanged?: (sources: ConfigSource[], selectedSourceId: string) => void | Promise<void>;
+  onCompared?: (comparison: ConfigSourceComparison) => void | Promise<void>;
 };
 
 type ConfigSourceCopyDraft = Omit<ConfigSourceCopyRequest, "sourceId">;
 
-function runtimeScopeLabel(scope: string) {
-  if (scope === "global") return "全局配置";
-  if (scope === "override") return "当前源覆盖";
-  if (scope === "inherited") return "继承全局";
-  if (scope === "unsupported") return "未启用";
+function runtimeScopeLabel(scope: string, t: Translate) {
+  if (scope === "global") return t("全局配置");
+  if (scope === "override") return t("当前源覆盖");
+  if (scope === "inherited") return t("继承全局");
+  if (scope === "unsupported") return t("未启用");
   return scope;
 }
 
-function healthLabel(status: string) {
-  if (status === "ready") return "可用";
-  if (status === "empty") return "待初始化";
-  if (status === "invalid") return "需修复";
-  if (status === "missing") return "未创建";
-  if (status === "unsupported") return "未启用";
+function healthLabel(status: string, t: Translate) {
+  if (status === "ready") return t("可用");
+  if (status === "empty") return t("待初始化");
+  if (status === "invalid") return t("需修复");
+  if (status === "missing") return t("未创建");
+  if (status === "unsupported") return t("未启用");
   return status;
 }
 
@@ -141,7 +147,9 @@ export function ConfigSourceManagerDialog({
   compareOnOpen = false,
   onClose,
   onChanged,
+  onCompared,
 }: ConfigSourceManagerDialogProps) {
+  const { language, t } = useI18n();
   const {
     sources,
     selectedSource,
@@ -165,10 +173,19 @@ export function ConfigSourceManagerDialog({
   const [error, setError] = useState("");
   const [status, setStatusValue] = useState("");
   const [toastNonce, setToastNonce] = useState(0);
+  const [showArchivedSources, setShowArchivedSources] = useState(false);
   const internalWriteRefreshUntilRef = useRef(0);
   const [confirm, confirmDialog] = useAppConfirmDialog();
 
   const loading = loadingSources || inspectionLoading;
+  const archivedSourceCount = archivedConfigSourceCount(sources);
+  const visibleSources = visibleConfigSources(sources, showArchivedSources);
+
+  useEffect(() => {
+    if (selectedSource?.workspaceArchived) {
+      setShowArchivedSources(true);
+    }
+  }, [selectedSource?.workspaceArchived]);
 
   function setStatus(value: string) {
     setStatusValue(value);
@@ -271,7 +288,11 @@ export function ConfigSourceManagerDialog({
   }
 
   async function chooseBaseDirectory() {
-    const selected = await openDialog({ directory: true, multiple: false, title: "选择配置源目录" });
+    const selected = await openDialog({
+      directory: true,
+      multiple: false,
+      title: t("选择配置源目录"),
+    });
     if (typeof selected === "string") updateDraft({ baseDir: selected });
   }
 
@@ -279,7 +300,7 @@ export function ConfigSourceManagerDialog({
     const selected = await openDialog({
       directory: true,
       multiple: false,
-      title: "选择副本目录",
+      title: t("选择副本目录"),
     });
     if (typeof selected === "string") {
       setCopyDraft((current) => (current ? { ...current, baseDir: selected } : current));
@@ -302,7 +323,7 @@ export function ConfigSourceManagerDialog({
   async function copySource() {
     if (!inspection || !copyDraft) return;
     if (!copyDraft.id.trim() || !copyDraft.name.trim()) {
-      setError("副本 ID 和名称不能为空");
+      setError(t("副本 ID 和名称不能为空"));
       return;
     }
     setSaving(true);
@@ -321,11 +342,14 @@ export function ConfigSourceManagerDialog({
       const refreshed = await loadSources(result.target.id);
       if (refreshed) {
         await onChanged?.(refreshed.sources, refreshed.sourceId);
-        setStatus(
-          `已创建“${result.target.name}”，复制 ${result.copiedCount} 个文件${
-            result.missingCount > 0 ? `，${result.missingCount} 个源文件缺失` : ""
-          }`,
-        );
+        setStatus(t("已创建“{name}”，复制 {copiedCount} 个文件{missingSummary}", {
+          name: result.target.name,
+          copiedCount: result.copiedCount,
+          missingSummary:
+            result.missingCount > 0
+              ? t("，{count} 个源文件缺失", { count: result.missingCount })
+              : "",
+        }));
       }
     } catch (reason) {
       setError(String(reason));
@@ -345,10 +369,17 @@ export function ConfigSourceManagerDialog({
         rightSourceId,
       });
       setComparison(result);
+      await onCompared?.(result);
       setStatus(
         result.identical
-          ? `“${result.left.name}”与“${result.right.name}”完全一致`
-          : `比较完成：${result.summary.differing} 项不同，${result.summary.matching} 项一致`,
+          ? t("“{left}”与“{right}”完全一致", {
+              left: result.left.name,
+              right: result.right.name,
+            })
+          : t("比较完成：{differing} 项不同，{matching} 项一致", {
+              differing: result.summary.differing,
+              matching: result.summary.matching,
+            }),
       );
     } catch (reason) {
       setComparison(null);
@@ -366,11 +397,11 @@ export function ConfigSourceManagerDialog({
   async function saveDefinition() {
     if (!draft) return;
     if (!draft.id.trim() || !draft.name.trim()) {
-      setError("配置源 ID 和名称不能为空");
+      setError(t("配置源 ID 和名称不能为空"));
       return;
     }
     if (draft.capabilities.length === 0) {
-      setError("至少启用一种配置能力");
+      setError(t("至少启用一种配置能力"));
       return;
     }
     setSaving(true);
@@ -384,7 +415,7 @@ export function ConfigSourceManagerDialog({
       const result = await loadSources(nextInspection.source.id);
       if (result) {
         await onChanged?.(result.sources, result.sourceId);
-        setStatus(`已保存配置源“${nextInspection.source.name}”`);
+        setStatus(t("已保存配置源“{name}”", { name: nextInspection.source.name }));
       }
     } catch (reason) {
       setError(String(reason));
@@ -396,9 +427,11 @@ export function ConfigSourceManagerDialog({
   async function deleteSource() {
     if (!inspection?.editable) return;
     const accepted = await confirm({
-      title: "移除配置源？",
-      description: `将移除“${inspection.source.name}”的注册记录，已有配置文件会保留。`,
-      confirmLabel: "移除",
+      title: t("移除配置源？"),
+      description: t("将移除“{name}”的注册记录，已有配置文件会保留。", {
+        name: inspection.source.name,
+      }),
+      confirmLabel: t("移除"),
       tone: "danger",
       preferenceKey: "destructive.delete",
     });
@@ -412,7 +445,7 @@ export function ConfigSourceManagerDialog({
       const result = await loadSources("default");
       if (result) {
         await onChanged?.(result.sources, result.sourceId);
-        setStatus(`已移除配置源“${inspection.source.name}”`);
+        setStatus(t("已移除配置源“{name}”", { name: inspection.source.name }));
       }
     } catch (reason) {
       setError(String(reason));
@@ -444,8 +477,8 @@ export function ConfigSourceManagerDialog({
       if (loaded) {
         setStatus(
           lastExternalChange?.catalogChanged
-            ? "配置源列表已在外部更新"
-            : "当前配置源文件已在外部更新",
+            ? t("配置源列表已在外部更新")
+            : t("当前配置源文件已在外部更新"),
         );
       }
     });
@@ -458,9 +491,11 @@ export function ConfigSourceManagerDialog({
         <Box className="config-source-manager-editor config-source-copy-editor">
           <Stack className="config-source-manager-section-head" direction="row" alignItems="center">
             <Box minWidth={0} flex={1}>
-              <Typography variant="subtitle2">复制配置源</Typography>
+              <Typography variant="subtitle2">{t("复制配置源")}</Typography>
               <Typography variant="caption" color="text.secondary">
-                从“{inspection.source.name}”创建独立副本
+                {t("从“{name}”创建独立副本", {
+                  name: inspection.source.name,
+                })}
               </Typography>
             </Box>
           </Stack>
@@ -468,18 +503,18 @@ export function ConfigSourceManagerDialog({
             <div className="config-source-manager-form-grid">
               <TextField
                 size="small"
-                label="副本 ID"
+                label={t("副本 ID")}
                 value={copyDraft.id}
                 onChange={(event) =>
                   setCopyDraft((current) =>
                     current ? { ...current, id: event.target.value } : current,
                   )
                 }
-                helperText="保存后不可修改"
+                helperText={t("保存后不可修改")}
               />
               <TextField
                 size="small"
-                label="副本名称"
+                label={t("副本名称")}
                 value={copyDraft.name}
                 onChange={(event) =>
                   setCopyDraft((current) =>
@@ -492,23 +527,26 @@ export function ConfigSourceManagerDialog({
               <TextField
                 fullWidth
                 size="small"
-                label="副本目录"
+                label={t("副本目录")}
                 value={copyDraft.baseDir ?? ""}
                 onChange={(event) =>
                   setCopyDraft((current) =>
                     current ? { ...current, baseDir: event.target.value } : current,
                   )
                 }
-                helperText="留空时自动创建独立目录；已有非空目录不会被覆盖"
+                helperText={t("留空时自动创建独立目录；已有非空目录不会被覆盖")}
               />
-              <Tooltip title="选择目录">
-                <IconButton onClick={() => void chooseCopyBaseDirectory()} aria-label="选择副本目录">
+              <Tooltip title={t("选择目录")}>
+                <IconButton
+                  onClick={() => void chooseCopyBaseDirectory()}
+                  aria-label={t("选择副本目录")}
+                >
                   <FolderIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
             </div>
             <Alert severity="info">
-              将复制该来源已启用的配置文件；缺失文件保持缺失，不会修改原配置源。
+              {t("将复制该来源已启用的配置文件；缺失文件保持缺失，不会修改原配置源。")}
             </Alert>
           </Box>
         </Box>
@@ -520,10 +558,10 @@ export function ConfigSourceManagerDialog({
         <Stack className="config-source-manager-section-head" direction="row" alignItems="center">
           <Box minWidth={0} flex={1}>
             <Typography variant="subtitle2">
-              {mode === "create" ? "新增配置源" : "编辑配置源"}
+              {mode === "create" ? t("新增配置源") : t("编辑配置源")}
             </Typography>
             <Typography variant="caption" color="text.secondary">
-              绑定独立目录、文件映射和可用能力
+              {t("绑定独立目录、文件映射和可用能力")}
             </Typography>
           </Box>
         </Stack>
@@ -531,15 +569,15 @@ export function ConfigSourceManagerDialog({
           <div className="config-source-manager-form-grid">
             <TextField
               size="small"
-              label="配置源 ID"
+              label={t("配置源 ID")}
               value={draft.id}
               onChange={(event) => updateDraft({ id: event.target.value })}
               disabled={mode === "edit"}
-              helperText="保存后 ID 不可修改"
+              helperText={t("保存后 ID 不可修改")}
             />
             <TextField
               size="small"
-              label="名称"
+              label={t("名称")}
               value={draft.name}
               onChange={(event) => updateDraft({ name: event.target.value })}
             />
@@ -548,13 +586,16 @@ export function ConfigSourceManagerDialog({
             <TextField
               fullWidth
               size="small"
-              label="基础目录"
+              label={t("基础目录")}
               value={draft.baseDir ?? ""}
               onChange={(event) => updateDraft({ baseDir: event.target.value })}
-              helperText="留空时由 rDevTool 在配置目录下自动创建"
+              helperText={t("留空时由 rDevTool 在配置目录下自动创建")}
             />
-            <Tooltip title="选择目录">
-              <IconButton onClick={() => void chooseBaseDirectory()} aria-label="选择配置源目录">
+            <Tooltip title={t("选择目录")}>
+              <IconButton
+                onClick={() => void chooseBaseDirectory()}
+                aria-label={t("选择配置源目录")}
+              >
                 <FolderIcon fontSize="small" />
               </IconButton>
             </Tooltip>
@@ -562,21 +603,21 @@ export function ConfigSourceManagerDialog({
           <TextField
             select
             size="small"
-            label="界面配置"
+            label={t("界面配置")}
             value={draft.uiProfile ?? "resource-basic"}
             onChange={(event) => updateDraft({ uiProfile: event.target.value })}
             helperText={
-              uiProfileDefinition(draft.uiProfile)?.description ?? "选择内置界面配置"
+              t(uiProfileDefinition(draft.uiProfile)?.description ?? "选择内置界面配置")
             }
           >
             {UI_PROFILES.map((profile) => (
               <MenuItem key={profile.id} value={profile.id}>
-                {profile.label} · {profile.id}
+                {t(profile.label)} · {profile.id}
               </MenuItem>
             ))}
           </TextField>
           <div className="config-source-manager-fieldset">
-            <Typography variant="caption">能力范围</Typography>
+            <Typography variant="caption">{t("能力范围")}</Typography>
             <div className="config-source-manager-capabilities">
               {CAPABILITIES.map((item) => (
                 <FormControlLabel
@@ -588,23 +629,23 @@ export function ConfigSourceManagerDialog({
                       onChange={(event) => updateCapability(item.key, event.target.checked)}
                     />
                   }
-                  label={item.label}
+                  label={t(item.label)}
                 />
               ))}
             </div>
           </div>
           <div className="config-source-manager-fieldset">
-            <Typography variant="caption">文件映射</Typography>
+            <Typography variant="caption">{t("文件映射")}</Typography>
             <div className="config-source-manager-file-grid">
               {FILE_FIELDS.map((item) => (
                 <TextField
                   key={item.key}
                   size="small"
-                  label={item.label}
+                  label={t(item.label)}
                   value={draft.files[item.key] ?? ""}
                   placeholder={item.fallback}
                   onChange={(event) => updateDraftFile(item.key, event.target.value)}
-                  helperText="可使用相对基础目录的路径"
+                  helperText={t("可使用相对基础目录的路径")}
                 />
               ))}
             </div>
@@ -631,14 +672,22 @@ export function ConfigSourceManagerDialog({
               <Typography variant="subtitle2">{inspection.source.name}</Typography>
               <Chip
                 size="small"
-                label={configSourceKindLabel(inspection.source.kind)}
+                label={t(configSourceKindLabel(inspection.source.kind))}
                 variant="outlined"
               />
               <Chip
                 size="small"
-                label={healthLabel(inspection.status)}
+                label={healthLabel(inspection.status, t)}
                 className={`config-source-health is-${inspection.status}`}
               />
+              {inspection.source.workspaceArchived ? (
+                <Chip
+                  size="small"
+                  color="warning"
+                  label={t("来源工作区已归档")}
+                  variant="outlined"
+                />
+              ) : null}
             </Stack>
             <Typography variant="caption" color="text.secondary">
               {inspection.summary}
@@ -646,9 +695,9 @@ export function ConfigSourceManagerDialog({
           </Box>
           {inspection.editable ? (
             <Stack direction="row" spacing={0.35}>
-              <Tooltip title="编辑配置源">
+              <Tooltip title={t("编辑配置源")}>
                 <IconButton
-                  aria-label="编辑配置源"
+                  aria-label={t("编辑配置源")}
                   onClick={() => {
                     setDraft(definitionFromInspection(inspection));
                     setMode("edit");
@@ -657,8 +706,12 @@ export function ConfigSourceManagerDialog({
                   <EditIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
-              <Tooltip title="移除配置源">
-                <IconButton aria-label="移除配置源" color="error" onClick={() => void deleteSource()}>
+              <Tooltip title={t("移除配置源")}>
+                <IconButton
+                  aria-label={t("移除配置源")}
+                  color="error"
+                  onClick={() => void deleteSource()}
+                >
                   <TrashIcon fontSize="small" />
                 </IconButton>
               </Tooltip>
@@ -667,20 +720,27 @@ export function ConfigSourceManagerDialog({
         </Stack>
 
         {inspection.issues.length ? (
-          <Alert severity="error">{inspection.issues.join("；")}</Alert>
+          <Alert severity="error">
+            {inspection.issues.join(language === "en-US" ? "; " : "；")}
+          </Alert>
+        ) : null}
+        {inspection.source.workspaceArchived ? (
+          <Alert severity="warning">
+            {t("此配置源由已归档工作区生成。现有引用仍然有效；恢复工作区后会重新进入日常配置范围。")}
+          </Alert>
         ) : null}
 
         <div className="config-source-manager-summary-grid">
           <div>
-            <Typography variant="caption">基础目录</Typography>
+            <Typography variant="caption">{t("基础目录")}</Typography>
             <Typography variant="body2" noWrap title={inspection.source.baseDir}>
               {inspection.source.baseDir}
             </Typography>
           </div>
           <div>
-            <Typography variant="caption">运行配置</Typography>
+            <Typography variant="caption">{t("运行环境")}</Typography>
             <Typography variant="body2">
-              {runtimeScopeLabel(inspection.runtimeProfileScope)}
+              {runtimeScopeLabel(inspection.runtimeProfileScope, t)}
             </Typography>
           </div>
         </div>
@@ -690,7 +750,7 @@ export function ConfigSourceManagerDialog({
             <Chip
               key={item.key}
               size="small"
-              label={item.label}
+              label={t(item.label)}
               variant={inspection.source.capabilities.includes(item.key) ? "filled" : "outlined"}
               disabled={!inspection.source.capabilities.includes(item.key)}
             />
@@ -701,7 +761,7 @@ export function ConfigSourceManagerDialog({
           <TextField
             select
             size="small"
-            label="对比配置源"
+            label={t("对比配置源")}
             value={compareTargetId}
             onChange={(event) => {
               setCompareTargetId(event.target.value);
@@ -721,7 +781,7 @@ export function ConfigSourceManagerDialog({
             onClick={() => void compareSource()}
             disabled={!compareTargetId || comparing || saving}
           >
-            {comparing ? "比较中" : "比较"}
+            {comparing ? t("比较中") : t("比较")}
           </Button>
           <Button
             variant="outlined"
@@ -729,7 +789,7 @@ export function ConfigSourceManagerDialog({
             onClick={() => beginCopy(inspection.source)}
             disabled={saving}
           >
-            复制
+            {t("复制")}
           </Button>
         </div>
 
@@ -737,14 +797,22 @@ export function ConfigSourceManagerDialog({
           <div className="config-source-comparison">
             <Stack direction="row" spacing={0.65} alignItems="center" flexWrap="wrap" useFlexGap>
               <Typography variant="subtitle2">
-                对比 {comparison.right.name}
+                {t("对比 {name}", { name: comparison.right.name })}
               </Typography>
               <Chip
                 size="small"
                 color={comparison.identical ? "success" : "warning"}
-                label={comparison.identical ? "完全一致" : `${comparison.summary.differing} 项不同`}
+                label={
+                  comparison.identical
+                    ? t("完全一致")
+                    : t("{count} 项不同", { count: comparison.summary.differing })
+                }
               />
-              <Chip size="small" variant="outlined" label={`${comparison.summary.matching} 项一致`} />
+              <Chip
+                size="small"
+                variant="outlined"
+                label={t("{count} 项一致", { count: comparison.summary.matching })}
+              />
             </Stack>
             <div className="config-source-comparison-files">
               {comparison.files.map((file) => (
@@ -754,7 +822,7 @@ export function ConfigSourceManagerDialog({
                   <Chip
                     size="small"
                     variant="outlined"
-                    label={file.equivalent ? "一致" : "不同"}
+                    label={file.equivalent ? t("一致") : t("不同")}
                   />
                 </div>
               ))}
@@ -771,19 +839,23 @@ export function ConfigSourceManagerDialog({
               <div className="config-source-manager-file-main">
                 <Stack direction="row" spacing={0.65} alignItems="center">
                   <Typography variant="body2">{file.label}</Typography>
-                  <Chip size="small" label={healthLabel(file.status)} variant="outlined" />
+                  <Chip size="small" label={healthLabel(file.status, t)} variant="outlined" />
                 </Stack>
                 <Typography variant="caption" noWrap title={file.path ?? ""}>
-                  {file.path ?? "未配置路径"}
+                  {file.path ?? t("未配置路径")}
                 </Typography>
                 <Typography variant="caption" className="config-source-manager-file-message">
                   {file.message}
                 </Typography>
               </div>
               {file.supported ? (
-                <Tooltip title={file.exists ? "打开文件" : "打开目录"}>
+                <Tooltip title={file.exists ? t("打开文件") : t("打开目录")}>
                   <IconButton
-                    aria-label={file.exists ? `打开${file.label}文件` : `打开${file.label}目录`}
+                    aria-label={
+                      file.exists
+                        ? t("打开{label}文件", { label: file.label })
+                        : t("打开{label}目录", { label: file.label })
+                    }
                     onClick={() => void openPath(file.exists ? file.path : null, inspection.source.baseDir)}
                   >
                     <OpenExternalIcon fontSize="small" />
@@ -797,8 +869,8 @@ export function ConfigSourceManagerDialog({
         {!inspection.editable ? (
           <Alert severity="info">
             {inspection.source.isDefault
-              ? "默认配置由应用维护。"
-              : "工作区配置源随工作区自动生成，请在工作区设置中调整归属。"}
+              ? t("默认配置由应用维护。")
+              : t("工作区配置源随工作区自动生成，请在工作区设置中调整归属。")}
           </Alert>
         ) : null}
       </Box>
@@ -827,21 +899,21 @@ export function ConfigSourceManagerDialog({
         titleIconClassName="config-source-manager-title-icon"
         contentClassName="config-source-manager-content"
         actionsClassName="config-source-manager-actions"
-        title="配置源管理"
-        subtitle="统一管理配置范围、文件位置和继承状态"
+        title={t("配置源管理")}
+        subtitle={t("统一管理配置范围、文件位置和继承状态")}
         titleIcon={<SettingsIcon fontSize="small" />}
         dirty={mode !== "view"}
-        dirtyLabel="编辑中"
+        dirtyLabel={t("编辑中")}
         closeDisabled={saving}
         headerActions={
-            <Tooltip title="重新检查">
+            <Tooltip title={t("重新检查")}>
               <span>
                 <IconButton
-                  aria-label="重新检查配置源"
+                  aria-label={t("重新检查配置源")}
                   onClick={() =>
                     void loadSources(selectedSourceId).then((result) => {
                       if (result) {
-                        setStatus("配置源状态已刷新");
+                        setStatus(t("配置源状态已刷新"));
                       }
                     })
                   }
@@ -870,7 +942,7 @@ export function ConfigSourceManagerDialog({
                   }}
                   disabled={saving}
                 >
-                  取消编辑
+                  {t("取消编辑")}
                 </Button>
                 <Button
                   variant="contained"
@@ -878,11 +950,11 @@ export function ConfigSourceManagerDialog({
                   onClick={() => void (mode === "copy" ? copySource() : saveDefinition())}
                   disabled={saving}
                 >
-                  {mode === "copy" ? "创建副本" : "保存配置源"}
+                  {mode === "copy" ? t("创建副本") : t("保存配置源")}
                 </Button>
               </>
             ) : (
-              <Button onClick={requestClose}>关闭</Button>
+              <Button onClick={requestClose}>{t("关闭")}</Button>
             )}
           </>
         )}
@@ -892,14 +964,14 @@ export function ConfigSourceManagerDialog({
             <aside className="config-source-manager-sidebar">
               <Stack direction="row" alignItems="center" className="config-source-manager-sidebar-head">
                 <Box flex={1} minWidth={0}>
-                  <Typography variant="subtitle2">配置源</Typography>
+                  <Typography variant="subtitle2">{t("配置源")}</Typography>
                   <Typography variant="caption" color="text.secondary">
-                    {sources.length} 个
+                    {t("{count} 个", { count: visibleSources.length })}
                   </Typography>
                 </Box>
-                <Tooltip title="新增配置源">
+                <Tooltip title={t("新增配置源")}>
                   <IconButton
-                    aria-label="新增配置源"
+                    aria-label={t("新增配置源")}
                     onClick={() => {
                       setDraft(emptyDefinition(sources));
                       setCopyDraft(null);
@@ -911,8 +983,23 @@ export function ConfigSourceManagerDialog({
                   </IconButton>
                 </Tooltip>
               </Stack>
+              {archivedSourceCount > 0 ? (
+                <FormControlLabel
+                  className="config-source-manager-archived-toggle"
+                  control={
+                    <Checkbox
+                      size="small"
+                      checked={showArchivedSources}
+                      onChange={(event) =>
+                        setShowArchivedSources(event.target.checked)
+                      }
+                    />
+                  }
+                  label={t("显示归档来源 {count}", { count: archivedSourceCount })}
+                />
+              ) : null}
               <div className="config-source-manager-list">
-                {sources.map((source) => (
+                {visibleSources.map((source) => (
                   <button
                     key={source.id}
                     type="button"
@@ -927,7 +1014,9 @@ export function ConfigSourceManagerDialog({
                       <small>{source.id}</small>
                     </span>
                     <span className="config-source-manager-list-kind">
-                      {configSourceKindLabel(source.kind)}
+                      {source.workspaceArchived
+                        ? t("已归档")
+                        : t(configSourceKindLabel(source.kind))}
                     </span>
                   </button>
                 ))}

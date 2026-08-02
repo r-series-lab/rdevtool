@@ -18,6 +18,7 @@ import type {
   ManagedArtifactRecord,
   ManagedArtifactReference,
 } from "../app-types";
+import { useI18n } from "../i18n";
 import { RefreshIcon } from "./AppIcons";
 import { AppEmptyState } from "./AppEmptyState";
 
@@ -83,6 +84,8 @@ function referenceMatchesQuery(record: ManagedArtifactReference, query: string) 
 }
 
 function ArtifactRecordCard({ record }: { record: ManagedArtifactRecord }) {
+  const { t } = useI18n();
+
   return (
     <Box
       component="article"
@@ -107,19 +110,19 @@ function ArtifactRecordCard({ record }: { record: ManagedArtifactRecord }) {
           flexWrap="wrap"
         >
           {record.active ? (
-            <Chip className="settings-artifact-chip is-active" size="small" label="活动中" />
+            <Chip className="settings-artifact-chip is-active" size="small" label={t("活动中")} />
           ) : null}
           <Chip
             className={`settings-artifact-chip${record.exists ? "" : " is-warning"}`}
             size="small"
             variant="outlined"
-            label={record.exists ? record.objectType : "路径缺失"}
+            label={record.exists ? record.objectType : t("路径缺失")}
           />
           <Chip
             className={`settings-artifact-chip${record.ownershipVerified ? " is-verified" : " is-warning"}`}
             size="small"
             variant="outlined"
-            label={record.ownershipVerified ? "归属已验证" : "归属待验证"}
+            label={record.ownershipVerified ? t("归属已验证") : t("归属待验证")}
           />
         </Stack>
       </Stack>
@@ -128,8 +131,10 @@ function ArtifactRecordCard({ record }: { record: ManagedArtifactRecord }) {
       </Typography>
       <Typography className="settings-artifact-meta" variant="caption">
         {[
-          record.workspaceKey ? `工作区 ${record.workspaceKey}` : "未映射工作区",
-          record.projectKey ? `项目 ${record.projectKey}` : "",
+          record.workspaceKey
+            ? t("工作区 {key}", { key: record.workspaceKey })
+            : t("未映射工作区"),
+          record.projectKey ? t("项目 {key}", { key: record.projectKey }) : "",
           record.runId ? `Run ${record.runId}` : "",
           record.source,
         ]
@@ -144,6 +149,8 @@ function ArtifactRecordCard({ record }: { record: ManagedArtifactRecord }) {
 }
 
 function ArtifactReferenceCard({ record }: { record: ManagedArtifactReference }) {
+  const { t } = useI18n();
+
   return (
     <Box component="article" className="settings-artifact-reference">
       <Stack
@@ -166,14 +173,14 @@ function ArtifactReferenceCard({ record }: { record: ManagedArtifactReference })
             className="settings-artifact-chip"
             size="small"
             variant="outlined"
-            label="仅引用"
+            label={t("仅引用")}
           />
           {!record.exists ? (
             <Chip
               className="settings-artifact-chip is-warning"
               size="small"
               variant="outlined"
-              label="路径缺失"
+              label={t("路径缺失")}
             />
           ) : null}
         </Stack>
@@ -195,6 +202,7 @@ export function ManagedArtifactsInventoryView({
   inventory: ManagedArtifactInventoryResponse;
   query: string;
 }) {
+  const { t } = useI18n();
   const artifacts = useMemo(
     () => inventory.observed.artifacts.filter((record) => recordMatchesQuery(record, query)),
     [inventory, query],
@@ -212,15 +220,15 @@ export function ManagedArtifactsInventoryView({
       data-managed-artifacts-view="read-only"
     >
       <div className="settings-list-group-head settings-artifacts-group-label">
-        <Typography variant="caption">盘点概览</Typography>
+        <Typography variant="caption">{t("盘点概览")}</Typography>
         <Typography variant="caption">{inventory.status.label}</Typography>
       </div>
-      <Box className="settings-artifacts-summary" aria-label="受管产物盘点概览">
+      <Box className="settings-artifacts-summary" aria-label={t("受管产物盘点概览")}>
         {[
-          ["托管记录", summary.artifactCount],
-          ["已存在", summary.existingCount],
-          ["活动中", summary.activeCount],
-          ["仅引用", summary.referenceCount],
+          [t("托管记录"), summary.artifactCount],
+          [t("已存在"), summary.existingCount],
+          [t("活动中"), summary.activeCount],
+          [t("仅引用"), summary.referenceCount],
         ].map(([label, value]) => (
           <Box className="settings-artifacts-metric" key={label}>
             <Typography component="strong">{value}</Typography>
@@ -250,8 +258,8 @@ export function ManagedArtifactsInventoryView({
       ) : null}
       <Box className="settings-artifacts-record-group">
         <header className="settings-artifacts-record-group-head">
-          <Typography variant="subtitle2">托管产物</Typography>
-          <Typography variant="caption">{artifacts.length} 条</Typography>
+          <Typography variant="subtitle2">{t("托管产物")}</Typography>
+          <Typography variant="caption">{t("{count} 条", { count: artifacts.length })}</Typography>
         </header>
         <Stack className="settings-artifacts-record-list" spacing={0.7}>
           {artifacts.length > 0 ? (
@@ -259,8 +267,8 @@ export function ManagedArtifactsInventoryView({
           ) : (
             <AppEmptyState
               compact
-              title="没有匹配的托管产物"
-              description="调整搜索或工作区范围后重试。"
+              title={t("没有匹配的托管产物")}
+              description={t("调整搜索或工作区范围后重试。")}
             />
           )}
         </Stack>
@@ -268,8 +276,8 @@ export function ManagedArtifactsInventoryView({
       {references.length > 0 ? (
         <Box component="details" className="settings-artifacts-references">
           <Typography component="summary" variant="subtitle2">
-            <Box component="span">非托管引用</Box>
-            <Box component="span">{references.length} 条</Box>
+            <Box component="span">{t("非托管引用")}</Box>
+            <Box component="span">{t("{count} 条", { count: references.length })}</Box>
           </Typography>
           <Stack className="settings-artifacts-reference-list" spacing={0.7}>
             {references.map((record) => (
@@ -286,6 +294,7 @@ export function ManagedArtifactsInventoryView({
 }
 
 export function ManagedArtifactsPanel({ activeWorkspaceKey }: ManagedArtifactsPanelProps) {
+  const { t } = useI18n();
   const [allWorkspaces, setAllWorkspaces] = useState(activeWorkspaceKey === "system");
   const [inventory, setInventory] = useState<ManagedArtifactInventoryResponse | null>(null);
   const [query, setQuery] = useState("");
@@ -336,20 +345,20 @@ export function ManagedArtifactsPanel({ activeWorkspaceKey }: ManagedArtifactsPa
         <header className="settings-list-head settings-artifacts-head">
           <div className="settings-artifacts-head-copy">
             <Typography id="settings-artifacts-title" variant="subtitle2">
-              受管产物
+              {t("受管产物")}
             </Typography>
             <Typography variant="caption">
-              汇总工作区副本、Runtime 与 Proxy daemon 的持久化产物
+              {t("汇总工作区副本、Runtime 与 Proxy daemon 的持久化产物")}
             </Typography>
           </div>
-          <Tooltip title="刷新受管产物">
+          <Tooltip title={t("刷新受管产物")}>
             <span>
               <IconButton
                 className="settings-artifacts-refresh"
                 size="small"
                 onClick={() => void loadInventory()}
                 disabled={loading}
-                aria-label="刷新受管产物"
+                aria-label={t("刷新受管产物")}
               >
                 {loading ? <CircularProgress size={15} /> : <RefreshIcon fontSize="small" />}
               </IconButton>
@@ -358,13 +367,15 @@ export function ManagedArtifactsPanel({ activeWorkspaceKey }: ManagedArtifactsPa
         </header>
         <Stack className="settings-artifacts-content" spacing={0}>
           <div className="settings-list-group-head settings-artifacts-group-label">
-            <Typography variant="caption">范围</Typography>
-            <Typography variant="caption">筛选当前盘点结果</Typography>
+            <Typography variant="caption">{t("范围")}</Typography>
+            <Typography variant="caption">{t("筛选当前盘点结果")}</Typography>
           </div>
           <div className="settings-list-row settings-list-row--split settings-artifacts-toolbar">
             <div className="settings-overview-copy">
-              <Typography variant="subtitle2">搜索与工作区</Typography>
-              <Typography variant="caption">按类型、路径、工作区或项目快速定位。</Typography>
+              <Typography variant="subtitle2">{t("搜索与工作区")}</Typography>
+              <Typography variant="caption">
+                {t("按类型、路径、工作区或项目快速定位。")}
+              </Typography>
             </div>
             <Stack
               className="settings-artifacts-controls"
@@ -377,8 +388,8 @@ export function ManagedArtifactsPanel({ activeWorkspaceKey }: ManagedArtifactsPa
                 size="small"
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索类型、路径、工作区或项目"
-                inputProps={{ "aria-label": "搜索受管产物" }}
+                placeholder={t("搜索类型、路径、工作区或项目")}
+                inputProps={{ "aria-label": t("搜索受管产物") }}
                 sx={{ flex: 1 }}
               />
               <FormControlLabel
@@ -388,15 +399,15 @@ export function ManagedArtifactsPanel({ activeWorkspaceKey }: ManagedArtifactsPa
                     size="small"
                     checked={allWorkspaces}
                     onChange={(event) => setAllWorkspaces(event.target.checked)}
-                    inputProps={{ "aria-label": "查看全部工作区产物" }}
+                    inputProps={{ "aria-label": t("查看全部工作区产物") }}
                   />
                 }
-                label="全部工作区"
+                label={t("全部工作区")}
               />
             </Stack>
           </div>
           <Alert className="settings-artifacts-readonly" severity="info" variant="outlined">
-            仅提供盘点视图，不执行删除或清理；cleanup-plan 同样只生成只读计划。
+            {t("仅提供盘点视图，不执行删除或清理；cleanup-plan 同样只生成只读计划。")}
           </Alert>
           {error ? (
             <Alert className="settings-artifacts-error" severity="error">
@@ -407,7 +418,7 @@ export function ManagedArtifactsPanel({ activeWorkspaceKey }: ManagedArtifactsPa
             <Stack className="settings-artifacts-loading" direction="row" spacing={1} alignItems="center">
               <CircularProgress size={18} />
               <Typography variant="body2" color="text.secondary">
-                正在读取受管产物台账…
+                {t("正在读取受管产物台账…")}
               </Typography>
             </Stack>
           ) : inventory ? (

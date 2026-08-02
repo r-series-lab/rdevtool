@@ -5,12 +5,11 @@ use rdevtool_core::storage::{
 };
 
 use crate::{
-    AppState, clear_build_history_by_active_workspace,
-    clear_deploy_history_by_active_workspace, clear_merge_history_by_active_workspace,
-    filter_build_history_by_active_workspace, filter_deploy_history_by_active_workspace,
-    filter_merge_history_by_active_workspace, filter_operation_events_by_active_workspace,
-    history_scope_for_save, merge_history_worklog_event, record_workspace_operation,
-    save_build_history_record,
+    AppState, clear_build_history_by_active_workspace, clear_deploy_history_by_active_workspace,
+    clear_merge_history_by_active_workspace, filter_build_history_by_active_workspace,
+    filter_deploy_history_by_active_workspace, filter_merge_history_by_active_workspace,
+    filter_operation_events_by_active_workspace, history_scope_for_save,
+    merge_history_worklog_event, record_workspace_operation, save_build_history_record,
 };
 
 #[tauri::command]
@@ -29,10 +28,8 @@ pub(crate) async fn save_build_history(
     mut request: SaveBuildHistoryRequest,
 ) -> Result<(), String> {
     let requested_workspace_key = request.workspace_key.clone();
-    let (workspace_key, project_instance_path) = history_scope_for_save(
-        &request.project_key,
-        requested_workspace_key.as_deref(),
-    )?;
+    let (workspace_key, project_instance_path) =
+        history_scope_for_save(&request.project_key, requested_workspace_key.as_deref())?;
     request.workspace_key = Some(workspace_key);
     request.project_instance_path = project_instance_path.or(request.project_instance_path);
     let storage = state.storage.clone();
@@ -69,10 +66,8 @@ pub(crate) async fn save_deploy_history(
     mut request: SaveDeployHistoryRequest,
 ) -> Result<(), String> {
     let requested_workspace_key = request.workspace_key.clone();
-    let (workspace_key, project_instance_path) = history_scope_for_save(
-        &request.project_key,
-        requested_workspace_key.as_deref(),
-    )?;
+    let (workspace_key, project_instance_path) =
+        history_scope_for_save(&request.project_key, requested_workspace_key.as_deref())?;
     request.workspace_key = Some(workspace_key);
     request.project_instance_path = project_instance_path.or(request.project_instance_path);
     let storage = state.storage.clone();
@@ -119,10 +114,8 @@ pub(crate) async fn save_merge_history(
     mut request: SaveMergeHistoryRequest,
 ) -> Result<(), String> {
     let requested_workspace_key = request.workspace_key.clone();
-    let (workspace_key, project_instance_path) = history_scope_for_save(
-        &request.project_key,
-        requested_workspace_key.as_deref(),
-    )?;
+    let (workspace_key, project_instance_path) =
+        history_scope_for_save(&request.project_key, requested_workspace_key.as_deref())?;
     request.workspace_key = Some(workspace_key);
     request.project_instance_path = project_instance_path.or(request.project_instance_path);
     let storage = state.storage.clone();

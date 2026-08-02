@@ -53,6 +53,21 @@ pub fn with_config_file_lock<T>(path: &Path, operation: impl FnOnce() -> Result<
     operation()
 }
 
+pub fn with_config_file_locks<T>(
+    paths: impl IntoIterator<Item = PathBuf>,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+
+    let mut guards = Vec::with_capacity(paths.len());
+    for path in paths {
+        guards.push(ConfigFileLock::acquire(&path)?);
+    }
+    operation()
+}
+
 pub fn write_config_text_atomic(path: &Path, content: impl AsRef<[u8]>) -> Result<()> {
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     fs::create_dir_all(parent)

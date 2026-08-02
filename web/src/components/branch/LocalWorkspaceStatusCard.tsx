@@ -7,6 +7,7 @@ import {
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import type { BranchPushStatus } from "../../app-types";
+import { useI18n } from "../../i18n";
 import { BranchChangedFilesList } from "./BranchChangedFilesList";
 
 type LocalWorkspaceStatusCardProps = {
@@ -24,6 +25,8 @@ export function LocalWorkspaceStatusCard({
   onToggleFilesExpanded,
   onOpenPushMode,
 }: LocalWorkspaceStatusCardProps) {
+  const { t } = useI18n();
+
   return (
     <Box
       sx={(theme) => ({
@@ -50,16 +53,16 @@ export function LocalWorkspaceStatusCard({
         <Stack direction="row" columnGap={0.5} rowGap={0.45} flexWrap="wrap">
           <Chip
             size="small"
-            label={status.clean ? "工作副本干净" : "存在本地改动"}
+            label={t(status.clean ? "工作副本干净" : "存在本地改动")}
             color={status.clean ? "success" : "primary"}
             variant={status.clean ? "outlined" : "filled"}
           />
-          <Chip size="small" label={`已暂存 ${status.stagedCount}`} variant="outlined" />
-          <Chip size="small" label={`未暂存 ${status.unstagedCount}`} variant="outlined" />
-          <Chip size="small" label={`未跟踪 ${status.untrackedCount}`} variant="outlined" />
+          <Chip size="small" label={t("已暂存 {count}", { count: status.stagedCount })} variant="outlined" />
+          <Chip size="small" label={t("未暂存 {count}", { count: status.unstagedCount })} variant="outlined" />
+          <Chip size="small" label={t("未跟踪 {count}", { count: status.untrackedCount })} variant="outlined" />
           <Chip
             size="small"
-            label={`冲突 ${status.conflictedCount}`}
+            label={t("冲突 {count}", { count: status.conflictedCount })}
             color={status.conflictedCount > 0 ? "error" : "default"}
             variant={status.conflictedCount > 0 ? "filled" : "outlined"}
           />
@@ -80,7 +83,7 @@ export function LocalWorkspaceStatusCard({
               color="text.secondary"
               sx={{ flexShrink: 0, fontSize: "0.7rem", fontWeight: 680, lineHeight: 1.35 }}
             >
-              最近提交
+              {t("最近提交")}
             </Typography>
             <Typography
               variant="caption"
@@ -142,14 +145,14 @@ export function LocalWorkspaceStatusCard({
           >
             <Box minWidth={0}>
               <Typography variant="body2" fontWeight={820} sx={{ lineHeight: 1.35 }}>
-                切换已暂停
+                {t("切换已暂停")}
               </Typography>
               <Typography
                 variant="caption"
                 color="text.secondary"
                 sx={{ display: "block", mt: 0.12, overflowWrap: "anywhere", lineHeight: 1.45 }}
               >
-                先处理本地变更，再切换到目标分支。
+                {t("先处理本地变更，再切换到目标分支。")}
               </Typography>
             </Box>
             <Stack direction="row" spacing={0.55} flexWrap="wrap" rowGap={0.55}>
@@ -159,7 +162,7 @@ export function LocalWorkspaceStatusCard({
                 onClick={onOpenPushMode}
                 sx={{ minHeight: 28, px: 1, whiteSpace: "nowrap" }}
               >
-                去推送/提交
+                {t("去推送/提交")}
               </Button>
               {status.files.length > 0 ? (
                 <Button
@@ -168,7 +171,7 @@ export function LocalWorkspaceStatusCard({
                   onClick={onToggleFilesExpanded}
                   sx={{ minHeight: 28, px: 1, whiteSpace: "nowrap" }}
                 >
-                  {filesExpanded ? "收起明细" : "查看变更"}
+                  {t(filesExpanded ? "收起明细" : "查看变更")}
                 </Button>
               ) : null}
             </Stack>

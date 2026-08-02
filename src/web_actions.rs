@@ -451,7 +451,7 @@ fn resolve_runtime_profile<'a>(
         .iter()
         .find(|profile| profile.key == key)
         .map(Some)
-        .ok_or_else(|| anyhow!("运行配置不存在: {}", key))
+        .ok_or_else(|| anyhow!("运行环境不存在: {}", key))
 }
 
 fn controlled_browser_app_name(value: &str) -> Option<String> {

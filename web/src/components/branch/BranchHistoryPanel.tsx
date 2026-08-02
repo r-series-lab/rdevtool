@@ -8,7 +8,10 @@ import {
   Stack,
   Typography,
 } from "@mui/material";
-import type { BranchTaskHistoryEntry } from "../../app-types";
+import type {
+  BranchTaskHistoryEntry,
+  BranchTaskPendingEntry,
+} from "../../app-types";
 import { branchTaskDisplayDetail } from "../../lib/branchTaskDetails";
 import type { TrayPinnedAction } from "../../lib/trayPins";
 import { AppEmptyState } from "../AppEmptyState";
@@ -29,6 +32,8 @@ import {
 } from "../AppIcons";
 import { groupConsecutiveBy, stableStringify } from "../../lib/historyGroups";
 import { useTrayPinnedActions } from "../../hooks/useTrayPinnedActions";
+import { useI18n } from "../../i18n";
+import { translateInternalMessage } from "../../i18n/internalMessages";
 import { branchWorkflowModeLabel } from "./BranchModeTabs";
 
 const HISTORY_SCROLL_PAGE_SIZE = 8;
@@ -118,7 +123,7 @@ type BranchHistoryPanelProps = {
   expanded: boolean;
   history: BranchTaskHistoryEntry[];
   currentHistoryId: string;
-  currentTaskLabel: string;
+  currentTask: BranchTaskPendingEntry | null;
   busy: string;
   workflowGroupCount: number;
   workflowSignalIdsForBranchReplay: (entry: BranchTaskHistoryEntry) => string[];
@@ -136,7 +141,7 @@ export function BranchHistoryPanel({
   expanded,
   history,
   currentHistoryId,
-  currentTaskLabel,
+  currentTask,
   busy,
   workflowGroupCount,
   workflowSignalIdsForBranchReplay,
@@ -149,6 +154,7 @@ export function BranchHistoryPanel({
   onOpenTaskOutput,
   formatRelativeTime,
 }: BranchHistoryPanelProps) {
+  const { t } = useI18n();
   const [historyVisibleCount, setHistoryVisibleCount] = useState(
     HISTORY_SCROLL_PAGE_SIZE,
   );
@@ -357,7 +363,7 @@ export function BranchHistoryPanel({
     [pinnedHistoryGroups, visibleUnpinnedHistoryGroups],
   );
   const hasMoreHistoryGroups = historyVisibleCount < unpinnedHistoryGroups.length;
-  const hasDisplayHistory = history.length > 0 || Boolean(currentTaskLabel);
+  const hasDisplayHistory = history.length > 0 || Boolean(currentTask);
   const latestTaskEntry = useMemo(() => {
     if (currentHistoryId) {
       const matched = history.find((item) => item.id === currentHistoryId);
@@ -377,6 +383,12 @@ export function BranchHistoryPanel({
       )?.id ?? ""
     );
   }, [latestTaskEntry, sortedHistoryGroups]);
+
+  useEffect(() => {
+    if (currentTask) {
+      setHistoryVisibleCount(HISTORY_SCROLL_PAGE_SIZE);
+    }
+  }, [currentTask?.id]);
 
   useEffect(() => {
     setHistoryVisibleCount((current) => {
@@ -472,7 +484,7 @@ export function BranchHistoryPanel({
           mb={expanded ? 0.8 : 0}
         >
           <Typography variant="h6" sx={{ flexShrink: 0, fontWeight: 800 }}>
-            记录
+            {t("记录")}
           </Typography>
           <Stack
             direction="row"
@@ -489,8 +501,8 @@ export function BranchHistoryPanel({
             <IconButton
               size="small"
               onClick={onRefreshHistory}
-              aria-label="刷新分支任务记录"
-              title="刷新分支任务记录"
+              aria-label={t("刷新分支任务记录")}
+              title={t("刷新分支任务记录")}
             >
               <RefreshIcon fontSize="small" />
             </IconButton>
@@ -498,16 +510,16 @@ export function BranchHistoryPanel({
               size="small"
               onClick={onClearHistory}
               disabled={history.length === 0 || Boolean(busy)}
-              aria-label="清空分支任务记录"
-              title="清空分支任务记录"
+              aria-label={t("清空分支任务记录")}
+              title={t("清空分支任务记录")}
             >
               <TrashIcon fontSize="small" />
             </IconButton>
             <IconButton
               size="small"
               onClick={onToggleExpanded}
-              aria-label={expanded ? "收起最近任务" : "展开最近任务"}
-              title={expanded ? "收起最近任务" : "展开最近任务"}
+              aria-label={t(expanded ? "收起最近任务" : "展开最近任务")}
+              title={t(expanded ? "收起最近任务" : "展开最近任务")}
             >
               {expanded ? (
                 <CollapseIcon fontSize="small" />
@@ -523,17 +535,22 @@ export function BranchHistoryPanel({
             <Stack className="workflow-history-content" spacing={0.65} minWidth={0}>
               <Box className="module-list-scroll" onScroll={handleHistoryScroll}>
                 <Stack spacing={0.65} minWidth={0}>
-                  {currentTaskLabel ? (
+                  {currentTask ? (
                     <HistoryCard
-                      title={currentTaskLabel}
-                      subtitle="执行中"
-                      detail="等待任务完成"
-                      meta={[]}
+                      key={currentTask.id}
+                      title={`${t(branchWorkflowModeLabel(currentTask.taskKind))} · ${translateInternalMessage(currentTask.summary, t)}`}
+                      subtitle={formatRelativeTime(currentTask.createdAt)}
+                      detail={translateInternalMessage(currentTask.detail, t)}
+                      meta={[
+                        currentTask.projectNames.length > 1
+                          ? t("{count} 个项目", { count: currentTask.projectNames.length })
+                          : currentTask.projectNames[0] || "",
+                      ].filter(Boolean)}
                       accent="warning"
                       badge={
                         <Chip
                           size="small"
-                          label="正在执行"
+                          label={t("正在执行")}
                           color="warning"
                           variant="filled"
                         />
@@ -555,7 +572,7 @@ export function BranchHistoryPanel({
                     return (
                       <HistoryCard
                         key={group.id}
-                        title={`${branchWorkflowModeLabel(item.taskKind)} · ${item.summary}`}
+                        title={`${t(branchWorkflowModeLabel(item.taskKind))} · ${translateInternalMessage(item.summary, t)}`}
                         subtitle={formatRelativeTime(item.createdAt)}
                         pinned={pinned}
                         accent={branchHistoryAccent(item)}
@@ -571,7 +588,7 @@ export function BranchHistoryPanel({
                               {!item.workspaceKey ? (
                                 <Chip
                                   size="small"
-                                  label="未归属"
+                                  label={t("未归属")}
                                   color="default"
                                   variant="outlined"
                                 />
@@ -579,7 +596,7 @@ export function BranchHistoryPanel({
                               {isTaskAnchorGroup ? (
                               <Chip
                                 size="small"
-                                label="最新任务"
+                                label={t("最新任务")}
                                 color="primary"
                                 variant="filled"
                               />
@@ -589,8 +606,8 @@ export function BranchHistoryPanel({
                                 size="small"
                                 onClick={() => onOpenTaskOutput(outputPath)}
                                 disabled={Boolean(busy)}
-                                aria-label="打开目录"
-                                title="打开目录"
+                                aria-label={t("打开目录")}
+                                title={t("打开目录")}
                               >
                                 <OpenExternalIcon fontSize="small" />
                               </IconButton>
@@ -599,9 +616,9 @@ export function BranchHistoryPanel({
                               size="small"
                               onClick={() => onReplayHistory(item)}
                               disabled={Boolean(busy) || !item.replay}
-                              aria-label="重播分支任务"
+                              aria-label={t("重播分支任务")}
                               title={
-                                item.replay ? "使用相同参数重播" : "旧记录缺少回放参数"
+                                t(item.replay ? "使用相同参数重播" : "旧记录缺少回放参数")
                               }
                             >
                               <ReplayIcon fontSize="small" />
@@ -610,7 +627,7 @@ export function BranchHistoryPanel({
                               active={workflowSignalIds.length > 0}
                               onClick={() => onConfigureWorkflow(item)}
                               disabled={!item.replay}
-                              title={item.replay ? "配置联动" : "旧记录缺少回放参数"}
+                              title={t(item.replay ? "配置联动" : "旧记录缺少回放参数")}
                             />
                             <IconButton
                               size="small"
@@ -621,13 +638,13 @@ export function BranchHistoryPanel({
                               }
                               disabled={!trayAction}
                               color={pinned ? "primary" : "default"}
-                              aria-label={pinned ? "取消标记" : "标记记录"}
+                              aria-label={t(pinned ? "取消标记" : "标记记录")}
                               title={
                                 trayAction
                                   ? pinned
-                                    ? "取消标记"
-                                    : "标记记录"
-                                  : "旧记录缺少回放参数"
+                                    ? t("取消标记")
+                                    : t("标记记录")
+                                  : t("旧记录缺少回放参数")
                               }
                               sx={
                                 pinned
@@ -649,9 +666,9 @@ export function BranchHistoryPanel({
                                 size="small"
                                 onClick={() => toggleHistoryGroup(group.id)}
                                 aria-label={
-                                  groupExpanded ? "收起同参数记录" : "展开同参数记录"
+                                  t(groupExpanded ? "收起同参数记录" : "展开同参数记录")
                                 }
-                                title={groupExpanded ? "收起同参数记录" : "展开同参数记录"}
+                                title={t(groupExpanded ? "收起同参数记录" : "展开同参数记录")}
                               >
                                 {groupExpanded ? (
                                   <CollapseIcon fontSize="small" />
@@ -662,12 +679,18 @@ export function BranchHistoryPanel({
                             ) : null}
                           </Stack>
                         }
-                        detail={branchTaskDisplayDetail(item)}
+                        detail={translateInternalMessage(branchTaskDisplayDetail(item), t)}
                         meta={[
-                          isGrouped ? `连续 ${group.items.length} 次` : "",
-                          `${item.items.length} 项`,
-                          `${item.items.filter((taskItem) => taskItem.success).length} 成功`,
-                          item.items.some((taskItem) => !taskItem.success) ? "含失败" : "",
+                          isGrouped
+                            ? t("连续 {count} 次", { count: group.items.length })
+                            : "",
+                          t("{count} 项", { count: item.items.length }),
+                          t("{count} 成功", {
+                            count: item.items.filter((taskItem) => taskItem.success).length,
+                          }),
+                          item.items.some((taskItem) => !taskItem.success)
+                            ? t("含失败")
+                            : "",
                         ]}
                       >
                         {isGrouped ? (
@@ -705,14 +728,16 @@ export function BranchHistoryPanel({
                                       color="text.secondary"
                                       sx={{ flexShrink: 0, fontWeight: 800 }}
                                     >
-                                      {index === 0 ? "最新" : `第 ${index + 1} 次`}
+                                      {index === 0
+                                        ? t("最新")
+                                        : t("第 {count} 次", { count: index + 1 })}
                                     </Typography>
                                     <Typography
                                       variant="body2"
                                       noWrap
                                       sx={{ flex: 1, minWidth: 0 }}
                                     >
-                                      {historyItem.summary}
+                                      {translateInternalMessage(historyItem.summary, t)}
                                     </Typography>
                                     <Typography
                                       variant="caption"
@@ -734,7 +759,7 @@ export function BranchHistoryPanel({
                                         whiteSpace: "pre-line",
                                       }}
                                     >
-                                      {branchTaskDisplayDetail(historyItem)}
+                                      {translateInternalMessage(branchTaskDisplayDetail(historyItem), t)}
                                     </Typography>
                                   ) : null}
                                 </Box>
@@ -760,7 +785,7 @@ export function BranchHistoryPanel({
                           onClick={loadMoreHistoryGroups}
                           className="workflow-history-footer-action"
                         >
-                          下滑加载更多
+                          {t("下滑加载更多")}
                         </Button>
                       ) : (
                         <AppListEndState />
@@ -771,7 +796,11 @@ export function BranchHistoryPanel({
               </Box>
             </Stack>
           ) : (
-            <AppEmptyState compact title="暂无分支任务" description="合并、创建或推送后会保留记录。" />
+            <AppEmptyState
+              compact
+              title={t("暂无分支任务")}
+              description={t("合并、创建或推送后会保留记录。")}
+            />
           )}
         </Collapse>
     </Box>

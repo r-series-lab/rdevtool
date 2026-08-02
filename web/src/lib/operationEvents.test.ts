@@ -31,7 +31,12 @@ function event(): OperationEventEntry {
 
 describe("operation events", () => {
   it("validates and converts a terminal Git event", () => {
-    const value = event();
+    const value: OperationEventEntry = {
+      ...event(),
+      chainId: "workspace-chain:delivery:cli-1",
+      stepLabel: "推送分支",
+      chainLabel: "发布流程",
+    };
 
     expect(isOperationEventEntry(value)).toBe(true);
     expect(activityFromOperationEvent(value)).toMatchObject({
@@ -40,6 +45,9 @@ describe("operation events", () => {
       origin: "cli",
       status: "failed",
       detail: "目标分支不存在",
+      chainId: "workspace-chain:delivery:cli-1",
+      stepLabel: "推送分支",
+      chainLabel: "发布流程",
       target: { page: "merge", branchMode: "switch" },
     });
   });
@@ -178,6 +186,8 @@ describe("operation events", () => {
       summary: "本地联调代理 · 已启动",
       projectKey: null,
       projectName: null,
+      chainId: "workspace-chain:local-debug:cli-1",
+      stepLabel: "启动代理",
       payload: {
         profileId: "local-debug",
         listenUrl: "http://127.0.0.1:8791",
@@ -192,6 +202,8 @@ describe("operation events", () => {
     expect(proxy).toMatchObject({
       kind: "proxy",
       origin: "cli",
+      chainId: "workspace-chain:local-debug:cli-1",
+      stepLabel: "启动代理",
       target: { page: "proxy" },
       executionKey: "proxy:start:local-debug",
     });
@@ -212,6 +224,7 @@ describe("operation events", () => {
         name: "管理端",
         debugProfile: "dc2",
         envOverrides: { APP_ENV: "dc2" },
+        expectedPort: 5175,
       },
     });
     const proxy = activityFromLifecycleOperationEvent({
@@ -241,6 +254,7 @@ describe("operation events", () => {
         projectName: "管理端",
         debugProfileKey: "dc2",
         envOverrides: { APP_ENV: "dc2" },
+        expectedPort: 5175,
         replayAction: "start",
       },
     });
@@ -295,6 +309,8 @@ describe("operation events", () => {
         linkName: "合作渠道联调",
         mode: "run",
         sourceId: "workspace-links",
+        proxySourceId: "workspace-proxy",
+        runtimeSourceId: "workspace-runtime",
         failedCount: 1,
         diagnosticSteps: [
           {
@@ -330,9 +346,44 @@ describe("operation events", () => {
         linkKey: "cooperation-debug",
         linkName: "合作渠道联调",
         sourceId: "workspace-links",
+        proxySourceId: "workspace-proxy",
+        runtimeSourceId: "workspace-runtime",
+        workspaceKey: "feature-a",
         replayAction: "run",
       },
       target: { page: "overview" },
+    });
+  });
+
+  it("keeps workspace archive and restore operations visible in Activity", () => {
+    const activity = activityFromLifecycleOperationEvent({
+      ...event(),
+      id: "operation-app-workspace-archive",
+      origin: "app",
+      workspaceKey: "feature-a",
+      domain: "workspace",
+      action: "archive",
+      state: "success",
+      title: "归档工作区",
+      summary: "已归档工作区：Feature A",
+      detail: "",
+      projectKey: null,
+      projectName: null,
+    });
+
+    expect(activity).toMatchObject({
+      kind: "config",
+      status: "success",
+      executionKey: "workspace:archive:feature-a",
+      target: {
+        page: "overview",
+        workspaceKey: "feature-a",
+        workspaceView: "archived",
+      },
+      parameters: [
+        { key: "workspace", value: "feature-a" },
+        { key: "action", value: "归档" },
+      ],
     });
   });
 });

@@ -43,6 +43,7 @@ import { ConfigSourceManagerDialog } from "./ConfigSourceManagerDialog";
 import { ConfigSourceBar } from "./ConfigSourceBar";
 import { ConfigDialogShell } from "./ConfigDialogShell";
 import { useConfigSource } from "../hooks/useConfigSource";
+import { useI18n, type Translate } from "../i18n";
 
 const NAVIGATION_ENTRY_KIND_OPTIONS: Array<{
   value: NavigationEditorEntryKind;
@@ -109,7 +110,7 @@ const NAVIGATION_TOOL_OPTIONS: NavigationToolConfig[] = [
     label: "网页动作入口",
     keyLabel: "引用网页动作",
     keyPlaceholder: "选择已有网页动作",
-    description: "引用已有网页动作配置；脚本、受控页面和调试仍在运行配置面板维护。",
+    description: "引用已有网页动作配置；脚本、受控页面和调试仍在运行环境面板维护。",
     defaultAction: "open",
     actions: [
       { value: "open", label: "打开目标" },
@@ -145,8 +146,8 @@ export type ResourceConfigDialogProps = {
   onSaved?: () => Promise<void> | void;
 };
 
-function navigationEntryKindLabel(kind: string) {
-  return NAVIGATION_ENTRY_KIND_OPTIONS.find((item) => item.value === kind)?.label ?? "入口";
+function navigationEntryKindLabel(kind: string, t: Translate = (message) => message) {
+  return t(NAVIGATION_ENTRY_KIND_OPTIONS.find((item) => item.value === kind)?.label ?? "入口");
 }
 
 function navigationToolConfig(tool?: string | null): NavigationToolConfig {
@@ -172,12 +173,17 @@ function navigationToolActionValue(entry: NavigationEditorEntry) {
   return entry.toolAction?.trim() || navigationToolConfig(entry.tool).defaultAction;
 }
 
-function navigationToolActionLabel(config: NavigationToolConfig, value: string) {
-  return config.actions.find((item) => item.value === value)?.label ?? value;
+function navigationToolActionLabel(
+  config: NavigationToolConfig,
+  value: string,
+  t: Translate = (message) => message,
+) {
+  const label = config.actions.find((item) => item.value === value)?.label;
+  return label ? t(label) : value;
 }
 
-function webActionKindLabel(kind?: string | null) {
-  return kind === "request" ? "请求动作" : "脚本动作";
+function webActionKindLabel(kind: string | null | undefined, t: Translate) {
+  return t(kind === "request" ? "请求动作" : "脚本动作");
 }
 
 function navigationBrowserSelectValue(browser?: string | null) {
@@ -200,23 +206,26 @@ function navigationBrowserSupportsProfile(browser?: string | null) {
   );
 }
 
-function navigationBrowserLabel(entry: NavigationEditorEntry) {
+function navigationBrowserLabel(entry: NavigationEditorEntry, t: Translate) {
   if (entry.runtimeProfile?.trim()) {
-    return `运行配置 ${entry.runtimeProfile.trim()}`;
+    return t("运行环境 {name}", { name: entry.runtimeProfile.trim() });
   }
   const browser = entry.browser?.trim();
   if (!browser || browser === "current_chrome") {
-    return "当前 Chrome";
+    return t("当前 Chrome");
   }
   if (browser === "system") {
-    return "系统默认";
+    return t("系统默认");
   }
   return entry.browserProfile ? `${browser} · ${entry.browserProfile}` : browser;
 }
 
-function emptyNavigationEntry(kind: NavigationEditorEntryKind = "url"): NavigationEditorEntry {
+function emptyNavigationEntry(
+  kind: NavigationEditorEntryKind = "url",
+  t: Translate = (message) => message,
+): NavigationEditorEntry {
   return {
-    name: "新入口",
+    name: t("新入口"),
     kind,
     url: "",
     browser: null,
@@ -234,13 +243,16 @@ function emptyNavigationEntry(kind: NavigationEditorEntryKind = "url"): Navigati
   };
 }
 
-function uniqueNavigationCategoryTitle(categories: NavigationEditorCategory[]) {
+function uniqueNavigationCategoryTitle(
+  categories: NavigationEditorCategory[],
+  t: Translate = (message) => message,
+) {
   const existing = new Set(categories.map((category) => category.title.trim()));
   let index = categories.length + 1;
-  let title = `新分类 ${index}`;
+  let title = t("新分类 {index}", { index });
   while (existing.has(title)) {
     index += 1;
-    title = `新分类 ${index}`;
+    title = t("新分类 {index}", { index });
   }
   return title;
 }
@@ -253,6 +265,7 @@ export function ResourceConfigDialog({
   onOpenNavigationConfigFile,
   onSaved,
 }: ResourceConfigDialogProps) {
+  const { t } = useI18n();
   const {
     sources: configSources,
     selectedSource: selectedConfigSource,
@@ -418,7 +431,7 @@ export function ResourceConfigDialog({
         }
         return [
           entry.name,
-          navigationEntryKindLabel(entry.kind),
+          navigationEntryKindLabel(entry.kind, t),
           entry.url,
           entry.path,
           entry.appName,
@@ -434,7 +447,7 @@ export function ResourceConfigDialog({
           .filter(Boolean)
           .some((value) => String(value).toLowerCase().includes(keyword));
       });
-  }, [allEntryItems, entryKindFilter, entryQuery]);
+  }, [allEntryItems, entryKindFilter, entryQuery, t]);
 
   const selectedEntry = activeCategory?.entries[selectedEntryIndex] ?? null;
 
@@ -479,7 +492,7 @@ export function ResourceConfigDialog({
 
   function addCategory(initialKind: NavigationEditorEntryKind = "url") {
     const categories = editor?.categories ?? [];
-    const title = uniqueNavigationCategoryTitle(categories);
+    const title = uniqueNavigationCategoryTitle(categories, t);
     const nextIndex = categories.length;
     updateEditor((current) => ({
       ...current,
@@ -488,7 +501,7 @@ export function ResourceConfigDialog({
         {
           title,
           shortLabel: title,
-          entries: [emptyNavigationEntry(initialKind)],
+          entries: [emptyNavigationEntry(initialKind, t)],
         },
       ],
     }));
@@ -504,7 +517,7 @@ export function ResourceConfigDialog({
       ...current,
       categories: current.categories.map((category, index) =>
         index === categoryIndex
-          ? { ...category, entries: [...category.entries, emptyNavigationEntry(kind)] }
+              ? { ...category, entries: [...category.entries, emptyNavigationEntry(kind, t)] }
           : category,
       ),
     }));
@@ -556,7 +569,7 @@ export function ResourceConfigDialog({
       return;
     }
     const nextCategoryIndex = editor.categories.length;
-    const title = uniqueNavigationCategoryTitle(editor.categories);
+    const title = uniqueNavigationCategoryTitle(editor.categories, t);
     updateEditor((current) => {
       const entry = current.categories[categoryIndex]?.entries[entryIndex];
       if (!entry) {
@@ -623,7 +636,9 @@ export function ResourceConfigDialog({
     const currentEntry =
       editor?.categories[target.categoryIndex]?.entries[target.entryIndex] ?? null;
     const nextName =
-      !currentEntry?.name.trim() || currentEntry.name.trim() === "新入口"
+      !currentEntry?.name.trim() ||
+      currentEntry.name.trim() === "新入口" ||
+      currentEntry.name.trim() === t("新入口")
         ? result.link.name
         : currentEntry.name;
     updateEntryAt(target.categoryIndex, target.entryIndex, {
@@ -634,9 +649,12 @@ export function ResourceConfigDialog({
       toolAction: "plan",
       note:
         currentEntry?.note?.trim() ||
-        `Link ${result.link.key} · ${result.plan.steps.length} 步`,
+        t("Link {key} · {count} 步", {
+          key: result.link.key,
+          count: result.plan.steps.length,
+        }),
     });
-    showStatus("已保存链路定义，并填入当前工具入口；请保存入口配置。");
+    showStatus(t("已保存链路定义，并填入当前工具入口；请保存入口配置。"));
   }
 
   function deleteEntryAt(categoryIndex: number, entryIndex: number) {
@@ -688,7 +706,7 @@ export function ResourceConfigDialog({
       return;
     }
     if (dirty) {
-      showError("请先保存或取消当前改动，再切换配置源。");
+      showError(t("请先保存或取消当前改动，再切换配置源。"));
       return;
     }
     try {
@@ -727,7 +745,7 @@ export function ResourceConfigDialog({
       });
       setEditor(nextEditor);
       setDirty(false);
-      showStatus("已保存资源入口配置");
+      showStatus(t("已保存资源入口配置"));
       await onSaved?.();
     } catch (reason) {
       showError(String(reason));
@@ -760,7 +778,7 @@ export function ResourceConfigDialog({
           />
           <TextField
             size="small"
-            label="应用名"
+            label={t("应用名")}
             value={entry.appName ?? ""}
             onChange={(event) =>
               updateEntryAt(categoryIndex, entryIndex, { appName: event.target.value })
@@ -775,7 +793,7 @@ export function ResourceConfigDialog({
         <>
           <TextField
             size="small"
-            label="脚本路径"
+            label={t("脚本路径")}
             value={entry.script ?? ""}
             onChange={(event) =>
               updateEntryAt(categoryIndex, entryIndex, { script: event.target.value })
@@ -783,7 +801,7 @@ export function ResourceConfigDialog({
           />
           <TextField
             size="small"
-            label="工作目录"
+            label={t("工作目录")}
             value={entry.cwd ?? ""}
             onChange={(event) =>
               updateEntryAt(categoryIndex, entryIndex, { cwd: event.target.value })
@@ -802,7 +820,7 @@ export function ResourceConfigDialog({
       const actionValue = navigationToolActionValue(entry);
       const actionOptions = toolConfig.actions.some((item) => item.value === actionValue)
         ? toolConfig.actions
-        : [{ value: actionValue, label: `自定义：${actionValue}` }, ...toolConfig.actions];
+        : [{ value: actionValue, label: t("自定义：{value}", { value: actionValue }) }, ...toolConfig.actions];
       const toolKey = entry.toolKey?.trim() ?? "";
       const runtimeProfileKey = entry.runtimeProfile?.trim() ?? "";
       const selectedWebAction =
@@ -817,58 +835,61 @@ export function ResourceConfigDialog({
         ? runtimeProfiles.find((profile) => profile.key === runtimeProfileKey) ?? null
         : null;
       const toolMetaItems: Array<{ label: string; value: string }> = [
-        { label: "动作", value: navigationToolActionLabel(toolConfig, actionValue) },
+        { label: t("动作"), value: navigationToolActionLabel(toolConfig, actionValue, t) },
       ];
       const toolWarnings: string[] = [];
 
       if (toolConfig.value === "webAction") {
         if (selectedWebAction) {
           toolMetaItems.push(
-            { label: "引用", value: selectedWebAction.name || selectedWebAction.key },
-            { label: "类型", value: webActionKindLabel(selectedWebAction.kind) },
-            { label: "范围", value: selectedWebAction.scope || "全局" },
+            { label: t("引用"), value: selectedWebAction.name || selectedWebAction.key },
+            { label: t("类型"), value: webActionKindLabel(selectedWebAction.kind, t) },
+            { label: t("范围"), value: selectedWebAction.scope || t("全局") },
           );
           if (selectedWebAction.matchPatterns.length > 0) {
             toolMetaItems.push({
-              label: "匹配",
-              value: `${selectedWebAction.matchPatterns.length} 条`,
+              label: t("匹配"),
+              value: t("{count} 条", { count: selectedWebAction.matchPatterns.length }),
             });
           }
           if (selectedWebAction.params.length > 0) {
-            toolMetaItems.push({ label: "参数", value: `${selectedWebAction.params.length} 个` });
+            toolMetaItems.push({
+              label: t("参数"),
+              value: t("{count} 个", { count: selectedWebAction.params.length }),
+            });
           }
         } else if (toolKey) {
-          toolWarnings.push(`引用的网页动作不存在：${toolKey}`);
+          toolWarnings.push(t("引用的网页动作不存在：{key}", { key: toolKey }));
         } else if (webActions.length > 0) {
-          toolWarnings.push("请选择一个已有网页动作。");
+          toolWarnings.push(t("请选择一个已有网页动作。"));
         } else {
-          toolWarnings.push("暂无可引用网页动作，请先到运行配置的网页动作面板创建。");
+          toolWarnings.push(t("暂无可引用网页动作，请先到运行环境的网页动作面板创建。"));
         }
         if (actionValue === "run") {
-          toolWarnings.push("执行动作会触发网页自动化，建议先在网页动作面板检查。");
+          toolWarnings.push(t("执行动作会触发网页自动化，建议先在网页动作面板检查。"));
         }
       } else if (toolConfig.value === "runtime") {
         if (selectedProject) {
-          toolMetaItems.push({ label: "项目", value: selectedProject.name || selectedProject.key });
+          toolMetaItems.push({ label: t("项目"), value: selectedProject.name || selectedProject.key });
         } else if (toolKey) {
-          toolWarnings.push(`引用的项目不存在：${toolKey}`);
+          toolWarnings.push(t("引用的项目不存在：{key}", { key: toolKey }));
         } else {
-          toolWarnings.push("请选择一个项目作为运行入口。");
+          toolWarnings.push(t("请选择一个项目作为运行入口。"));
         }
         if (runtimeProfileKey) {
           if (selectedRuntimeProfile) {
             toolMetaItems.push({
-              label: "运行配置",
+              label: t("运行环境"),
               value: selectedRuntimeProfile.label || selectedRuntimeProfile.key,
             });
           } else {
-            toolWarnings.push(`运行配置不存在：${runtimeProfileKey}`);
+            toolWarnings.push(t("运行环境不存在：{key}", { key: runtimeProfileKey }));
           }
         }
       } else if (toolKey) {
-        toolMetaItems.push({ label: "引用", value: toolKey });
+        toolMetaItems.push({ label: t("引用"), value: toolKey });
       } else {
-        toolWarnings.push(`请填写 ${toolConfig.keyLabel}。`);
+        toolWarnings.push(t("请填写 {label}。", { label: t(toolConfig.keyLabel) }));
       }
 
       const renderToolKeyField = () => {
@@ -878,24 +899,26 @@ export function ResourceConfigDialog({
             <TextField
               select
               size="small"
-              label={toolConfig.keyLabel}
+              label={t(toolConfig.keyLabel)}
               value={entry.toolKey ?? ""}
               helperText={
                 webActions.length > 0
-                  ? "只引用已有网页动作；脚本和受控页面请到运行配置的网页动作面板维护。"
-                  : "暂无可引用网页动作，请先到运行配置的网页动作面板创建。"
+                  ? t("只引用已有网页动作；脚本和受控页面请到运行环境的网页动作面板维护。")
+                  : t("暂无可引用网页动作，请先到运行环境的网页动作面板创建。")
               }
               onChange={(event) =>
                 updateEntryAt(categoryIndex, entryIndex, { toolKey: event.target.value })
               }
             >
-              <MenuItem value="">未选择</MenuItem>
+              <MenuItem value="">{t("未选择")}</MenuItem>
               {!hasCurrent && entry.toolKey?.trim() ? (
-                <MenuItem value={entry.toolKey}>自定义：{entry.toolKey}</MenuItem>
+                <MenuItem value={entry.toolKey}>
+                  {t("自定义：{value}", { value: entry.toolKey })}
+                </MenuItem>
               ) : null}
               {webActions.map((action) => (
                 <MenuItem key={action.key} value={action.key}>
-                  {action.name || action.key} · {webActionKindLabel(action.kind)}
+                  {action.name || action.key} · {webActionKindLabel(action.kind, t)}
                 </MenuItem>
               ))}
             </TextField>
@@ -908,16 +931,18 @@ export function ResourceConfigDialog({
             <TextField
               select
               size="small"
-              label={toolConfig.keyLabel}
+              label={t(toolConfig.keyLabel)}
               value={entry.toolKey ?? ""}
-              helperText={toolConfig.keyPlaceholder}
+              helperText={t(toolConfig.keyPlaceholder)}
               onChange={(event) =>
                 updateEntryAt(categoryIndex, entryIndex, { toolKey: event.target.value })
               }
             >
-              <MenuItem value="">未选择</MenuItem>
+              <MenuItem value="">{t("未选择")}</MenuItem>
               {!hasCurrent && entry.toolKey?.trim() ? (
-                <MenuItem value={entry.toolKey}>自定义：{entry.toolKey}</MenuItem>
+                <MenuItem value={entry.toolKey}>
+                  {t("自定义：{value}", { value: entry.toolKey })}
+                </MenuItem>
               ) : null}
               {projects.map((project) => (
                 <MenuItem key={project.key} value={project.key}>
@@ -931,8 +956,8 @@ export function ResourceConfigDialog({
         return (
           <TextField
             size="small"
-            label={toolConfig.keyLabel}
-            placeholder={toolConfig.keyPlaceholder}
+            label={t(toolConfig.keyLabel)}
+            placeholder={t(toolConfig.keyPlaceholder)}
             value={entry.toolKey ?? ""}
             onChange={(event) =>
               updateEntryAt(categoryIndex, entryIndex, { toolKey: event.target.value })
@@ -946,7 +971,7 @@ export function ResourceConfigDialog({
           <TextField
             select
             size="small"
-            label="工具类型"
+            label={t("工具类型")}
             value={toolValue}
             onChange={(event) => {
               const nextTool = event.target.value;
@@ -962,18 +987,18 @@ export function ResourceConfigDialog({
           >
             {NAVIGATION_TOOL_OPTIONS.map((item) => (
               <MenuItem key={item.value} value={item.value}>
-                {item.label}
+                {t(item.label)}
               </MenuItem>
             ))}
             {toolValue === "__custom__" ? (
-              <MenuItem value="__custom__">{entry.tool || "自定义工具"}</MenuItem>
+              <MenuItem value="__custom__">{entry.tool || t("自定义工具")}</MenuItem>
             ) : null}
           </TextField>
           {renderToolKeyField()}
           <TextField
             select
             size="small"
-            label="动作"
+            label={t("动作")}
             value={actionValue}
             onChange={(event) =>
               updateEntryAt(categoryIndex, entryIndex, { toolAction: event.target.value })
@@ -981,7 +1006,7 @@ export function ResourceConfigDialog({
           >
             {actionOptions.map((item) => (
               <MenuItem key={item.value} value={item.value}>
-                {item.label}
+                {t(item.label)}
               </MenuItem>
             ))}
           </TextField>
@@ -989,7 +1014,7 @@ export function ResourceConfigDialog({
             <TextField
               select
               size="small"
-              label="运行配置"
+              label={t("运行环境")}
               value={entry.runtimeProfile ?? ""}
               onChange={(event) =>
                 updateEntryAt(categoryIndex, entryIndex, {
@@ -997,7 +1022,7 @@ export function ResourceConfigDialog({
                 })
               }
             >
-              <MenuItem value="">不使用</MenuItem>
+              <MenuItem value="">{t("不使用")}</MenuItem>
               {runtimeProfiles.map((profile) => (
                 <MenuItem key={profile.key} value={profile.key}>
                   {profile.label || profile.key}
@@ -1007,8 +1032,8 @@ export function ResourceConfigDialog({
           ) : null}
           <div className="resource-config-tool-hint settings-form-grid-wide">
             <div>
-              <Typography variant="caption">{toolConfig.label}</Typography>
-              <Typography variant="caption">{toolConfig.description}</Typography>
+              <Typography variant="caption">{t(toolConfig.label)}</Typography>
+              <Typography variant="caption">{t(toolConfig.description)}</Typography>
               <div className="resource-config-tool-meta">
                 {toolMetaItems.map((item) => (
                   <span key={`${item.label}-${item.value}`}>
@@ -1038,7 +1063,7 @@ export function ResourceConfigDialog({
                 onClick={() => openLinkWizardForEntry(categoryIndex, entryIndex)}
                 disabled={saving || !sourceAllowsLink}
               >
-                {toolKey ? "编辑链路" : "新建链路"}
+                {t(toolKey ? "编辑链路" : "新建链路")}
               </Button>
             ) : null}
           </div>
@@ -1052,7 +1077,7 @@ export function ResourceConfigDialog({
         <div className="settings-path-field settings-form-grid-wide">
           <TextField
             size="small"
-            label={directory ? "目录路径" : "文件路径"}
+            label={t(directory ? "目录路径" : "文件路径")}
             value={entry.path ?? ""}
             onChange={(event) =>
               updateEntryAt(categoryIndex, entryIndex, { path: event.target.value })
@@ -1065,7 +1090,7 @@ export function ResourceConfigDialog({
             onClick={() => void choosePath(categoryIndex, entryIndex, directory)}
             disabled={saving}
           >
-            选择
+            {t("选择")}
           </Button>
         </div>
       );
@@ -1089,18 +1114,18 @@ export function ResourceConfigDialog({
         <div className="settings-browser-route settings-form-grid-wide">
           <div className="settings-browser-route-head">
             <div>
-              <Typography variant="caption">打开方式</Typography>
+              <Typography variant="caption">{t("打开方式")}</Typography>
               <Typography variant="caption">
-                默认沿用当前 Chrome；指定 Chrome / Edge 时可填写 Profile。
+                {t("默认沿用当前 Chrome；指定 Chrome / Edge 时可填写 Profile。")}
               </Typography>
             </div>
-            <Chip size="small" label={navigationBrowserLabel(entry)} variant="outlined" />
+            <Chip size="small" label={navigationBrowserLabel(entry, t)} variant="outlined" />
           </div>
           <div className="settings-form-grid settings-form-grid-tight">
             <TextField
               select
               size="small"
-              label="运行配置"
+              label={t("运行环境")}
               value={entry.runtimeProfile ?? ""}
               onChange={(event) =>
                 updateEntryAt(categoryIndex, entryIndex, {
@@ -1108,7 +1133,7 @@ export function ResourceConfigDialog({
                 })
               }
             >
-              <MenuItem value="">不使用</MenuItem>
+              <MenuItem value="">{t("不使用")}</MenuItem>
               {runtimeProfiles.map((profile) => (
                 <MenuItem key={profile.key} value={profile.key}>
                   {profile.label || profile.key}
@@ -1118,7 +1143,7 @@ export function ResourceConfigDialog({
             <TextField
               select
               size="small"
-              label="浏览器"
+              label={t("浏览器")}
               value={browserSelectValue}
               onChange={(event) => {
                 const nextValue = event.target.value;
@@ -1146,15 +1171,17 @@ export function ResourceConfigDialog({
             >
               {NAVIGATION_BROWSER_OPTIONS.map((item) => (
                 <MenuItem key={item.value} value={item.value}>
-                  {item.label}
+                  {t(item.label)}
                 </MenuItem>
               ))}
-              <MenuItem value={CUSTOM_NAVIGATION_BROWSER_VALUE}>自定义应用名</MenuItem>
+              <MenuItem value={CUSTOM_NAVIGATION_BROWSER_VALUE}>
+                {t("自定义应用名")}
+              </MenuItem>
             </TextField>
             {isCustomBrowser ? (
               <TextField
                 size="small"
-                label="浏览器应用"
+                label={t("浏览器应用")}
                 value={entry.browser ?? ""}
                 onChange={(event) =>
                   updateEntryAt(categoryIndex, entryIndex, {
@@ -1171,7 +1198,7 @@ export function ResourceConfigDialog({
                 size="small"
                 label="Profile"
                 value={entry.browserProfile ?? ""}
-                helperText="例如 Default 或 Profile 2"
+                helperText={t("例如 Default 或 Profile 2")}
                 onChange={(event) =>
                   updateEntryAt(categoryIndex, entryIndex, {
                     browserProfile: event.target.value,
@@ -1190,13 +1217,13 @@ export function ResourceConfigDialog({
     entry: NavigationEditorEntry,
     entryIndex: number,
   ) {
-    const kindLabel = navigationEntryKindLabel(entry.kind);
+    const kindLabel = navigationEntryKindLabel(entry.kind, t);
 
     return (
       <div className="settings-param-editor settings-finder-entry" key={`${categoryIndex}-${entryIndex}`}>
         <div className="settings-param-editor-head">
           <div className="settings-finder-entry-title">
-            <Typography variant="caption">{entry.name || "未命名入口"}</Typography>
+            <Typography variant="caption">{entry.name || t("未命名入口")}</Typography>
             <Chip size="small" label={kindLabel} variant="outlined" />
           </div>
           <Button
@@ -1206,13 +1233,13 @@ export function ResourceConfigDialog({
             onClick={() => deleteEntryAt(categoryIndex, entryIndex)}
             disabled={saving}
           >
-            删除
+            {t("删除")}
           </Button>
         </div>
         <div className="settings-form-grid settings-form-grid-tight">
           <TextField
             size="small"
-            label="名称"
+            label={t("名称")}
             value={entry.name}
             onChange={(event) =>
               updateEntryAt(categoryIndex, entryIndex, { name: event.target.value })
@@ -1221,7 +1248,7 @@ export function ResourceConfigDialog({
           <TextField
             select
             size="small"
-            label="类型"
+            label={t("类型")}
             value={entry.kind}
             onChange={(event) => {
               const kind = event.target.value as NavigationEditorEntryKind;
@@ -1234,7 +1261,7 @@ export function ResourceConfigDialog({
           >
             {NAVIGATION_ENTRY_KIND_OPTIONS.map((item) => (
               <MenuItem key={item.value} value={item.value}>
-                {item.label}
+                {t(item.label)}
               </MenuItem>
             ))}
           </TextField>
@@ -1242,7 +1269,7 @@ export function ResourceConfigDialog({
             className="settings-form-grid-wide"
             select
             size="small"
-            label="所属分类"
+            label={t("所属分类")}
             value={categoryIndex}
             onChange={(event) => {
               const nextCategoryIndex = Number(event.target.value);
@@ -1255,16 +1282,16 @@ export function ResourceConfigDialog({
           >
             {editor?.categories.map((category, index) => (
               <MenuItem key={`${category.title}-${index}`} value={index}>
-                {category.title || "未命名分类"}
+                {category.title || t("未命名分类")}
               </MenuItem>
             ))}
-            <MenuItem value={-1}>新建分类</MenuItem>
+            <MenuItem value={-1}>{t("新建分类")}</MenuItem>
           </TextField>
           {renderEntryTargetFields(entry, categoryIndex, entryIndex)}
           <TextField
             className="resource-config-note-field settings-form-grid-wide"
             size="small"
-            label="备注"
+            label={t("备注")}
             multiline
             minRows={3}
             value={entry.note ?? ""}
@@ -1279,22 +1306,24 @@ export function ResourceConfigDialog({
 
   function navigationEntryTargetSummary(entry: NavigationEditorEntry) {
     if (entry.kind === "directory" || entry.kind === "file") {
-      return entry.path?.trim() || (entry.kind === "directory" ? "未配置目录路径" : "未配置文件路径");
+      return (
+        entry.path?.trim() || t(entry.kind === "directory" ? "未配置目录路径" : "未配置文件路径")
+      );
     }
     if (entry.kind === "app") {
-      return entry.bundleId?.trim() || entry.appName?.trim() || "未配置应用";
+      return entry.bundleId?.trim() || entry.appName?.trim() || t("未配置应用");
     }
     if (entry.kind === "script") {
-      return entry.script?.trim() || entry.cwd?.trim() || "未配置脚本路径";
+      return entry.script?.trim() || entry.cwd?.trim() || t("未配置脚本路径");
     }
     if (entry.kind === "tool") {
       const toolConfig = navigationToolConfig(entry.tool);
       const key = entry.toolKey?.trim();
       return key
         ? [toolConfig.label, key, entry.runtimeProfile?.trim()].filter(Boolean).join(" · ")
-        : "未配置工具 Key";
+        : t("未配置工具 Key");
     }
-    return entry.url?.trim() || "未配置 URL";
+    return entry.url?.trim() || t("未配置 URL");
   }
 
   function navigationEntryReady(entry: NavigationEditorEntry) {
@@ -1323,8 +1352,8 @@ export function ResourceConfigDialog({
     category: NavigationEditorCategory,
   ) {
     const selected = categoryIndex === selectedCategoryIndex && entryIndex === selectedEntryIndex;
-    const kindLabel = navigationEntryKindLabel(entry.kind);
-    const toolLabel = entry.kind === "tool" ? navigationToolConfig(entry.tool).label : null;
+    const kindLabel = navigationEntryKindLabel(entry.kind, t);
+    const toolLabel = entry.kind === "tool" ? t(navigationToolConfig(entry.tool).label) : null;
     const ready = navigationEntryReady(entry);
     const categoryLabel = category.shortLabel?.trim() || category.title?.trim();
 
@@ -1345,21 +1374,11 @@ export function ResourceConfigDialog({
         }}
       >
         <span className="resource-config-entry-icon" aria-hidden="true">
-          {entry.kind === "url"
-            ? "网"
-            : entry.kind === "directory"
-              ? "目"
-              : entry.kind === "file"
-                ? "文"
-              : entry.kind === "app"
-                ? "应"
-                : entry.kind === "script"
-                  ? "脚"
-                  : toolLabel?.slice(0, 1) || "工"}
+          {toolLabel?.slice(0, 1) || kindLabel.slice(0, 1)}
         </span>
         <span className="resource-config-entry-main">
           <span className="resource-config-entry-title-line">
-            <span className="resource-config-entry-name">{entry.name || "未命名入口"}</span>
+            <span className="resource-config-entry-name">{entry.name || t("未命名入口")}</span>
             <span className={`resource-config-entry-kind is-${entry.kind}`}>{kindLabel}</span>
             {toolLabel ? (
               <span className="resource-config-entry-kind is-tool-type">{toolLabel}</span>
@@ -1371,7 +1390,7 @@ export function ResourceConfigDialog({
           <span className="resource-config-entry-target">{navigationEntryTargetSummary(entry)}</span>
         </span>
         <span className={ready ? "resource-config-entry-status" : "resource-config-entry-status is-warn"}>
-          {ready ? "可用" : "待补"}
+          {t(ready ? "可用" : "待补")}
         </span>
       </button>
     );
@@ -1390,8 +1409,8 @@ export function ResourceConfigDialog({
         titleClassName="resource-config-dialog-title"
         contentClassName="resource-config-dialog-content"
         actionsClassName="resource-config-dialog-actions"
-        title="资源入口配置"
-        subtitle="网站、目录、应用、脚本和工具入口"
+        title={t("资源入口配置")}
+        subtitle={t("网站、目录、应用、脚本和工具入口")}
         dirty={dirty}
         closeDisabled={saving}
         actions={(requestClose) => (
@@ -1403,16 +1422,16 @@ export function ResourceConfigDialog({
               startIcon={<OpenExternalIcon fontSize="small" />}
               onClick={() => void openSelectedNavigationConfigFile()}
             >
-              打开文件
+              {t("打开文件")}
             </Button>
-            <Button onClick={requestClose}>取消</Button>
+            <Button onClick={requestClose}>{t("取消")}</Button>
             <Button
               variant="contained"
               startIcon={<CheckIcon fontSize="small" />}
               onClick={() => void saveNavigationEditor()}
               disabled={!editor || !dirty || saving}
             >
-              保存
+              {t("保存")}
             </Button>
           </>
         )}
@@ -1430,7 +1449,7 @@ export function ResourceConfigDialog({
             selectedSource={selectedConfigSource}
             path={editor?.filePath || selectedConfigSource?.files.navigation}
             requiredCapability="resource"
-            warningLabel={!sourceAllowsLink ? "不支持链路" : null}
+            warningLabel={!sourceAllowsLink ? t("不支持链路") : null}
             disabled={loading || saving || sourceBusy}
             status={sourceStatus}
             error={sourceError}
@@ -1439,10 +1458,16 @@ export function ResourceConfigDialog({
             onManage={() => setConfigSourceManagerOpen(true)}
           />
         ) : null}
-        {loading && !editor ? <Alert severity="info">正在读取资源入口配置</Alert> : null}
+        {loading && !editor ? (
+          <Alert severity="info">{t("正在读取资源入口配置")}</Alert>
+        ) : null}
         {!loading && !editor ? (
           <Stack spacing={1.2}>
-            <AppEmptyState compact title="暂无资源入口配置" description="读取配置后可维护快捷入口。" />
+            <AppEmptyState
+              compact
+              title={t("暂无资源入口配置")}
+              description={t("读取配置后可维护快捷入口。")}
+            />
             <Button
               variant="outlined"
               color="inherit"
@@ -1450,7 +1475,7 @@ export function ResourceConfigDialog({
               onClick={() => void loadNavigationEditor()}
               disabled={loading}
             >
-              重新读取
+              {t("重新读取")}
             </Button>
           </Stack>
         ) : null}
@@ -1460,8 +1485,8 @@ export function ResourceConfigDialog({
               <Stack spacing={1.2}>
                 <AppEmptyState
                   compact
-                  title="暂无资源分类"
-                  description="先新增一个入口，App 会自动创建默认分类。"
+                  title={t("暂无资源分类")}
+                  description={t("先新增一个入口，App 会自动创建默认分类。")}
                 />
                 <Button
                   variant="outlined"
@@ -1470,7 +1495,7 @@ export function ResourceConfigDialog({
                   onClick={() => addCategory()}
                   disabled={saving}
                 >
-                  新增入口
+                  {t("新增入口")}
                 </Button>
               </Stack>
             ) : null}
@@ -1480,9 +1505,12 @@ export function ResourceConfigDialog({
                 <aside className="resource-config-list-panel">
                   <div className="resource-config-list-head">
                     <div>
-                      <Typography variant="subtitle2">入口</Typography>
+                      <Typography variant="subtitle2">{t("入口")}</Typography>
                       <Typography variant="caption">
-                        {visibleEntryItems.length}/{allEntryItems.length} 个
+                        {t("{visible}/{total} 个", {
+                          visible: visibleEntryItems.length,
+                          total: allEntryItems.length,
+                        })}
                       </Typography>
                     </div>
                     <div className="resource-config-add-entry">
@@ -1493,14 +1521,14 @@ export function ResourceConfigDialog({
                         onClick={() => addEntry(activeCategoryIndex)}
                         disabled={saving}
                       >
-                        新增
+                        {t("新增")}
                       </Button>
                     </div>
                   </div>
                   <TextField
                     size="small"
                     value={entryQuery}
-                    placeholder="搜索名称、类型、URL 或路径"
+                    placeholder={t("搜索名称、类型、URL 或路径")}
                     onChange={(event) => setEntryQuery(event.target.value)}
                     InputProps={{
                       startAdornment: (
@@ -1510,13 +1538,16 @@ export function ResourceConfigDialog({
                       ),
                     }}
                   />
-                  <div className="resource-config-kind-filter" aria-label="入口类型筛选">
+                  <div
+                    className="resource-config-kind-filter"
+                    aria-label={t("入口类型筛选")}
+                  >
                     <button
                       type="button"
                       className={entryKindFilter === "all" ? "is-active" : ""}
                       onClick={() => setEntryKindFilter("all")}
                     >
-                      全部
+                      {t("全部")}
                     </button>
                     {NAVIGATION_ENTRY_KIND_OPTIONS.map((item) => (
                       <button
@@ -1525,20 +1556,20 @@ export function ResourceConfigDialog({
                         className={entryKindFilter === item.value ? "is-active" : ""}
                         onClick={() => setEntryKindFilter(item.value)}
                       >
-                        {item.label}
+                        {t(item.label)}
                       </button>
                     ))}
                   </div>
                   <div className="resource-config-entry-list">
                     {visibleEntryItems.length === 0 ? (
-                      <div className="settings-empty-row">没有匹配入口</div>
+                      <div className="settings-empty-row">{t("没有匹配入口")}</div>
                     ) : (
                       visibleEntryItems.map(({ category, categoryIndex, entry, entryIndex }) =>
                         renderEntryListItem(entry, categoryIndex, entryIndex, category),
                       )
                     )}
                     {visibleEntryItems.length > 0 ? (
-                      <div className="resource-config-list-end">没有更多了</div>
+                      <div className="resource-config-list-end">{t("没有更多了")}</div>
                     ) : null}
                   </div>
                 </aside>
@@ -1548,8 +1579,8 @@ export function ResourceConfigDialog({
                   ) : (
                     <AppEmptyState
                       compact
-                      title="请选择入口"
-                      description="从左侧选择入口后，在这里编辑完整配置。"
+                      title={t("请选择入口")}
+                      description={t("从左侧选择入口后，在这里编辑完整配置。")}
                     />
                   )}
                 </section>
@@ -1563,7 +1594,6 @@ export function ResourceConfigDialog({
         activeProjectWorkspaceKey={activeProjectWorkspaceKey}
         projectWorkspaces={projectWorkspaces}
         projects={projects}
-        runtimeProfiles={runtimeProfiles}
         webActions={webActions}
         initialLinkKey={linkWizardTarget?.linkKey}
         onClose={() => setLinkWizardTarget(null)}

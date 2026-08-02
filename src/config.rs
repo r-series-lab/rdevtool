@@ -47,6 +47,7 @@ fn default_workspace_style_mode() -> String {
 fn default_workspace_enabled_pages() -> Vec<String> {
     vec![
         "overview".to_string(),
+        "knowledge".to_string(),
         "projects".to_string(),
         "merge".to_string(),
         "deploy".to_string(),
@@ -80,6 +81,8 @@ pub struct ProjectWorkspaceConfig {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archive: Option<ProjectWorkspaceArchiveConfig>,
     #[serde(default = "default_project_workspace_type")]
     pub workspace_type: String,
     #[serde(default)]
@@ -106,6 +109,13 @@ pub struct ProjectWorkspaceConfig {
     pub project_instances: Vec<ProjectWorkspaceProjectInstanceConfig>,
     #[serde(default)]
     pub resource_categories: Vec<ProjectWorkspaceResourceCategoryConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ProjectWorkspaceArchiveConfig {
+    pub archived_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -175,6 +185,7 @@ impl Default for ProjectWorkspaceConfig {
             key: SYSTEM_PROJECT_WORKSPACE_KEY.to_string(),
             name: "系统工作区".to_string(),
             description: Some("显示全部项目和入口，作为全局管理视图。".to_string()),
+            archive: None,
             workspace_type: SYSTEM_PROJECT_WORKSPACE_TYPE.to_string(),
             metadata: BTreeMap::new(),
             root_dir: None,
@@ -198,6 +209,12 @@ impl ProjectWorkspaceConfig {
             .unwrap_or_else(|| SYSTEM_PROJECT_WORKSPACE_KEY.to_string());
         self.name = normalize_text(&self.name).unwrap_or_else(|| self.key.clone());
         self.description = normalize_optional_text(self.description);
+        self.archive = self.archive.and_then(|archive| {
+            normalize_text(&archive.archived_at).map(|archived_at| ProjectWorkspaceArchiveConfig {
+                archived_at,
+                reason: normalize_optional_text(archive.reason),
+            })
+        });
         self.workspace_type = normalize_project_workspace_type(&self.workspace_type);
         self.metadata = normalize_metadata(self.metadata);
         self.root_dir = normalize_optional_path(self.root_dir);
@@ -217,6 +234,7 @@ impl ProjectWorkspaceConfig {
             self.resource_dir = None;
             self.worklog_file = None;
             self.worklog_auto_record = false;
+            self.archive = None;
             self.metadata.clear();
             self.project_instances.clear();
             self.resource_categories.clear();
@@ -228,6 +246,10 @@ impl ProjectWorkspaceConfig {
 
     pub fn is_system(&self) -> bool {
         self.key == SYSTEM_PROJECT_WORKSPACE_KEY
+    }
+
+    pub fn is_archived(&self) -> bool {
+        self.archive.is_some()
     }
 
     pub fn project_count_for(&self, config: &AppConfig) -> usize {
@@ -1057,7 +1079,7 @@ pub fn save_project_workspace_config(path: &Path, config: &ProjectWorkspaceConfi
     Ok(())
 }
 
-pub fn load_project_workspaces(dir: &Path) -> Result<Vec<ProjectWorkspaceConfig>> {
+pub fn load_all_project_workspaces(dir: &Path) -> Result<Vec<ProjectWorkspaceConfig>> {
     let mut workspaces = Vec::new();
     for entry in fs::read_dir(dir)
         .with_context(|| format!("failed to read project workspaces dir: {}", dir.display()))?
@@ -1088,6 +1110,13 @@ pub fn load_project_workspaces(dir: &Path) -> Result<Vec<ProjectWorkspaceConfig>
             .then_with(|| left.key.cmp(&right.key))
     });
     Ok(workspaces)
+}
+
+pub fn load_project_workspaces(dir: &Path) -> Result<Vec<ProjectWorkspaceConfig>> {
+    Ok(load_all_project_workspaces(dir)?
+        .into_iter()
+        .filter(|workspace| !workspace.is_archived())
+        .collect())
 }
 
 pub fn load_project_workspace_by_key(dir: &Path, key: &str) -> Result<ProjectWorkspaceConfig> {
@@ -1149,6 +1178,7 @@ pub fn build_project_workspace(
         key: key.clone(),
         name: name.clone(),
         description: None,
+        archive: None,
         workspace_type: DEFAULT_PROJECT_WORKSPACE_TYPE.to_string(),
         metadata: BTreeMap::new(),
         root_dir: None,
@@ -1166,6 +1196,7 @@ pub fn build_project_workspace(
     workspace.key = key;
     workspace.name = name;
     workspace.description = normalize_optional_text(request.description);
+    workspace.archive = None;
     if let Some(workspace_type) = request.workspace_type {
         workspace.workspace_type = workspace_type;
     }
@@ -1187,17 +1218,31 @@ pub fn build_project_workspace(
 }
 
 pub fn activate_project_workspace(paths: &ConfigPaths, workspace_key: &str) -> Result<()> {
+    let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    if workspace.is_archived() {
+        bail!(
+            "project workspace is archived: {} (restore it before activation)",
+            workspace.key
+        );
+    }
     let mut app_workspace = load_workspace_config(&paths.workspace)?;
-    app_workspace.app.active_workspace = Some(workspace_key.to_string());
+    app_workspace.app.active_workspace = Some(workspace.key);
     save_workspace_config(&paths.workspace, &app_workspace)
 }
 
 pub fn load_active_project_workspace(paths: &ConfigPaths) -> Result<ProjectWorkspaceConfig> {
     let workspace_config = load_workspace_config(&paths.workspace)?;
     let active_key = active_project_workspace_key(&workspace_config);
-    load_project_workspace_by_key(&paths.project_workspaces, &active_key).or_else(|_| {
-        load_project_workspace_by_key(&paths.project_workspaces, SYSTEM_PROJECT_WORKSPACE_KEY)
-    })
+    load_project_workspace_by_key(&paths.project_workspaces, &active_key)
+        .and_then(|workspace| {
+            if workspace.is_archived() {
+                bail!("active project workspace is archived: {}", workspace.key);
+            }
+            Ok(workspace)
+        })
+        .or_else(|_| {
+            load_project_workspace_by_key(&paths.project_workspaces, SYSTEM_PROJECT_WORKSPACE_KEY)
+        })
 }
 
 pub fn apply_project_workspace_filter(
@@ -1550,5 +1595,37 @@ job_name = "Demo/legacy"
         .expect("parse legacy target");
 
         assert!(target.artifact.is_none());
+    }
+}
+
+#[cfg(test)]
+mod workspace_archive_config_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_workspace_without_archive_fields_remains_open() {
+        let workspace: ProjectWorkspaceConfig = toml::from_str(
+            r#"
+key = "feature-a"
+name = "Feature A"
+"#,
+        )
+        .expect("parse legacy workspace");
+
+        assert!(!workspace.normalized().is_archived());
+    }
+
+    #[test]
+    fn system_workspace_discards_archive_state() {
+        let workspace = ProjectWorkspaceConfig {
+            archive: Some(ProjectWorkspaceArchiveConfig {
+                archived_at: "2026-07-28T08:00:00Z".to_string(),
+                reason: Some("invalid".to_string()),
+            }),
+            ..ProjectWorkspaceConfig::default()
+        }
+        .normalized();
+
+        assert!(!workspace.is_archived());
     }
 }

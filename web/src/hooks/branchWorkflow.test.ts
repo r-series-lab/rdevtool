@@ -8,6 +8,7 @@ import {
   branchTaskHistoryFromCliMergeHistory,
   branchHistoryMatchesWorkspace,
   branchWorkflowProjectReset,
+  branchWorkflowReferenceProject,
   mergeBranchTaskHistory,
 } from "./useBranchWorkflowModule";
 import {
@@ -114,6 +115,40 @@ describe("Git branch workflow defaults", () => {
       hasExplicitBranchValues({ targetBranch: " ", requireTarget: true }),
     ).toBe(false);
   });
+
+  it("uses the only selected merge project as the branch reference", () => {
+    expect(
+      branchWorkflowReferenceProject("sync", "alpha", ["beta"], ["gamma"]),
+    ).toBe("beta");
+  });
+
+  it("uses the first selected project for batch merge and branch creation", () => {
+    expect(
+      branchWorkflowReferenceProject(
+        "sync",
+        "alpha",
+        ["beta", "gamma"],
+        ["delta", "epsilon"],
+      ),
+    ).toBe("beta");
+    expect(
+      branchWorkflowReferenceProject(
+        "create",
+        "alpha",
+        ["beta", "gamma"],
+        ["delta", "epsilon"],
+      ),
+    ).toBe("delta");
+  });
+
+  it("falls back to the current project outside batch project selection", () => {
+    expect(branchWorkflowReferenceProject("sync", "alpha", [], [])).toBe(
+      "alpha",
+    );
+    expect(
+      branchWorkflowReferenceProject("switch", "alpha", ["beta"], ["gamma"]),
+    ).toBe("alpha");
+  });
 });
 
 describe("Git merge preflight", () => {
@@ -171,20 +206,36 @@ describe("Git branch workspace history", () => {
   const projects = new Set(["demo"]);
 
   it("shows only records owned by the active non-system workspace", () => {
-    expect(branchHistoryMatchesWorkspace(branchHistory("feature"), "feature", projects)).toBe(
-      true,
-    );
-    expect(branchHistoryMatchesWorkspace(branchHistory("release"), "feature", projects)).toBe(
-      false,
-    );
-    expect(branchHistoryMatchesWorkspace(branchHistory(), "feature", projects)).toBe(false);
+    expect(
+      branchHistoryMatchesWorkspace(
+        branchHistory("feature"),
+        "feature",
+        projects,
+      ),
+    ).toBe(true);
+    expect(
+      branchHistoryMatchesWorkspace(
+        branchHistory("release"),
+        "feature",
+        projects,
+      ),
+    ).toBe(false);
+    expect(
+      branchHistoryMatchesWorkspace(branchHistory(), "feature", projects),
+    ).toBe(false);
   });
 
   it("keeps all scoped and legacy records visible in the system workspace", () => {
-    expect(branchHistoryMatchesWorkspace(branchHistory("feature"), "system", projects)).toBe(
-      true,
-    );
-    expect(branchHistoryMatchesWorkspace(branchHistory(), "system", projects)).toBe(true);
+    expect(
+      branchHistoryMatchesWorkspace(
+        branchHistory("feature"),
+        "system",
+        projects,
+      ),
+    ).toBe(true);
+    expect(
+      branchHistoryMatchesWorkspace(branchHistory(), "system", projects),
+    ).toBe(true);
   });
 });
 
@@ -213,7 +264,16 @@ describe("Git CLI merge history", () => {
       success: false,
       summary: "成功 1 / 失败 1",
       workspaceKey: "feature",
-      replay: null,
+      replay: {
+        command: "execute_branch_sync_task",
+        busyText: "正在重播合并分支",
+        request: {
+          project: "beta",
+          projects: ["beta"],
+          sourceBranch: "feature/demo",
+          targetBranches: ["main"],
+        },
+      },
       createdAt: "2026-07-20T08:00:00.000Z",
     });
     expect(history[0].items.map((item) => item.projectKey)).toEqual([
@@ -293,7 +353,9 @@ describe("Git branch automatic refresh", () => {
     );
 
     expect(response.observed.freshness).toBe("cached");
-    expect(response.branches).toEqual([{ name: "main", updatedAt: "", updatedTs: 2 }]);
+    expect(response.branches).toEqual([
+      { name: "main", updatedAt: "", updatedTs: 2 },
+    ]);
   });
 
   it("deduplicates concurrent refreshes for the same project", async () => {

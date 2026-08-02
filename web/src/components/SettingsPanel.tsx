@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ChangeEvent,
   type FocusEvent,
@@ -27,6 +28,7 @@ import { useWorkspaceTypeOptions } from "../hooks/useWorkspaceTypeOptions";
 import { useConfigSource } from "../hooks/useConfigSource";
 import { useConfirmationPreferences } from "../hooks/useConfirmationPreferences";
 import { useActivityPreferences } from "../hooks/useActivityPreferences";
+import { useI18n, type AppLanguagePreference, type Translate } from "../i18n";
 import type {
   AppExitRuntimePolicy,
   CreateProjectWorkspacePayload,
@@ -80,6 +82,7 @@ import { AppToast } from "./AppToast";
 import { ConfigSourceBar } from "./ConfigSourceBar";
 import { ConfigSourceManagerDialog } from "./ConfigSourceManagerDialog";
 import { ManagedArtifactsPanel } from "./ManagedArtifactsPanel";
+import { SystemDiagnosticsPanel } from "./SystemDiagnosticsPanel";
 import { WorkspaceTypeSelect } from "./WorkspaceTypeSelect";
 
 export type SettingsSection =
@@ -89,6 +92,7 @@ export type SettingsSection =
   | "appearance"
   | "access"
   | "artifacts"
+  | "diagnostics"
   | "workspace"
   | "projects"
   | "projectBasics"
@@ -101,6 +105,7 @@ export type SettingsSection =
   | "build";
 type PageKey =
   | "overview"
+  | "knowledge"
   | "projectManagement"
   | "resources"
   | "merge"
@@ -109,6 +114,7 @@ type PageKey =
 
 const SETTINGS_ALL_PAGE_KEYS: PageKey[] = [
   "overview",
+  "knowledge",
   "projectManagement",
   "resources",
   "proxy",
@@ -116,6 +122,7 @@ const SETTINGS_ALL_PAGE_KEYS: PageKey[] = [
 
 const SETTINGS_NAV_ITEM_MAP: Record<PageKey, { label: string; shortLabel: string }> = {
   overview: { label: "工作区", shortLabel: "工作区" },
+  knowledge: { label: "知识库", shortLabel: "知识库" },
   projectManagement: { label: "项目管理", shortLabel: "项目管理" },
   resources: { label: "资源入口", shortLabel: "资源入口" },
   proxy: { label: "本地代理", shortLabel: "本地代理" },
@@ -158,10 +165,10 @@ type SettingsConfirmState = {
 
 const SECTION_ITEMS: Array<{ key: SettingsSection; label: string }> = [
   { key: "menu", label: "通用" },
-  { key: "appearance", label: "外观" },
   { key: "confirmation", label: "操作确认" },
   { key: "access", label: "快捷入口" },
   { key: "artifacts", label: "受管产物" },
+  { key: "diagnostics", label: "系统诊断" },
 ];
 
 const DEPLOY_PARAM_KIND_OPTIONS: Array<{ value: DeployParamConfigKind; label: string }> = [
@@ -281,14 +288,15 @@ const NAVIGATION_ENTRY_CREATE_OPTIONS: Array<{
   { value: "tool", label: "工具" },
 ];
 
-function navigationEntryKindLabel(kind: string) {
-  return (
-    NAVIGATION_ENTRY_KIND_OPTIONS.find((item) => item.value === kind)?.label ?? "入口"
-  );
+function navigationEntryKindLabel(kind: string, t: Translate) {
+  return t(NAVIGATION_ENTRY_KIND_OPTIONS.find((item) => item.value === kind)?.label ?? "入口");
 }
 
-function buildActionKindLabel(actionKind: DeployTargetConfigSummary["actionKind"]) {
-  return BUILD_ACTION_KIND_OPTIONS.find((item) => item.value === actionKind)?.label ?? "构建";
+function buildActionKindLabel(
+  actionKind: DeployTargetConfigSummary["actionKind"],
+  t: Translate,
+) {
+  return t(BUILD_ACTION_KIND_OPTIONS.find((item) => item.value === actionKind)?.label ?? "构建");
 }
 
 function defaultBuildActionKindForAdapter(
@@ -402,7 +410,7 @@ function emptyDebugProfile(existingKeys: string[]): ProjectDebugProfileDraft {
   const key = uniqueConfigKey("debug", existingKeys);
   return {
     key,
-    label: "项目运行配置",
+    label: "项目启动档案",
     command: null,
     cwd: null,
     expectedPort: null,
@@ -498,7 +506,7 @@ function parseKeywordList(value: string) {
     .filter(Boolean);
 }
 
-function debugProfileMeta(profile: ProjectDebugProfileDraft) {
+function debugProfileMeta(profile: ProjectDebugProfileDraft, t: Translate) {
   const enabledFiles = (profile.localFiles ?? []).filter((file) => file.enabled).length;
   const envCount = profile.envText
     .split("\n")
@@ -506,19 +514,19 @@ function debugProfileMeta(profile: ProjectDebugProfileDraft) {
     .filter((line) => line && !line.startsWith("#"))
     .length;
   const parts = [
-    profile.runtimeProfile ? `继承 ${profile.runtimeProfile}` : "",
-    profile.cwd ? "独有目录" : "",
+    profile.runtimeProfile ? t("继承 {name}", { name: profile.runtimeProfile }) : "",
+    profile.cwd ? t("独有目录") : "",
     profile.readyProbe ? "HTTP Ready" : "",
     envCount > 0 ? `${envCount} env` : "",
-    enabledFiles > 0 ? `${enabledFiles} 文件` : "",
+    enabledFiles > 0 ? t("{count} 个文件", { count: enabledFiles }) : "",
     profile.browserUserDataDir || profile.browserArgsText?.trim()
-      ? "浏览器参数"
+      ? t("浏览器参数")
       : "",
-    profile.networkProxy?.enabled ? "代理" : "",
-    profile.localProxy?.enabled ? "本地代理" : "",
+    profile.networkProxy?.enabled ? t("代理") : "",
+    profile.localProxy?.enabled ? t("本地代理") : "",
     profile.localProxy?.authHelper?.enabled ? "Token Helper" : "",
   ].filter(Boolean);
-  return parts.length > 0 ? parts.join(" · ") : "默认";
+  return parts.length > 0 ? parts.join(" · ") : t("默认");
 }
 
 function navigationBrowserSelectValue(browser?: string | null) {
@@ -541,16 +549,16 @@ function navigationBrowserSupportsProfile(browser?: string | null) {
   );
 }
 
-function navigationBrowserLabel(entry: NavigationEditorEntry) {
+function navigationBrowserLabel(entry: NavigationEditorEntry, t: Translate) {
   if (entry.runtimeProfile?.trim()) {
-    return `运行配置 ${entry.runtimeProfile.trim()}`;
+    return t("运行环境 {name}", { name: entry.runtimeProfile.trim() });
   }
   const browser = entry.browser?.trim();
   if (!browser || browser === "current_chrome") {
-    return "当前 Chrome";
+    return t("当前 Chrome");
   }
   if (browser === "system") {
-    return "系统默认";
+    return t("系统默认");
   }
   return entry.browserProfile ? `${browser} · ${entry.browserProfile}` : browser;
 }
@@ -615,6 +623,8 @@ export function SettingsPanel({
   onOpenProjectManagement,
   onClose,
 }: SettingsPanelProps) {
+  const { preference: languagePreference, setPreference: setLanguagePreference, t } =
+    useI18n();
   const normalizeProjectManagementSection = (section?: SettingsSection): SettingsSection => {
     switch (section) {
       case "build":
@@ -635,11 +645,13 @@ export function SettingsPanel({
   };
   const normalizeSettingsSection = (section?: SettingsSection): SettingsSection => {
     switch (section) {
+      case "appearance":
+        return "menu";
       case "menu":
       case "confirmation":
-      case "appearance":
       case "access":
       case "artifacts":
+      case "diagnostics":
         return section;
       case "general":
       default:
@@ -650,6 +662,12 @@ export function SettingsPanel({
     surface === "projectManagement"
       ? normalizeProjectManagementSection(initialSection)
       : normalizeSettingsSection(initialSection ?? sectionForPage(activePage)),
+  );
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const openerRef = useRef<HTMLElement | null>(
+    typeof document === "undefined" || !(document.activeElement instanceof HTMLElement)
+      ? null
+      : document.activeElement,
   );
   const [editorState, setEditorState] = useState<ProjectConfigEditorState | null>(null);
   const [navigationEditor, setNavigationEditor] = useState<NavigationEditorState | null>(null);
@@ -674,7 +692,7 @@ export function SettingsPanel({
   const [newWorkspaceResourceDir, setNewWorkspaceResourceDir] = useState("");
   const [createWorkspaceWorklog, setCreateWorkspaceWorklog] = useState(true);
   const [autoRecordWorkspaceWorklog, setAutoRecordWorkspaceWorklog] = useState(true);
-  const [copyCurrentWorkspace, setCopyCurrentWorkspace] = useState(true);
+  const [copyCurrentWorkspace, setCopyCurrentWorkspace] = useState(false);
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [workspaceEditor, setWorkspaceEditor] = useState<ProjectWorkspaceEditorState | null>(null);
   const [workspaceDraft, setWorkspaceDraft] = useState<ProjectWorkspaceEditorDraft | null>(null);
@@ -773,8 +791,8 @@ export function SettingsPanel({
     surface === "projectManagement"
       ? [
           { key: "projectBasics" as const, label: "基础信息" },
-          { key: "projectLocal" as const, label: "本地运行" },
-          { key: "projectRuntime" as const, label: "运行配置" },
+          { key: "projectLocal" as const, label: "本地命令" },
+          { key: "projectRuntime" as const, label: "启动档案" },
           { key: "projectBuild" as const, label: "构建目标" },
           { key: "projectBranch" as const, label: "分支规则" },
         ]
@@ -924,7 +942,7 @@ export function SettingsPanel({
       setWorkspaceDraft(nextState.workspace);
       setWorkspaceEditorKey(nextState.workspace.key);
       await onProjectConfigSaved();
-      setStatus(`已更新工作区 ${nextState.workspace.name}`);
+      setStatus(t("已更新工作区 {name}", { name: nextState.workspace.name }));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -952,7 +970,7 @@ export function SettingsPanel({
       );
       applyProjectWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
-      setStatus("已创建工作区副本");
+      setStatus(t("已创建工作区副本"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -982,7 +1000,7 @@ export function SettingsPanel({
       );
       applyProjectWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
-      setStatus("已绑定已有目录");
+      setStatus(t("已绑定已有目录"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1004,7 +1022,7 @@ export function SettingsPanel({
       );
       applyProjectWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
-      setStatus("已恢复使用全局目录");
+      setStatus(t("已恢复使用全局目录"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1037,7 +1055,7 @@ export function SettingsPanel({
     setError("");
     try {
       await invoke("open_local_path", { path });
-      setStatus("已打开项目目录");
+      setStatus(t("已打开项目目录"));
     } catch (reason) {
       setError(String(reason));
     }
@@ -1049,7 +1067,7 @@ export function SettingsPanel({
     }
     try {
       await copyPlainText(path);
-      setStatus("已复制项目目录路径");
+      setStatus(t("已复制项目目录路径"));
     } catch (reason) {
       setError(String(reason));
     }
@@ -1060,11 +1078,11 @@ export function SettingsPanel({
     const key = normalizeWorkspaceKey(newWorkspaceKey || name);
     const description = newWorkspaceDescription.trim();
     if (!name) {
-      setError("请填写工作区名称");
+      setError(t("请填写工作区名称"));
       return;
     }
     if (!key) {
-      setError("请填写工作区 key");
+      setError(t("请填写工作区 key"));
       return;
     }
     setCreatingWorkspace(true);
@@ -1095,9 +1113,9 @@ export function SettingsPanel({
       setNewWorkspaceResourceDir("");
       setCreateWorkspaceWorklog(true);
       setAutoRecordWorkspaceWorklog(true);
-      setCopyCurrentWorkspace(true);
+      setCopyCurrentWorkspace(false);
       await loadProjectWorkspaceEditor(key);
-      setStatus(`已创建工作区 ${name}`);
+      setStatus(t("已创建工作区 {name}", { name }));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1108,7 +1126,7 @@ export function SettingsPanel({
   async function handleCreateWorkspaceType(label: string) {
     try {
       const option = await addWorkspaceType(label);
-      setStatus(`已新增类型 ${option.label}`);
+      setStatus(t("已新增类型 {name}", { name: option.label }));
       return option;
     } catch (reason) {
       setError(String(reason));
@@ -1123,7 +1141,7 @@ export function SettingsPanel({
   ) {
     const usedCount = workspaceTypeUsageCounts.get(optionKey) ?? 0;
     if (usedCount > 0) {
-      setError(`已有 ${usedCount} 个工作区使用 ${label}`);
+      setError(t("已有 {count} 个工作区使用 {name}", { count: usedCount, name: label }));
       return;
     }
     try {
@@ -1148,7 +1166,7 @@ export function SettingsPanel({
           );
         }
       }
-      setStatus(`已删除类型 ${label}`);
+      setStatus(t("已删除类型 {name}", { name: label }));
     } catch (reason) {
       setError(String(reason));
     }
@@ -1163,9 +1181,11 @@ export function SettingsPanel({
       projectWorkspaces.find((workspace) => workspace.key === workspaceKey)?.name ?? workspaceKey;
     if (workspaceDirty) {
       setConfirmState({
-        title: "切换配置对象？",
-        message: `当前配置有未保存修改，查看「${workspaceName}」会丢弃这些修改。`,
-        confirmLabel: "查看",
+        title: t("切换配置对象？"),
+        message: t("当前配置有未保存修改，查看「{name}」会丢弃这些修改。", {
+          name: workspaceName,
+        }),
+        confirmLabel: t("查看"),
         onConfirm: () => switchProjectWorkspaceConfirmed(workspaceKey),
       });
       return;
@@ -1263,7 +1283,47 @@ export function SettingsPanel({
   }, [navigationEditor?.categories.length]);
 
   useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const activeTab = panelRef.current?.querySelector<HTMLElement>(
+        '.settings-section-nav [role="tab"][aria-selected="true"]',
+      );
+      activeTab?.focus();
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frame);
+      openerRef.current?.focus();
+    };
+  }, []);
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (
+        event.key === "Tab" &&
+        !runtimeConfigSourceManagerOpen &&
+        !confirmState
+      ) {
+        const focusable = Array.from(
+          panelRef.current?.querySelectorAll<HTMLElement>(
+            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+          ) ?? [],
+        ).filter((element) => !element.hasAttribute("hidden"));
+        const first = focusable[0];
+        const last = focusable[focusable.length - 1];
+        if (!first || !last) {
+          event.preventDefault();
+          panelRef.current?.focus();
+          return;
+        }
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+        return;
+      }
       if (event.key === "Escape") {
         if (runtimeConfigSourceManagerOpen) {
           return;
@@ -1283,9 +1343,9 @@ export function SettingsPanel({
   function requestClose() {
     if (hasUnsavedChanges) {
       setConfirmState({
-        title: "关闭设置？",
-        message: "当前有未保存的配置修改，关闭后这些修改不会生效。",
-        confirmLabel: "关闭",
+        title: t("关闭设置？"),
+        message: t("当前有未保存的配置修改，关闭后这些修改不会生效。"),
+        confirmLabel: t("关闭"),
         onConfirm: onClose,
       });
       return;
@@ -1340,7 +1400,7 @@ export function SettingsPanel({
       return;
     }
     if (hasUnsavedChanges) {
-      setError("请先保存或取消当前项目改动，再切换运行配置源。");
+      setError(t("请先保存或取消当前项目改动，再切换运行环境配置源。"));
       return;
     }
     setError("");
@@ -1405,7 +1465,7 @@ export function SettingsPanel({
         targetKeywords: [],
       },
     }));
-    setStatus("当前项目将继承默认分支规则，保存后生效");
+    setStatus(t("当前项目将继承默认分支规则，保存后生效"));
   }
 
   function updateCommand(
@@ -1438,7 +1498,7 @@ export function SettingsPanel({
     const nextProfile = emptyDebugProfile(profiles.map((profile) => profile.key));
     updateDebugProfiles((current) => [...current, nextProfile]);
     setSelectedDebugProfileIndex(profiles.length);
-    setStatus("已新增项目运行配置，保存后生效");
+    setStatus(t("已新增项目启动档案，保存后生效"));
   }
 
   function updateDebugProfileAt(
@@ -1783,9 +1843,11 @@ export function SettingsPanel({
     }
     if (category.entries.length > 0) {
       setConfirmState({
-        title: "删除访达分类？",
-        message: `将删除「${category.title || "未命名"}」以及里面的入口。`,
-        confirmLabel: "删除",
+        title: t("删除访达分类？"),
+        message: t("将删除「{name}」以及里面的入口。", {
+          name: category.title || t("未命名"),
+        }),
+        confirmLabel: t("删除"),
         tone: "danger",
         onConfirm: () => deleteNavigationCategoryConfirmed(categoryIndex),
       });
@@ -1874,7 +1936,7 @@ export function SettingsPanel({
   ) {
     try {
       const selected = await open({
-        title: directory ? "选择目录入口" : "选择文件入口",
+        title: t(directory ? "选择目录入口" : "选择文件入口"),
         multiple: false,
         directory,
       });
@@ -2011,7 +2073,7 @@ export function SettingsPanel({
     });
     setSelectedDeployTargetIndex(targetIndex + 1);
     setError("");
-    setStatus("已复制构建配置，调整 Key 和名称后保存");
+    setStatus(t("已复制构建配置，调整 Key 和名称后保存"));
   }
 
   function deleteDeployTargetAt(targetIndex: number) {
@@ -2041,7 +2103,7 @@ export function SettingsPanel({
       ];
     });
     setSelectedDeployTargetIndex(0);
-    setStatus("已设为默认构建配置，保存后生效");
+    setStatus(t("已设为默认构建配置，保存后生效"));
   }
 
   function addDeployParam(targetIndex: number) {
@@ -2084,7 +2146,7 @@ export function SettingsPanel({
     }
     const missingParams = missingBuildParamPresets(target, presets);
     if (missingParams.length === 0) {
-      setStatus("参数已完整");
+      setStatus(t("参数已完整"));
       return;
     }
     updateDeployTargets((deployTargets) =>
@@ -2104,7 +2166,7 @@ export function SettingsPanel({
           : item,
       ),
     );
-    setStatus(`已补齐 ${missingParams.length} 个参数，保存后生效`);
+    setStatus(t("已补齐 {count} 个参数，保存后生效", { count: missingParams.length }));
   }
 
   function deleteDeployParamAt(targetIndex: number, paramIndex: number) {
@@ -2142,7 +2204,7 @@ export function SettingsPanel({
       });
       setSelectedKey(selectedProject.key);
       await onProjectConfigSaved();
-      setStatus("已保存项目配置");
+      setStatus(t("已保存项目配置"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -2163,7 +2225,7 @@ export function SettingsPanel({
       setEditorState(nextState);
       setDefaultBranchRulesDirty(false);
       await onProjectConfigSaved();
-      setStatus("已保存默认分支规则");
+      setStatus(t("已保存默认分支规则"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -2175,7 +2237,7 @@ export function SettingsPanel({
     const key = newProjectKey.trim();
     const name = newProjectName.trim();
     if (!key || !name) {
-      setError("项目 key 和名称不能为空");
+      setError(t("项目 key 和名称不能为空"));
       return;
     }
     setSaving(true);
@@ -2192,7 +2254,7 @@ export function SettingsPanel({
       setNewProjectKey("");
       setNewProjectName("");
       await onProjectConfigSaved();
-      setStatus("已新增项目");
+      setStatus(t("已新增项目"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -2206,9 +2268,11 @@ export function SettingsPanel({
     }
     const projectName = selectedProject.name || selectedProject.key;
     setConfirmState({
-      title: "删除项目配置？",
-      message: `将删除「${projectName}」的项目配置。`,
-      confirmLabel: "删除",
+      title: t("删除项目配置？"),
+      message: t("将删除「{name}」的项目配置。", {
+        name: projectName,
+      }),
+      confirmLabel: t("删除"),
       tone: "danger",
       onConfirm: deleteSelectedProjectConfirmed,
     });
@@ -2231,7 +2295,7 @@ export function SettingsPanel({
       setDirtyDeployProjectKeys(new Set());
       setSelectedKey(nextState.projects[0]?.key ?? "");
       await onProjectConfigSaved();
-      setStatus("已删除项目配置");
+      setStatus(t("已删除项目配置"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -2262,7 +2326,7 @@ export function SettingsPanel({
       });
       setSelectedKey(projectKey);
       await onProjectConfigSaved();
-      setStatus("已保存构建配置");
+      setStatus(t("已保存构建配置"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -2288,7 +2352,7 @@ export function SettingsPanel({
       setNavigationEditor(nextState);
       setNavigationDirty(false);
       await onProjectConfigSaved();
-      setStatus("已保存访达配置");
+      setStatus(t("已保存访达配置"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -2317,8 +2381,8 @@ export function SettingsPanel({
             <RefreshIcon fontSize="small" />
           </span>
           <div className="settings-overview-copy">
-            <Typography variant="subtitle2">当前工作区</Typography>
-            <Typography variant="caption">正在读取范围配置</Typography>
+            <Typography variant="subtitle2">{t("当前工作区")}</Typography>
+            <Typography variant="caption">{t("正在读取范围配置")}</Typography>
           </div>
         </div>
       );
@@ -2368,7 +2432,7 @@ export function SettingsPanel({
           <div className="settings-workspace-editor-head">
             <div className="settings-overview-copy">
               <Typography component="span" variant="subtitle2">
-                当前工作区
+                {t("当前工作区")}
               </Typography>
               <Typography component="span" variant="caption">
                 {workspaceDraft.key}
@@ -2380,8 +2444,11 @@ export function SettingsPanel({
                 size="small"
                 label={
                   workspaceDraft.system
-                    ? "全局"
-                    : `${selectedProjects}/${projectTotal} 项目`
+                    ? t("全局")
+                    : t("{selected}/{total} 项目", {
+                        selected: selectedProjects,
+                        total: projectTotal,
+                      })
                 }
               />
               {!workspaceDraft.system ? (
@@ -2399,21 +2466,29 @@ export function SettingsPanel({
                 <Chip
                   className="settings-workspace-stat"
                   size="small"
-                  label={`${selectedNavigation}/${navigationTotal} 入口`}
+                  label={t("{selected}/{total} 入口", {
+                    selected: selectedNavigation,
+                    total: navigationTotal,
+                  })}
                 />
               ) : null}
               {!workspaceDraft.system ? (
                 <Chip
                   className="settings-workspace-stat"
                   size="small"
-                  label={`${selectedProxyProfiles}/${proxyTotal} 代理`}
+                  label={t("{selected}/{total} 代理", {
+                    selected: selectedProxyProfiles,
+                    total: proxyTotal,
+                  })}
                 />
               ) : null}
               {!workspaceDraft.system && workspaceDraft.projectInstances.length > 0 ? (
                 <Chip
                   className="settings-workspace-stat"
                   size="small"
-                  label={`${workspaceDraft.projectInstances.length} 实例`}
+                  label={t("{count} 实例", {
+                    count: workspaceDraft.projectInstances.length,
+                  })}
                 />
               ) : null}
               <Button
@@ -2423,20 +2498,20 @@ export function SettingsPanel({
                 onClick={() => void saveProjectWorkspaceEditor()}
                 disabled={workspaceDraft.system || workspaceSaving || !workspaceDirty}
               >
-                保存
+                {t("保存")}
               </Button>
             </div>
           </div>
           {workspaceDraft.system ? (
             <Typography className="settings-workspace-system-note" variant="caption">
-              全局工作区显示全部项目、入口和代理。
+              {t("全局工作区显示全部项目、入口和代理。")}
             </Typography>
           ) : (
             <>
               <div className="settings-workspace-meta-grid">
                 <TextField
                   size="small"
-                  label="名称"
+                  label={t("名称")}
                   value={workspaceDraft.name}
                   onChange={(event) => updateDraft({ name: event.target.value })}
                   disabled={workspaceSaving}
@@ -2459,24 +2534,24 @@ export function SettingsPanel({
                 />
                 <TextField
                   size="small"
-                  label="备注"
+                  label={t("备注")}
                   value={workspaceDraft.description ?? ""}
                   onChange={(event) => updateDraft({ description: event.target.value })}
                   disabled={workspaceSaving}
                 />
                 <TextField
                   size="small"
-                  label="工作区目录"
+                  label={t("工作区目录")}
                   value={workspaceDraft.rootDir ?? ""}
-                  placeholder="留空为轻量范围工作区"
+                  placeholder={t("留空为轻量范围工作区")}
                   onChange={(event) => updateDraft({ rootDir: event.target.value })}
                   disabled={workspaceSaving}
                 />
                 <TextField
                   size="small"
-                  label="资料目录"
+                  label={t("资料目录")}
                   value={workspaceDraft.resourceDir ?? ""}
-                  placeholder="默认：工作区目录/resources"
+                  placeholder={t("默认：工作区目录/resources")}
                   onChange={(event) => updateDraft({ resourceDir: event.target.value })}
                   disabled={workspaceSaving}
                   InputProps={{
@@ -2484,7 +2559,7 @@ export function SettingsPanel({
                       <InputAdornment position="end">
                         <IconButton
                           size="small"
-                          aria-label="选择资料目录"
+                          aria-label={t("选择资料目录")}
                           onClick={() => void chooseWorkspaceResourceDirectory("edit")}
                           disabled={workspaceSaving}
                         >
@@ -2496,7 +2571,7 @@ export function SettingsPanel({
                 />
                 <TextField
                   size="small"
-                  label="工作日志文件"
+                  label={t("工作日志文件")}
                   value={workspaceDraft.worklogFile ?? "WORKLOG.md"}
                   onChange={(event) => updateDraft({ worklogFile: event.target.value })}
                   disabled={workspaceSaving}
@@ -2513,14 +2588,14 @@ export function SettingsPanel({
                       disabled={workspaceSaving || !workspaceDraft.resourceDir}
                     />
                   }
-                  label="自动记录关键操作"
+                  label={t("自动记录关键操作")}
                 />
               </div>
               <div className="settings-workspace-project-dir-list">
                 <div className="settings-workspace-project-dir-head">
-                  <Typography variant="caption">项目目录</Typography>
+                  <Typography variant="caption">{t("项目目录")}</Typography>
                   <Typography className="settings-workspace-scope-hint" variant="caption">
-                    全局目录 / 工作区副本 / 绑定目录
+                    {t("全局目录 / 工作区副本 / 绑定目录")}
                   </Typography>
                 </div>
                 {scopedProjects.length > 0 ? (
@@ -2528,12 +2603,12 @@ export function SettingsPanel({
                     const instance = instanceByProject.get(project.key);
                     const modeLabel = instance
                       ? instance.managed
-                        ? "工作区副本"
-                        : "绑定目录"
-                      : "使用全局目录";
-                    const path = instance?.path || project.repoPath || "未配置项目目录";
+                        ? t("工作区副本")
+                        : t("绑定目录")
+                      : t("使用全局目录");
+                    const path = instance?.path || project.repoPath || "";
                     const busy = workspaceDirectoryBusy === project.key;
-                    const canUsePath = path !== "未配置项目目录";
+                    const canUsePath = Boolean(path.trim());
                     return (
                       <div key={project.key} className="settings-workspace-project-dir-row">
                         <div className="settings-workspace-project-dir-main">
@@ -2543,33 +2618,33 @@ export function SettingsPanel({
                             </Typography>
                             <Chip size="small" label={modeLabel} variant="outlined" />
                             {instance?.managed ? (
-                              <Chip size="small" label="托管" variant="outlined" />
+                              <Chip size="small" label={t("托管")} variant="outlined" />
                             ) : null}
                           </Stack>
                           <Typography className="settings-workspace-project-dir-path" variant="caption">
-                            {path}
+                            {path || t("未配置项目目录")}
                           </Typography>
                         </div>
                         <div className="settings-workspace-project-dir-actions">
-                          <Tooltip title="打开目录">
+                          <Tooltip title={t("打开目录")}>
                             <span>
                               <IconButton
                                 size="small"
                                 onClick={() => void openWorkspaceProjectDirectory(path)}
                                 disabled={!canUsePath || workspaceSaving}
-                                aria-label="打开项目目录"
+                                aria-label={t("打开项目目录")}
                               >
                                 <OpenExternalIcon fontSize="small" />
                               </IconButton>
                             </span>
                           </Tooltip>
-                          <Tooltip title="复制路径">
+                          <Tooltip title={t("复制路径")}>
                             <span>
                               <IconButton
                                 size="small"
                                 onClick={() => void copyWorkspaceProjectDirectory(path)}
                                 disabled={!canUsePath || workspaceSaving}
-                                aria-label="复制项目目录路径"
+                                aria-label={t("复制项目目录路径")}
                               >
                                 <CopyIcon fontSize="small" />
                               </IconButton>
@@ -2582,7 +2657,7 @@ export function SettingsPanel({
                               onClick={() => void unbindWorkspaceProjectDirectory(project.key)}
                               disabled={workspaceSaving || directoryBusy}
                             >
-                              {busy ? "处理中" : "解绑"}
+                              {busy ? t("处理中") : t("解绑")}
                             </Button>
                           ) : (
                             <>
@@ -2597,7 +2672,7 @@ export function SettingsPanel({
                                   !project.repoPath
                                 }
                               >
-                                {busy ? "创建中" : "创建副本"}
+                                {busy ? t("创建中") : t("创建副本")}
                               </Button>
                               <Button
                                 size="small"
@@ -2605,7 +2680,7 @@ export function SettingsPanel({
                                 onClick={() => void bindWorkspaceProjectDirectory(project.key)}
                                 disabled={workspaceSaving || directoryBusy}
                               >
-                                绑定目录
+                                {t("绑定目录")}
                               </Button>
                             </>
                           )}
@@ -2615,14 +2690,14 @@ export function SettingsPanel({
                   })
                 ) : (
                   <Typography className="settings-workspace-system-note" variant="caption">
-                    先在项目范围里选择项目，再配置项目目录策略。
+                    {t("先在项目范围里选择项目，再配置项目目录策略。")}
                   </Typography>
                 )}
               </div>
               <div className="settings-workspace-scope-grid">
                 <section className="settings-workspace-scope-pane">
                   <header className="settings-workspace-scope-head">
-                    <Typography variant="caption">项目</Typography>
+                    <Typography variant="caption">{t("项目")}</Typography>
                     <FormControlLabel
                       className="settings-workspace-copy"
                       control={
@@ -2638,7 +2713,7 @@ export function SettingsPanel({
                           disabled={workspaceSaving}
                         />
                       }
-                      label="全部"
+                      label={t("全部")}
                     />
                   </header>
                   {!workspaceDraft.includeAllProjects ? (
@@ -2676,9 +2751,9 @@ export function SettingsPanel({
                 <section className="settings-workspace-scope-pane">
                   <header className="settings-workspace-scope-head">
                     <span>
-                      <Typography variant="caption">入口</Typography>
+                      <Typography variant="caption">{t("入口")}</Typography>
                       <Typography className="settings-workspace-scope-hint" variant="caption">
-                        网站 / 目录 / 工具
+                        {t("网站 / 目录 / 工具")}
                       </Typography>
                     </span>
                     <FormControlLabel
@@ -2701,7 +2776,7 @@ export function SettingsPanel({
                           disabled={workspaceSaving}
                         />
                       }
-                      label="全部"
+                      label={t("全部")}
                     />
                   </header>
                   {!workspaceDraft.includeAllNavigation ? (
@@ -2759,7 +2834,7 @@ export function SettingsPanel({
                                           disabled={workspaceSaving}
                                         />
                                       }
-                                      label={`${entry.name} · ${navigationEntryKindLabel(entry.kind)}`}
+                                      label={`${entry.name} · ${navigationEntryKindLabel(entry.kind, t)}`}
                                     />
                                   );
                                 })
@@ -2773,9 +2848,9 @@ export function SettingsPanel({
 
                 <section className="settings-workspace-scope-pane">
                   <header className="settings-workspace-scope-head">
-                    <Typography variant="caption">代理</Typography>
+                    <Typography variant="caption">{t("代理")}</Typography>
                     <Typography className="settings-workspace-scope-hint" variant="caption">
-                      归属当前
+                      {t("归属当前")}
                     </Typography>
                   </header>
                   <div className="settings-workspace-check-list">
@@ -2813,7 +2888,7 @@ export function SettingsPanel({
                       })
                     ) : (
                       <Typography className="settings-workspace-empty-note" variant="caption">
-                        暂无代理配置
+                        {t("暂无代理配置")}
                       </Typography>
                     )}
                   </div>
@@ -2836,9 +2911,9 @@ export function SettingsPanel({
           <header className="settings-list-head">
             <span className="settings-list-head-copy">
               <Typography id="settings-workspace-title" variant="subtitle2">
-                工作区
+                {t("工作区")}
               </Typography>
-              <Typography variant="caption">需求上下文与范围配置</Typography>
+              <Typography variant="caption">{t("需求上下文与范围配置")}</Typography>
             </span>
             <Button
               className="settings-workspace-head-action"
@@ -2848,7 +2923,7 @@ export function SettingsPanel({
               startIcon={<OpenExternalIcon fontSize="small" />}
               onClick={onOpenProjectWorkspacesDir}
             >
-              目录
+              {t("目录")}
             </Button>
           </header>
           <div className="settings-workspace-layout">
@@ -2865,7 +2940,7 @@ export function SettingsPanel({
                     size="small"
                     value={workspaceDraft?.key ?? workspaceEditorKey}
                     onChange={(event) => switchProjectWorkspace(event.target.value)}
-                    inputProps={{ "aria-label": "当前工作区" }}
+                    inputProps={{ "aria-label": t("当前工作区") }}
                   >
                     {projectWorkspaces.map((workspace) => (
                       <MenuItem key={workspace.key} value={workspace.key}>
@@ -2875,7 +2950,11 @@ export function SettingsPanel({
                   </TextField>
                 </>
               ) : (
-                <AppEmptyState compact title="暂无工作区" description="先创建一个需求上下文。" />
+                <AppEmptyState
+                  compact
+                  title={t("暂无工作区")}
+                  description={t("先创建一个需求上下文。")}
+                />
               )}
             </div>
 
@@ -2888,8 +2967,12 @@ export function SettingsPanel({
                   <div className="settings-workspace-create">
                     <div className="settings-workspace-create-head">
                       <div className="settings-overview-copy">
-                        <Typography component="span" variant="subtitle2">新建工作区</Typography>
-                        <Typography component="span" variant="caption">生成 TOML 并切换</Typography>
+                        <Typography component="span" variant="subtitle2">
+                          {t("新建工作区")}
+                        </Typography>
+                        <Typography component="span" variant="caption">
+                          {t("生成 TOML 并切换")}
+                        </Typography>
                       </div>
                       <Button
                         variant="contained"
@@ -2898,13 +2981,13 @@ export function SettingsPanel({
                         onClick={() => void handleCreateWorkspace()}
                         disabled={creatingWorkspace || !newWorkspaceName.trim()}
                       >
-                        创建
+                        {t("创建")}
                       </Button>
                     </div>
                     <div className="settings-workspace-create-fields">
                       <TextField
                         size="small"
-                        label="名称"
+                        label={t("名称")}
                         value={newWorkspaceName}
                         onChange={(event) => setNewWorkspaceName(event.target.value)}
                         disabled={creatingWorkspace}
@@ -2928,7 +3011,7 @@ export function SettingsPanel({
                       />
                       <TextField
                         size="small"
-                        label="备注"
+                        label={t("备注")}
                         value={newWorkspaceDescription}
                         onChange={(event) => setNewWorkspaceDescription(event.target.value)}
                         disabled={creatingWorkspace}
@@ -2943,23 +3026,23 @@ export function SettingsPanel({
                             disabled={creatingWorkspace}
                           />
                         }
-                        label="独立目录"
+                        label={t("独立目录")}
                       />
                       {newWorkspaceIndependentDir ? (
                         <TextField
                           size="small"
-                          label="工作区目录"
+                          label={t("工作区目录")}
                           value={newWorkspaceRootDir}
-                          placeholder="默认：~/Documents/rdevtool-workspaces/<key>"
+                          placeholder={t("默认：~/Documents/rdevtool-workspaces/<key>")}
                           onChange={(event) => setNewWorkspaceRootDir(event.target.value)}
                           disabled={creatingWorkspace}
                         />
                       ) : null}
                       <TextField
                         size="small"
-                        label="资料目录"
+                        label={t("资料目录")}
                         value={newWorkspaceResourceDir}
-                        placeholder="默认：工作区目录/resources"
+                        placeholder={t("默认：工作区目录/resources")}
                         onChange={(event) => setNewWorkspaceResourceDir(event.target.value)}
                         disabled={creatingWorkspace}
                         InputProps={{
@@ -2967,7 +3050,7 @@ export function SettingsPanel({
                             <InputAdornment position="end">
                               <IconButton
                                 size="small"
-                                aria-label="选择资料目录"
+                                aria-label={t("选择资料目录")}
                                 onClick={() => void chooseWorkspaceResourceDirectory("create")}
                                 disabled={creatingWorkspace}
                               >
@@ -2987,7 +3070,7 @@ export function SettingsPanel({
                             disabled={creatingWorkspace}
                           />
                         }
-                        label="初始化工作日志"
+                        label={t("初始化工作日志")}
                       />
                       <FormControlLabel
                         className="settings-workspace-copy"
@@ -3001,7 +3084,7 @@ export function SettingsPanel({
                             disabled={creatingWorkspace || !createWorkspaceWorklog}
                           />
                         }
-                        label="自动记录关键操作"
+                        label={t("自动记录关键操作")}
                       />
                       <FormControlLabel
                         className="settings-workspace-copy"
@@ -3013,7 +3096,7 @@ export function SettingsPanel({
                             disabled={creatingWorkspace}
                           />
                         }
-                        label="复制当前范围"
+                        label={t("复制当前范围")}
                       />
                     </div>
                   </div>
@@ -3040,9 +3123,9 @@ export function SettingsPanel({
         >
           <header className="settings-list-head">
             <Typography id={`settings-${activeSection}-title`} variant="subtitle2">
-              {title}
+              {t(title)}
             </Typography>
-            <Typography variant="caption">{description}</Typography>
+            <Typography variant="caption">{t(description)}</Typography>
           </header>
           <div className="settings-list settings-global-combined-list">{content}</div>
         </section>
@@ -3050,19 +3133,112 @@ export function SettingsPanel({
     );
   }
 
+  function renderStyleModeChoices() {
+    return (
+      <div className="settings-style-choice" role="group" aria-label={t("主题")}>
+        <button
+          type="button"
+          className={`settings-style-card settings-style-card--system${
+            styleMode === "system" ? " is-active" : ""
+          }`}
+          aria-label={t("跟随系统主题")}
+          aria-pressed={styleMode === "system"}
+          title={t("跟随系统主题")}
+          onClick={() => onStyleModeChange("system")}
+        >
+          <span className="settings-style-card-icon" aria-hidden="true">
+            <span className="settings-style-system" />
+          </span>
+          <span className="settings-style-card-copy">
+            <span>{t("系统")}</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          className={`settings-style-card settings-style-card--light${
+            styleMode === "light" ? " is-active" : ""
+          }`}
+          aria-label={t("亮色主题")}
+          aria-pressed={styleMode === "light"}
+          title={t("亮色主题")}
+          onClick={() => onStyleModeChange("light")}
+        >
+          <span className="settings-style-card-icon" aria-hidden="true">
+            <span className="settings-style-sun" />
+          </span>
+          <span className="settings-style-card-copy">
+            <span>{t("亮色")}</span>
+          </span>
+        </button>
+        <button
+          type="button"
+          className={`settings-style-card settings-style-card--mono${
+            styleMode === "mono" ? " is-active" : ""
+          }`}
+          aria-label={t("暗色主题")}
+          aria-pressed={styleMode === "mono"}
+          title={t("暗色主题")}
+          onClick={() => onStyleModeChange("mono")}
+        >
+          <span className="settings-style-card-icon" aria-hidden="true">
+            <span className="settings-style-moon" />
+          </span>
+          <span className="settings-style-card-copy">
+            <span>{t("暗色")}</span>
+          </span>
+        </button>
+      </div>
+    );
+  }
+
+  function renderLanguageChoices() {
+    const options: Array<{
+      value: AppLanguagePreference;
+      label: string;
+      code: string;
+    }> = [
+      { value: "system", label: "跟随系统", code: "AUTO" },
+      { value: "zh-CN", label: "中文", code: "中" },
+      { value: "en-US", label: "英文", code: "EN" },
+    ];
+
+    return (
+      <div
+        className="settings-language-choice"
+        role="group"
+        aria-label={t("界面语言")}
+      >
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={languagePreference === option.value}
+            className={languagePreference === option.value ? "is-active" : ""}
+            onClick={() => setLanguagePreference(option.value)}
+          >
+            <span className="settings-language-code" aria-hidden="true">
+              {option.code}
+            </span>
+            <span>{t(option.label)}</span>
+          </button>
+        ))}
+      </div>
+    );
+  }
+
   function renderMenuSettingsSection() {
     return renderGlobalSettingsSection(
       "通用",
-      "设置应用菜单与退出行为",
+      "菜单、外观与应用行为",
       <>
             <div className="settings-list-group-head">
-              <Typography variant="caption">菜单</Typography>
-              <Typography variant="caption">未启用的菜单不会展示</Typography>
+              <Typography variant="caption">{t("菜单")}</Typography>
+              <Typography variant="caption">{t("未启用的菜单不会展示")}</Typography>
             </div>
             <div className="settings-list-row settings-list-row--split">
               <div className="settings-overview-copy">
-                <Typography variant="subtitle2">展示菜单</Typography>
-                <Typography variant="caption">至少保留一个工作区菜单。</Typography>
+                <Typography variant="subtitle2">{t("展示菜单")}</Typography>
+                <Typography variant="caption">{t("至少保留一个工作区菜单。")}</Typography>
               </div>
               <Stack
                 className="settings-menu-choice"
@@ -3088,7 +3264,7 @@ export function SettingsPanel({
                           }
                         />
                       }
-                      label={SETTINGS_NAV_ITEM_MAP[page].shortLabel}
+                      label={t(SETTINGS_NAV_ITEM_MAP[page].shortLabel)}
                       sx={{ m: 0 }}
                     />
                   );
@@ -3097,8 +3273,8 @@ export function SettingsPanel({
             </div>
             <div className="settings-list-row settings-list-row--split">
               <div className="settings-overview-copy">
-                <Typography variant="subtitle2">默认菜单</Typography>
-                <Typography variant="caption">应用启动后优先进入此菜单。</Typography>
+                <Typography variant="subtitle2">{t("默认菜单")}</Typography>
+                <Typography variant="caption">{t("应用启动后优先进入此菜单。")}</Typography>
               </div>
               <TextField
                 select
@@ -3108,30 +3284,48 @@ export function SettingsPanel({
                   onDefaultPageChange(event.target.value as PageKey)
                 }
                 sx={{ width: "min(220px, 100%)", flexShrink: 0 }}
-                inputProps={{ "aria-label": "默认菜单" }}
+                inputProps={{ "aria-label": t("默认菜单") }}
               >
                 {enabledPages.map((page) => (
                   <MenuItem key={page} value={page}>
-                    {SETTINGS_NAV_ITEM_MAP[page].label}
+                    {t(SETTINGS_NAV_ITEM_MAP[page].label)}
                   </MenuItem>
                 ))}
               </TextField>
             </div>
+            <div className="settings-list-group-head settings-list-group-head--single">
+              <Typography variant="caption">{t("外观")}</Typography>
+            </div>
+            <div className="settings-list-row settings-list-row--split settings-list-row--appearance">
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">{t("主题")}</Typography>
+              </div>
+              {renderStyleModeChoices()}
+            </div>
+            <div className="settings-list-row settings-list-row--split settings-list-row--appearance">
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">{t("界面语言")}</Typography>
+                <Typography variant="caption">
+                  {t("选择应用界面的显示语言。")}
+                </Typography>
+              </div>
+              {renderLanguageChoices()}
+            </div>
             <div className="settings-list-group-head">
-              <Typography variant="caption">活动中心</Typography>
-              <Typography variant="caption">配置监听保持开启</Typography>
+              <Typography variant="caption">{t("活动中心")}</Typography>
+              <Typography variant="caption">{t("配置监听保持开启")}</Typography>
             </div>
             <div className="settings-list-row settings-list-row--split">
               <div className="settings-overview-copy">
-                <Typography variant="subtitle2">配置变更活动</Typography>
+                <Typography variant="subtitle2">{t("配置变更活动")}</Typography>
                 <Typography variant="caption">
-                  待处理和未确认失败项保留，已处理记录可按需查看。
+                  {t("未处理提醒会保留；完成或忽略后进入全部记录。")}
                 </Typography>
               </div>
               <div
                 className="settings-activity-mode"
                 role="radiogroup"
-                aria-label="配置变更活动显示"
+                aria-label={t("配置变更活动显示")}
               >
                 {(
                   [
@@ -3154,24 +3348,26 @@ export function SettingsPanel({
                     onClick={() =>
                       persistActivityPreference(
                         setConfigActivityVisibility(option.value),
-                        `配置变更活动已设为${option.label}`,
+                        t("配置变更活动已设为 {mode}", {
+                          mode: t(option.label),
+                        }),
                       )
                     }
                     disabled={activityPreferencesLoading}
                   >
-                    {option.label}
+                    {t(option.label)}
                   </button>
                 ))}
               </div>
             </div>
             <div className="settings-list-group-head">
-              <Typography variant="caption">运行</Typography>
-              <Typography variant="caption">退出行为</Typography>
+              <Typography variant="caption">{t("运行")}</Typography>
+              <Typography variant="caption">{t("退出行为")}</Typography>
             </div>
             <div className="settings-list-row settings-list-row--split">
               <div className="settings-overview-copy">
-                <Typography variant="subtitle2">退出时项目</Typography>
-                <Typography variant="caption">控制关闭应用时已启动项目的处理方式。</Typography>
+                <Typography variant="subtitle2">{t("退出时项目")}</Typography>
+                <Typography variant="caption">{t("控制关闭应用时已启动项目的处理方式。")}</Typography>
               </div>
               <TextField
                 select
@@ -3183,11 +3379,11 @@ export function SettingsPanel({
                   )
                 }
                 sx={{ width: "min(240px, 100%)", flexShrink: 0 }}
-                inputProps={{ "aria-label": "退出时项目" }}
+                inputProps={{ "aria-label": t("退出时项目") }}
               >
-                <MenuItem value="ask">每次询问</MenuItem>
-                <MenuItem value="keep">保持项目运行</MenuItem>
-                <MenuItem value="stop">停止本次启动项目</MenuItem>
+                <MenuItem value="ask">{t("每次询问")}</MenuItem>
+                <MenuItem value="keep">{t("保持项目运行")}</MenuItem>
+                <MenuItem value="stop">{t("停止本次启动项目")}</MenuItem>
               </TextField>
             </div>
       </>,
@@ -3201,8 +3397,8 @@ export function SettingsPanel({
       <>
             <div className="settings-list-group-head settings-list-group-head--confirmation">
               <div>
-                <Typography variant="caption">确认策略</Typography>
-                <Typography variant="caption">高风险动作始终需要确认</Typography>
+                <Typography variant="caption">{t("确认策略")}</Typography>
+                <Typography variant="caption">{t("高风险动作始终需要确认")}</Typography>
               </div>
               <Button
                 size="small"
@@ -3210,23 +3406,23 @@ export function SettingsPanel({
                 onClick={() =>
                   persistConfirmationPreference(
                     resetConfirmationPreferences(),
-                    "已恢复平衡确认策略",
+                    t("已恢复平衡确认策略"),
                   )
                 }
                 disabled={confirmationPreferencesLoading}
               >
-                恢复平衡
+                {t("恢复平衡")}
               </Button>
             </div>
             <div className="settings-list-row settings-list-row--split">
               <div className="settings-overview-copy">
-                <Typography variant="subtitle2">确认策略</Typography>
-                <Typography variant="caption">高风险动作始终需要确认。</Typography>
+                <Typography variant="subtitle2">{t("确认策略")}</Typography>
+                <Typography variant="caption">{t("高风险动作始终需要确认。")}</Typography>
               </div>
               <div
                 className="settings-confirmation-mode"
                 role="radiogroup"
-                aria-label="操作确认策略"
+                aria-label={t("操作确认策略")}
               >
                 {(
                   [
@@ -3249,16 +3445,18 @@ export function SettingsPanel({
                     onClick={() =>
                       persistConfirmationPreference(
                         setConfirmationMode(option.value),
-                        `已切换为${option.label}确认策略`,
+                        t("已切换为 {mode} 确认策略", {
+                          mode: t(option.label),
+                        }),
                       )
                     }
                     disabled={confirmationPreferencesLoading}
                   >
-                    {option.label}
+                    {t(option.label)}
                   </button>
                 ))}
                 {confirmationPreferences.mode === "custom" ? (
-                  <Chip size="small" label="自定义" />
+                  <Chip size="small" label={t("自定义")} />
                 ) : null}
               </div>
             </div>
@@ -3269,11 +3467,11 @@ export function SettingsPanel({
                   className="settings-list-row settings-list-row--split settings-confirmation-row"
                 >
                   <div className="settings-overview-copy">
-                    <Typography variant="subtitle2">{definition.label}</Typography>
-                    <Typography variant="caption">{definition.description}</Typography>
+                    <Typography variant="subtitle2">{t(definition.label)}</Typography>
+                    <Typography variant="caption">{t(definition.description)}</Typography>
                   </div>
                   {definition.required ? (
-                    <Chip size="small" variant="outlined" label="始终确认" />
+                    <Chip size="small" variant="outlined" label={t("始终确认")} />
                   ) : (
                     <Switch
                       size="small"
@@ -3284,82 +3482,19 @@ export function SettingsPanel({
                             definition.key as ConfirmationPreferenceKey,
                             event.target.checked,
                           ),
-                          `已更新${definition.label}确认策略`,
+                          t("已更新 {label} 确认策略", {
+                            label: t(definition.label),
+                          }),
                         )
                       }
                       disabled={confirmationPreferencesLoading}
                       slotProps={{
-                        input: { "aria-label": `${definition.label}确认` },
+                        input: { "aria-label": t("{label}确认", { label: t(definition.label) }) },
                       }}
                     />
                   )}
                 </div>
               ))}
-            </div>
-      </>,
-    );
-  }
-
-  function renderAppearanceSettingsSection() {
-    return renderGlobalSettingsSection(
-      "外观",
-      "选择当前窗口的视觉风格",
-      <>
-            <div className="settings-list-row settings-list-row--split">
-              <div className="settings-overview-copy">
-                <Typography variant="subtitle2">换肤</Typography>
-                <Typography variant="caption">选择当前窗口的视觉风格。</Typography>
-              </div>
-              <div className="settings-style-choice" role="group" aria-label="换肤">
-                <button
-                  type="button"
-                  className={`settings-style-card settings-style-card--system${
-                    styleMode === "system" ? " is-active" : ""
-                  }`}
-                  aria-pressed={styleMode === "system"}
-                  onClick={() => onStyleModeChange("system")}
-                >
-                  <span className="settings-style-card-icon" aria-hidden="true">
-                    <span className="settings-style-system" />
-                  </span>
-                  <span className="settings-style-card-copy">
-                    <span>系统默认</span>
-                    <small>跟随系统亮暗色。</small>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={`settings-style-card settings-style-card--light${
-                    styleMode === "light" ? " is-active" : ""
-                  }`}
-                  aria-pressed={styleMode === "light"}
-                  onClick={() => onStyleModeChange("light")}
-                >
-                  <span className="settings-style-card-icon" aria-hidden="true">
-                    <span className="settings-style-sun" />
-                  </span>
-                  <span className="settings-style-card-copy">
-                    <span>亮色</span>
-                    <small>使用明亮、通透的窗口界面。</small>
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  className={`settings-style-card settings-style-card--mono${
-                    styleMode === "mono" ? " is-active" : ""
-                  }`}
-                  aria-pressed={styleMode === "mono"}
-                  onClick={() => onStyleModeChange("mono")}
-                >
-                  <span className="settings-style-card-icon" aria-hidden="true">
-                    <span className="settings-style-moon" />
-                  </span>
-                  <span className="settings-style-card-copy">
-                    <span>暗色</span>
-                    <small>使用低亮度、高对比的工作界面。</small>
-                  </span>
-                </button>
-              </div>
             </div>
       </>,
     );
@@ -3375,8 +3510,8 @@ export function SettingsPanel({
                 <span>⌘</span>
               </div>
               <div className="settings-overview-copy">
-                <Typography variant="subtitle2">命令面板</Typography>
-                <Typography variant="caption">搜索页面、项目、快捷入口和常用动作。</Typography>
+                <Typography variant="subtitle2">{t("命令面板")}</Typography>
+                <Typography variant="caption">{t("搜索页面、项目、快捷入口和常用动作。")}</Typography>
               </div>
               <kbd>Cmd/Ctrl&nbsp;K</kbd>
             </div>
@@ -3390,8 +3525,8 @@ export function SettingsPanel({
                 <FolderIcon fontSize="small" />
               </span>
               <span className="settings-overview-copy">
-                <Typography component="span" variant="subtitle2">配置文件夹</Typography>
-                <Typography component="span" variant="caption">打开当前配置目录</Typography>
+                <Typography component="span" variant="subtitle2">{t("配置文件夹")}</Typography>
+                <Typography component="span" variant="caption">{t("打开当前配置目录")}</Typography>
               </span>
               <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
             </Button>
@@ -3406,7 +3541,7 @@ export function SettingsPanel({
               </span>
               <span className="settings-overview-copy">
                 <Typography component="span" variant="subtitle2">projects.toml</Typography>
-                <Typography component="span" variant="caption">项目与构建配置</Typography>
+                <Typography component="span" variant="caption">{t("项目与构建配置")}</Typography>
               </span>
               <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
             </Button>
@@ -3421,7 +3556,7 @@ export function SettingsPanel({
               </span>
               <span className="settings-overview-copy">
                 <Typography component="span" variant="subtitle2">navigation.toml</Typography>
-                <Typography component="span" variant="caption">访达快捷入口</Typography>
+                <Typography component="span" variant="caption">{t("访达快捷入口")}</Typography>
               </span>
               <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
             </Button>
@@ -3433,12 +3568,12 @@ export function SettingsPanel({
     switch (activeSection) {
       case "confirmation":
         return renderConfirmationSettingsSection();
-      case "appearance":
-        return renderAppearanceSettingsSection();
       case "access":
         return renderAccessSettingsSection();
       case "artifacts":
         return <ManagedArtifactsPanel activeWorkspaceKey={activeProjectWorkspaceKey} />;
+      case "diagnostics":
+        return <SystemDiagnosticsPanel />;
       case "menu":
       default:
         return renderMenuSettingsSection();
@@ -3454,7 +3589,7 @@ export function SettingsPanel({
           value={selectedKey}
           onChange={(event) => setSelectedKey(event.target.value)}
           disabled={loading || saving || !editorState?.projects.length}
-          inputProps={{ "aria-label": "项目" }}
+          inputProps={{ "aria-label": t("项目") }}
         >
           {(editorState?.projects ?? []).map((project) => (
             <MenuItem key={project.key} value={project.key}>
@@ -3469,7 +3604,7 @@ export function SettingsPanel({
           onClick={() => void loadProjectConfig(selectedKey)}
           disabled={loading || saving}
         >
-          刷新
+          {t("刷新")}
         </Button>
       </div>
     );
@@ -3480,8 +3615,10 @@ export function SettingsPanel({
       <Stack spacing={1.2}>
         <section className="settings-list-section">
           <header className="settings-list-head">
-            <Typography variant="subtitle2">项目配置已迁移</Typography>
-            <Typography variant="caption">项目、构建与分支规则统一在项目管理中维护</Typography>
+            <Typography variant="subtitle2">{t("项目配置已迁移")}</Typography>
+            <Typography variant="caption">
+              {t("项目、构建与分支规则统一在项目管理中维护")}
+            </Typography>
           </header>
           <div className="settings-list">
             <Button
@@ -3496,10 +3633,10 @@ export function SettingsPanel({
               </span>
               <span className="settings-overview-copy">
                 <Typography component="span" variant="subtitle2">
-                  打开项目管理
+                  {t("打开项目管理")}
                 </Typography>
                 <Typography component="span" variant="caption">
-                  管理项目身份、运行配置、构建目标和 Git 分支规则
+                  {t("管理项目身份、基础命令、启动档案、构建目标和 Git 分支规则")}
                 </Typography>
               </span>
               <OpenExternalIcon className="settings-list-action-icon" fontSize="small" />
@@ -3515,7 +3652,7 @@ export function SettingsPanel({
     return (
       <div className="settings-sub-block">
         <div className="settings-form-block-head">
-          <Typography variant="subtitle2">{label}</Typography>
+          <Typography variant="subtitle2">{t(label)}</Typography>
           {command.envCount > 0 ? (
             <Chip size="small" label={`${command.envCount} env`} variant="outlined" />
           ) : null}
@@ -3523,19 +3660,19 @@ export function SettingsPanel({
         <div className="settings-form-grid">
           <TextField
             size="small"
-            label="命令"
+            label={t("命令")}
             value={command.command}
             onChange={(event) => updateCommand(commandKey, { command: event.target.value })}
           />
           <TextField
             size="small"
-            label="工作目录"
+            label={t("工作目录")}
             value={command.cwd ?? ""}
             onChange={(event) => updateCommand(commandKey, { cwd: event.target.value })}
           />
           <TextField
             size="small"
-            label="输出目录"
+            label={t("输出目录")}
             value={command.outputDir ?? ""}
             onChange={(event) => updateCommand(commandKey, { outputDir: event.target.value })}
           />
@@ -3563,8 +3700,8 @@ export function SettingsPanel({
       ...(selectedLocalProxy.authHelper ?? {}),
     };
     return renderProjectSectionBlock(
-      "项目运行配置",
-      "启动前应用项目环境、API 代理、Token Helper 和本地覆盖文件",
+      "项目启动档案",
+      "在项目基础命令上保存环境、端口、本地文件和共享运行环境等差异",
       <Stack spacing={1}>
         <div className="settings-deploy-switcher settings-debug-profile-switcher">
           {profiles.map((profile, index) => (
@@ -3575,9 +3712,9 @@ export function SettingsPanel({
               onClick={() => setSelectedDebugProfileIndex(index)}
             >
               <Typography variant="caption">
-                {profile.label || profile.key || `档案 ${index + 1}`}
+                {profile.label || profile.key || t("档案 {index}", { index: index + 1 })}
               </Typography>
-              <Typography variant="caption">{debugProfileMeta(profile)}</Typography>
+              <Typography variant="caption">{debugProfileMeta(profile, t)}</Typography>
             </button>
           ))}
           <Button
@@ -3586,13 +3723,13 @@ export function SettingsPanel({
             onClick={addDebugProfile}
             disabled={saving}
           >
-            新增档案
+            {t("新增档案")}
           </Button>
         </div>
 
         {profiles.length === 0 ? (
           <div className="settings-empty-row">
-            暂无项目运行配置。新增后可在项目卡片里选择并启动。
+            {t("暂无启动档案。项目仍可使用基础命令启动，也可新增 UAT、联调等档案。")}
           </div>
         ) : null}
 
@@ -3603,7 +3740,7 @@ export function SettingsPanel({
                 <Typography variant="subtitle2">
                   {selectedDebugProfile.label || selectedDebugProfile.key}
                 </Typography>
-                <Typography variant="caption">保存后会写入 projects.toml</Typography>
+                <Typography variant="caption">{t("保存后会写入 projects.toml")}</Typography>
               </div>
               <Button
                 variant="outlined"
@@ -3612,7 +3749,7 @@ export function SettingsPanel({
                 onClick={() => deleteDebugProfileAt(selectedDebugProfileIndex)}
                 disabled={saving}
               >
-                删除档案
+                {t("删除档案")}
               </Button>
             </div>
 
@@ -3629,7 +3766,7 @@ export function SettingsPanel({
               />
               <TextField
                 size="small"
-                label="名称"
+                label={t("名称")}
                 value={selectedDebugProfile.label}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3640,15 +3777,16 @@ export function SettingsPanel({
               <TextField
                 select
                 size="small"
-                label="继承运行配置"
+                label={t("共享运行环境")}
                 value={selectedDebugProfile.runtimeProfile ?? ""}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
                     runtimeProfile: event.target.value || null,
                   })
                 }
+                helperText={t("复用浏览器、代理、域名映射和网页动作。")}
               >
-                <MenuItem value="">不继承</MenuItem>
+                <MenuItem value="">{t("不绑定共享环境")}</MenuItem>
                 {runtimeProfiles.map((profile) => (
                   <MenuItem key={profile.key} value={profile.key}>
                     {profile.label || profile.key}
@@ -3658,33 +3796,33 @@ export function SettingsPanel({
               <TextField
                 className="settings-form-grid-wide"
                 size="small"
-                label="启动命令覆盖"
+                label={t("启动命令覆盖")}
                 value={selectedDebugProfile.command ?? ""}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
                     command: event.target.value || null,
                   })
                 }
-                placeholder="留空时使用项目默认 dev 命令"
-                helperText="仅对该调试档案生效，不修改项目默认启动命令。"
+                placeholder={t("留空时使用项目默认 dev 命令")}
+                helperText={t("仅对该启动档案生效，不修改项目基础启动命令。")}
               />
               <TextField
                 className="settings-form-grid-wide"
                 size="small"
-                label="独有工作目录"
+                label={t("独有工作目录")}
                 value={selectedDebugProfile.cwd ?? ""}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
                     cwd: event.target.value || null,
                   })
                 }
-                placeholder="留空时使用项目 dev.cwd；相对路径基于 repoPath"
-                helperText="用于同一项目的不同 worktree、副本或子应用运行目录。"
+                placeholder={t("留空时使用项目 dev.cwd；相对路径基于 repoPath")}
+                helperText={t("用于同一项目的不同 worktree、副本或子应用运行目录。")}
               />
               <TextField
                 size="small"
                 type="number"
-                label="预期端口"
+                label={t("预期端口")}
                 value={selectedDebugProfile.expectedPort ?? ""}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3694,12 +3832,12 @@ export function SettingsPanel({
                   })
                 }
                 inputProps={{ min: 1, max: 65535 }}
-                helperText="被占用时直接阻止启动。"
+                helperText={t("被占用时直接阻止启动。")}
               />
               <TextField
                 className="settings-form-grid-wide"
                 size="small"
-                label="启动页面 URL"
+                label={t("启动页面 URL")}
                 value={selectedDebugProfile.focusUrl ?? ""}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3707,7 +3845,7 @@ export function SettingsPanel({
                   })
                 }
                 placeholder="http://127.0.0.1:5173/#/debug"
-                helperText="覆盖项目 focus.url，仅用于该调试档案的聚焦与 Ready 回退。"
+                helperText={t("覆盖项目 focus.url，仅用于该启动档案的聚焦与 Ready 回退。")}
               />
               <FormControlLabel
                 className="settings-form-grid-wide settings-checkbox-row"
@@ -3729,7 +3867,7 @@ export function SettingsPanel({
                     }
                   />
                 }
-                label="启用该档案的 HTTP Ready 探测"
+                label={t("启用该档案的 HTTP Ready 探测")}
               />
               {selectedDebugProfile.readyProbe ? (
                 <>
@@ -3745,11 +3883,11 @@ export function SettingsPanel({
                         },
                       })
                     }
-                    placeholder="留空时使用启动页面或监听端口"
+                    placeholder={t("留空时使用启动页面或监听端口")}
                   />
                   <TextField
                     size="small"
-                    label="Ready 路径"
+                    label={t("Ready 路径")}
                     value={selectedDebugProfile.readyProbe.path ?? ""}
                     onChange={(event) =>
                       updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3763,7 +3901,7 @@ export function SettingsPanel({
                   />
                   <TextField
                     size="small"
-                    label="成功状态码"
+                    label={t("成功状态码")}
                     value={selectedDebugProfile.readyProbe.expectedStatuses.join(",")}
                     onChange={(event) =>
                       updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3775,12 +3913,12 @@ export function SettingsPanel({
                         },
                       })
                     }
-                    placeholder="留空表示 200-399；或 200,204"
+                    placeholder={t("留空表示 200-399；或 200,204")}
                   />
                   <TextField
                     size="small"
                     type="number"
-                    label="Ready 超时 (ms)"
+                    label={t("Ready 超时 (ms)")}
                     value={selectedDebugProfile.readyProbe.timeoutMs ?? ""}
                     onChange={(event) =>
                       updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3799,7 +3937,7 @@ export function SettingsPanel({
               ) : null}
               <TextField
                 size="small"
-                label="浏览器"
+                label={t("浏览器覆盖（可选）")}
                 value={selectedDebugProfile.browser ?? ""}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3810,7 +3948,7 @@ export function SettingsPanel({
               />
               <TextField
                 size="small"
-                label="浏览器 Profile"
+                label={t("Profile 覆盖（可选）")}
                 value={selectedDebugProfile.browserProfile ?? ""}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3821,7 +3959,7 @@ export function SettingsPanel({
               />
               <TextField
                 size="small"
-                label="浏览器数据目录"
+                label={t("数据目录覆盖（可选）")}
                 value={selectedDebugProfile.browserUserDataDir ?? ""}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3833,7 +3971,7 @@ export function SettingsPanel({
               <TextField
                 className="settings-form-grid-wide"
                 size="small"
-                label="浏览器参数"
+                label={t("额外浏览器参数")}
                 value={selectedDebugProfile.browserArgsText ?? ""}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3843,14 +3981,14 @@ export function SettingsPanel({
                 placeholder={
                   "--host-resolver-rules=MAP app.example.test 127.0.0.1"
                 }
-                helperText="每行一个 Chrome 参数；参数值不要额外包 shell 引号。"
+                helperText={t("每行一个 Chrome 参数；参数值不要额外包 shell 引号。")}
                 multiline
                 minRows={2}
               />
               <TextField
                 className="settings-form-grid-wide"
                 size="small"
-                label="环境变量"
+                label={t("档案环境变量")}
                 value={selectedDebugProfile.envText}
                 onChange={(event) =>
                   updateDebugProfileAt(selectedDebugProfileIndex, {
@@ -3867,7 +4005,7 @@ export function SettingsPanel({
               className={`settings-param-editor settings-network-proxy${
                 selectedNetworkProxy.enabled ? " is-enabled" : ""
               }`}
-              aria-label="网络代理"
+              aria-label={t("网络代理")}
             >
               <div className="settings-param-editor-head">
                 <FormControlLabel
@@ -3883,7 +4021,7 @@ export function SettingsPanel({
                       }
                     />
                   }
-                  label="启用网络代理"
+                  label={t("覆盖共享环境的网络代理")}
                 />
                 <Chip
                   size="small"
@@ -3892,7 +4030,7 @@ export function SettingsPanel({
                       ? selectedNetworkProxy.nodeHook
                         ? "env + Node Hook"
                         : "env"
-                      : "直连"
+                      : t("直连")
                   }
                   variant="outlined"
                 />
@@ -3901,7 +4039,7 @@ export function SettingsPanel({
                 <TextField
                   className="settings-form-grid-wide"
                   size="small"
-                  label="代理地址"
+                  label={t("代理地址")}
                   value={selectedNetworkProxy.proxyUrl}
                   onChange={(event) =>
                     updateDebugProfileNetworkProxy(selectedDebugProfileIndex, {
@@ -3938,7 +4076,7 @@ export function SettingsPanel({
                         disabled={!selectedNetworkProxy.enabled}
                       />
                     }
-                    label="注入 env"
+                    label={t("注入 env")}
                   />
                   <FormControlLabel
                     className="settings-checkbox-row"
@@ -3964,7 +4102,7 @@ export function SettingsPanel({
               className={`settings-param-editor settings-network-proxy${
                 selectedLocalProxy.enabled ? " is-enabled" : ""
               }`}
-              aria-label="本地 API 代理"
+              aria-label={t("本地 API 代理")}
             >
               <div className="settings-param-editor-head">
                 <FormControlLabel
@@ -3980,18 +4118,18 @@ export function SettingsPanel({
                       }
                     />
                   }
-                  label="启用本地 API 代理"
+                  label={t("启用本地 API 代理")}
                 />
                 <Chip
                   size="small"
-                  label={selectedLocalProxy.enabled ? selectedLocalProxy.listen : "关闭"}
+                  label={selectedLocalProxy.enabled ? selectedLocalProxy.listen : t("关闭")}
                   variant="outlined"
                 />
               </div>
               <div className="settings-form-grid settings-form-grid-tight">
                 <TextField
                   size="small"
-                  label="监听地址"
+                  label={t("监听地址")}
                   value={selectedLocalProxy.listen}
                   onChange={(event) =>
                     updateDebugProfileLocalProxy(selectedDebugProfileIndex, {
@@ -4003,7 +4141,7 @@ export function SettingsPanel({
                 />
                 <TextField
                   size="small"
-                  label="前端地址"
+                  label={t("前端地址")}
                   value={selectedLocalProxy.frontendUrl}
                   onChange={(event) =>
                     updateDebugProfileLocalProxy(selectedDebugProfileIndex, {
@@ -4016,7 +4154,7 @@ export function SettingsPanel({
                 <TextField
                   className="settings-form-grid-wide"
                   size="small"
-                  label="上游 HTTP 代理"
+                  label={t("上游 HTTP 代理")}
                   value={selectedLocalProxy.upstreamProxy}
                   onChange={(event) =>
                     updateDebugProfileLocalProxy(selectedDebugProfileIndex, {
@@ -4025,14 +4163,16 @@ export function SettingsPanel({
                   }
                   placeholder="http://127.0.0.1:7897"
                   disabled={!selectedLocalProxy.enabled}
-                  helperText="内网 API 需要走代理时填写；留空表示直连。"
+                  helperText={t("内网 API 需要走代理时填写；留空表示直连。")}
                 />
               </div>
 
-              <div className="settings-param-list" aria-label="本地 API 代理路由">
+              <div className="settings-param-list" aria-label={t("本地 API 代理路由")}>
                 <div className="settings-param-list-head">
                   <Typography variant="caption">
-                    {(selectedLocalProxy.routes ?? []).length} 条路由
+                    {t("{count} 条路由", {
+                      count: (selectedLocalProxy.routes ?? []).length,
+                    })}
                   </Typography>
                   <Button
                     variant="outlined"
@@ -4040,11 +4180,11 @@ export function SettingsPanel({
                     onClick={() => addLocalProxyRoute(selectedDebugProfileIndex)}
                     disabled={saving || !selectedLocalProxy.enabled}
                   >
-                    添加路由
+                    {t("添加路由")}
                   </Button>
                 </div>
                 {(selectedLocalProxy.routes ?? []).length === 0 ? (
-                  <div className="settings-empty-row">暂无 API 路由</div>
+                  <div className="settings-empty-row">{t("暂无 API 路由")}</div>
                 ) : (
                   (selectedLocalProxy.routes ?? []).map((route, routeIndex) => (
                     <div
@@ -4068,7 +4208,7 @@ export function SettingsPanel({
                               disabled={!selectedLocalProxy.enabled}
                             />
                           }
-                          label="启用"
+                          label={t("启用")}
                         />
                         <Button
                           variant="outlined"
@@ -4079,13 +4219,13 @@ export function SettingsPanel({
                           }
                           disabled={saving}
                         >
-                          删除路由
+                          {t("删除路由")}
                         </Button>
                       </div>
                       <div className="settings-form-grid settings-form-grid-tight">
                         <TextField
                           size="small"
-                          label="匹配前缀"
+                          label={t("匹配前缀")}
                           value={route.matchPrefix}
                           onChange={(event) =>
                             updateLocalProxyRouteAt(
@@ -4099,7 +4239,7 @@ export function SettingsPanel({
                         />
                         <TextField
                           size="small"
-                          label="目标地址"
+                          label={t("目标地址")}
                           value={route.target}
                           onChange={(event) =>
                             updateLocalProxyRouteAt(
@@ -4113,7 +4253,7 @@ export function SettingsPanel({
                         />
                         <TextField
                           size="small"
-                          label="改写前缀"
+                          label={t("改写前缀")}
                           value={route.rewritePrefix}
                           onChange={(event) =>
                             updateLocalProxyRouteAt(
@@ -4128,7 +4268,7 @@ export function SettingsPanel({
                         <TextField
                           className="settings-form-grid-wide"
                           size="small"
-                          label="注入 Header"
+                          label={t("注入 Header")}
                           value={route.headersText}
                           onChange={(event) =>
                             updateLocalProxyRouteAt(
@@ -4148,7 +4288,7 @@ export function SettingsPanel({
                 )}
               </div>
 
-              <div className="settings-param-list" aria-label="Token Helper">
+              <div className="settings-param-list" aria-label={t("Token Helper")}>
                 <div className="settings-param-list-head">
                   <FormControlLabel
                     className="settings-checkbox-row"
@@ -4164,7 +4304,7 @@ export function SettingsPanel({
                         disabled={!selectedLocalProxy.enabled}
                       />
                     }
-                    label="启用 Token Helper"
+                    label={t("启用 Token Helper")}
                   />
                   <Button
                     variant="outlined"
@@ -4174,13 +4314,13 @@ export function SettingsPanel({
                       saving || !selectedLocalProxy.enabled || !selectedAuthHelper.enabled
                     }
                   >
-                    添加写入项
+                    {t("添加写入项")}
                   </Button>
                 </div>
                 <div className="settings-form-grid settings-form-grid-tight">
                   <TextField
                     size="small"
-                    label="Helper 路径"
+                    label={t("Helper 路径")}
                     value={selectedAuthHelper.path}
                     onChange={(event) =>
                       updateDebugProfileAuthHelper(selectedDebugProfileIndex, {
@@ -4192,7 +4332,7 @@ export function SettingsPanel({
                   />
                   <TextField
                     size="small"
-                    label="写入后跳转"
+                    label={t("写入后跳转")}
                     value={selectedAuthHelper.redirectPath}
                     onChange={(event) =>
                       updateDebugProfileAuthHelper(selectedDebugProfileIndex, {
@@ -4204,7 +4344,7 @@ export function SettingsPanel({
                   />
                 </div>
                 {(selectedAuthHelper.items ?? []).length === 0 ? (
-                  <div className="settings-empty-row">暂无写入项</div>
+                  <div className="settings-empty-row">{t("暂无写入项")}</div>
                 ) : (
                   (selectedAuthHelper.items ?? []).map((item, itemIndex) => (
                     <div
@@ -4228,7 +4368,7 @@ export function SettingsPanel({
                               disabled={!selectedLocalProxy.enabled || !selectedAuthHelper.enabled}
                             />
                           }
-                          label="启用"
+                          label={t("启用")}
                         />
                         <Button
                           variant="outlined"
@@ -4239,14 +4379,14 @@ export function SettingsPanel({
                           }
                           disabled={saving}
                         >
-                          删除写入项
+                          {t("删除写入项")}
                         </Button>
                       </div>
                       <div className="settings-form-grid settings-form-grid-tight">
                         <TextField
                           select
                           size="small"
-                          label="存储位置"
+                          label={t("存储位置")}
                           value={item.storage}
                           onChange={(event) =>
                             updateAuthHelperItemAt(
@@ -4287,7 +4427,7 @@ export function SettingsPanel({
                         />
                         <TextField
                           size="small"
-                          label="JSON 路径"
+                          label={t("JSON 路径")}
                           value={item.fromJsonPath}
                           onChange={(event) =>
                             updateAuthHelperItemAt(
@@ -4305,7 +4445,7 @@ export function SettingsPanel({
                         />
                         <TextField
                           size="small"
-                          label="固定值"
+                          label={t("固定值")}
                           value={item.value}
                           onChange={(event) =>
                             updateAuthHelperItemAt(
@@ -4314,7 +4454,7 @@ export function SettingsPanel({
                               { value: event.target.value },
                             )
                           }
-                          placeholder="留空则从 JSON 路径读取"
+                          placeholder={t("留空则从 JSON 路径读取")}
                           disabled={
                             !selectedLocalProxy.enabled ||
                             !selectedAuthHelper.enabled ||
@@ -4388,10 +4528,12 @@ export function SettingsPanel({
               </div>
             </div>
 
-            <div className="settings-param-list" aria-label="本地覆盖文件">
+            <div className="settings-param-list" aria-label={t("本地覆盖文件")}>
               <div className="settings-param-list-head">
                 <Typography variant="caption">
-                  {(selectedDebugProfile.localFiles ?? []).length} 个本地文件
+                  {t("{count} 个本地文件", {
+                    count: (selectedDebugProfile.localFiles ?? []).length,
+                  })}
                 </Typography>
                 <Button
                   variant="outlined"
@@ -4399,11 +4541,11 @@ export function SettingsPanel({
                   onClick={() => addDebugLocalFile(selectedDebugProfileIndex)}
                   disabled={saving}
                 >
-                  新增文件
+                  {t("新增文件")}
                 </Button>
               </div>
               {(selectedDebugProfile.localFiles ?? []).length === 0 ? (
-                <div className="settings-empty-row">暂无本地覆盖文件</div>
+                <div className="settings-empty-row">{t("暂无本地覆盖文件")}</div>
               ) : (
                 (selectedDebugProfile.localFiles ?? []).map((file, fileIndex) => (
                   <div
@@ -4423,7 +4565,7 @@ export function SettingsPanel({
                             }
                           />
                         }
-                        label="启用"
+                        label={t("启用")}
                       />
                       <Button
                         variant="outlined"
@@ -4434,13 +4576,13 @@ export function SettingsPanel({
                         }
                         disabled={saving}
                       >
-                        删除文件
+                        {t("删除文件")}
                       </Button>
                     </div>
                     <div className="settings-form-grid settings-form-grid-tight">
                       <TextField
                         size="small"
-                        label="路径"
+                        label={t("路径")}
                         value={file.path}
                         onChange={(event) =>
                           updateDebugLocalFileAt(selectedDebugProfileIndex, fileIndex, {
@@ -4452,7 +4594,7 @@ export function SettingsPanel({
                       <TextField
                         select
                         size="small"
-                        label="写入方式"
+                        label={t("写入方式")}
                         value={file.mode || "overwrite"}
                         onChange={(event) =>
                           updateDebugLocalFileAt(selectedDebugProfileIndex, fileIndex, {
@@ -4462,21 +4604,21 @@ export function SettingsPanel({
                       >
                         {DEBUG_LOCAL_FILE_MODE_OPTIONS.map((mode) => (
                           <MenuItem key={mode.value} value={mode.value}>
-                            {mode.label}
+                            {t(mode.label)}
                           </MenuItem>
                         ))}
                       </TextField>
                       <TextField
                         className="settings-form-grid-wide"
                         size="small"
-                        label="内容"
+                        label={t("内容")}
                         value={file.content}
                         onChange={(event) =>
                           updateDebugLocalFileAt(selectedDebugProfileIndex, fileIndex, {
                             content: event.target.value,
                           })
                         }
-                        placeholder="写入这个本地文件的内容"
+                        placeholder={t("写入这个本地文件的内容")}
                         multiline
                         minRows={4}
                       />
@@ -4500,8 +4642,8 @@ export function SettingsPanel({
       <div className="settings-form-block">
         <div className="settings-form-block-head">
           <div>
-            <Typography variant="subtitle2">{title}</Typography>
-            <Typography variant="caption">{caption}</Typography>
+            <Typography variant="subtitle2">{t(title)}</Typography>
+            <Typography variant="caption">{t(caption)}</Typography>
           </div>
         </div>
         {children}
@@ -4513,7 +4655,7 @@ export function SettingsPanel({
     return (
       <div className="settings-form-block settings-compact-block">
         <div className="settings-form-block-head">
-          <Typography variant="subtitle2">新增项目</Typography>
+          <Typography variant="subtitle2">{t("新增项目")}</Typography>
         </div>
         <div className="settings-form-grid">
           <TextField
@@ -4525,21 +4667,21 @@ export function SettingsPanel({
           />
           <TextField
             size="small"
-            label="名称"
+            label={t("名称")}
             value={newProjectName}
             onChange={(event) => setNewProjectName(event.target.value)}
             disabled={saving}
           />
         </div>
         <div className="settings-save-row">
-          <Typography variant="caption">写入 projects.toml</Typography>
+          <Typography variant="caption">{t("写入 projects.toml")}</Typography>
           <Button
             variant="outlined"
             color="inherit"
             onClick={() => void addProject()}
             disabled={saving || !newProjectKey.trim() || !newProjectName.trim()}
           >
-            新增
+            {t("新增")}
           </Button>
         </div>
       </div>
@@ -4559,7 +4701,7 @@ export function SettingsPanel({
               onClick={() => void deleteSelectedProject()}
               disabled={saving}
             >
-              删除
+              {t("删除")}
             </Button>
           ) : null}
           <Button
@@ -4568,7 +4710,7 @@ export function SettingsPanel({
             onClick={() => void saveSelectedProject()}
             disabled={!hasDirtySelectedProject || saving}
           >
-            保存
+            {t("保存")}
           </Button>
         </div>
       </div>
@@ -4577,12 +4719,12 @@ export function SettingsPanel({
 
   function renderNoProjectSection(description: string) {
     if (loading && !editorState) {
-      return <Alert severity="info">正在读取项目配置</Alert>;
+      return <Alert severity="info">{t("正在读取项目配置")}</Alert>;
     }
     if (!selectedProject) {
       return (
         <Stack spacing={1.3}>
-          <AppEmptyState compact title="暂无项目配置" description={description} />
+          <AppEmptyState compact title={t("暂无项目配置")} description={t(description)} />
           {renderNewProjectBlock()}
         </Stack>
       );
@@ -4602,7 +4744,7 @@ export function SettingsPanel({
           <TextField size="small" label="Key" value={selectedProject.key} disabled />
           <TextField
             size="small"
-            label="名称"
+            label={t("名称")}
             value={selectedProject.name}
             onChange={(event) =>
               updateSelectedProject((project) => ({ ...project, name: event.target.value }))
@@ -4610,7 +4752,7 @@ export function SettingsPanel({
           />
           <TextField
             size="small"
-            label="分类"
+            label={t("分类")}
             value={selectedProject.category}
             onChange={(event) =>
               updateSelectedProject((project) => ({ ...project, category: event.target.value }))
@@ -4626,7 +4768,7 @@ export function SettingsPanel({
           />
           <TextField
             size="small"
-            label="仓库路径"
+            label={t("仓库路径")}
             value={selectedProject.repoPath ?? ""}
             onChange={(event) =>
               updateSelectedProject((project) => ({ ...project, repoPath: event.target.value }))
@@ -4639,8 +4781,8 @@ export function SettingsPanel({
 
   function renderProjectLocalCommandsBlock() {
     return renderProjectSectionBlock(
-      "本地运行",
-      "项目页启动 dev 服务和本地构建时使用",
+      "项目基础命令",
+      "所有启动档案共同继承的 dev 与 build 命令",
       <Stack spacing={1}>
         {renderCommandFields("dev", "dev 服务")}
         {renderCommandFields("build", "本地构建")}
@@ -4693,13 +4835,13 @@ export function SettingsPanel({
               }
             />
           }
-          label="启动成功后自动唤起"
+          label={t("启动成功后自动唤起")}
           sx={{ alignSelf: "center" }}
         />
         <TextField
           size="small"
           select
-          label="自动打开"
+          label={t("自动打开")}
           value={selectedProject.focus.autoOpenMode ?? "ready"}
           onChange={(event) =>
             updateSelectedProject((project) => ({
@@ -4711,13 +4853,13 @@ export function SettingsPanel({
             }))
           }
         >
-          <MenuItem value="ready">识别成功后打开</MenuItem>
-          <MenuItem value="started">进程启动后打开</MenuItem>
-          <MenuItem value="manual">手动打开</MenuItem>
+          <MenuItem value="ready">{t("识别成功后打开")}</MenuItem>
+          <MenuItem value="started">{t("进程启动后打开")}</MenuItem>
+          <MenuItem value="manual">{t("手动打开")}</MenuItem>
         </TextField>
         <TextField
           size="small"
-          label="识别超时 ms"
+          label={t("识别超时 ms")}
           type="number"
           value={selectedProject.focus.readyTimeoutMs ?? 180000}
           onChange={(event) =>
@@ -4745,14 +4887,14 @@ export function SettingsPanel({
               }
             />
           }
-          label="启用启动识别"
+          label={t("启用启动识别")}
           sx={{ alignSelf: "center" }}
         />
         <TextField
           size="small"
           className="settings-form-grid-wide"
-          label="启动后动作"
-          helperText="一行一个网页动作 key，在项目 ready 后按顺序执行"
+          label={t("启动后动作")}
+          helperText={t("一行一个网页动作 key，在项目 ready 后按顺序执行")}
           value={selectedProject.focus.afterReadyActionsText ?? ""}
           onChange={(event) =>
             updateSelectedProject((project) => ({
@@ -4769,7 +4911,7 @@ export function SettingsPanel({
         <TextField
           size="small"
           className="settings-form-grid-wide"
-          label="URL 提取模板"
+          label={t("URL 提取模板")}
           value={
             selectedProject.focus.readyUrlPatternsText ??
             "- Local: {url}\nLocal: {url}\n- Network: {url}\nNetwork: {url}\nready - {url}"
@@ -4789,7 +4931,7 @@ export function SettingsPanel({
         <TextField
           size="small"
           className="settings-form-grid-wide"
-          label="成功标记（可选）"
+          label={t("成功标记（可选）")}
           value={selectedProject.focus.readySuccessMarkersText ?? ""}
           onChange={(event) =>
             updateSelectedProject((project) => ({
@@ -4806,7 +4948,7 @@ export function SettingsPanel({
         <TextField
           size="small"
           className="settings-form-grid-wide"
-          label="失败标记"
+          label={t("失败标记")}
           value={
             selectedProject.focus.readyFailureMarkersText ??
             "Failed to compile\nCompilation failed\nEADDRINUSE"
@@ -4843,7 +4985,7 @@ export function SettingsPanel({
   }
 
   function renderProjectLocalSection() {
-    const empty = renderNoProjectSection("新增项目后可配置本地运行和聚焦。");
+    const empty = renderNoProjectSection("新增项目后可配置基础命令和聚焦。");
     if (empty) {
       return empty;
     }
@@ -4858,7 +5000,7 @@ export function SettingsPanel({
   }
 
   function renderProjectRuntimeSection() {
-    const empty = renderNoProjectSection("新增项目后可配置运行配置。");
+    const empty = renderNoProjectSection("新增项目后可配置启动档案。");
     if (empty) {
       return empty;
     }
@@ -4868,25 +5010,32 @@ export function SettingsPanel({
         : editorState?.runtimeConfigPath || selectedRuntimeConfigSource?.files.runtimeOverrides;
     return (
       <Stack spacing={1.3}>
-        {runtimeConfigSources.length > 0 ? (
-          <ConfigSourceBar
-            sources={runtimeConfigSources}
-            selectedSourceId={selectedRuntimeConfigSourceId}
-            selectedSource={selectedRuntimeConfigSource}
-            path={runtimeConfigPath}
-            requiredCapability="runtime"
-            profileFallback="runtime"
-            disabled={loading || saving || runtimeConfigSourceBusy}
-            status={runtimeConfigSourceStatus}
-            error={runtimeConfigSourceError}
-            showReadyStatus
-            manageDisabled={hasUnsavedChanges}
-            manageDisabledReason="请先保存或取消当前项目改动"
-            onSourceChange={(sourceId) => void handleRuntimeConfigSourceChange(sourceId)}
-            onManage={() => setRuntimeConfigSourceManagerOpen(true)}
-          />
-        ) : null}
         {renderProjectSelector()}
+        {runtimeConfigSources.length > 0 ? (
+          <Stack spacing={0.55}>
+            <Typography variant="caption" color="text.secondary" fontWeight={750}>
+              {t("共享运行环境来源")}
+            </Typography>
+            <ConfigSourceBar
+              sources={runtimeConfigSources}
+              selectedSourceId={selectedRuntimeConfigSourceId}
+              selectedSource={selectedRuntimeConfigSource}
+              path={runtimeConfigPath}
+              requiredCapability="runtime"
+              profileFallback="runtime"
+              disabled={loading || saving || runtimeConfigSourceBusy}
+              status={runtimeConfigSourceStatus}
+              error={runtimeConfigSourceError}
+              showReadyStatus
+              manageDisabled={hasUnsavedChanges}
+              manageDisabledReason={t("请先保存或取消当前项目改动")}
+              onSourceChange={(sourceId) =>
+                void handleRuntimeConfigSourceChange(sourceId)
+              }
+              onManage={() => setRuntimeConfigSourceManagerOpen(true)}
+            />
+          </Stack>
+        ) : null}
         {renderDebugProfilesBlock()}
         {renderProjectSaveRow()}
       </Stack>
@@ -4917,7 +5066,7 @@ export function SettingsPanel({
           />
           <TextField
             size="small"
-            label="应用名"
+            label={t("应用名")}
             value={entry.appName ?? ""}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -4934,7 +5083,7 @@ export function SettingsPanel({
         <>
           <TextField
             size="small"
-            label="脚本路径"
+            label={t("脚本路径")}
             value={entry.script ?? ""}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -4944,7 +5093,7 @@ export function SettingsPanel({
           />
           <TextField
             size="small"
-            label="工作目录"
+            label={t("工作目录")}
             value={entry.cwd ?? ""}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -4962,7 +5111,7 @@ export function SettingsPanel({
           <TextField
             select
             size="small"
-            label="工具类型"
+            label={t("工具类型")}
             value={entry.tool ?? "link"}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -4986,7 +5135,7 @@ export function SettingsPanel({
           <TextField
             select
             size="small"
-            label="动作"
+            label={t("动作")}
             value={entry.toolAction ?? "plan"}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -4994,7 +5143,7 @@ export function SettingsPanel({
               })
             }
           >
-            <MenuItem value="plan">查看计划</MenuItem>
+            <MenuItem value="plan">{t("查看计划")}</MenuItem>
           </TextField>
         </>
       );
@@ -5006,7 +5155,7 @@ export function SettingsPanel({
         <div className="settings-path-field settings-form-grid-wide">
           <TextField
             size="small"
-            label={directory ? "目录路径" : "文件路径"}
+            label={t(directory ? "目录路径" : "文件路径")}
             value={entry.path ?? ""}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -5021,7 +5170,7 @@ export function SettingsPanel({
             onClick={() => void chooseNavigationPath(categoryIndex, entryIndex, directory)}
             disabled={saving}
           >
-            选择
+            {t("选择")}
           </Button>
         </div>
       );
@@ -5047,18 +5196,18 @@ export function SettingsPanel({
         <div className="settings-browser-route settings-form-grid-wide">
           <div className="settings-browser-route-head">
             <div>
-              <Typography variant="caption">打开方式</Typography>
+              <Typography variant="caption">{t("打开方式")}</Typography>
               <Typography variant="caption">
-                默认沿用当前 Chrome；指定 Chrome / Edge 时可填写 Profile。
+                {t("默认沿用当前 Chrome；指定 Chrome / Edge 时可填写 Profile。")}
               </Typography>
             </div>
-            <Chip size="small" label={navigationBrowserLabel(entry)} variant="outlined" />
+            <Chip size="small" label={navigationBrowserLabel(entry, t)} variant="outlined" />
           </div>
           <div className="settings-form-grid settings-form-grid-tight">
             <TextField
               select
               size="small"
-              label="运行配置"
+              label={t("运行环境")}
               value={entry.runtimeProfile ?? ""}
               onChange={(event) =>
                 updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -5066,7 +5215,7 @@ export function SettingsPanel({
                 })
               }
             >
-              <MenuItem value="">不使用</MenuItem>
+              <MenuItem value="">{t("不使用")}</MenuItem>
               {runtimeProfiles.map((profile) => (
                 <MenuItem key={profile.key} value={profile.key}>
                   {profile.label || profile.key}
@@ -5076,7 +5225,7 @@ export function SettingsPanel({
             <TextField
               select
               size="small"
-              label="浏览器"
+              label={t("浏览器")}
               value={browserSelectValue}
               onChange={(event) => {
                 const nextValue = event.target.value;
@@ -5107,15 +5256,17 @@ export function SettingsPanel({
             >
               {NAVIGATION_BROWSER_OPTIONS.map((item) => (
                 <MenuItem key={item.value} value={item.value}>
-                  {item.label}
+                  {t(item.label)}
                 </MenuItem>
               ))}
-              <MenuItem value={CUSTOM_NAVIGATION_BROWSER_VALUE}>自定义应用名</MenuItem>
+              <MenuItem value={CUSTOM_NAVIGATION_BROWSER_VALUE}>
+                {t("自定义应用名")}
+              </MenuItem>
             </TextField>
             {isCustomBrowser ? (
               <TextField
                 size="small"
-                label="浏览器应用"
+                label={t("浏览器应用")}
                 value={entry.browser ?? ""}
                 onChange={(event) =>
                   updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -5132,7 +5283,7 @@ export function SettingsPanel({
                 size="small"
                 label="Profile"
                 value={entry.browserProfile ?? ""}
-                helperText="例如 Default 或 Profile 2"
+                helperText={t("例如 Default 或 Profile 2")}
                 onChange={(event) =>
                   updateNavigationEntryAt(categoryIndex, entryIndex, {
                     browserProfile: event.target.value,
@@ -5151,13 +5302,13 @@ export function SettingsPanel({
     entry: NavigationEditorEntry,
     entryIndex: number,
   ) {
-    const kindLabel = navigationEntryKindLabel(entry.kind);
+    const kindLabel = navigationEntryKindLabel(entry.kind, t);
 
     return (
       <div className="settings-param-editor settings-finder-entry" key={`entry-${categoryIndex}-${entryIndex}`}>
         <div className="settings-param-editor-head">
           <div className="settings-finder-entry-title">
-            <Typography variant="caption">{entry.name || "未命名入口"}</Typography>
+            <Typography variant="caption">{entry.name || t("未命名入口")}</Typography>
             <Chip size="small" label={kindLabel} variant="outlined" />
           </div>
           <Button
@@ -5167,13 +5318,13 @@ export function SettingsPanel({
             onClick={() => deleteNavigationEntryAt(categoryIndex, entryIndex)}
             disabled={saving}
           >
-            删除
+            {t("删除")}
           </Button>
         </div>
         <div className="settings-form-grid settings-form-grid-tight">
           <TextField
             size="small"
-            label="名称"
+            label={t("名称")}
             value={entry.name}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -5184,7 +5335,7 @@ export function SettingsPanel({
           <TextField
             select
             size="small"
-            label="类型"
+            label={t("类型")}
             value={entry.kind}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -5194,7 +5345,7 @@ export function SettingsPanel({
           >
             {NAVIGATION_ENTRY_KIND_OPTIONS.map((item) => (
               <MenuItem key={item.value} value={item.value}>
-                {item.label}
+                {t(item.label)}
               </MenuItem>
             ))}
           </TextField>
@@ -5202,7 +5353,7 @@ export function SettingsPanel({
           <TextField
             className="settings-form-grid-wide"
             size="small"
-            label="备注"
+            label={t("备注")}
             value={entry.note ?? ""}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -5217,12 +5368,16 @@ export function SettingsPanel({
 
   function renderFinderSection() {
     if (navigationLoading && !navigationEditor) {
-      return <Alert severity="info">正在读取访达配置</Alert>;
+      return <Alert severity="info">{t("正在读取访达配置")}</Alert>;
     }
     if (!navigationEditor) {
       return (
         <Stack spacing={1.3}>
-          <AppEmptyState compact title="暂无访达配置" description="读取配置后可维护快捷入口。" />
+          <AppEmptyState
+            compact
+            title={t("暂无访达配置")}
+            description={t("读取配置后可维护快捷入口。")}
+          />
           <div className="settings-action-grid">
             <Button
               variant="outlined"
@@ -5231,7 +5386,7 @@ export function SettingsPanel({
               onClick={() => void loadNavigationEditor()}
               disabled={navigationLoading}
             >
-              重新读取
+              {t("重新读取")}
             </Button>
             <Button
               variant="outlined"
@@ -5268,7 +5423,7 @@ export function SettingsPanel({
               <TextField
                 select
                 size="small"
-                label="默认分类"
+                label={t("默认分类")}
                 value={preferredCategoryValue}
                 onChange={(event) =>
                   updateNavigationEditor((current) => ({
@@ -5279,11 +5434,11 @@ export function SettingsPanel({
                 disabled={categoryCount === 0}
               >
                 <MenuItem value="" disabled>
-                  选择默认分类
+                  {t("选择默认分类")}
                 </MenuItem>
                 {navigationEditor.categories.map((category) => (
                   <MenuItem key={category.title} value={category.title}>
-                    {category.title || "未命名分类"}
+                    {category.title || t("未命名分类")}
                   </MenuItem>
                 ))}
               </TextField>
@@ -5294,7 +5449,7 @@ export function SettingsPanel({
                   onClick={addNavigationCategory}
                   disabled={saving}
                 >
-                  新增分类
+                  {t("新增分类")}
                 </Button>
                 <Button
                   variant="outlined"
@@ -5303,14 +5458,20 @@ export function SettingsPanel({
                   onClick={() => void loadNavigationEditor()}
                   disabled={navigationLoading || saving}
                 >
-                  刷新
+                  {t("刷新")}
                 </Button>
               </div>
             </div>
             {categoryCount === 0 ? (
-              <div className="settings-empty-row">暂无分类，先新增一个访达分类</div>
+              <div className="settings-empty-row">
+                {t("暂无分类，先新增一个访达分类")}
+              </div>
             ) : (
-              <div className="settings-deploy-switcher settings-finder-switcher" role="tablist" aria-label="访达分类">
+              <div
+                className="settings-deploy-switcher settings-finder-switcher"
+                role="tablist"
+                aria-label={t("访达分类")}
+              >
                 {navigationEditor.categories.map((category, categoryIndex) => (
                   <button
                     key={`${category.title}-${categoryIndex}`}
@@ -5319,8 +5480,8 @@ export function SettingsPanel({
                     onClick={() => setSelectedNavigationCategoryIndex(categoryIndex)}
                     aria-selected={activeCategoryIndex === categoryIndex}
                   >
-                    <span>{category.title || "未命名分类"}</span>
-                    <small>{category.entries.length} 个入口</small>
+                    <span>{category.title || t("未命名分类")}</span>
+                    <small>{t("{count} 个入口", { count: category.entries.length })}</small>
                   </button>
                 ))}
               </div>
@@ -5332,9 +5493,12 @@ export function SettingsPanel({
           <div className="settings-form-block">
             <div className="settings-form-block-head">
               <div>
-                <Typography variant="subtitle2">{activeCategory.title || "未命名分类"}</Typography>
+                <Typography variant="subtitle2">
+                  {activeCategory.title || t("未命名分类")}
+                </Typography>
                 <Typography variant="caption">
-                  {activeCategory.entries.length} 个入口 · {activeCategory.shortLabel || "无短名"}
+                  {t("{count} 个入口", { count: activeCategory.entries.length })} ·{" "}
+                  {activeCategory.shortLabel || t("无短名")}
                 </Typography>
               </div>
               <div className="settings-inline-actions">
@@ -5345,14 +5509,14 @@ export function SettingsPanel({
                   onClick={() => deleteNavigationCategoryAt(activeCategoryIndex)}
                   disabled={saving}
                 >
-                  删除分类
+                  {t("删除分类")}
                 </Button>
               </div>
             </div>
             <div className="settings-form-grid">
               <TextField
                 size="small"
-                label="分类名称"
+                label={t("分类名称")}
                 value={activeCategory.title}
                 onChange={(event) => {
                   const nextTitle = event.target.value;
@@ -5373,7 +5537,7 @@ export function SettingsPanel({
               />
               <TextField
                 size="small"
-                label="短名"
+                label={t("短名")}
                 value={activeCategory.shortLabel}
                 onChange={(event) =>
                   updateNavigationCategoryAt(activeCategoryIndex, {
@@ -5384,7 +5548,7 @@ export function SettingsPanel({
             </div>
             <div className="settings-param-list">
               <div className="settings-param-list-head">
-                <Typography variant="caption">入口</Typography>
+                <Typography variant="caption">{t("入口")}</Typography>
                 <div className="settings-inline-actions">
                   {NAVIGATION_ENTRY_CREATE_OPTIONS.map((item) => (
                     <Button
@@ -5394,13 +5558,13 @@ export function SettingsPanel({
                       onClick={() => addNavigationEntry(activeCategoryIndex, item.value)}
                       disabled={saving}
                     >
-                      新增{item.label}
+                      {t("新增{kind}", { kind: t(item.label) })}
                     </Button>
                   ))}
                 </div>
               </div>
               {activeCategory.entries.length === 0 ? (
-                <div className="settings-empty-row">暂无入口</div>
+                <div className="settings-empty-row">{t("暂无入口")}</div>
               ) : (
                 activeCategory.entries.map((entry, entryIndex) =>
                   renderNavigationEntryEditor(activeCategoryIndex, entry, entryIndex),
@@ -5419,7 +5583,7 @@ export function SettingsPanel({
               startIcon={<OpenExternalIcon fontSize="small" />}
               onClick={() => void openNavigationEditorFile()}
             >
-              打开文件
+              {t("打开文件")}
             </Button>
             <Button
               variant="contained"
@@ -5427,7 +5591,7 @@ export function SettingsPanel({
               onClick={() => void saveNavigationEditor()}
               disabled={!navigationDirty || saving}
             >
-              保存
+              {t("保存")}
             </Button>
           </div>
         </div>
@@ -5437,7 +5601,7 @@ export function SettingsPanel({
 
   function renderBranchSection() {
     if (loading && !editorState) {
-      return <Alert severity="info">正在读取分支配置</Alert>;
+      return <Alert severity="info">{t("正在读取分支配置")}</Alert>;
     }
     function keywordListFieldProps(
       draftKey: string,
@@ -5500,7 +5664,7 @@ export function SettingsPanel({
             <div className="settings-form-grid">
               <TextField
                 size="small"
-                label="默认源分支关键词"
+                label={t("默认源分支关键词")}
                 {...keywordListFieldProps(
                   "default-branch-source",
                   defaultBranchRules.sourceKeywords,
@@ -5513,7 +5677,7 @@ export function SettingsPanel({
               />
               <TextField
                 size="small"
-                label="默认目标分支关键词"
+                label={t("默认目标分支关键词")}
                 {...keywordListFieldProps(
                   "default-branch-target",
                   defaultBranchRules.targetKeywords,
@@ -5534,10 +5698,14 @@ export function SettingsPanel({
               onClick={() => void saveDefaultBranchRules()}
               disabled={!defaultBranchRulesDirty || saving}
             >
-              保存默认
+              {t("保存默认")}
             </Button>
           </div>
-          <AppEmptyState compact title="暂无项目配置" description="新增项目后可配置分支规则。" />
+          <AppEmptyState
+            compact
+            title={t("暂无项目配置")}
+            description={t("新增项目后可配置分支规则。")}
+          />
           {renderNewProjectBlock()}
         </Stack>
       );
@@ -5551,7 +5719,7 @@ export function SettingsPanel({
           <div className="settings-form-grid">
             <TextField
               size="small"
-              label="默认源分支关键词"
+              label={t("默认源分支关键词")}
               {...keywordListFieldProps(
                 "default-branch-source",
                 defaultBranchRules.sourceKeywords,
@@ -5564,7 +5732,7 @@ export function SettingsPanel({
             />
             <TextField
               size="small"
-              label="默认目标分支关键词"
+              label={t("默认目标分支关键词")}
               {...keywordListFieldProps(
                 "default-branch-target",
                 defaultBranchRules.targetKeywords,
@@ -5585,7 +5753,7 @@ export function SettingsPanel({
             onClick={() => void saveDefaultBranchRules()}
             disabled={!defaultBranchRulesDirty || saving}
           >
-            保存默认
+            {t("保存默认")}
           </Button>
         </div>
         {renderProjectSelector()}
@@ -5596,7 +5764,7 @@ export function SettingsPanel({
             <div className="settings-inline-actions">
               <Chip
                 size="small"
-                label={projectOverridesBranchRules ? "项目覆盖默认" : "继承默认设置"}
+                label={t(projectOverridesBranchRules ? "项目覆盖默认" : "继承默认设置")}
                 color={projectOverridesBranchRules ? "primary" : "default"}
                 variant={projectOverridesBranchRules ? "filled" : "outlined"}
               />
@@ -5606,17 +5774,17 @@ export function SettingsPanel({
                 onClick={useDefaultBranchRulesForProject}
                 disabled={!projectOverridesBranchRules || saving}
               >
-                使用默认设置
+                {t("使用默认设置")}
               </Button>
             </div>
             <div className="settings-form-grid">
               <TextField
                 size="small"
-                label={
+                label={t(
                   projectOverridesSourceRules
                     ? "源分支关键词"
-                    : "源分支关键词（继承默认）"
-                }
+                    : "源分支关键词（继承默认）",
+                )}
                 {...keywordListFieldProps(
                   `project-branch-source:${selectedProject.key}`,
                   projectSourceKeywords,
@@ -5629,11 +5797,11 @@ export function SettingsPanel({
               />
               <TextField
                 size="small"
-                label={
+                label={t(
                   projectOverridesTargetRules
                     ? "目标分支关键词"
-                    : "目标分支关键词（继承默认）"
-                }
+                    : "目标分支关键词（继承默认）",
+                )}
                 {...keywordListFieldProps(
                   `project-branch-target:${selectedProject.key}`,
                   projectTargetKeywords,
@@ -5674,7 +5842,7 @@ export function SettingsPanel({
             onClick={() => deleteDeployParamAt(targetIndex, paramIndex)}
             disabled={saving}
           >
-            删除
+            {t("删除")}
           </Button>
         </div>
         <div className="settings-form-grid settings-form-grid-tight">
@@ -5688,7 +5856,7 @@ export function SettingsPanel({
           />
           <TextField
             size="small"
-            label="名称"
+            label={t("名称")}
             value={param.label}
             onChange={(event) =>
               updateDeployParamAt(targetIndex, paramIndex, { label: event.target.value })
@@ -5697,7 +5865,7 @@ export function SettingsPanel({
           <TextField
             select
             size="small"
-            label="类型"
+            label={t("类型")}
             value={param.kind}
             onChange={(event) =>
               updateDeployParamAt(targetIndex, paramIndex, {
@@ -5707,13 +5875,13 @@ export function SettingsPanel({
           >
             {DEPLOY_PARAM_KIND_OPTIONS.map((item) => (
               <MenuItem key={item.value} value={item.value}>
-                {item.label}
+                {t(item.label)}
               </MenuItem>
             ))}
           </TextField>
           <TextField
             size="small"
-            label="默认值"
+            label={t("默认值")}
             value={param.defaultValue ?? ""}
             onChange={(event) =>
               updateDeployParamAt(targetIndex, paramIndex, {
@@ -5724,7 +5892,7 @@ export function SettingsPanel({
           {showOptions ? (
             <TextField
               size="small"
-              label="选项"
+              label={t("选项")}
               className="settings-form-grid-wide"
               value={optionsText}
               onFocus={() =>
@@ -5762,7 +5930,7 @@ export function SettingsPanel({
             <>
               <TextField
                 size="small"
-                label="True 值"
+                label={t("True 值")}
                 value={param.trueValue ?? ""}
                 onChange={(event) =>
                   updateDeployParamAt(targetIndex, paramIndex, {
@@ -5772,7 +5940,7 @@ export function SettingsPanel({
               />
               <TextField
                 size="small"
-                label="False 值"
+                label={t("False 值")}
                 value={param.falseValue ?? ""}
                 onChange={(event) =>
                   updateDeployParamAt(targetIndex, paramIndex, {
@@ -5784,7 +5952,7 @@ export function SettingsPanel({
                 size="small"
                 multiline
                 minRows={2}
-                label="影响路径"
+                label={t("影响路径")}
                 className="settings-form-grid-wide"
                 value={param.impactPaths.join("\n")}
                 onChange={(event) =>
@@ -5800,7 +5968,9 @@ export function SettingsPanel({
                       .filter(Boolean),
                   })
                 }
-                helperText="每行一个仓库相对路径，可用 mobile/** 这类目录模式；命中后要求启用该构建项。"
+                helperText={t(
+                  "每行一个仓库相对路径，可用 mobile/** 这类目录模式；命中后要求启用该构建项。",
+                )}
                 inputProps={{
                   autoCapitalize: "none",
                   autoComplete: "off",
@@ -5822,7 +5992,7 @@ export function SettingsPanel({
               }
             />
           }
-          label="必填"
+          label={t("必填")}
         />
       </div>
     );
@@ -5830,10 +6000,16 @@ export function SettingsPanel({
 
   function renderDeploySection() {
     if (loading && !editorState) {
-      return <Alert severity="info">正在读取构建配置</Alert>;
+      return <Alert severity="info">{t("正在读取构建配置")}</Alert>;
     }
     if (!selectedProject) {
-      return <AppEmptyState compact title="暂无项目配置" description="新增项目后可配置构建任务。" />;
+      return (
+        <AppEmptyState
+          compact
+          title={t("暂无项目配置")}
+          description={t("新增项目后可配置构建任务。")}
+        />
+      );
     }
     const deployTargetCount = selectedProject.deployTargets.length;
     const activeDeployTargetIndex =
@@ -5853,7 +6029,9 @@ export function SettingsPanel({
         {renderProjectSelector()}
         <div className="settings-save-row">
           <Typography variant="caption">
-            {selectedProject.deployTargets.length} 个构建配置
+            {t("{count} 个构建配置", {
+              count: selectedProject.deployTargets.length,
+            })}
           </Typography>
           <div className="settings-inline-actions">
             <Button
@@ -5862,7 +6040,7 @@ export function SettingsPanel({
               onClick={addDeployTarget}
               disabled={saving}
             >
-              新增配置
+              {t("新增配置")}
             </Button>
             <Button
               variant="contained"
@@ -5870,15 +6048,19 @@ export function SettingsPanel({
               onClick={() => void saveDeployTargets()}
               disabled={!hasDirtySelectedDeployProject || saving}
             >
-              保存构建
+              {t("保存构建")}
             </Button>
           </div>
         </div>
         {deployTargetCount === 0 ? (
-          <Alert severity="info">该项目未配置构建目标</Alert>
+          <Alert severity="info">{t("该项目未配置构建目标")}</Alert>
         ) : activeDeployTarget ? (
           <>
-            <div className="settings-deploy-switcher" role="tablist" aria-label="构建配置">
+            <div
+              className="settings-deploy-switcher"
+              role="tablist"
+              aria-label={t("构建配置")}
+            >
               {selectedProject.deployTargets.map((target, targetIndex) => (
                 <button
                   key={`${target.key}-${targetIndex}`}
@@ -5887,9 +6069,9 @@ export function SettingsPanel({
                   onClick={() => setSelectedDeployTargetIndex(targetIndex)}
                   aria-selected={activeDeployTargetIndex === targetIndex}
                 >
-                  <span>{target.label || target.key || "未命名"}</span>
+                  <span>{target.label || target.key || t("未命名")}</span>
                   <small>
-                    {targetIndex === 0 ? "默认 · " : ""}
+                    {targetIndex === 0 ? `${t("默认")} · ` : ""}
                     {target.key || "new"}
                   </small>
                 </button>
@@ -5903,8 +6085,9 @@ export function SettingsPanel({
                   </Typography>
                   <Typography variant="caption">
                     {activeDeployTarget.jobName ||
-                      activeDeployTargetDetail?.emptyJobText ||
-                      "未设置任务"}
+                      (activeDeployTargetDetail
+                        ? t(activeDeployTargetDetail.emptyJobText)
+                        : t("未设置任务"))}
                   </Typography>
                 </div>
                 <div className="settings-inline-actions">
@@ -5912,7 +6095,7 @@ export function SettingsPanel({
                     size="small"
                     label={
                       activeDeployTargetIndex === 0
-                        ? `默认 · ${activeDeployTarget.key || "new"}`
+                        ? `${t("默认")} · ${activeDeployTarget.key || "new"}`
                         : activeDeployTarget.key || "new"
                     }
                     color={activeDeployTargetIndex === 0 ? "primary" : "default"}
@@ -5925,7 +6108,7 @@ export function SettingsPanel({
                     onClick={() => setDeployTargetAsDefault(activeDeployTargetIndex)}
                     disabled={saving || activeDeployTargetIndex === 0}
                   >
-                    设为默认
+                    {t("设为默认")}
                   </Button>
                   <Button
                     variant="outlined"
@@ -5934,7 +6117,7 @@ export function SettingsPanel({
                     onClick={() => duplicateDeployTargetAt(activeDeployTargetIndex)}
                     disabled={saving}
                   >
-                    复制当前
+                    {t("复制当前")}
                   </Button>
                   <Button
                     variant="outlined"
@@ -5943,14 +6126,14 @@ export function SettingsPanel({
                     onClick={() => deleteDeployTargetAt(activeDeployTargetIndex)}
                     disabled={saving}
                   >
-                    删除
+                    {t("删除")}
                   </Button>
                 </div>
               </div>
               <div className="settings-build-config-stack">
                 <section className="settings-build-config-block">
                   <div className="settings-build-config-head">
-                    <Typography variant="caption">基础</Typography>
+                    <Typography variant="caption">{t("基础")}</Typography>
                   </div>
                   <div className="settings-form-grid">
                     <TextField
@@ -5963,7 +6146,7 @@ export function SettingsPanel({
                     />
                     <TextField
                       size="small"
-                      label="名称"
+                      label={t("名称")}
                       value={activeDeployTarget.label}
                       onChange={(event) =>
                         updateDeployTargetAt(activeDeployTargetIndex, { label: event.target.value })
@@ -5983,14 +6166,14 @@ export function SettingsPanel({
                     >
                       {BUILD_ADAPTER_OPTIONS.map((item) => (
                         <MenuItem key={item.value} value={item.value}>
-                          {item.label}
+                          {t(item.label)}
                         </MenuItem>
                       ))}
                     </TextField>
                     <TextField
                       select
                       size="small"
-                      label="动作"
+                      label={t("动作")}
                       value={activeDeployTarget.actionKind}
                       onChange={(event) =>
                         updateDeployTargetAt(activeDeployTargetIndex, {
@@ -6000,7 +6183,7 @@ export function SettingsPanel({
                     >
                       {BUILD_ACTION_KIND_OPTIONS.map((item) => (
                         <MenuItem key={item.value} value={item.value}>
-                          {item.label}
+                          {t(item.label)}
                         </MenuItem>
                       ))}
                     </TextField>
@@ -6012,7 +6195,7 @@ export function SettingsPanel({
                     <div className="settings-build-config-head">
                       <div>
                         <Typography variant="subtitle2">
-                          {activeDeployTargetDetail.title}
+                          {t(activeDeployTargetDetail.title)}
                         </Typography>
                         <Typography variant="caption">
                           {activeDeployTargetDetail.meta}
@@ -6021,7 +6204,7 @@ export function SettingsPanel({
                       <div className="settings-inline-actions">
                         <Chip
                           size="small"
-                          label={buildActionKindLabel(activeDeployTarget.actionKind)}
+                          label={buildActionKindLabel(activeDeployTarget.actionKind, t)}
                           variant="outlined"
                         />
                         {activeDeployTarget.adapter === "r_series_package" ? (
@@ -6036,7 +6219,7 @@ export function SettingsPanel({
                             }
                             disabled={saving || missingRSeriesPackageParams.length === 0}
                           >
-                            补齐 R 参数
+                            {t("补齐 R 参数")}
                           </Button>
                         ) : null}
                       </div>
@@ -6062,8 +6245,8 @@ export function SettingsPanel({
                         </TextField>
                         <TextField
                           size="small"
-                          label={activeDeployTargetDetail.commandLabel}
-                          placeholder={activeDeployTargetDetail.commandPlaceholder}
+                          label={t(activeDeployTargetDetail.commandLabel)}
+                          placeholder={t(activeDeployTargetDetail.commandPlaceholder)}
                           value={activeDeployTarget.jobName}
                           onChange={(event) =>
                             updateDeployTargetAt(activeDeployTargetIndex, {
@@ -6076,8 +6259,8 @@ export function SettingsPanel({
                       <TextField
                         size="small"
                         className="settings-form-grid-wide"
-                        label={activeDeployTargetDetail.commandLabel}
-                        placeholder={activeDeployTargetDetail.commandPlaceholder}
+                        label={t(activeDeployTargetDetail.commandLabel)}
+                        placeholder={t(activeDeployTargetDetail.commandPlaceholder)}
                         value={activeDeployTarget.jobName}
                         onChange={(event) =>
                           updateDeployTargetAt(activeDeployTargetIndex, {
@@ -6090,34 +6273,34 @@ export function SettingsPanel({
                 ) : null}
                 <section className="settings-build-config-block">
                   <div className="settings-build-config-head">
-                    <Typography variant="caption">产物</Typography>
+                    <Typography variant="caption">{t("产物")}</Typography>
                   </div>
                   <TextField
                     size="small"
                     className="settings-form-grid-wide"
-                    label="产物目录"
+                    label={t("产物目录")}
                     value={activeDeployTarget.artifactOutputDir ?? ""}
                     onChange={(event) =>
                       updateDeployTargetAt(activeDeployTargetIndex, {
                         artifactOutputDir: event.target.value || null,
                       })
                     }
-                    placeholder="留空时使用项目构建输出目录"
+                    placeholder={t("留空时使用项目构建输出目录")}
                     helperText={
                       activeDeployTarget.adapter === "jenkins"
-                        ? "仅用于产物定位，不会作为 Jenkins 参数发送。"
-                        : "相对路径基于构建目录；留空时使用项目构建输出目录。"
+                        ? t("仅用于产物定位，不会作为 Jenkins 参数发送。")
+                        : t("相对路径基于构建目录；留空时使用项目构建输出目录。")
                     }
                   />
                 </section>
               </div>
               <div
                 className="settings-param-list"
-                aria-label={`${activeDeployTarget.label} 参数`}
+                aria-label={t("{name} 参数", { name: activeDeployTarget.label })}
               >
                 <div className="settings-param-list-head">
                   <Typography variant="caption">
-                    {activeDeployTarget.params.length} 个参数
+                    {t("{count} 个参数", { count: activeDeployTarget.params.length })}
                   </Typography>
                   <Button
                     variant="outlined"
@@ -6125,11 +6308,11 @@ export function SettingsPanel({
                     onClick={() => addDeployParam(activeDeployTargetIndex)}
                     disabled={saving}
                   >
-                    新增参数
+                    {t("新增参数")}
                   </Button>
                 </div>
                 {activeDeployTarget.params.length === 0 ? (
-                  <div className="settings-empty-row">无参数</div>
+                  <div className="settings-empty-row">{t("无参数")}</div>
                 ) : (
                   activeDeployTarget.params.map((param, paramIndex) =>
                     renderDeployParamEditor(activeDeployTargetIndex, param, paramIndex),
@@ -6147,7 +6330,7 @@ export function SettingsPanel({
             startIcon={<OpenExternalIcon fontSize="small" />}
             onClick={onOpenConfigFile}
           >
-            原始配置
+            {t("原始配置")}
           </Button>
         </div>
       </Stack>
@@ -6165,27 +6348,29 @@ export function SettingsPanel({
       }}
     >
       <div
+        ref={panelRef}
         className={`settings-panel settings-panel-wide${
           surface === "projectManagement" ? " settings-panel--project-config" : " settings-panel--global"
         }`}
         role="dialog"
         aria-modal="true"
-        aria-label={surface === "projectManagement" ? "项目配置" : "设置"}
+        tabIndex={-1}
+        aria-label={t(surface === "projectManagement" ? "项目配置" : "设置")}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="settings-panel-head">
           <div>
             <Typography variant="subtitle2">
-              {surface === "projectManagement" ? "项目配置" : "设置"}
+              {t(surface === "projectManagement" ? "项目配置" : "设置")}
             </Typography>
             <Typography variant="caption">
-              {surface === "projectManagement" ? "项目管理" : "应用偏好与行为"}
+              {t(surface === "projectManagement" ? "项目管理" : "应用偏好与行为")}
             </Typography>
           </div>
           <button
             type="button"
             className="settings-close-button"
-            aria-label="关闭设置"
+            aria-label={t("关闭设置")}
             onClick={requestClose}
           >
             <ClearIcon fontSize="small" />
@@ -6193,7 +6378,7 @@ export function SettingsPanel({
         </div>
 
         <div className="settings-panel-body">
-          <div className="settings-section-nav" role="tablist" aria-label="设置分类">
+          <div className="settings-section-nav" role="tablist" aria-label={t("设置分类")}>
             {visibleSectionItems.map((item) => (
               <button
                 key={item.key}
@@ -6205,7 +6390,7 @@ export function SettingsPanel({
                 className={activeSection === item.key ? "is-active" : ""}
                 onClick={() => setActiveSection(item.key)}
               >
-                {item.label}
+                {t(item.label)}
               </button>
             ))}
           </div>
@@ -6281,21 +6466,21 @@ export function SettingsPanel({
             className="settings-confirm-card"
             role="alertdialog"
             aria-modal="true"
-            aria-label={confirmState.title}
+            aria-label={t(confirmState.title)}
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <Typography variant="subtitle2">{confirmState.title}</Typography>
-            <Typography variant="body2">{confirmState.message}</Typography>
+            <Typography variant="subtitle2">{t(confirmState.title)}</Typography>
+            <Typography variant="body2">{t(confirmState.message)}</Typography>
             <div className="settings-confirm-actions">
               <Button variant="outlined" color="inherit" onClick={() => setConfirmState(null)}>
-                取消
+                {t("取消")}
               </Button>
               <Button
                 variant="contained"
                 color={confirmState.tone === "danger" ? "error" : "primary"}
                 onClick={() => void runConfirmAction()}
               >
-                {confirmState.confirmLabel}
+                {t(confirmState.confirmLabel)}
               </Button>
             </div>
           </div>

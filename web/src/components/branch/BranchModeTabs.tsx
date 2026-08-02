@@ -1,5 +1,6 @@
 import { Box, Button } from "@mui/material";
 import type { BranchWorkflowMode } from "../../app-types";
+import { useI18n } from "../../i18n";
 
 export const BRANCH_MODE_OPTIONS: Array<{
   key: BranchWorkflowMode;
@@ -47,6 +48,8 @@ export function BranchModeTabs({
   mode,
   onModeChange,
 }: BranchModeTabsProps) {
+  const { t } = useI18n();
+
   return (
     <Box
       className="branch-mode-tabs"
@@ -81,7 +84,7 @@ export function BranchModeTabs({
             color: mode === item.key ? undefined : "text.secondary",
           }}
         >
-          {item.label}
+          {t(item.label)}
         </Button>
       ))}
     </Box>

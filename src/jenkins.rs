@@ -1,11 +1,14 @@
 use anyhow::{Context, Result, bail};
-use reqwest::Url;
 use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, LOCATION};
+use reqwest::{StatusCode, Url};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::thread;
 use std::time::Duration;
+
+const CRUMB_MAX_ATTEMPTS: usize = 3;
+const CRUMB_RETRY_BASE_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Deserialize)]
 struct CrumbResponse {
@@ -29,7 +32,28 @@ pub struct StatusResult {
     pub build_url: Option<String>,
     pub state: TriggerState,
     pub detail: String,
+    pub commit: Option<String>,
 }
+
+#[derive(Debug)]
+pub struct JenkinsCrumbError {
+    pub retryable: bool,
+    pub attempts: usize,
+    pub side_effect_occurred: bool,
+    message: String,
+}
+
+impl std::fmt::Display for JenkinsCrumbError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} (retryable={}, attempts={}, sideEffectOccurred={})",
+            self.message, self.retryable, self.attempts, self.side_effect_occurred
+        )
+    }
+}
+
+impl std::error::Error for JenkinsCrumbError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TriggerState {
@@ -85,6 +109,20 @@ struct BuildResponse {
     number: Option<u64>,
     result: Option<String>,
     url: Option<String>,
+    #[serde(default)]
+    actions: Vec<BuildActionResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuildActionResponse {
+    #[serde(rename = "lastBuiltRevision")]
+    last_built_revision: Option<BuildRevisionResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BuildRevisionResponse {
+    #[serde(rename = "SHA1")]
+    sha1: Option<String>,
 }
 
 pub fn trigger_build(
@@ -154,7 +192,7 @@ fn trigger_build_with_client(
 
     let (state, detail, build_url) = if let Some(queue_url_ref) = queue_url.as_ref() {
         match inspect_queue_and_build(client, base_url, username, password, queue_url_ref) {
-            Ok((state, detail, build_url)) => (state, detail, build_url),
+            Ok((state, detail, build_url, _commit)) => (state, detail, build_url),
             Err(error) => (
                 TriggerState::Accepted,
                 format!("已触发，但暂时无法读取队列状态：{error}"),
@@ -188,25 +226,27 @@ fn refresh_status_with_client(
 ) -> Result<StatusResult> {
     if let Some(build_url) = build_url {
         let normalized = normalize_jenkins_url(base_url, build_url);
-        let (state, detail, build_url) =
+        let (state, detail, build_url, commit) =
             inspect_build(client, base_url, username, password, &normalized, 0)?;
         return Ok(StatusResult {
             queue_url: queue_url.map(ToString::to_string),
             build_url,
             state,
             detail,
+            commit,
         });
     }
 
     if let Some(queue_url) = queue_url {
         let normalized = normalize_jenkins_url(base_url, queue_url);
-        let (state, detail, build_url) =
+        let (state, detail, build_url, commit) =
             inspect_queue_and_build(client, base_url, username, password, &normalized)?;
         return Ok(StatusResult {
             queue_url: Some(normalized),
             build_url,
             state,
             detail,
+            commit,
         });
     }
 
@@ -219,23 +259,83 @@ fn fetch_crumb(
     username: &str,
     password: &str,
 ) -> Result<CrumbResponse> {
-    let url = format!("{}/crumbIssuer/api/json", base_url.trim_end_matches('/'));
-    let response = client
-        .get(&url)
-        .basic_auth(username, Some(password))
-        .send()
-        .with_context(|| format!("failed to request Jenkins crumb: {url}"))?;
+    fetch_crumb_with_policy(
+        client,
+        base_url,
+        username,
+        password,
+        CRUMB_MAX_ATTEMPTS,
+        CRUMB_RETRY_BASE_DELAY,
+    )
+}
 
-    if !response.status().is_success() {
-        bail!(
-            "failed to request Jenkins crumb: HTTP {}",
-            response.status()
-        );
+fn fetch_crumb_with_policy(
+    client: &Client,
+    base_url: &str,
+    username: &str,
+    password: &str,
+    max_attempts: usize,
+    base_delay: Duration,
+) -> Result<CrumbResponse> {
+    let url = format!("{}/crumbIssuer/api/json", base_url.trim_end_matches('/'));
+    let max_attempts = max_attempts.max(1);
+    for attempt in 1..=max_attempts {
+        let response = client.get(&url).basic_auth(username, Some(password)).send();
+        let response = match response {
+            Ok(response) => response,
+            Err(error) => {
+                let retryable = error.is_timeout();
+                if retryable && attempt < max_attempts {
+                    thread::sleep(crumb_retry_delay(base_delay, attempt));
+                    continue;
+                }
+                return Err(anyhow::Error::new(JenkinsCrumbError {
+                    retryable,
+                    attempts: attempt,
+                    side_effect_occurred: false,
+                    message: format!("failed to request Jenkins crumb: {url}: {error}"),
+                }));
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let retryable = is_retryable_crumb_status(status);
+            if retryable && attempt < max_attempts {
+                thread::sleep(crumb_retry_delay(base_delay, attempt));
+                continue;
+            }
+            return Err(anyhow::Error::new(JenkinsCrumbError {
+                retryable,
+                attempts: attempt,
+                side_effect_occurred: false,
+                message: format!("failed to request Jenkins crumb: HTTP {status}"),
+            }));
+        }
+
+        return response.json::<CrumbResponse>().map_err(|error| {
+            anyhow::Error::new(JenkinsCrumbError {
+                retryable: false,
+                attempts: attempt,
+                side_effect_occurred: false,
+                message: format!("failed to parse Jenkins crumb response: {error}"),
+            })
+        });
     }
 
-    response
-        .json::<CrumbResponse>()
-        .context("failed to parse Jenkins crumb response")
+    unreachable!("crumb request loop always returns")
+}
+
+fn is_retryable_crumb_status(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::BAD_GATEWAY | StatusCode::SERVICE_UNAVAILABLE | StatusCode::GATEWAY_TIMEOUT
+    )
+}
+
+fn crumb_retry_delay(base_delay: Duration, completed_attempt: usize) -> Duration {
+    let exponent = completed_attempt.saturating_sub(1).min(16) as u32;
+    base_delay.saturating_mul(2u32.saturating_pow(exponent))
 }
 
 fn inspect_queue_and_build(
@@ -244,7 +344,7 @@ fn inspect_queue_and_build(
     username: &str,
     password: &str,
     queue_url: &str,
-) -> Result<(TriggerState, String, Option<String>)> {
+) -> Result<(TriggerState, String, Option<String>, Option<String>)> {
     let queue_api = api_json_url(queue_url);
     let mut last_why = String::new();
 
@@ -263,6 +363,7 @@ fn inspect_queue_and_build(
                 queue
                     .why
                     .unwrap_or_else(|| "队列任务已被 Jenkins 取消".to_string()),
+                None,
                 None,
             ));
         }
@@ -291,7 +392,7 @@ fn inspect_queue_and_build(
     } else {
         last_why
     };
-    Ok((TriggerState::Queued, detail, None))
+    Ok((TriggerState::Queued, detail, None, None))
 }
 
 fn inspect_build(
@@ -301,7 +402,7 @@ fn inspect_build(
     password: &str,
     build_url: &str,
     build_number: u64,
-) -> Result<(TriggerState, String, Option<String>)> {
+) -> Result<(TriggerState, String, Option<String>, Option<String>)> {
     let build_api = api_json_url(build_url);
     let build = client
         .get(&build_api)
@@ -315,6 +416,15 @@ fn inspect_build(
     } else {
         Some(build_number)
     };
+    let commit = build.actions.iter().find_map(|action| {
+        action
+            .last_built_revision
+            .as_ref()
+            .and_then(|revision| revision.sha1.as_ref())
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    });
 
     if build.building {
         let detail = resolved_build_number
@@ -327,6 +437,7 @@ fn inspect_build(
                 .url
                 .map(|url| normalize_jenkins_url(base_url, &url))
                 .or_else(|| Some(build_url.to_string())),
+            commit,
         ));
     }
 
@@ -352,6 +463,7 @@ fn inspect_build(
             .url
             .map(|url| normalize_jenkins_url(base_url, &url))
             .or_else(|| Some(build_url.to_string())),
+        commit,
     ))
 }
 
@@ -393,4 +505,119 @@ fn normalize_jenkins_url(base_url: &str, raw_url: &str) -> String {
     base.join(raw_url.trim_start_matches('/'))
         .map(|url| url.to_string())
         .unwrap_or_else(|_| raw_url.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        JenkinsCrumbError, crumb_retry_delay, fetch_crumb_with_policy, is_retryable_crumb_status,
+        trigger_build_with_client,
+    };
+    use reqwest::{StatusCode, blocking::Client};
+    use std::collections::BTreeMap;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use std::thread;
+    use std::time::Duration;
+
+    fn spawn_server(
+        responses: Vec<(u16, &'static str, Option<&'static str>)>,
+    ) -> (String, Arc<AtomicUsize>, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test server");
+        let address = listener.local_addr().expect("test server address");
+        let requests = Arc::new(AtomicUsize::new(0));
+        let request_count = Arc::clone(&requests);
+        let handle = thread::spawn(move || {
+            for (status, body, location) in responses {
+                let (mut stream, _) = listener.accept().expect("accept test request");
+                let mut buffer = [0u8; 4096];
+                let _ = stream.read(&mut buffer);
+                request_count.fetch_add(1, Ordering::SeqCst);
+                let location = location
+                    .map(|value| format!("Location: {value}\r\n"))
+                    .unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{location}Connection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write test response");
+            }
+        });
+        (format!("http://{address}"), requests, handle)
+    }
+
+    #[test]
+    fn retries_transient_crumb_failures_three_total_attempts() {
+        let body = r#"{"crumbRequestField":"Jenkins-Crumb","crumb":"ok"}"#;
+        let (base_url, requests, handle) =
+            spawn_server(vec![(502, "", None), (503, "", None), (200, body, None)]);
+        let client = Client::builder()
+            .timeout(Duration::from_secs(1))
+            .build()
+            .expect("build client");
+        let crumb =
+            fetch_crumb_with_policy(&client, &base_url, "user", "password", 3, Duration::ZERO)
+                .expect("third crumb request succeeds");
+        handle.join().expect("join test server");
+
+        assert_eq!(crumb.crumb, "ok");
+        assert_eq!(requests.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn reports_non_retryable_crumb_failure_without_side_effects() {
+        let (base_url, requests, handle) = spawn_server(vec![(401, "", None)]);
+        let client = Client::builder().build().expect("build client");
+        let error =
+            fetch_crumb_with_policy(&client, &base_url, "user", "password", 3, Duration::ZERO)
+                .expect_err("unauthorized crumb must fail");
+        handle.join().expect("join test server");
+        let error = error
+            .downcast_ref::<JenkinsCrumbError>()
+            .expect("typed crumb error");
+
+        assert!(!error.retryable);
+        assert_eq!(error.attempts, 1);
+        assert!(!error.side_effect_occurred);
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn never_retries_an_ambiguous_trigger_post() {
+        let crumb = r#"{"crumbRequestField":"Jenkins-Crumb","crumb":"ok"}"#;
+        let (base_url, requests, handle) = spawn_server(vec![(200, crumb, None), (502, "", None)]);
+        let client = Client::builder().build().expect("build client");
+        let result = trigger_build_with_client(
+            &client,
+            &base_url,
+            "user",
+            "password",
+            &format!("{base_url}/job/demo/buildWithParameters"),
+            &BTreeMap::new(),
+        );
+        handle.join().expect("join test server");
+
+        assert!(result.is_err());
+        assert_eq!(requests.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn crumb_retry_policy_is_bounded_and_exponential() {
+        assert!(is_retryable_crumb_status(StatusCode::BAD_GATEWAY));
+        assert!(!is_retryable_crumb_status(StatusCode::UNAUTHORIZED));
+        assert_eq!(
+            crumb_retry_delay(Duration::from_millis(250), 1),
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            crumb_retry_delay(Duration::from_millis(250), 2),
+            Duration::from_millis(500)
+        );
+    }
 }

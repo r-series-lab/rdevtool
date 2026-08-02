@@ -7,6 +7,7 @@ import {
 } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import type { BranchPushStatus } from "../../app-types";
+import { useI18n } from "../../i18n";
 import { BranchChangesDialog } from "./BranchChangedFilesList";
 
 type BranchPushStatusCardProps = {
@@ -26,6 +27,7 @@ export function BranchPushStatusCard({
   selectedPaths = [],
   onSelectedPathsChange,
 }: BranchPushStatusCardProps) {
+  const { t } = useI18n();
   const selectedPathSet = new Set(selectedPaths);
   const hasUnselectedStagedFile =
     selectionEnabled &&
@@ -121,7 +123,7 @@ export function BranchPushStatusCard({
                     lineHeight: 1,
                   }}
                 >
-                  分支
+                  {t("分支")}
                 </Typography>
                 <Typography
                   variant="caption"
@@ -148,7 +150,7 @@ export function BranchPushStatusCard({
                   size="small"
                   color="primary"
                   variant="outlined"
-                  label={`已选 ${selectedPaths.length}`}
+                  label={t("已选 {count}", { count: selectedPaths.length })}
                   sx={{ height: 23, borderRadius: "999px", fontWeight: 820 }}
                 />
               ) : null}
@@ -208,7 +210,7 @@ export function BranchPushStatusCard({
                         whiteSpace: "nowrap",
                       }}
                     >
-                      {metric.label}
+                      {t(metric.label)}
                     </Typography>
                     <Typography
                       variant="caption"
@@ -243,7 +245,7 @@ export function BranchPushStatusCard({
                   fontWeight: 720,
                 }}
               >
-                最近提交{" "}
+                {t("最近提交")}{" "}
                 <Box
                   component="span"
                   sx={{
@@ -299,7 +301,7 @@ export function BranchPushStatusCard({
                   variant="caption"
                   sx={{ color: "text.secondary", fontSize: "0.64rem", fontWeight: 760, lineHeight: 1 }}
                 >
-                  变更文件
+                  {t("变更文件")}
                 </Typography>
                 <Typography
                   variant="caption"
@@ -328,7 +330,7 @@ export function BranchPushStatusCard({
                   boxShadow: "none",
                 }}
               >
-                查看变更
+                {t("查看变更")}
               </Button>
             </Box>
           ) : null}
@@ -340,7 +342,7 @@ export function BranchPushStatusCard({
             color="warning.main"
             sx={{ display: "block", lineHeight: 1.4 }}
           >
-            存在未选择但已暂存的文件，提交已选会被阻止。请一并选择或先处理暂存区。
+            {t("存在未选择但已暂存的文件，提交已选会被阻止。请一并选择或先处理暂存区。")}
           </Typography>
         ) : null}
 
@@ -359,7 +361,7 @@ export function BranchPushStatusCard({
             color="text.secondary"
             sx={{ display: "block", fontSize: "0.72rem", lineHeight: 1.35 }}
           >
-            当前工作副本没有未提交文件。
+            {t("当前工作副本没有未提交文件。")}
           </Typography>
         )}
       </Stack>

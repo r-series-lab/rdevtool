@@ -9,8 +9,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Shutdown, TcpListener, TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, AtomicU64, Ordering},
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,7 +24,11 @@ const DEFAULT_PROXY_PORT: u16 = 8787;
 const DEFAULT_CAPTURE_BYTES: usize = 4096;
 const PROXY_READ_TIMEOUT: Duration = Duration::from_secs(60);
 const PROXY_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+const MAX_PROXY_CONNECTIONS: usize = 64;
+const MAX_REQUEST_BODY_BYTES: usize = 32 * 1024 * 1024;
 pub const PROXY_VERIFY_ID_HEADER: &str = "x-rdevtool-verify-id";
+
+static FORWARD_HTTP_CLIENTS: OnceLock<Mutex<HashMap<String, Client>>> = OnceLock::new();
 
 fn default_profile_id() -> String {
     "default".to_string()
@@ -400,6 +404,22 @@ struct ProxyServerHandle {
     stop: Arc<AtomicBool>,
     listen_url: String,
     started_at: String,
+}
+
+struct ActiveProxyConnection {
+    counter: Arc<AtomicUsize>,
+}
+
+impl ActiveProxyConnection {
+    fn new(counter: Arc<AtomicUsize>) -> Self {
+        Self { counter }
+    }
+}
+
+impl Drop for ActiveProxyConnection {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 fn proxy_runtime_key(path: &Path, profile_id: &str) -> ProxyRuntimeKey {
@@ -836,31 +856,60 @@ impl ProxyRuntimeState {
 
         let runtime = self.clone();
         let thread_profile_id = profile.id.clone();
-        thread::spawn(move || {
-            while !stop.load(Ordering::Relaxed) {
-                match listener.accept() {
-                    Ok((stream, _)) => {
-                        let runtime = runtime.clone();
-                        let path = path.clone();
-                        let profile_id = thread_profile_id.clone();
-                        thread::spawn(move || {
-                            if let Err(error) =
-                                handle_proxy_connection(stream, path, profile_id, runtime.clone())
-                            {
-                                eprintln!("proxy connection failed: {error:#}");
+        let active_connections = Arc::new(AtomicUsize::new(0));
+        thread::Builder::new()
+            .name(format!("rdevtool-proxy-listener-{}", profile.id))
+            .spawn(move || {
+                while !stop.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            let active = active_connections.fetch_add(1, Ordering::AcqRel);
+                            if active >= MAX_PROXY_CONNECTIONS {
+                                active_connections.fetch_sub(1, Ordering::AcqRel);
+                                let _ = send_simple_response(
+                                    &mut stream,
+                                    503,
+                                    "text/plain; charset=utf-8",
+                                    b"Proxy is busy; retry shortly",
+                                    &BTreeMap::new(),
+                                );
+                                let _ = stream.shutdown(Shutdown::Write);
+                                continue;
                             }
-                        });
-                    }
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        thread::sleep(Duration::from_millis(40));
-                    }
-                    Err(error) => {
-                        eprintln!("proxy listener failed: {error:#}");
-                        thread::sleep(Duration::from_millis(120));
+                            let runtime = runtime.clone();
+                            let path = path.clone();
+                            let profile_id = thread_profile_id.clone();
+                            let connection_counter = active_connections.clone();
+                            let spawn_counter = active_connections.clone();
+                            if let Err(error) = thread::Builder::new()
+                                .name("rdevtool-proxy-connection".to_string())
+                                .spawn(move || {
+                                    let _guard = ActiveProxyConnection::new(connection_counter);
+                                    if let Err(error) = handle_proxy_connection(
+                                        stream,
+                                        path,
+                                        profile_id,
+                                        runtime.clone(),
+                                    ) {
+                                        eprintln!("proxy connection failed: {error:#}");
+                                    }
+                                })
+                            {
+                                spawn_counter.fetch_sub(1, Ordering::AcqRel);
+                                eprintln!("failed to spawn proxy connection worker: {error}");
+                            }
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(40));
+                        }
+                        Err(error) => {
+                            eprintln!("proxy listener failed: {error:#}");
+                            thread::sleep(Duration::from_millis(120));
+                        }
                     }
                 }
-            }
-        });
+            })
+            .context("failed to start proxy listener thread")?;
 
         Ok(ProxyProfileRuntimeStatus {
             profile_id: profile.id,
@@ -984,6 +1033,9 @@ fn handle_proxy_connection(
     profile_id: String,
     runtime: ProxyRuntimeState,
 ) -> Result<()> {
+    stream
+        .set_nonblocking(false)
+        .context("failed to switch accepted proxy connection to blocking mode")?;
     stream.set_read_timeout(Some(PROXY_READ_TIMEOUT)).ok();
     stream.set_write_timeout(Some(PROXY_WRITE_TIMEOUT)).ok();
 
@@ -1034,13 +1086,21 @@ fn handle_proxy_connection(
         );
     }
 
-    let content_length = header_value(&headers, "content-length")
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .unwrap_or(0);
-    let mut body = vec![0; content_length];
-    if content_length > 0 {
-        reader.read_exact(&mut body)?;
-    }
+    let body = match read_request_body(&mut reader, &headers) {
+        Ok(body) => body,
+        Err(error) => {
+            let response_body = format!("Invalid request body: {error}");
+            send_simple_response(
+                &mut stream,
+                400,
+                "text/plain; charset=utf-8",
+                response_body.as_bytes(),
+                &BTreeMap::new(),
+            )?;
+            let _ = stream.shutdown(Shutdown::Write);
+            return Ok(());
+        }
+    };
 
     let started_at = Utc::now().to_rfc3339();
     let started = Instant::now();
@@ -1137,6 +1197,7 @@ fn handle_proxy_connection(
                         error: None,
                     }),
                 );
+                let _ = stream.shutdown(Shutdown::Write);
                 return Ok(());
             }
             ProxyRuleAction::Block {
@@ -1173,6 +1234,7 @@ fn handle_proxy_connection(
                         error: None,
                     }),
                 );
+                let _ = stream.shutdown(Shutdown::Write);
                 return Ok(());
             }
             ProxyRuleAction::Forward { .. } => {}
@@ -1248,8 +1310,72 @@ fn handle_proxy_connection(
         }
     }
 
-    let _ = stream.shutdown(Shutdown::Both);
+    let _ = stream.shutdown(Shutdown::Write);
     Ok(())
+}
+
+fn read_request_body<R: BufRead>(reader: &mut R, headers: &[(String, String)]) -> Result<Vec<u8>> {
+    let is_chunked = header_value(headers, "transfer-encoding").is_some_and(|value| {
+        value
+            .split(',')
+            .any(|item| item.trim().eq_ignore_ascii_case("chunked"))
+    });
+    if is_chunked {
+        return read_chunked_request_body(reader);
+    }
+
+    let content_length = header_value(headers, "content-length")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .unwrap_or(0);
+    if content_length > MAX_REQUEST_BODY_BYTES {
+        bail!("request body exceeds {} bytes", MAX_REQUEST_BODY_BYTES);
+    }
+    let mut body = vec![0; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+    Ok(body)
+}
+
+fn read_chunked_request_body<R: BufRead>(reader: &mut R) -> Result<Vec<u8>> {
+    let mut body = Vec::new();
+    loop {
+        let mut size_line = String::new();
+        if reader.read_line(&mut size_line)? == 0 {
+            bail!("unexpected EOF while reading chunk size");
+        }
+        let size_text = size_line
+            .trim_end_matches(['\r', '\n'])
+            .split(';')
+            .next()
+            .unwrap_or_default()
+            .trim();
+        let chunk_size = usize::from_str_radix(size_text, 16)
+            .with_context(|| format!("invalid chunk size: {size_text}"))?;
+        if chunk_size == 0 {
+            loop {
+                let mut trailer = String::new();
+                if reader.read_line(&mut trailer)? == 0
+                    || trailer.trim_end_matches(['\r', '\n']).is_empty()
+                {
+                    break;
+                }
+            }
+            return Ok(body);
+        }
+        if body.len().saturating_add(chunk_size) > MAX_REQUEST_BODY_BYTES {
+            bail!("request body exceeds {} bytes", MAX_REQUEST_BODY_BYTES);
+        }
+
+        let start = body.len();
+        body.resize(start + chunk_size, 0);
+        reader.read_exact(&mut body[start..])?;
+        let mut chunk_end = [0_u8; 2];
+        reader.read_exact(&mut chunk_end)?;
+        if chunk_end != *b"\r\n" {
+            bail!("invalid chunk terminator");
+        }
+    }
 }
 
 fn handle_connect_tunnel(
@@ -1731,15 +1857,9 @@ fn resolve_target_url(
     Url::parse(&target).with_context(|| format!("invalid request target: {target}"))
 }
 
-fn join_base_url(mut base: Url, target: &str) -> Result<Url> {
-    if target.starts_with('/') {
-        base.set_path(target);
-        base.set_query(None);
-        Ok(base)
-    } else {
-        base.join(target)
-            .with_context(|| format!("failed to join upstream URL with {target}"))
-    }
+fn join_base_url(base: Url, target: &str) -> Result<Url> {
+    base.join(target)
+        .with_context(|| format!("failed to join upstream URL with {target}"))
 }
 
 fn rule_matches(
@@ -1977,18 +2097,8 @@ fn forward_http_request(
     body: Vec<u8>,
 ) -> Result<ForwardResponse> {
     let destination = rewrite_destination_url(target_url, rule)?;
-    let mut builder = Client::builder()
-        .timeout(Duration::from_secs(90))
-        .redirect(reqwest::redirect::Policy::none());
-    if let Some(upstream_proxy) = outbound_proxy_for_request(profile, rule) {
-        builder = builder.proxy(
-            reqwest::Proxy::all(&upstream_proxy)
-                .with_context(|| format!("invalid upstream proxy: {upstream_proxy}"))?,
-        );
-    }
-    let client = builder
-        .build()
-        .context("failed to build proxy HTTP client")?;
+    let upstream_proxy = outbound_proxy_for_request(profile, rule);
+    let client = forward_http_client(upstream_proxy.as_deref())?;
     let req_method = Method::from_bytes(method.as_bytes()).unwrap_or(Method::GET);
     let mut request = client.request(req_method, destination.clone());
 
@@ -2052,6 +2162,36 @@ fn forward_http_request(
         headers: response_headers,
         body,
     })
+}
+
+fn forward_http_client(upstream_proxy: Option<&str>) -> Result<Client> {
+    let cache_key = upstream_proxy.unwrap_or("direct").to_string();
+    let clients = FORWARD_HTTP_CLIENTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut clients = clients
+        .lock()
+        .map_err(|_| anyhow!("proxy HTTP client cache is poisoned"))?;
+    if let Some(client) = clients.get(&cache_key) {
+        return Ok(client.clone());
+    }
+
+    let mut builder = Client::builder()
+        .timeout(Duration::from_secs(90))
+        .pool_idle_timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(8)
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(upstream_proxy) = upstream_proxy {
+        builder = builder.proxy(
+            reqwest::Proxy::all(upstream_proxy)
+                .with_context(|| format!("invalid upstream proxy: {upstream_proxy}"))?,
+        );
+    } else {
+        builder = builder.no_proxy();
+    }
+    let client = builder
+        .build()
+        .context("failed to build proxy HTTP client")?;
+    clients.insert(cache_key, client.clone());
+    Ok(client)
 }
 
 fn outbound_proxy_for_request(profile: &ProxyProfile, rule: Option<&ProxyRule>) -> Option<String> {
@@ -2141,7 +2281,10 @@ fn should_forward_header(name: &str) -> bool {
         "host"
             | "connection"
             | "proxy-connection"
+            | "proxy-authorization"
             | "keep-alive"
+            | "te"
+            | "trailer"
             | "transfer-encoding"
             | "upgrade"
             | "content-length"
@@ -2151,7 +2294,14 @@ fn should_forward_header(name: &str) -> bool {
 fn should_forward_response_header(name: &str) -> bool {
     !matches!(
         name.to_ascii_lowercase().as_str(),
-        "connection" | "keep-alive" | "transfer-encoding" | "upgrade" | "content-length"
+        "connection"
+            | "proxy-authenticate"
+            | "keep-alive"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+            | "content-length"
     )
 }
 
@@ -2324,6 +2474,72 @@ pub fn validate_proxy_rule(rule: &ProxyRule) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn joins_relative_proxy_target_without_encoding_its_query() {
+        let base = Url::parse("http://nginx.example.test/").unwrap();
+        let target = "/imop/auth-admin-dc2-vke/login/path?redirectUri=http://localhost:8080/";
+
+        let resolved = join_base_url(base, target).unwrap();
+
+        assert_eq!(resolved.path(), "/imop/auth-admin-dc2-vke/login/path");
+        assert_eq!(resolved.query(), Some("redirectUri=http://localhost:8080/"));
+        assert!(!resolved.as_str().contains("%3F"));
+    }
+
+    #[test]
+    fn removes_hop_by_hop_headers_from_forwarded_requests_and_responses() {
+        for header in [
+            "Host",
+            "Connection",
+            "Proxy-Connection",
+            "Proxy-Authorization",
+            "Keep-Alive",
+            "TE",
+            "Trailer",
+            "Transfer-Encoding",
+            "Upgrade",
+            "Content-Length",
+        ] {
+            assert!(!should_forward_header(header), "{header}");
+        }
+        for header in [
+            "Connection",
+            "Proxy-Authenticate",
+            "Keep-Alive",
+            "TE",
+            "Trailer",
+            "Transfer-Encoding",
+            "Upgrade",
+            "Content-Length",
+        ] {
+            assert!(!should_forward_response_header(header), "{header}");
+        }
+        assert!(should_forward_header("Authorization"));
+        assert!(should_forward_response_header("Location"));
+    }
+
+    #[test]
+    fn reads_and_decodes_chunked_request_body() {
+        let headers = vec![("Transfer-Encoding".to_string(), "chunked".to_string())];
+        let mut reader = std::io::Cursor::new(
+            b"4\r\nWiki\r\n5;extension=value\r\npedia\r\n0\r\nX-Trailer: done\r\n\r\n",
+        );
+
+        let body = read_request_body(&mut reader, &headers).unwrap();
+
+        assert_eq!(body, b"Wikipedia");
+    }
+
+    #[test]
+    fn reads_content_length_request_body() {
+        let headers = vec![("Content-Length".to_string(), "7".to_string())];
+        let mut reader = std::io::Cursor::new(b"payload");
+
+        let body = read_request_body(&mut reader, &headers).unwrap();
+
+        assert_eq!(body, b"payload");
+    }
 
     #[test]
     fn runtime_status_is_scoped_by_config_path() {

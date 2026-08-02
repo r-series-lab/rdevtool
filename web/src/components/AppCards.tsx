@@ -2,6 +2,7 @@ import { Box, Card, CardContent, Stack, Typography } from "@mui/material";
 import { alpha } from "@mui/material/styles";
 import type { ReactNode } from "react";
 import type { CommitInfo } from "../app-types";
+import { useI18n } from "../i18n";
 
 export type HistoryAccent = "success" | "info" | "warning" | "danger" | "neutral";
 
@@ -74,6 +75,8 @@ export function HistoryCard({
   pinned?: boolean;
   accent?: HistoryAccent;
 }) {
+  const { t } = useI18n();
+
   return (
     <Card
       variant="outlined"
@@ -150,7 +153,7 @@ export function HistoryCard({
                       fontWeight: 820,
                     })}
                   >
-                    已标记
+                    {t("已标记")}
                   </Box>
                 ) : null}
                 <Typography

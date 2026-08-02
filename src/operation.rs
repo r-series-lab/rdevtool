@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use crate::config::ProjectWorkspaceConfig;
 use crate::core::{BranchTaskResponse, BuildTriggerResponse, DeployRequest};
+use crate::history_id;
 use crate::link::LinkExecutionReport;
 use crate::storage::{SaveDeployHistoryRequest, Storage};
 
@@ -39,6 +40,19 @@ pub enum OperationEventState {
     Info,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OperationChainContext {
+    #[serde(default)]
+    pub chain_id: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub step_label: Option<String>,
+    #[serde(default)]
+    pub chain_label: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationEvent {
@@ -56,9 +70,29 @@ pub struct OperationEvent {
     pub project_name: Option<String>,
     #[serde(default)]
     pub related_history_keys: Vec<String>,
+    #[serde(default)]
+    pub chain_id: Option<String>,
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    #[serde(default)]
+    pub step_label: Option<String>,
+    #[serde(default)]
+    pub chain_label: Option<String>,
     pub payload: Option<Value>,
     pub created_at: String,
     pub updated_at: String,
+}
+
+impl OperationEvent {
+    pub fn with_chain_context(mut self, context: Option<&OperationChainContext>) -> Self {
+        if let Some(context) = context {
+            self.chain_id = normalized_optional_text(context.chain_id.as_deref());
+            self.parent_id = normalized_optional_text(context.parent_id.as_deref());
+            self.step_label = normalized_optional_text(context.step_label.as_deref());
+            self.chain_label = normalized_optional_text(context.chain_label.as_deref());
+        }
+        self
+    }
 }
 
 pub fn operation_event_id(
@@ -127,6 +161,10 @@ pub fn branch_task_operation_event(
             .or_else(|| fallback_project_key.map(ToOwned::to_owned)),
         project_name: item.map(|item| item.project_name.clone()),
         related_history_keys,
+        chain_id: None,
+        parent_id: None,
+        step_label: None,
+        chain_label: None,
         payload: response.and_then(|response| serde_json::to_value(response).ok()),
         created_at: now.clone(),
         updated_at: now,
@@ -140,12 +178,7 @@ pub fn build_history_request(
 ) -> SaveDeployHistoryRequest {
     let params = &result.plan.params;
     SaveDeployHistoryRequest {
-        history_key: result
-            .queue_url
-            .as_deref()
-            .or(result.build_url.as_deref())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| fallback_history_key.to_string()),
+        history_key: history_id::from_seed("build", fallback_history_key),
         workspace_key: Some(workspace.key.clone()),
         project_instance_path: workspace
             .project_instance_path(&result.plan.project_key)
@@ -195,6 +228,10 @@ pub fn build_operation_event(
         project_key: Some(history.project_key.clone()),
         project_name: Some(history.project_name.clone()),
         related_history_keys: vec![history.history_key.clone()],
+        chain_id: None,
+        parent_id: None,
+        step_label: None,
+        chain_label: None,
         payload: serde_json::to_value(history).ok(),
         created_at: now.clone(),
         updated_at: now,
@@ -287,6 +324,10 @@ pub fn lifecycle_operation_event(
         project_key: project_key.map(ToOwned::to_owned),
         project_name: project_name.map(ToOwned::to_owned),
         related_history_keys: Vec::new(),
+        chain_id: None,
+        parent_id: None,
+        step_label: None,
+        chain_label: None,
         payload,
         created_at: now.clone(),
         updated_at: now,
@@ -300,6 +341,8 @@ pub fn link_operation_event(
     action: &str,
     link_key: &str,
     source_id: Option<&str>,
+    proxy_source_id: Option<&str>,
+    runtime_source_id: Option<&str>,
     report: Option<&LinkExecutionReport>,
     error: Option<&str>,
 ) -> OperationEvent {
@@ -323,6 +366,8 @@ pub fn link_operation_event(
                 "linkKey": link_key,
                 "mode": action,
                 "sourceId": source_id,
+                "proxySourceId": proxy_source_id,
+                "runtimeSourceId": runtime_source_id,
             })),
         );
     };
@@ -330,18 +375,27 @@ pub fn link_operation_event(
     let failed_steps = report
         .steps
         .iter()
-        .filter(|step| step.status == "failed")
+        .filter(|step| step.status == "failed" || step.status == "blocked")
         .collect::<Vec<_>>();
     let skipped_count = report
         .steps
         .iter()
         .filter(|step| step.status == "skipped")
         .count();
+    let blocking_steps = report
+        .steps
+        .iter()
+        .filter(|step| {
+            step.status == "failed"
+                || step.status == "blocked"
+                || (step.status == "skipped" && !step.risks.is_empty())
+        })
+        .collect::<Vec<_>>();
     let completed_count = report
         .steps
         .len()
         .saturating_sub(failed_steps.len() + skipped_count);
-    let state = if !failed_steps.is_empty() {
+    let state = if !blocking_steps.is_empty() {
         OperationEventState::Failed
     } else if report.steps.is_empty() {
         OperationEventState::Info
@@ -355,7 +409,7 @@ pub fn link_operation_event(
         failed_steps.len(),
         skipped_count
     );
-    let mut detail_lines = failed_steps
+    let mut detail_lines = blocking_steps
         .iter()
         .map(|step| format!("{}：{}", step.label, step.summary))
         .collect::<Vec<_>>();
@@ -376,19 +430,43 @@ pub fn link_operation_event(
         .as_ref()
         .map(|context| context.link_source_id.as_str())
         .or(source_id);
+    let resolved_proxy_source_id = report
+        .plan
+        .source_context
+        .as_ref()
+        .map(|context| context.proxy_source_id.as_str())
+        .or(proxy_source_id);
+    let resolved_runtime_source_id = report
+        .plan
+        .source_context
+        .as_ref()
+        .map(|context| context.runtime_source_id.as_str())
+        .or(runtime_source_id);
     let payload = json!({
         "linkKey": report.key,
         "linkName": report.name,
         "mode": report.mode,
         "sourceId": resolved_source_id,
+        "proxySourceId": resolved_proxy_source_id,
+        "runtimeSourceId": resolved_runtime_source_id,
+        "declaredWorkspaceKey": report.plan.workspace_key,
         "stepCount": report.steps.len(),
         "completedCount": completed_count,
         "failedCount": failed_steps.len(),
+        "blockingCount": blocking_steps.len(),
         "skippedCount": skipped_count,
         "failedSteps": failed_steps.iter().map(|step| json!({
             "id": step.id,
             "type": step.step_type,
             "label": step.label,
+            "summary": step.summary,
+            "risks": step.risks,
+        })).collect::<Vec<_>>(),
+        "blockingSteps": blocking_steps.iter().map(|step| json!({
+            "id": step.id,
+            "type": step.step_type,
+            "label": step.label,
+            "status": step.status,
             "summary": step.summary,
             "risks": step.risks,
         })).collect::<Vec<_>>(),
@@ -406,7 +484,7 @@ pub fn link_operation_event(
     lifecycle_operation_event(
         id,
         origin,
-        report.plan.workspace_key.clone().unwrap_or(workspace_key),
+        workspace_key,
         "link",
         action,
         state,
@@ -541,6 +619,13 @@ fn event_timestamp() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
+fn normalized_optional_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OperationStatus {
@@ -650,6 +735,38 @@ mod operation_event_tests {
     }
 
     #[test]
+    fn operation_event_preserves_optional_workflow_context() {
+        let event = lifecycle_operation_event(
+            "activity-runtime-1".to_string(),
+            OperationEventOrigin::Cli,
+            "feature-a".to_string(),
+            "runtime",
+            "start",
+            OperationEventState::Success,
+            "启动 dev 服务",
+            "已启动",
+            "",
+            Some("admin"),
+            Some("管理端"),
+            None,
+        )
+        .with_chain_context(Some(&OperationChainContext {
+            chain_id: Some("workspace-chain:delivery:cli-1".to_string()),
+            parent_id: None,
+            step_label: Some("启动项目".to_string()),
+            chain_label: Some("本地联调".to_string()),
+        }));
+
+        let value = serde_json::to_value(&event).expect("serialize operation event");
+        let restored: OperationEvent =
+            serde_json::from_value(value).expect("restore operation event");
+
+        assert_eq!(restored.chain_id, event.chain_id);
+        assert_eq!(restored.step_label.as_deref(), Some("启动项目"));
+        assert_eq!(restored.chain_label.as_deref(), Some("本地联调"));
+    }
+
+    #[test]
     fn failed_build_event_keeps_the_exact_replay_request() {
         let request = DeployRequest {
             project: "admin".to_string(),
@@ -734,6 +851,9 @@ mod operation_event_tests {
                     commit_source: None,
                     changed_paths: Vec::new(),
                     change_sources: Vec::new(),
+                    local_working_tree_paths: Vec::new(),
+                    local_committed_paths: Vec::new(),
+                    selected_branch_changed_paths: Vec::new(),
                 },
                 ignored_inputs: Vec::new(),
                 status: OperationStatus {
@@ -755,6 +875,14 @@ mod operation_event_tests {
             detail: "等待执行".to_string(),
         };
         let history = build_history_request(&workspace, &result, "activity-build-1");
+        assert_eq!(
+            history.history_key,
+            crate::history_id::from_seed("build", "activity-build-1")
+        );
+        assert_eq!(
+            history.queue_url.as_deref(),
+            Some("http://jenkins/queue/item/42/")
+        );
         let event = build_operation_event(
             "activity-build-1".to_string(),
             OperationEventOrigin::App,
@@ -813,7 +941,7 @@ mod operation_event_tests {
 
     #[test]
     fn link_event_keeps_compact_failure_evidence() {
-        let report = LinkExecutionReport {
+        let mut report = LinkExecutionReport {
             key: "cooperation-debug".to_string(),
             name: "合作渠道联调".to_string(),
             mode: "run".to_string(),
@@ -847,13 +975,15 @@ mod operation_event_tests {
             "run",
             &report.key,
             None,
+            None,
+            None,
             Some(&report),
             None,
         );
 
         assert_eq!(event.domain, "link");
         assert_eq!(event.state, OperationEventState::Failed);
-        assert_eq!(event.workspace_key, "feature-a");
+        assert_eq!(event.workspace_key, "fallback");
         assert_eq!(event.project_key.as_deref(), Some("admin"));
         assert!(event.detail.contains("端口已被占用"));
         assert_eq!(event.payload.as_ref().unwrap()["failedCount"], 1);
@@ -862,5 +992,39 @@ mod operation_event_tests {
             "failed"
         );
         assert!(event.payload.as_ref().unwrap().get("plan").is_none());
+
+        report.steps[0].status = "skipped".to_string();
+        report.steps[0].summary = "前置条件不满足，未执行".to_string();
+        let risky_skipped = link_operation_event(
+            "activity-link-risky-skipped".to_string(),
+            OperationEventOrigin::App,
+            "feature-a".to_string(),
+            "run",
+            &report.key,
+            Some("link-source"),
+            Some("proxy-source"),
+            Some("runtime-source"),
+            Some(&report),
+            None,
+        );
+        assert_eq!(risky_skipped.state, OperationEventState::Failed);
+        assert_eq!(risky_skipped.payload.as_ref().unwrap()["failedCount"], 0);
+        assert_eq!(risky_skipped.payload.as_ref().unwrap()["blockingCount"], 1);
+
+        report.steps[0].risks.clear();
+        let benign_skipped = link_operation_event(
+            "activity-link-benign-skipped".to_string(),
+            OperationEventOrigin::App,
+            "feature-a".to_string(),
+            "stop",
+            &report.key,
+            None,
+            None,
+            None,
+            Some(&report),
+            None,
+        );
+        assert_eq!(benign_skipped.state, OperationEventState::Success);
+        assert_eq!(benign_skipped.payload.as_ref().unwrap()["blockingCount"], 0);
     }
 }

@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { getStoredJson, setStoredJson } from "../lib/storage";
 import {
+  normalizeWorkspaceWorkflowChains,
+  removeWorkspaceWorkflowChainRules,
+  validateWorkspaceWorkflowChain,
+  type WorkspaceWorkflowChain,
+} from "../lib/workflowChains";
+import {
   DEFAULT_WORKFLOW_RULES,
   makeBroadcastRulesForReplay,
   makeReceiveRulesForReplay,
@@ -20,7 +26,10 @@ const WORKFLOW_STORAGE_NAMESPACE = "workflow-signals";
 const WORKFLOW_RULES_KEY = "rules";
 const WORKFLOW_LAST_SIGNAL_KEY = "last-signal";
 const WORKFLOW_PENDING_SIGNALS_KEY = "pending-signals";
+const WORKFLOW_CHAINS_KEY = "workspace-chains";
+const WORKFLOW_CANCELLED_RUNS_KEY = "cancelled-workspace-runs";
 const MAX_PENDING_SIGNALS = 20;
+const MAX_CANCELLED_RUNS = 20;
 
 type UseWorkflowSignalsOptions = {
   setError: (value: string) => void;
@@ -38,30 +47,77 @@ export type WorkflowSignalSummary = {
 export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
   const [rules, setRules] = useState<WorkflowRules>(DEFAULT_WORKFLOW_RULES);
   const [pendingSignals, setPendingSignals] = useState<WorkflowSignal[]>([]);
+  const [workspaceChains, setWorkspaceChains] = useState<
+    WorkspaceWorkflowChain[]
+  >([]);
+  const [cancelledWorkflowRunIds, setCancelledWorkflowRunIds] = useState<
+    string[]
+  >([]);
   const rulesRef = useRef(rules);
   const pendingSignalsRef = useRef(pendingSignals);
+  const workspaceChainsRef = useRef(workspaceChains);
+  const cancelledWorkflowRunIdsRef = useRef(new Set<string>());
 
   useEffect(() => {
     let cancelled = false;
 
     void (async () => {
       try {
-        const [storedRules, storedSignals, storedLegacySignal] = await Promise.all([
-          getStoredJson<unknown>(WORKFLOW_STORAGE_NAMESPACE, WORKFLOW_RULES_KEY),
-          getStoredJson<unknown>(WORKFLOW_STORAGE_NAMESPACE, WORKFLOW_PENDING_SIGNALS_KEY),
-          getStoredJson<unknown>(WORKFLOW_STORAGE_NAMESPACE, WORKFLOW_LAST_SIGNAL_KEY),
-        ]);
+        const [
+          storedRules,
+          storedSignals,
+          storedLegacySignal,
+          storedChains,
+          storedCancelledRuns,
+        ] = await Promise.all([
+            getStoredJson<unknown>(
+              WORKFLOW_STORAGE_NAMESPACE,
+              WORKFLOW_RULES_KEY,
+            ),
+            getStoredJson<unknown>(
+              WORKFLOW_STORAGE_NAMESPACE,
+              WORKFLOW_PENDING_SIGNALS_KEY,
+            ),
+            getStoredJson<unknown>(
+              WORKFLOW_STORAGE_NAMESPACE,
+              WORKFLOW_LAST_SIGNAL_KEY,
+            ),
+            getStoredJson<unknown>(
+              WORKFLOW_STORAGE_NAMESPACE,
+              WORKFLOW_CHAINS_KEY,
+            ),
+            getStoredJson<unknown>(
+              WORKFLOW_STORAGE_NAMESPACE,
+              WORKFLOW_CANCELLED_RUNS_KEY,
+            ),
+          ]);
         if (cancelled) {
           return;
         }
-        const normalizedRules = normalizeWorkflowRules(storedRules);
+        const normalizedChains = normalizeWorkspaceWorkflowChains(storedChains);
+        const normalizedRules = normalizedChains.reduce(
+          (current, chain) =>
+            removeWorkspaceWorkflowChainRules(chain.id, current),
+          normalizeWorkflowRules(storedRules),
+        );
         rulesRef.current = normalizedRules;
         setRules(normalizedRules);
+        workspaceChainsRef.current = normalizedChains;
+        setWorkspaceChains(normalizedChains);
         const pending = normalizeWorkflowSignals(storedSignals);
         const normalizedSignals =
           pending.length > 0 ? pending : normalizeWorkflowSignals(storedLegacySignal);
         pendingSignalsRef.current = normalizedSignals;
         setPendingSignals(normalizedSignals);
+        const normalizedCancelledRuns = Array.isArray(storedCancelledRuns)
+          ? storedCancelledRuns
+              .filter((runId): runId is string => typeof runId === "string")
+              .map((runId) => runId.trim())
+              .filter(Boolean)
+              .slice(0, MAX_CANCELLED_RUNS)
+          : [];
+        cancelledWorkflowRunIdsRef.current = new Set(normalizedCancelledRuns);
+        setCancelledWorkflowRunIds(normalizedCancelledRuns);
       } catch (reason) {
         if (!cancelled) {
           setError(String(reason));
@@ -77,13 +133,19 @@ export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
   const nextPendingSignal = useMemo(
     () =>
       pendingSignals.find(
-        (signal) => matchingReceiversForSignal(signal, rules.receivers).length > 0,
+        (signal) =>
+          !cancelledWorkflowRunIdsRef.current.has(signal.chainId ?? "") &&
+          matchingReceiversForSignal(signal, rules.receivers).length > 0,
       ) ?? null,
-    [pendingSignals, rules.receivers],
+    [cancelledWorkflowRunIds, pendingSignals, rules.receivers],
   );
 
   async function persistRules(nextRules: WorkflowRules) {
-    const normalized = normalizeWorkflowRules(nextRules);
+    const normalized = workspaceChainsRef.current.reduce(
+      (current, chain) =>
+        removeWorkspaceWorkflowChainRules(chain.id, current),
+      normalizeWorkflowRules(nextRules),
+    );
     rulesRef.current = normalized;
     setRules(normalized);
     await setStoredJson(
@@ -102,6 +164,76 @@ export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
       WORKFLOW_PENDING_SIGNALS_KEY,
       normalized,
     );
+  }
+
+  async function persistWorkspaceState(
+    nextChains: WorkspaceWorkflowChain[],
+    nextRules: WorkflowRules,
+  ) {
+    const normalizedChains = normalizeWorkspaceWorkflowChains(nextChains);
+    const normalizedRules = normalizeWorkflowRules(nextRules);
+    await Promise.all([
+      setStoredJson(
+        WORKFLOW_STORAGE_NAMESPACE,
+        WORKFLOW_CHAINS_KEY,
+        normalizedChains,
+      ),
+      setStoredJson(
+        WORKFLOW_STORAGE_NAMESPACE,
+        WORKFLOW_RULES_KEY,
+        normalizedRules,
+      ),
+    ]);
+    workspaceChainsRef.current = normalizedChains;
+    setWorkspaceChains(normalizedChains);
+    rulesRef.current = normalizedRules;
+    setRules(normalizedRules);
+  }
+
+  async function saveWorkspaceChain(chain: WorkspaceWorkflowChain) {
+    const normalized = normalizeWorkspaceWorkflowChains([chain])[0];
+    if (!normalized) {
+      throw new Error("联动流程配置无效");
+    }
+    const validation = validateWorkspaceWorkflowChain(normalized);
+    if (!validation.valid) {
+      throw new Error(validation.errors.join("；"));
+    }
+    const nextChains = [
+      normalized,
+      ...workspaceChainsRef.current.filter((item) => item.id !== normalized.id),
+    ];
+    const nextRules = removeWorkspaceWorkflowChainRules(
+      normalized.id,
+      rulesRef.current,
+    );
+    await persistWorkspaceState(nextChains, nextRules);
+    return normalized;
+  }
+
+  async function deleteWorkspaceChain(chainId: string) {
+    const normalizedId = chainId.trim();
+    if (!normalizedId) {
+      return;
+    }
+    await persistWorkspaceState(
+      workspaceChainsRef.current.filter((chain) => chain.id !== normalizedId),
+      removeWorkspaceWorkflowChainRules(normalizedId, rulesRef.current),
+    );
+  }
+
+  async function setWorkspaceChainEnabled(chainId: string, enabled: boolean) {
+    const current = workspaceChainsRef.current.find(
+      (chain) => chain.id === chainId,
+    );
+    if (!current) {
+      return;
+    }
+    await saveWorkspaceChain({
+      ...current,
+      enabled,
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   async function setBroadcastRules(broadcasts: WorkflowBroadcastRule[]) {
@@ -288,10 +420,50 @@ export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
   }
 
   async function emitWorkflowSignals(signals: WorkflowSignal[]) {
-    if (signals.length === 0) {
+    const eligibleSignals = signals.filter(
+      (signal) =>
+        !cancelledWorkflowRunIdsRef.current.has(signal.chainId ?? ""),
+    );
+    if (eligibleSignals.length === 0) {
       return;
     }
-    await persistPendingSignals([...signals, ...pendingSignalsRef.current]);
+    await persistPendingSignals([
+      ...eligibleSignals,
+      ...pendingSignalsRef.current,
+    ]);
+  }
+
+  async function cancelWorkflowRun(runId: string) {
+    const normalizedRunId = runId.trim();
+    if (!normalizedRunId) {
+      return;
+    }
+    const next = [
+      normalizedRunId,
+      ...Array.from(cancelledWorkflowRunIdsRef.current).filter(
+        (item) => item !== normalizedRunId,
+      ),
+    ].slice(0, MAX_CANCELLED_RUNS);
+    cancelledWorkflowRunIdsRef.current = new Set(next);
+    setCancelledWorkflowRunIds(next);
+    await Promise.all([
+      setStoredJson(
+        WORKFLOW_STORAGE_NAMESPACE,
+        WORKFLOW_CANCELLED_RUNS_KEY,
+        next,
+      ),
+      persistPendingSignals(
+        pendingSignalsRef.current.filter(
+          (signal) => signal.chainId !== normalizedRunId,
+        ),
+      ),
+    ]);
+  }
+
+  function isWorkflowRunCancelled(runId?: string | null) {
+    return Boolean(
+      runId && cancelledWorkflowRunIdsRef.current.has(runId.trim()),
+    );
   }
 
   async function clearWorkflowSignal(instanceId: string) {
@@ -319,13 +491,22 @@ export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
   }
 
   async function clearWorkflowSignals() {
-    await persistRules(DEFAULT_WORKFLOW_RULES);
+    await persistWorkspaceState([], DEFAULT_WORKFLOW_RULES);
     await persistPendingSignals([]);
+    cancelledWorkflowRunIdsRef.current = new Set();
+    setCancelledWorkflowRunIds([]);
+    await setStoredJson(
+      WORKFLOW_STORAGE_NAMESPACE,
+      WORKFLOW_CANCELLED_RUNS_KEY,
+      [],
+    );
   }
 
   return {
     rules,
     pendingSignals,
+    workspaceChains,
+    cancelledWorkflowRunIds,
     nextPendingSignal,
     setBroadcastRules,
     setReceiveRules,
@@ -343,7 +524,12 @@ export function useWorkflowSignals({ setError }: UseWorkflowSignalsOptions) {
     signalOptions,
     signalSummaries,
     matchingReceivers,
+    saveWorkspaceChain,
+    deleteWorkspaceChain,
+    setWorkspaceChainEnabled,
     emitWorkflowSignals,
+    cancelWorkflowRun,
+    isWorkflowRunCancelled,
     clearWorkflowSignal,
     deleteWorkflowSignal,
     clearWorkflowSignals,

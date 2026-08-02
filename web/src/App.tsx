@@ -6,11 +6,7 @@ import {
   useRef,
   useState,
 } from "react";
-import {
-  CircularProgress,
-  CssBaseline,
-  ThemeProvider,
-} from "@mui/material";
+import { CircularProgress, CssBaseline, ThemeProvider } from "@mui/material";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { APP_MODULE_MAP, buildPagePropsFor } from "./app-modules";
@@ -25,11 +21,11 @@ import { useActivityPreferences } from "./hooks/useActivityPreferences";
 import { useAppBootstrap } from "./hooks/useAppBootstrap";
 import { useBranchContext } from "./hooks/useBranchContext";
 import { useMergeSelection } from "./hooks/useMergeSelection";
+import { useBuildModule } from "./hooks/useBuildModule";
 import {
-  useBuildModule,
-} from "./hooks/useBuildModule";
-import { useBranchWorkflowModule } from "./hooks/useBranchWorkflowModule";
-import { usePageModuleRuntime } from "./hooks/usePageModuleRuntime";
+  branchWorkflowReferenceProject,
+  useBranchWorkflowModule,
+} from "./hooks/useBranchWorkflowModule";
 import { usePageScrollReset } from "./hooks/usePageScrollReset";
 import { useProjectsModule } from "./hooks/useProjectsModule";
 import { useProxyModule } from "./hooks/useProxyModule";
@@ -39,6 +35,8 @@ import type {
   InitDemandWorkspacePayload,
   InitDemandWorkspaceResult,
   LinkExecutionReport,
+  ProjectManagementOpenRequest,
+  WorkspaceConfigFocusRequest,
 } from "./app-types";
 import type { ActivityEntry } from "./lib/activityCenter";
 import {
@@ -58,6 +56,7 @@ import {
 } from "./lib/trayActionExecution";
 import { disposeTauriListener } from "./lib/tauriEvents";
 import { createAppTheme } from "./theme";
+import { useI18n } from "./i18n";
 
 type AppInfo = {
   configDir?: string;
@@ -71,22 +70,33 @@ const WORKFLOW_AUTO_OPEN_WINDOW_MS = 10 * 60 * 1000;
 
 function isFreshWorkflowSignal(createdAt: string) {
   const timestamp = Date.parse(createdAt);
-  return Number.isFinite(timestamp) && Date.now() - timestamp <= WORKFLOW_AUTO_OPEN_WINDOW_MS;
+  return (
+    Number.isFinite(timestamp) &&
+    Date.now() - timestamp <= WORKFLOW_AUTO_OPEN_WINDOW_MS
+  );
 }
 
 function App() {
+  const { t } = useI18n();
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [activityConfigSourceRequest, setActivityConfigSourceRequest] = useState<{
-    sourceId: string;
-    nonce: number;
-  } | null>(null);
+  const [activityConfigSourceRequest, setActivityConfigSourceRequest] =
+    useState<{
+      activityId: string;
+      sourceId: string;
+      nonce: number;
+    } | null>(null);
 
   const appShell = useAppShell({ setError });
   const [workspaceConfigOpenSignal, setWorkspaceConfigOpenSignal] = useState(0);
+  const [workspaceConfigFocusRequest, setWorkspaceConfigFocusRequest] =
+    useState<WorkspaceConfigFocusRequest | null>(null);
   const [resourceConfigOpenSignal, setResourceConfigOpenSignal] = useState(0);
+  const [projectManagementOpenRequest, setProjectManagementOpenRequest] =
+    useState<ProjectManagementOpenRequest | null>(null);
   const openWorkspaceConfig = useCallback(() => {
+    setWorkspaceConfigFocusRequest(null);
     appShell.setPage("overview");
     setWorkspaceConfigOpenSignal((current) => current + 1);
   }, [appShell]);
@@ -94,6 +104,34 @@ function App() {
     appShell.setPage("resources");
     setResourceConfigOpenSignal((current) => current + 1);
   }, [appShell]);
+  const handleWorkspaceConfigOpenSignal = useCallback((signal: number) => {
+    setWorkspaceConfigOpenSignal((current) =>
+      current === signal ? 0 : current,
+    );
+  }, []);
+  const handleResourceConfigOpenSignal = useCallback((signal: number) => {
+    setResourceConfigOpenSignal((current) =>
+      current === signal ? 0 : current,
+    );
+  }, []);
+  const openProjectManagementTarget = useCallback(
+    (projectKey: string, target: ProjectManagementOpenRequest["target"]) => {
+      appShell.setSelectedProject(projectKey);
+      appShell.setProjectManagementView("projects");
+      appShell.setPage("projectManagement");
+      setProjectManagementOpenRequest((current) => ({
+        nonce: (current?.nonce ?? 0) + 1,
+        projectKey,
+        target,
+      }));
+    },
+    [appShell],
+  );
+  const handleProjectManagementOpenRequest = useCallback((nonce: number) => {
+    setProjectManagementOpenRequest((current) =>
+      current?.nonce === nonce ? null : current,
+    );
+  }, []);
   const activeProjectWorkspace = useMemo(
     () =>
       appShell.projectWorkspaces.find(
@@ -114,18 +152,33 @@ function App() {
   });
   const workflowSignals = useWorkflowSignals({ setError });
   const workflowAutoRunKeyRef = useRef("");
-  const projectManagementAvailable = appShell.enabledPages.includes("projectManagement");
-  const resourcesAvailable = appShell.enabledPages.includes("resources");
+  const projectManagementAvailable =
+    appShell.storageHydrated &&
+    appShell.enabledPages.includes("projectManagement");
+  const resourcesAvailable =
+    appShell.storageHydrated && appShell.enabledPages.includes("resources");
   const projectsAvailable = projectManagementAvailable || resourcesAvailable;
-  const buildAvailable = appShell.enabledPages.includes("build") || projectManagementAvailable;
-  const mergeAvailable = appShell.enabledPages.includes("merge") || projectManagementAvailable;
-  const proxyAvailable = appShell.enabledPages.includes("proxy");
+  const buildAvailable =
+    appShell.storageHydrated &&
+    (appShell.enabledPages.includes("build") || projectManagementAvailable);
+  const mergeAvailable =
+    appShell.storageHydrated &&
+    (appShell.enabledPages.includes("merge") || projectManagementAvailable);
+  const proxyAvailable =
+    appShell.storageHydrated && appShell.enabledPages.includes("proxy");
   const projectManagementBuildActive =
-    appShell.page === "projectManagement" && appShell.projectManagementView === "build";
+    appShell.page === "projectManagement" &&
+    appShell.projectManagementView === "build";
   const projectManagementGitActive =
-    appShell.page === "projectManagement" && appShell.projectManagementView === "git";
+    appShell.page === "projectManagement" &&
+    appShell.projectManagementView === "git";
+  const projectsModuleActive =
+    appShell.page === "resources" ||
+    (appShell.page === "projectManagement" &&
+      appShell.projectManagementView === "projects");
   const buildEnabled =
-    buildAvailable && (appShell.page === "build" || projectManagementBuildActive);
+    buildAvailable &&
+    (appShell.page === "build" || projectManagementBuildActive);
   const mergeEnabled =
     mergeAvailable && (appShell.page === "merge" || projectManagementGitActive);
   const proxyEnabled = proxyAvailable && appShell.page === "proxy";
@@ -162,7 +215,10 @@ function App() {
     if (!mergeEnabled) {
       return;
     }
-    if (!appShell.selectedProject || !branchProjects.some((item) => item.key === appShell.selectedProject)) {
+    if (
+      !appShell.selectedProject ||
+      !branchProjects.some((item) => item.key === appShell.selectedProject)
+    ) {
       if (branchProjects[0]) {
         appShell.setSelectedProject(branchProjects[0].key);
       }
@@ -173,16 +229,46 @@ function App() {
     if (!buildEnabled) {
       return;
     }
-    if (!appShell.selectedProject || !buildProjects.some((item) => item.key === appShell.selectedProject)) {
+    if (
+      !appShell.selectedProject ||
+      !buildProjects.some((item) => item.key === appShell.selectedProject)
+    ) {
       if (buildProjects[0]) {
         appShell.setSelectedProject(buildProjects[0].key);
       }
     }
   }, [appShell, buildEnabled, buildProjects]);
 
+  const mergeModule = useBranchWorkflowModule({
+    enabled: mergeEnabled,
+    activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
+    projects: branchProjects,
+    selectedProject: appShell.selectedProject,
+    setBusy,
+    setError,
+    workflowBroadcastRules: workflowSignals.rules.broadcasts,
+    emitWorkflowSignals: workflowSignals.emitWorkflowSignals,
+    recordActivity: activityCenter.recordActivity,
+    updateActivity: activityCenter.updateActivity,
+  });
+  const branchContextProject = mergeEnabled
+    ? branchWorkflowReferenceProject(
+        mergeModule.mode,
+        appShell.selectedProject,
+        mergeModule.syncProjects,
+        mergeModule.createProjects,
+      )
+    : appShell.selectedProject;
+  const branchContextProjectInfo = useMemo(
+    () =>
+      appShell.projects.find(
+        (project) => project.key === branchContextProject,
+      ) ?? null,
+    [appShell.projects, branchContextProject],
+  );
   const branchContext = useBranchContext({
     enabled: branchEnabled,
-    selectedProject: appShell.selectedProject,
+    selectedProject: branchContextProject,
     branchCache: appShell.branchCache,
     setBranchCache: appShell.setBranchCache,
     projectSelections: appShell.projectSelections,
@@ -191,8 +277,8 @@ function App() {
   });
   const mergeSelection = useMergeSelection({
     enabled: mergeEnabled,
-    selectedProject: appShell.selectedProject,
-    selectedProjectInfo: appShell.selectedProjectInfo,
+    selectedProject: branchContextProject,
+    selectedProjectInfo: branchContextProjectInfo,
     branchEntries: branchContext.branchEntries,
     branchOptions: branchContext.branchOptions,
     selectedProjectSelection: branchContext.selectedProjectSelection,
@@ -227,26 +313,7 @@ function App() {
       return;
     }
     buildModule.syncBuildActivitiesFromHistory();
-  }, [
-    activityCenter.items.length,
-    buildAvailable,
-    buildModule,
-  ]);
-
-  const mergeModule = useBranchWorkflowModule({
-    enabled: mergeEnabled,
-    activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
-    projects: branchProjects,
-    selectedProject: appShell.selectedProject,
-    sourceBranchOptions: mergeSelection.sourceBranchOptions,
-    targetBranchOptions: mergeSelection.targetBranchOptions,
-    setBusy,
-    setError,
-    workflowBroadcastRules: workflowSignals.rules.broadcasts,
-    emitWorkflowSignals: workflowSignals.emitWorkflowSignals,
-    recordActivity: activityCenter.recordActivity,
-    updateActivity: activityCenter.updateActivity,
-  });
+  }, [activityCenter.items.length, buildAvailable, buildModule]);
 
   useEffect(() => {
     if (!mergeEnabled) {
@@ -256,6 +323,7 @@ function App() {
   }, [appShell.activeProjectWorkspaceKey, mergeEnabled]);
   const projectsModule = useProjectsModule({
     enabled: projectsAvailable,
+    active: projectsModuleActive,
     activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
     setBusy,
     setError,
@@ -313,21 +381,25 @@ function App() {
     void listen<TrayPinnedAction>(
       TRAY_DOMAIN_ACTION_REQUESTED_EVENT,
       (event) => {
-        void trayDomainActionHandlerRef.current(event.payload).catch((reason) => {
-          setError(String(reason));
-        });
+        void trayDomainActionHandlerRef
+          .current(event.payload)
+          .catch((reason) => {
+            setError(String(reason));
+          });
       },
-    ).then((nextUnlisten) => {
-      if (disposed) {
-        disposeTauriListener(nextUnlisten);
-      } else {
-        unlisten = nextUnlisten;
-      }
-    }).catch((reason) => {
-      if (!disposed) {
-        setError(`监听托盘操作失败：${String(reason)}`);
-      }
-    });
+    )
+      .then((nextUnlisten) => {
+        if (disposed) {
+          disposeTauriListener(nextUnlisten);
+        } else {
+          unlisten = nextUnlisten;
+        }
+      })
+      .catch((reason) => {
+        if (!disposed) {
+          setError(`监听托盘操作失败：${String(reason)}`);
+        }
+      });
     return () => {
       disposed = true;
       disposeTauriListener(unlisten);
@@ -354,9 +426,15 @@ function App() {
       onInitDemandWorkspace: initDemandWorkspace,
       onProjectConfigSaved: reloadProjectsAfterConfigSave,
       workspaceConfigOpenSignal,
+      workspaceConfigFocusRequest,
       resourceConfigOpenSignal,
+      onWorkspaceConfigOpenHandled: handleWorkspaceConfigOpenSignal,
+      onResourceConfigOpenHandled: handleResourceConfigOpenSignal,
+      projectManagementOpenRequest,
       onOpenWorkspaceConfig: openWorkspaceConfig,
       onOpenResourceConfig: openResourceConfig,
+      onOpenProjectManagementTarget: openProjectManagementTarget,
+      onProjectManagementOpenRequestHandled: handleProjectManagementOpenRequest,
       onOpenProjectWorkspacesDir: openProjectWorkspacesDir,
       onOpenConfigDir: openConfigDir,
       onOpenConfigFile: openConfigFile,
@@ -369,6 +447,7 @@ function App() {
     projectsModule,
     proxyModule,
     activityCenter: {
+      items: activityCenter.allItems,
       recordActivity: activityCenter.recordActivity,
       updateActivity: activityCenter.updateActivity,
     },
@@ -381,13 +460,6 @@ function App() {
     modules: moduleRuntime,
     setError,
   });
-  usePageModuleRuntime({
-    page: appShell.page,
-    enabledPages: appShell.enabledPages,
-    modules: moduleRuntime,
-    setError,
-  });
-
   usePageScrollReset(
     appShell.page === "projectManagement"
       ? `${appShell.page}:${appShell.projectManagementView}`
@@ -418,21 +490,23 @@ function App() {
   useEffect(() => {
     const signal = workflowSignals.nextPendingSignal;
     const buildReceivers = signal
-      ? workflowSignals.matchingReceivers(signal).filter(
-          (receiver) =>
-            receiver.replay.target === "build.replay" ||
-            receiver.replay.target === "deploy.replay",
-        )
+      ? workflowSignals
+          .matchingReceivers(signal)
+          .filter(
+            (receiver) =>
+              receiver.replay.target === "build.replay" ||
+              receiver.replay.target === "deploy.replay",
+          )
       : [];
     const branchReceivers = signal
-      ? workflowSignals.matchingReceivers(signal).filter(
-          (receiver) => receiver.replay.target === "branch.replay",
-        )
+      ? workflowSignals
+          .matchingReceivers(signal)
+          .filter((receiver) => receiver.replay.target === "branch.replay")
       : [];
     const projectReceivers = signal
-      ? workflowSignals.matchingReceivers(signal).filter(
-          (receiver) => receiver.replay.target === "project.replay",
-        )
+      ? workflowSignals
+          .matchingReceivers(signal)
+          .filter((receiver) => receiver.replay.target === "project.replay")
       : [];
     if (
       !signal ||
@@ -463,45 +537,72 @@ function App() {
     void (async () => {
       const chainId = signal.chainId || `chain:${signal.instanceId}`;
       const parentId = signal.parentActivityId || null;
-      if (branchReceivers.length > 0) {
-        for (const receiver of branchReceivers) {
-          if (receiver.replay.target === "branch.replay") {
-            await mergeModule.handleReplayBranchTaskHistory(receiver.replay.entry, {
-              force: true,
-              chainId,
-              parentId,
-              stepLabel: "重播分支",
-            });
+      try {
+        if (workflowSignals.isWorkflowRunCancelled(chainId)) {
+          return;
+        }
+        if (branchReceivers.length > 0) {
+          for (const receiver of branchReceivers) {
+            if (receiver.replay.target === "branch.replay") {
+              await mergeModule.handleReplayBranchTaskHistory(
+                receiver.replay.entry,
+                {
+                  force: true,
+                  chainId,
+                  parentId,
+                  stepLabel: receiver.label || "重播分支",
+                },
+              );
+              if (workflowSignals.isWorkflowRunCancelled(chainId)) {
+                return;
+              }
+            }
           }
         }
-      }
-      if (projectReceivers.length > 0) {
-        for (const receiver of projectReceivers) {
-          if (receiver.replay.target === "project.replay") {
-            await projectsModule.handleReplayProjectWorkflow(receiver.replay, {
-              chainId,
-              parentId,
-              stepLabel: "重播项目",
-            });
+        if (projectReceivers.length > 0) {
+          for (const receiver of projectReceivers) {
+            if (receiver.replay.target === "project.replay") {
+              await projectsModule.handleReplayProjectWorkflow(
+                receiver.replay,
+                {
+                  chainId,
+                  parentId,
+                  stepLabel: receiver.label || "重播项目",
+                },
+              );
+              if (workflowSignals.isWorkflowRunCancelled(chainId)) {
+                return;
+              }
+            }
           }
         }
-      }
-      if (buildReceivers.length > 0) {
-        for (const receiver of buildReceivers) {
-          if (
-            receiver.replay.target === "build.replay" ||
-            receiver.replay.target === "deploy.replay"
-          ) {
-            await buildModule.handleReplayBuildHistory(receiver.replay.entry, {
-              force: true,
-              chainId,
-              parentId,
-              stepLabel: "触发构建",
-            });
+        if (buildReceivers.length > 0) {
+          for (const receiver of buildReceivers) {
+            if (
+              receiver.replay.target === "build.replay" ||
+              receiver.replay.target === "deploy.replay"
+            ) {
+              await buildModule.handleReplayBuildHistory(
+                receiver.replay.entry,
+                {
+                  force: true,
+                  chainId,
+                  parentId,
+                  stepLabel: receiver.label || "触发构建",
+                },
+              );
+              if (workflowSignals.isWorkflowRunCancelled(chainId)) {
+                return;
+              }
+            }
           }
         }
+      } catch (reason) {
+        setError(`联动操作失败：${String(reason)}`);
+      } finally {
+        await workflowSignals.clearWorkflowSignal(signal.instanceId);
+        workflowAutoRunKeyRef.current = "";
       }
-      await workflowSignals.clearWorkflowSignal(signal.instanceId);
     })();
   }, [
     busy,
@@ -582,7 +683,9 @@ function App() {
     }
   }
 
-  async function createProjectWorkspace(payload: CreateProjectWorkspacePayload) {
+  async function createProjectWorkspace(
+    payload: CreateProjectWorkspacePayload,
+  ) {
     try {
       setError("");
       await appShell.createProjectWorkspace(payload);
@@ -600,9 +703,12 @@ function App() {
   ): Promise<InitDemandWorkspaceResult> {
     try {
       setError("");
-      const result = await invoke<InitDemandWorkspaceResult>("init_demand_workspace_config", {
-        payload,
-      });
+      const result = await invoke<InitDemandWorkspaceResult>(
+        "init_demand_workspace_config",
+        {
+          payload,
+        },
+      );
       await appShell.loadProjectWorkspaces();
       if (projectsAvailable) {
         await projectsModule.loadFinderData({ force: true });
@@ -646,7 +752,9 @@ function App() {
       appShell.setProjectManagementView("projects");
       projectsModule.setFinderType("项目");
       if (entry.projectName || entry.projectKey) {
-        projectsModule.setFinderQuery(entry.projectName || entry.projectKey || "");
+        projectsModule.setFinderQuery(
+          entry.projectName || entry.projectKey || "",
+        );
       }
       void projectsModule.loadFinderData();
     }
@@ -655,6 +763,18 @@ function App() {
         projectsModule.setFinderType("网站");
       }
       void projectsModule.loadFinderData();
+    }
+    if (
+      target.page === "overview" &&
+      target.workspaceKey &&
+      target.workspaceView
+    ) {
+      setWorkspaceConfigFocusRequest({
+        nonce: Date.now(),
+        view: target.workspaceView,
+        workspaceKey: target.workspaceKey,
+      });
+      setWorkspaceConfigOpenSignal((current) => current + 1);
     }
     appShell.setPage(nextPage);
   }
@@ -681,6 +801,7 @@ function App() {
     }
     if (action.kind === "compareConfigSource") {
       setActivityConfigSourceRequest({
+        activityId: entry.id,
         sourceId: action.sourceId,
         nonce: Date.now(),
       });
@@ -688,6 +809,9 @@ function App() {
     }
     if (action.kind === "linkRecover") {
       const sourceId = action.sourceId || null;
+      const proxySourceId = action.proxySourceId || null;
+      const runtimeSourceId = action.runtimeSourceId || null;
+      const workspaceKey = action.workspaceKey || null;
       setBusy("正在检查联调链路");
       setError("");
       const checkActivityId = activityCenter.recordActivity(
@@ -700,6 +824,9 @@ function App() {
       try {
         const checkReport = await invoke<LinkExecutionReport>("check_link", {
           sourceId,
+          proxySourceId,
+          runtimeSourceId,
+          workspaceKey,
           key: action.linkKey,
         });
         activityCenter.updateActivity(
@@ -711,7 +838,11 @@ function App() {
           return;
         }
 
-        setBusy(action.replayAction === "stop" ? "正在重新停止联调链路" : "正在重新启动联调链路");
+        setBusy(
+          action.replayAction === "stop"
+            ? "正在重新停止联调链路"
+            : "正在重新启动联调链路",
+        );
         const replayActivityId = activityCenter.recordActivity(
           linkActivityDraft(
             action.linkKey,
@@ -725,6 +856,9 @@ function App() {
             action.replayAction === "stop" ? "stop_link" : "run_link",
             {
               sourceId,
+              proxySourceId,
+              runtimeSourceId,
+              workspaceKey,
               key: action.linkKey,
               activityId: replayActivityId,
               operationOrigin: "app",
@@ -734,6 +868,9 @@ function App() {
             report,
             action.replayAction,
             sourceId,
+            workspaceKey,
+            proxySourceId,
+            runtimeSourceId,
           );
           activityCenter.updateActivity(replayActivityId, replayPatch);
           if (replayPatch.status === "success") {
@@ -755,6 +892,9 @@ function App() {
               action.replayAction,
               sourceId,
               message,
+              workspaceKey,
+              proxySourceId,
+              runtimeSourceId,
             ),
           );
           setError(message);
@@ -830,13 +970,15 @@ function App() {
     if (action.kind === "runtimeRecover") {
       setError("");
       try {
-        const success = action.replayAction === "stop"
-          ? await projectsModule.handleStopRuntime(action.projectKey)
-          : await projectsModule.handleStartRuntime(
-              action.projectKey,
-              action.debugProfileKey || undefined,
-              action.envOverrides ?? undefined,
-            );
+        const success =
+          action.replayAction === "stop"
+            ? await projectsModule.handleStopRuntime(action.projectKey)
+            : await projectsModule.handleStartRuntime(
+                action.projectKey,
+                action.debugProfileKey || undefined,
+                action.envOverrides ?? undefined,
+                action.expectedPort ?? undefined,
+              );
         if (success) {
           activityCenter.updateActivity(entry.id, {
             action: null,
@@ -852,21 +994,23 @@ function App() {
     if (action.kind === "proxyRecover") {
       setError("");
       try {
-        const dashboard = action.replayAction === "stop"
-          ? await proxyModule.stopProxyProfile(
-              action.profileId,
-              action.sourceId || undefined,
-            )
-          : await proxyModule.startProxyProfile(
-              action.profileId,
-              action.sourceId || undefined,
-            );
+        const dashboard =
+          action.replayAction === "stop"
+            ? await proxyModule.stopProxyProfile(
+                action.profileId,
+                action.sourceId || undefined,
+              )
+            : await proxyModule.startProxyProfile(
+                action.profileId,
+                action.sourceId || undefined,
+              );
         const status = dashboard.statuses.find(
           (item) => item.profileId === action.profileId,
         );
-        const success = action.replayAction === "stop"
-          ? !status?.running
-          : Boolean(status?.running);
+        const success =
+          action.replayAction === "stop"
+            ? !status?.running
+            : Boolean(status?.running);
         if (success) {
           activityCenter.updateActivity(entry.id, {
             action: null,
@@ -893,21 +1037,35 @@ function App() {
       if (projectsAvailable) {
         await projectsModule.loadFinderData({ force: true });
       }
-      activityCenter.updateActivity(entry.id, {
-        status: "success",
-        summary: "已重新加载并应用最新配置",
-        action: null,
-        acknowledgedAt: new Date().toISOString(),
-      });
+      const resolvedAt = new Date().toISOString();
+      activityCenter.syncActivities(
+        {
+          kind: "config",
+          actionKind: "reloadConfig",
+        },
+        {
+          status: "success",
+          summary: "已重新加载并应用最新配置",
+          detail: null,
+          action: null,
+          acknowledgedAt: resolvedAt,
+        },
+      );
     } catch (reason) {
       const message = String(reason);
       setError(message);
-      activityCenter.updateActivity(entry.id, {
-        status: "failed",
-        summary: "重新加载配置失败",
-        detail: message,
-        acknowledgedAt: null,
-      });
+      activityCenter.syncActivities(
+        {
+          kind: "config",
+          actionKind: "reloadConfig",
+        },
+        {
+          status: "failed",
+          summary: "重新加载配置失败",
+          detail: message,
+          acknowledgedAt: null,
+        },
+      );
     } finally {
       setBusy("");
     }
@@ -950,14 +1108,14 @@ function App() {
         }}
         onRunActivityAction={runActivityAction}
         onRefreshActivities={activityCenter.refreshBuildActivities}
-        onAcknowledgeActivityEntry={(entry) => {
-          activityCenter.acknowledgeActivity(entry.id);
+        onResolveActivityEntry={(entry) => {
+          activityCenter.resolveActivity(entry.id);
         }}
-        onAcknowledgeActivityEntries={(entries) => {
-          activityCenter.acknowledgeActivities(entries.map((entry) => entry.id));
+        onResolveActivityEntries={(entries) => {
+          activityCenter.resolveActivities(entries.map((entry) => entry.id));
         }}
-        onClearActivities={() => {
-          void activityCenter.clearActivities().catch((reason) => {
+        onClearHandledActivities={() => {
+          void activityCenter.clearHandledActivities().catch((reason) => {
             setError(String(reason));
           });
         }}
@@ -966,12 +1124,16 @@ function App() {
       >
         <Suspense
           fallback={
-            <div className="page-loading-strip" role="status" aria-live="polite">
+            <div
+              className="page-loading-strip"
+              role="status"
+              aria-live="polite"
+            >
               <CircularProgress size={16} thickness={5} />
-              正在加载页面模块
+              {t("正在加载页面模块")}
             </div>
           }
-          >
+        >
           <PageErrorBoundary resetKey={appShell.page}>
             <ActivePage {...activePageProps} />
           </PageErrorBoundary>
@@ -1008,6 +1170,18 @@ function App() {
         open={Boolean(activityConfigSourceRequest)}
         initialSourceId={activityConfigSourceRequest?.sourceId}
         compareOnOpen
+        onCompared={() => {
+          const activityId = activityConfigSourceRequest?.activityId;
+          if (!activityId) {
+            return;
+          }
+          activityCenter.updateActivity(activityId, {
+            status: "info",
+            summary: "已查看配置源差异",
+            action: null,
+            acknowledgedAt: new Date().toISOString(),
+          });
+        }}
         onClose={() => setActivityConfigSourceRequest(null)}
       />
       <AppExitDialog onError={setError} />

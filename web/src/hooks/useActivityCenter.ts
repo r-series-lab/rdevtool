@@ -29,6 +29,7 @@ import {
   enrichBranchActivityFailureDetails,
   isBuildActivityKind,
   normalizeActivityEntries,
+  retainActivityEntries,
   stableActivityJson,
   type ActivityBulkUpdater,
   type ActivityDraft,
@@ -41,7 +42,12 @@ import {
   activityVisibleWithPreferences,
   type ConfigActivityVisibility,
 } from "../lib/activityPreferences";
+import {
+  activityCanBeCleared,
+  resolveActivityEntries,
+} from "../lib/activityResolution";
 import { reconcileHistoryActivities } from "../lib/historyActivities";
+import { isOperationActiveState } from "../lib/operationLifecycle";
 
 const ACTIVITY_STORAGE_NAMESPACE = "activity-center";
 const ACTIVITY_STORAGE_KEY = "items";
@@ -143,12 +149,8 @@ function activityTerminalRank(item: ActivityEntry) {
   return 1;
 }
 
-function isActiveBuildState(stateKey?: string | null) {
-  return stateKey === "accepted" || stateKey === "queued" || stateKey === "running";
-}
-
 function activityStatusFromBuildState(stateKey?: string | null): ActivityStatus {
-  if (isActiveBuildState(stateKey)) {
+  if (isOperationActiveState(stateKey)) {
     return "running";
   }
   if (
@@ -334,9 +336,10 @@ function normalizeActivityList(value: unknown, options: ActivityNormalizeOptions
       current ? chooseActivityDuplicate(current, normalizedItem) : normalizedItem,
     );
   }
-  return Array.from(deduped.values())
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .slice(0, MAX_ACTIVITY_ITEMS);
+  return retainActivityEntries(
+    Array.from(deduped.values()),
+    MAX_ACTIVITY_ITEMS,
+  );
 }
 
 function matchesActivity(item: ActivityEntry, match: ActivityMatch) {
@@ -344,6 +347,9 @@ function matchesActivity(item: ActivityEntry, match: ActivityMatch) {
     return false;
   }
   if (match.status && item.status !== match.status) {
+    return false;
+  }
+  if (match.actionKind && item.action?.kind !== match.actionKind) {
     return false;
   }
   if (match.executionKey && item.executionKey !== match.executionKey) {
@@ -518,18 +524,22 @@ export function useActivityCenter({
     if (!id) {
       return;
     }
+    let changed = false;
     const now = new Date().toISOString();
-    persist(
-      itemsRef.current.map((item) =>
-        item.id === id
-          ? {
-              ...item,
-              ...patch,
-              updatedAt: patch.updatedAt || now,
-            }
-        : item,
-      ),
-    );
+    const nextItems = itemsRef.current.map((item) => {
+      if (item.id !== id || !shouldApplyActivityPatch(item, patch)) {
+        return item;
+      }
+      changed = true;
+      return {
+        ...item,
+        ...patch,
+        updatedAt: patch.updatedAt || now,
+      };
+    });
+    if (changed) {
+      persist(nextItems);
+    }
   }, [persist]);
 
   const syncStoredBuildStatuses = useCallback(async (
@@ -681,7 +691,7 @@ export function useActivityCenter({
                 (item) => historyActivityTimestamp(item.createdAt) > cursor,
               )
             : mergeHistory;
-          const normalized = enrichBranchActivityFailureDetails(
+          const hydrated = enrichBranchActivityFailureDetails(
             normalizeActivityList(
               reconcileHistoryActivities(
                 normalizeActivityList(stored, { expireStaleRunning: true }),
@@ -693,6 +703,10 @@ export function useActivityCenter({
               { expireStaleRunning: true },
             ),
             branchHistory,
+          );
+          const normalized = normalizeActivityList(
+            [...itemsRef.current, ...hydrated],
+            { expireStaleRunning: true },
           );
           itemsRef.current = normalized;
           historyCursorRef.current = Math.max(
@@ -927,33 +941,20 @@ export function useActivityCenter({
     return changed;
   }, [persist]);
 
-  const acknowledgeActivities = useCallback((ids: string[]) => {
+  const resolveActivities = useCallback((ids: string[]) => {
     const targetIds = new Set(ids.filter(Boolean));
     if (targetIds.size === 0) {
       return;
     }
     const now = new Date().toISOString();
-    persist(
-      itemsRef.current.map((item) => {
-        if (!targetIds.has(item.id)) {
-          return item;
-        }
-        if (item.status === "failed") {
-          return {
-            ...item,
-            acknowledgedAt: item.acknowledgedAt || now,
-          };
-        }
-        return item;
-      }),
-    );
+    persist(resolveActivityEntries(itemsRef.current, [...targetIds], now));
   }, [persist]);
 
-  const acknowledgeActivity = useCallback((id: string) => {
-    acknowledgeActivities([id]);
-  }, [acknowledgeActivities]);
+  const resolveActivity = useCallback((id: string) => {
+    resolveActivities([id]);
+  }, [resolveActivities]);
 
-  const clearActivities = useCallback(async () => {
+  const clearHandledActivities = useCallback(async () => {
     const clearedAt = Date.now();
     historyCursorRef.current = Math.max(historyCursorRef.current, clearedAt);
     await enqueueStorageOperation(() =>
@@ -963,30 +964,33 @@ export function useActivityCenter({
         historyCursorRef.current,
       ),
     );
-    if (includeAllProjects) {
-      itemsRef.current = [];
-      setAllItems([]);
+    const remaining = itemsRef.current.filter(
+      (item) =>
+        !activityMatchesScope(item, projectKeySet, includeAllProjects) ||
+        !activityCanBeCleared(item),
+    );
+    if (includeAllProjects && remaining.length === 0) {
+      itemsRef.current = remaining;
+      setAllItems(remaining);
       await enqueueStorageOperation(() =>
         deleteStoredJson(ACTIVITY_STORAGE_NAMESPACE, ACTIVITY_STORAGE_KEY),
       );
       return;
     }
-    const remaining = itemsRef.current.filter(
-      (item) => !activityMatchesScope(item, projectKeySet, includeAllProjects),
-    );
     persist(remaining);
   }, [enqueueStorageOperation, includeAllProjects, persist, projectKeySet]);
 
   return {
     items: scopedItems,
+    allItems,
     stats,
     recordActivity,
     updateActivity,
     syncActivities,
     refreshBuildActivities,
-    acknowledgeActivity,
-    acknowledgeActivities,
-    clearActivities,
+    resolveActivity,
+    resolveActivities,
+    clearHandledActivities,
   };
 }
 

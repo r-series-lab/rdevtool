@@ -1,5 +1,17 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "workspace": {
+    "key": "feature-workspace",
+    "name": "Feature Workspace",
+    "system": false,
+    "projectInstancePath": "/workspace/demo-web",
+    "projectInstanceManaged": true,
+    "runtimeConfigSourceId": "workspace-feature",
+    "runtimeConfigSourceName": "Feature Workspace",
+    "runtimeConfigSourceKind": "workspace",
+    "runtimeConfigPath": "/workspace/.rdevtool/runtime_overrides.toml",
+    "runtimeProfileScope": "workspaceOverride"
+  },
   "requested": {
     "projectKey": "demo-web",
     "debugProfileKey": "feature",
@@ -15,11 +27,21 @@
     "debugProfileLabel": "Feature",
     "runtimeProfileKey": "browser",
     "runtimeProfileLabel": "Browser",
+    "environment": [
+      {
+        "key": "MODE",
+        "value": "feature",
+        "source": "launchOverride",
+        "masked": false
+      }
+    ],
+    "browserSource": "runtimeProfile",
+    "proxySource": "direct",
     "target": {
       "command": "npm run dev",
       "commandSource": "projectDev",
       "cwd": "/workspace/demo-web",
-      "cwdSource": "debugProfile",
+      "cwdSource": "workspaceProjectInstance.debugProfile",
       "expectedPort": 4173,
       "expectedPortSource": "debugProfile",
       "focusUrl": "http://127.0.0.1:4173/debug",

@@ -1,8 +1,17 @@
 mod desktop;
 mod tui;
 
+mod cli_docs;
+mod cli_operation_context;
+mod cli_output;
+mod cli_scope;
+mod cli_workflow;
+mod cli_workspace_chains;
+
 use anyhow::Result;
-use clap::{Args, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use cli_operation_context::save_cli_operation_event;
+use cli_output::BuildStatusField;
 use rdevtool_core::agent::{
     AgentCapabilities, AgentContext, AgentContextOptions, AgentContextPreset, AgentContextSection,
     capabilities, context_for_workspace, context_for_workspace_with_options_and_paths,
@@ -21,14 +30,16 @@ use rdevtool_core::config::{
     SYSTEM_PROJECT_WORKSPACE_KEY, active_project_workspace_key, apply_project_workspace_context,
     create_project_workspace, default_config_dir, default_project_workspace_root_dir,
     default_project_workspaces_dir, default_projects_path, default_workspace_path,
-    ensure_default_configs, load_active_project_workspace, load_config,
-    load_project_workspace_by_key, load_project_workspaces, load_workspace_config,
+    ensure_default_configs, load_active_project_workspace, load_all_project_workspaces,
+    load_config, load_project_workspace_by_key, load_project_workspaces, load_workspace_config,
     resolve_config_path, save_config, save_project_workspace_config, save_workspace_config,
 };
 use rdevtool_core::config_sources::{
-    CopyConfigSourceRequest, compare_config_sources, config_sources_file_path, copy_config_source,
-    list_config_sources, preferred_config_source_id_for_scope, resolve_config_source,
-    save_config_source_preference,
+    ConfigSource, ConfigSourceReference, CopyConfigSourceRequest,
+    apply_runtime_overrides_for_source, compare_config_sources, config_source_supports,
+    config_sources_file_path, copy_config_source, list_config_sources,
+    preferred_config_source_id_for_scope, resolve_config_source,
+    resolve_config_source_for_workspace, save_config_source_preference,
 };
 use rdevtool_core::core::{
     self, BranchCheckoutRequest, BranchCommitOverview, BranchCreateRequest, BranchFileDiffRequest,
@@ -38,11 +49,13 @@ use rdevtool_core::core::{
     branch_push_status, checkout_branch_to_directory, execute_branch_create, execute_branch_push,
     execute_branch_switch, execute_branch_sync, parse_extra_params_args, plan_branch_sync,
 };
+use rdevtool_core::health::{HealthSnapshot, collect_health_snapshot};
 use rdevtool_core::link::{
-    LinkConfig, LinkExecutionReport, LinkExecutionStepReport, LinkStepConfig,
-    LinkWorkspaceAttachRequest, attach_link_to_workspace, delete_link as core_delete_link,
-    get_link, link_proxy_check_status, links_file_path, list_link_summaries,
-    plan_link as core_plan_link, upsert_link,
+    LinkConfig, LinkExecutionReport, LinkExecutionStepReport, LinkSourceContext, LinkStepConfig,
+    LinkWorkspaceAttachRequest, attach_link_to_workspace_from_path, delete_link_from_path,
+    discover_link_sources, execute_link_migration, get_link_from_path, link_proxy_check_status,
+    list_link_summaries_from_path, load_links_config_from_path, plan_link_from_path,
+    plan_link_migration, upsert_link_to_path,
 };
 use rdevtool_core::navigation::{
     NavigationEditorCategory, NavigationEditorEntry, NavigationIndexEntry,
@@ -56,8 +69,11 @@ use rdevtool_core::operation::{
     OperationEventState, OperationEvidence, OperationRisk, OperationStatus, RecommendedAction,
     branch_task_operation_event, build_history_request, build_operation_event,
     failed_build_operation_event, lifecycle_operation_event, link_operation_event,
-    list_operation_events, operation_event_id, save_operation_event,
-    update_build_operation_event_from_history,
+    list_operation_events, operation_event_id, update_build_operation_event_from_history,
+};
+use rdevtool_core::project_notes::{
+    NotesFileIndex, init_notes, init_project_notes, notes_info, project_notes_info,
+    search_note_documents,
 };
 use rdevtool_core::proxy::{
     PROXY_VERIFY_ID_HEADER, ProxyConfig, ProxyEvent, ProxyOutboundMode, ProxyProfile,
@@ -72,14 +88,15 @@ use rdevtool_core::proxy_daemon::{
     proxy_daemon_status, proxy_daemon_stop,
 };
 use rdevtool_core::replay::{
-    ReplayAction, build_replay_action, merge_replay_action, replay_kind_and_history_key,
+    ReplayAction, ReplayBranchConflict, build_replay_action, merge_replay_action,
+    normalize_build_replay_request, replay_kind_and_history_key,
 };
 use rdevtool_core::runtime::{
     ProjectRuntimeFocusResponse, ProjectRuntimeInspectResponse, ProjectRuntimeLaunchOptions,
     ProjectRuntimeLogKind, ProjectRuntimeLogResponse, ProjectRuntimePreflightResponse,
     ProjectRuntimeStartResponse, ProjectRuntimeWaitOptions, ProjectRuntimeWaitResponse,
     ProjectRuntimeWaitUntil, RuntimeProfileSummary, RuntimeProfilesResponse,
-    adopt_project_runtime_with_options, clear_project_runtime_log,
+    adopt_project_runtime_with_options, clear_project_runtime_log, filter_project_runtime_log,
     inspect_project_runtime_with_options, project_runtime_candidate_cwds,
     project_runtime_preflight_with_options, read_project_runtime_log_with_selection,
     runtime_profile_show, runtime_profiles, start_project_runtime_detached_with_options,
@@ -91,6 +108,7 @@ use rdevtool_core::runtime_daemon::{
     status as runtime_daemon_status, stop as stop_runtime_daemon,
 };
 use rdevtool_core::runtime_link::{BindProxyRuntimeRequest, bind_proxy_runtime_profile};
+use rdevtool_core::self_info::{SelfIdentity, collect_self_identity};
 use rdevtool_core::storage::{
     self, DeployHistoryEntry, HistoryCommitInfo, MergeHistoryEntry, SaveDeployHistoryRequest,
     SaveMergeHistoryRequest, SaveNoteRequest, Storage,
@@ -109,6 +127,7 @@ use rdevtool_core::workspace_init::{
 use rdevtool_core::workspace_instance::{
     WorkspaceProjectInstanceValidation, validate_workspace_project_instance,
 };
+use rdevtool_core::workspace_lifecycle::{archive_project_workspace, restore_project_workspace};
 use rdevtool_core::workspace_resources::{
     WorkspaceOperationWorklogEvent, WorkspaceResourceStatus, append_workspace_operation_worklog,
     append_workspace_worklog, initialize_workspace_resources, read_workspace_worklog,
@@ -147,6 +166,8 @@ impl std::error::Error for CliReportedFailure {}
 struct Cli {
     #[arg(long)]
     config: Option<PathBuf>,
+    #[arg(long = "workspace", value_name = "KEY")]
+    workspace_scope: Option<String>,
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -158,7 +179,18 @@ enum Commands {
     Desktop,
     Info,
     Capabilities,
-    Doctor,
+    Doctor {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        debug_profile: Option<String>,
+        #[arg(long)]
+        runtime_profile: Option<String>,
+    },
+    Docs {
+        #[command(subcommand)]
+        command: DocsCommands,
+    },
     Context {
         #[arg(long)]
         project: Option<String>,
@@ -307,6 +339,8 @@ enum Commands {
         command: NavigationCommands,
     },
     Link {
+        #[arg(long, global = true)]
+        source: Option<String>,
         #[command(subcommand)]
         command: LinkCommands,
     },
@@ -340,6 +374,10 @@ enum Commands {
         #[command(subcommand)]
         command: HistoryCommands,
     },
+    Workflow {
+        #[command(subcommand)]
+        command: WorkflowCommands,
+    },
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
@@ -363,7 +401,14 @@ enum AppCommands {
 
 #[derive(Subcommand)]
 enum WorkspaceCommands {
-    List,
+    List {
+        #[arg(long)]
+        compact: bool,
+        #[arg(long, conflicts_with = "all")]
+        archived: bool,
+        #[arg(long)]
+        all: bool,
+    },
     Show {
         workspace: Option<String>,
     },
@@ -465,6 +510,16 @@ enum WorkspaceCommands {
         enabled: bool,
     },
     Use {
+        workspace: String,
+    },
+    Archive {
+        workspace: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        stop_running: bool,
+    },
+    Restore {
         workspace: String,
     },
     Scope {
@@ -969,6 +1024,8 @@ enum BuildCommands {
         extra_params: Vec<String>,
         #[command(flatten)]
         follow: BuildFollowOptions,
+        #[arg(long)]
+        compact: bool,
     },
     Trigger {
         project: String,
@@ -982,6 +1039,8 @@ enum BuildCommands {
         extra_params: Vec<String>,
         #[command(flatten)]
         follow: BuildFollowOptions,
+        #[arg(long)]
+        compact: bool,
     },
     Status {
         #[arg(long)]
@@ -990,12 +1049,90 @@ enum BuildCommands {
         build_url: Option<String>,
         #[command(flatten)]
         follow: BuildFollowOptions,
+        #[arg(long, value_enum, value_delimiter = ',')]
+        fields: Vec<BuildStatusField>,
     },
     History {
         #[arg(long)]
         project: Option<String>,
+        #[arg(long)]
+        env: Option<String>,
+        #[arg(long)]
+        latest: bool,
         #[arg(long, default_value_t = 20)]
         limit: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowCommands {
+    Promote {
+        #[command(subcommand)]
+        command: PromoteCommands,
+    },
+    Chain {
+        #[command(subcommand)]
+        command: WorkflowChainCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkflowChainCommands {
+    List,
+    Show {
+        chain: String,
+    },
+    Plan {
+        chain: String,
+        #[arg(long)]
+        force: bool,
+    },
+    Run {
+        chain: String,
+        #[arg(long)]
+        force: bool,
+        #[command(flatten)]
+        follow: BuildFollowOptions,
+    },
+}
+
+#[derive(Subcommand)]
+enum PromoteCommands {
+    Plan {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        repo_path: Option<String>,
+        #[arg(long)]
+        source: Option<String>,
+        #[arg(long)]
+        target: String,
+        #[arg(long = "deploy-history-id")]
+        deploy_history_id: String,
+        #[arg(long)]
+        message: Option<String>,
+        #[arg(long = "path")]
+        selected_paths: Vec<String>,
+    },
+    Run {
+        #[arg(long = "plan-hash")]
+        plan_hash: String,
+        #[command(flatten)]
+        follow: BuildFollowOptions,
+    },
+    Status {
+        #[arg(long = "plan-hash")]
+        plan_hash: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum DocsCommands {
+    GenerateCli {
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, conflicts_with = "output")]
+        output_dir: Option<PathBuf>,
     },
 }
 
@@ -1068,6 +1205,8 @@ enum GitCommands {
         project: String,
         #[arg(long = "target")]
         target_branch: String,
+        #[arg(long)]
+        repo_path: Option<String>,
     },
     PushStatus {
         #[arg(long)]
@@ -1109,6 +1248,31 @@ enum GitCommands {
 
 #[derive(Subcommand)]
 enum NoteCommands {
+    Path,
+    Init,
+    ProjectPath {
+        #[arg(long)]
+        project: String,
+    },
+    ProjectInit {
+        #[arg(long)]
+        project: String,
+    },
+    Index {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        query: Option<String>,
+        #[arg(long, default_value_t = 24)]
+        limit: usize,
+    },
+    FileSearch {
+        query: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long, default_value_t = 24)]
+        limit: usize,
+    },
     List {
         #[arg(long, default_value_t = 24)]
         limit: usize,
@@ -1167,6 +1331,10 @@ enum HistoryCommands {
     Build {
         #[arg(long)]
         project: Option<String>,
+        #[arg(long)]
+        env: Option<String>,
+        #[arg(long)]
+        latest: bool,
         #[arg(long, default_value_t = 12)]
         limit: usize,
     },
@@ -1187,6 +1355,8 @@ enum HistoryCommands {
     },
     ReplayRun {
         id: String,
+        #[command(flatten)]
+        follow: BuildFollowOptions,
     },
 }
 
@@ -1300,6 +1470,9 @@ enum NavigationCommands {
 enum LinkCommands {
     Path,
     List,
+    Inspect {
+        key: String,
+    },
     Show {
         key: String,
     },
@@ -1329,6 +1502,20 @@ enum LinkCommands {
     },
     Delete {
         key: String,
+    },
+    #[command(visible_alias = "move")]
+    Migrate {
+        key: String,
+        #[arg(long)]
+        from: String,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        copy: bool,
+        #[arg(long)]
+        replace: bool,
+        #[arg(long)]
+        dry_run: bool,
     },
     Attach {
         key: String,
@@ -1728,8 +1915,14 @@ enum RuntimeCommands {
         project: String,
         #[arg(long, value_enum, default_value = "dev")]
         kind: RuntimeLogKindArg,
-        #[arg(long, default_value_t = 160)]
+        #[arg(long = "tail", visible_alias = "max-lines", default_value_t = 160)]
         max_lines: usize,
+        #[arg(long)]
+        grep: Option<String>,
+        #[arg(long)]
+        errors_only: bool,
+        #[arg(long)]
+        case_sensitive: bool,
         #[arg(long)]
         clear: bool,
         #[arg(long)]
@@ -1997,9 +2190,21 @@ fn main() {
 fn run_cli(cli: Cli) -> Result<()> {
     let Cli {
         config,
+        workspace_scope,
         json,
         command,
     } = cli;
+    if workspace_scope.is_some()
+        && matches!(
+            &command,
+            Commands::Workspace {
+                command: WorkspaceCommands::Use { .. }
+            }
+        )
+    {
+        anyhow::bail!("--workspace cannot be combined with `workspace use`");
+    }
+    let _workspace_scope = cli_scope::install(workspace_scope)?;
     let config_override = config.as_deref();
 
     match command {
@@ -2012,7 +2217,18 @@ fn run_cli(cli: Cli) -> Result<()> {
             show_info(&config, &config_path, json)
         }
         Commands::Capabilities => run_capabilities(json),
-        Commands::Doctor => run_doctor(config_override, json),
+        Commands::Doctor {
+            project,
+            debug_profile,
+            runtime_profile,
+        } => run_doctor(
+            config_override,
+            project.as_deref(),
+            debug_profile,
+            runtime_profile,
+            json,
+        ),
+        Commands::Docs { command } => run_docs(command, json),
         Commands::Context {
             project,
             query,
@@ -2167,7 +2383,9 @@ fn run_cli(cli: Cli) -> Result<()> {
             run_push_branch(&config, project, message, json)
         }
         Commands::Navigation { command } => run_navigation(command, json),
-        Commands::Link { command } => run_link(command, config_override, json),
+        Commands::Link { source, command } => {
+            run_link(command, config_override, source.as_deref(), json)
+        }
         Commands::ConfigSource { command } => run_config_source(command, json),
         Commands::Proxy { source, command } => {
             run_proxy(command, config_override, source.as_deref(), json)
@@ -2178,10 +2396,27 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Commands::Artifacts { command } => run_artifacts(command, config_override, json),
         Commands::WebActions { command } => run_web_actions(command, json),
-        Commands::Notes { command } => run_notes(command, json),
+        Commands::Notes { command } => match command {
+            NoteCommands::ProjectPath { .. }
+            | NoteCommands::ProjectInit { .. }
+            | NoteCommands::Index {
+                project: Some(_), ..
+            }
+            | NoteCommands::FileSearch {
+                project: Some(_), ..
+            } => {
+                let (config, _) = load_cli_effective_config(config_override)?;
+                run_notes(Some(&config), command, json)
+            }
+            _ => run_notes(None, command, json),
+        },
         Commands::History { command } => {
             let (config, _) = load_cli_effective_config(config_override)?;
             run_history(&config, command, json)
+        }
+        Commands::Workflow { command } => {
+            let (config, _) = load_cli_effective_config(config_override)?;
+            run_workflow(&config, config_override, command, json)
         }
         Commands::Agent { command } => {
             let context_input = match &command {
@@ -2193,11 +2428,137 @@ fn run_cli(cli: Cli) -> Result<()> {
     }
 }
 
+fn run_workflow(
+    config: &AppConfig,
+    config_override: Option<&Path>,
+    command: WorkflowCommands,
+    json_mode: bool,
+) -> Result<()> {
+    let (command_name, value) = match command {
+        WorkflowCommands::Promote { command } => match command {
+            PromoteCommands::Plan {
+                project,
+                repo_path,
+                source,
+                target,
+                deploy_history_id,
+                message,
+                selected_paths,
+            } => (
+                "workflow.promote.plan",
+                serde_json::to_value(cli_workflow::create_promote_plan(
+                    config,
+                    cli_workflow::PromotePlanRequest {
+                        project,
+                        repo_path,
+                        source_branch: source,
+                        target_branch: target,
+                        deploy_history_id,
+                        commit_message: message,
+                        selected_paths,
+                    },
+                )?)?,
+            ),
+            PromoteCommands::Run { plan_hash, follow } => (
+                "workflow.promote.run",
+                serde_json::to_value(cli_workflow::run_promote_plan(config, &plan_hash, follow)?)?,
+            ),
+            PromoteCommands::Status { plan_hash } => (
+                "workflow.promote.status",
+                serde_json::to_value(cli_workflow::promote_status(&plan_hash)?)?,
+            ),
+        },
+        WorkflowCommands::Chain { command } => {
+            let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+            let workspace_scope = cli_scope::workspace_key();
+            match command {
+                WorkflowChainCommands::List => {
+                    let chains = cli_workspace_chains::load_workspace_chains(&storage)?
+                        .into_iter()
+                        .filter(|chain| {
+                            workspace_scope
+                                .as_deref()
+                                .is_none_or(|scope| chain.workspace_key == scope)
+                        })
+                        .collect::<Vec<_>>();
+                    ("workflow.chain.list", serde_json::to_value(chains)?)
+                }
+                WorkflowChainCommands::Show { chain } => {
+                    let chain = cli_workspace_chains::find_workspace_chain(
+                        &storage,
+                        &chain,
+                        workspace_scope.as_deref(),
+                    )?;
+                    ("workflow.chain.show", serde_json::to_value(chain)?)
+                }
+                WorkflowChainCommands::Plan { chain, force } => {
+                    let chain = cli_workspace_chains::find_workspace_chain(
+                        &storage,
+                        &chain,
+                        workspace_scope.as_deref(),
+                    )?;
+                    (
+                        "workflow.chain.plan",
+                        serde_json::to_value(cli_workspace_chains::plan_workspace_chain(
+                            &chain, force,
+                        )?)?,
+                    )
+                }
+                WorkflowChainCommands::Run {
+                    chain,
+                    force,
+                    follow,
+                } => {
+                    let chain = cli_workspace_chains::find_workspace_chain(
+                        &storage,
+                        &chain,
+                        workspace_scope.as_deref(),
+                    )?;
+                    let plan = cli_workspace_chains::plan_workspace_chain(&chain, force)?;
+                    let response = cli_workspace_chains::run_workspace_chain(
+                        &plan,
+                        config_override,
+                        follow.follow,
+                        follow.poll_interval_ms,
+                        follow.timeout_secs,
+                    )?;
+                    if !response.success {
+                        if json_mode {
+                            print_json(&json!({
+                                "ok": false,
+                                "command": "workflow.chain.run",
+                                "data": response,
+                                "error": {
+                                    "code": "workflow_chain_failed",
+                                    "message": "workspace workflow chain failed",
+                                },
+                            }))?;
+                        } else {
+                            print_json(&response)?;
+                        }
+                        return Err(anyhow::Error::new(CliReportedFailure {
+                            code: "workflow_chain_failed",
+                            message: "workspace workflow chain failed".to_string(),
+                        }));
+                    }
+                    ("workflow.chain.run", serde_json::to_value(response)?)
+                }
+            }
+        }
+    };
+    if json_mode {
+        print_json_command(command_name, &value)
+    } else {
+        print_json(&value)
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppInfo {
     name: String,
     version: String,
+    identity: SelfIdentity,
     config_dir: String,
     config_path: String,
     workspace_path: String,
@@ -2238,7 +2599,9 @@ struct DoctorReport {
     error_count: usize,
     warning_count: usize,
     paths: DoctorPaths,
+    health: HealthSnapshot,
     active_workspace: Option<ProjectWorkspaceCliInfo>,
+    runtime_preflight: Option<ProjectRuntimePreflightResponse>,
     checks: Vec<DoctorCheck>,
 }
 
@@ -2536,6 +2899,9 @@ struct ProjectWorkspaceCliInfo {
     description: Option<String>,
     active: bool,
     system: bool,
+    archived: bool,
+    archived_at: Option<String>,
+    archive_reason: Option<String>,
     workspace_kind: String,
     workspace_type: String,
     metadata: BTreeMap<String, String>,
@@ -2592,12 +2958,39 @@ fn load_cli_config(config_override: Option<&Path>) -> Result<(AppConfig, PathBuf
 
 fn load_cli_effective_config(config_override: Option<&Path>) -> Result<(AppConfig, PathBuf)> {
     let (config, path) = load_cli_config(config_override)?;
-    if config_override.is_some() {
+    if config_override.is_some() && cli_scope::workspace_key().is_none() {
         return Ok((config, path));
     }
     let paths = ensure_default_configs()?;
-    let workspace = load_active_project_workspace(&paths)?;
-    Ok((apply_project_workspace_context(&config, &workspace), path))
+    let workspace = cli_scope::load_workspace(&paths)?;
+    let mut effective = apply_project_workspace_context(&config, &workspace);
+    if config_override.is_none() {
+        let workspaces = load_project_workspaces(&paths.project_workspaces)?;
+        let runtime_source =
+            resolve_config_source_for_workspace(&paths, &workspace, &workspaces, "runtime", None)?;
+        apply_runtime_overrides_for_source(&mut effective, &runtime_source)?;
+    }
+    Ok((effective, path))
+}
+
+fn load_cli_effective_proxy_config() -> Result<ProxyConfig> {
+    let paths = ensure_default_configs()?;
+    let workspaces = load_project_workspaces(&paths.project_workspaces)?;
+    let workspace = cli_scope::load_workspace(&paths)?;
+    let source =
+        resolve_config_source_for_workspace(&paths, &workspace, &workspaces, "proxy", None)?;
+    let path = source
+        .files
+        .proxy
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("配置源没有代理配置文件：{}", source.name))?;
+    let config = load_proxy_config(&path)?;
+    Ok(if source.is_default {
+        filter_proxy_config_for_workspace(config, &workspace)
+    } else {
+        config
+    })
 }
 
 fn load_cli_context(
@@ -2605,13 +2998,22 @@ fn load_cli_context(
 ) -> Result<(AppConfig, ProjectWorkspaceConfig, PathBuf)> {
     let (config, path) = load_cli_config(config_override)?;
     let paths = ensure_default_configs()?;
-    let workspace = load_active_project_workspace(&paths)?;
+    let workspace = cli_scope::load_workspace(&paths)?;
     Ok((config, workspace, path))
 }
 
 fn classify_error(error: &anyhow::Error) -> (&'static str, i32) {
     if let Some(reported) = error.downcast_ref::<CliReportedFailure>() {
         return (reported.code, 1);
+    }
+    if error
+        .downcast_ref::<rdevtool_core::jenkins::JenkinsCrumbError>()
+        .is_some()
+    {
+        return ("jenkins_crumb_failed", 1);
+    }
+    if error.downcast_ref::<ReplayBranchConflict>().is_some() {
+        return ("replay_branch_conflict", 2);
     }
     let message = error.to_string().to_lowercase();
     if message.contains("not found")
@@ -2621,6 +3023,7 @@ fn classify_error(error: &anyhow::Error) -> (&'static str, i32) {
     {
         ("missing_resource", 3)
     } else if message.contains("unsupported")
+        || message.contains("不支持")
         || message.contains("not implemented")
         || message.contains("not configured")
         || message.contains("precondition")
@@ -2664,7 +3067,30 @@ fn emit_parse_error(error: &clap::Error, json_mode: bool) {
 fn emit_cli_error(error: &anyhow::Error, json_mode: bool) {
     if json_mode {
         let (code, _) = classify_error(error);
-        let _ = print_json_error(code, &error.to_string());
+        if let Some(crumb) = error.downcast_ref::<rdevtool_core::jenkins::JenkinsCrumbError>() {
+            let _ = print_json_error_with_details(
+                code,
+                &error.to_string(),
+                json!({
+                    "retryable": crumb.retryable,
+                    "attempts": crumb.attempts,
+                    "sideEffectOccurred": crumb.side_effect_occurred,
+                }),
+            );
+        } else if let Some(conflict) = error.downcast_ref::<ReplayBranchConflict>() {
+            let _ = print_json_error_with_details(
+                code,
+                &error.to_string(),
+                json!({
+                    "structuredBranch": conflict.structured_branch,
+                    "rawBranches": conflict.raw_branches,
+                    "alternativeCommands": conflict.alternative_commands,
+                    "sideEffectOccurred": false,
+                }),
+            );
+        } else {
+            let _ = print_json_error(code, &error.to_string());
+        }
     } else {
         eprintln!("{error}");
     }
@@ -2700,6 +3126,7 @@ fn show_info(config: &AppConfig, config_path: &std::path::Path, json_mode: bool)
     let info = AppInfo {
         name: "rDevTool".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        identity: collect_self_identity(),
         config_dir: default_config_dir().display().to_string(),
         config_path: config_path.display().to_string(),
         workspace_path: default_workspace_path().display().to_string(),
@@ -2752,8 +3179,14 @@ fn run_capabilities(json_mode: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_doctor(config_override: Option<&Path>, json_mode: bool) -> Result<()> {
-    let report = build_doctor_report(config_override)?;
+fn run_doctor(
+    config_override: Option<&Path>,
+    project: Option<&str>,
+    debug_profile: Option<String>,
+    runtime_profile: Option<String>,
+    json_mode: bool,
+) -> Result<()> {
+    let report = build_doctor_report(config_override, project, debug_profile, runtime_profile)?;
     if json_mode {
         return print_json_command("doctor", &report);
     }
@@ -2785,9 +3218,15 @@ fn run_context(
     Ok(())
 }
 
-fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
+fn build_doctor_report(
+    config_override: Option<&Path>,
+    project: Option<&str>,
+    debug_profile: Option<String>,
+    runtime_profile: Option<String>,
+) -> Result<DoctorReport> {
     let paths = ensure_default_configs()?;
     let mut checks = Vec::new();
+    let health = collect_health_snapshot();
     let mut active_workspace = None;
     let mut active_workspace_config = None;
     let mut app_workspace_config = None;
@@ -2795,7 +3234,7 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
     let mut config_for_workspace = None;
     let mut known_workspace_keys = BTreeSet::new();
 
-    let config_result = load_cli_config(config_override);
+    let config_result = load_cli_effective_config(config_override);
     let config_path = config_result
         .as_ref()
         .map(|(_, path)| path.clone())
@@ -2839,28 +3278,45 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
 
     match load_workspace_config(&paths.workspace) {
         Ok(workspace_config) => {
-            let active_key = active_project_workspace_key(&workspace_config);
+            let configured_active_key = active_project_workspace_key(&workspace_config);
+            let effective_key =
+                cli_scope::workspace_key().unwrap_or_else(|| configured_active_key.clone());
             app_workspace_config = Some(workspace_config.clone());
             push_check(
                 &mut checks,
                 DoctorStatus::Ok,
                 "workspace_preferences",
-                format!("active workspace is {active_key}"),
+                if effective_key == configured_active_key {
+                    format!("active workspace is {configured_active_key}")
+                } else {
+                    format!(
+                        "CLI scope is {effective_key}; app active workspace is {configured_active_key}"
+                    )
+                },
                 Some(paths.workspace.display().to_string()),
             );
-            match load_project_workspaces(&paths.project_workspaces) {
-                Ok(workspaces) => {
+            match load_all_project_workspaces(&paths.project_workspaces) {
+                Ok(all_workspaces) => {
+                    let workspaces = all_workspaces
+                        .iter()
+                        .filter(|workspace| !workspace.is_archived())
+                        .cloned()
+                        .collect::<Vec<_>>();
                     let workspace_count = workspaces.len();
+                    let archived_count = all_workspaces.len().saturating_sub(workspace_count);
                     known_workspace_keys = workspaces
                         .iter()
                         .map(|workspace| workspace.key.clone())
                         .collect();
-                    config_source_workspaces = workspaces;
+                    config_source_workspaces = all_workspaces;
                     push_check(
                         &mut checks,
                         DoctorStatus::Ok,
                         "workspace_catalog",
-                        format!("loaded {} workspaces", workspace_count),
+                        format!(
+                            "loaded {} workspaces and {} archived workspaces",
+                            workspace_count, archived_count
+                        ),
                         Some(paths.project_workspaces.display().to_string()),
                     );
                 }
@@ -2872,14 +3328,14 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
                     Some(error.to_string()),
                 ),
             }
-            match load_active_project_workspace(&paths) {
+            match cli_scope::load_workspace(&paths) {
                 Ok(workspace) => {
                     if let Some(config) = &config_for_workspace {
                         check_workspace_scope(&mut checks, &workspace, config);
                         active_workspace = Some(project_workspace_cli_info(
                             workspace.clone(),
                             config,
-                            &active_key,
+                            &effective_key,
                         ));
                     }
                     check_navigation_config(&mut checks, &workspace);
@@ -2914,6 +3370,86 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
     check_proxy_config(&mut checks, &known_workspace_keys, &active_proxy_path);
     check_storage(&mut checks);
     check_web_actions(&mut checks);
+    push_check(
+        &mut checks,
+        DoctorStatus::Ok,
+        "self_identity",
+        format!(
+            "{} {} ({})",
+            health.identity.version,
+            health.identity.install_kind,
+            health.identity.executable_path.display()
+        ),
+        health
+            .identity
+            .build_commit
+            .as_deref()
+            .map(|commit| format!("build commit {commit}")),
+    );
+    for risk in &health.risks {
+        push_check(
+            &mut checks,
+            if risk.severity == "error" {
+                DoctorStatus::Error
+            } else {
+                DoctorStatus::Warning
+            },
+            &risk.code,
+            &risk.summary,
+            Some(risk.detail.clone()),
+        );
+    }
+    let runtime_preflight =
+        match (project, config_for_workspace.as_ref()) {
+            (Some(project), Some(config)) => {
+                let options = ProjectRuntimeLaunchOptions {
+                    debug_profile,
+                    runtime_profile,
+                    ..ProjectRuntimeLaunchOptions::default()
+                };
+                match project_runtime_preflight_with_options(config, project, &options) {
+                    Ok(mut response) => {
+                        if let Ok(proxy_config) = load_cli_effective_proxy_config() {
+                            rdevtool_core::runtime::enrich_project_runtime_preflight_proxy_topology(
+                            config,
+                            &proxy_config,
+                            project,
+                            &options,
+                            &mut response,
+                        )
+                        .map_err(anyhow::Error::msg)?;
+                        }
+                        for check in response.checks.iter().filter(|check| {
+                            matches!(check.status_key.as_str(), "warning" | "error")
+                        }) {
+                            push_check(
+                                &mut checks,
+                                if check.status_key == "error" {
+                                    DoctorStatus::Error
+                                } else {
+                                    DoctorStatus::Warning
+                                },
+                                &format!("runtime.{}", check.key),
+                                &check.title,
+                                Some(check.detail.clone()),
+                            );
+                        }
+                        Some(response)
+                    }
+                    Err(error) => {
+                        push_check(
+                            &mut checks,
+                            DoctorStatus::Error,
+                            "runtime_preflight",
+                            format!("failed to inspect project runtime: {project}"),
+                            Some(error),
+                        );
+                        None
+                    }
+                }
+            }
+            _ => None,
+        };
 
     let error_count = checks
         .iter()
@@ -2936,7 +3472,9 @@ fn build_doctor_report(config_override: Option<&Path>) -> Result<DoctorReport> {
         error_count,
         warning_count,
         paths: doctor_paths,
+        health,
         active_workspace,
+        runtime_preflight,
         checks,
     })
 }
@@ -3348,13 +3886,13 @@ mod tests {
     use super::{
         AgentCommands, AgentContextPresetArg, ArtifactCommands, BuildCommands, Cli,
         CliReportedFailure, Commands, ConfigSourceCommands, GitCommands, HistoryCommands,
-        HistoryOperationCommands, ProjectCommands, ProjectDebugProfilePatch, ProxyDaemonStatus,
-        RuntimeCommands, RuntimeWaitUntilArg, WorkspaceCommands, WorkspaceCopyModeArg,
-        add_project_debug_profile, classify_error, cli_branch_task_history_entry_with_id,
-        delete_project_debug_profile, finish_branch_task_command, is_terminal_deploy_state,
-        proxy_event_confirms_match, proxy_listener_is_managed, proxy_started_stage,
-        proxy_verification_confirmed, resolve_project_runtime_lookup_cwd,
-        update_project_debug_profile,
+        HistoryOperationCommands, ProjectCommands, ProjectDebugProfilePatch, PromoteCommands,
+        ProxyDaemonStatus, RuntimeCommands, RuntimeWaitUntilArg, WorkflowChainCommands,
+        WorkflowCommands, WorkspaceCommands, WorkspaceCopyModeArg, add_project_debug_profile,
+        classify_error, cli_branch_task_history_entry_with_id, delete_project_debug_profile,
+        finish_branch_task_command, is_terminal_deploy_state, proxy_event_confirms_match,
+        proxy_listener_is_managed, proxy_started_stage, proxy_verification_confirmed,
+        resolve_project_runtime_lookup_cwd, update_project_debug_profile,
     };
     use clap::Parser;
     use rdevtool_core::config::{
@@ -3738,6 +4276,260 @@ mod tests {
                 if follow.follow
                     && follow.poll_interval_ms == Some(750)
                     && follow.timeout_secs == Some(120)
+        ));
+    }
+
+    #[test]
+    fn parses_compact_and_filtered_build_output_options() {
+        let run = parse_build_command(&["run", "demo", "--compact"]);
+        assert!(matches!(run, BuildCommands::Run { compact: true, .. }));
+
+        let status = parse_build_command(&[
+            "status",
+            "--build-url",
+            "https://jenkins/job/demo/42/",
+            "--fields",
+            "state,url,commit",
+        ]);
+        assert!(matches!(
+            status,
+            BuildCommands::Status { fields, .. }
+                if matches!(
+                    fields.as_slice(),
+                    [
+                        super::BuildStatusField::State,
+                        super::BuildStatusField::Url,
+                        super::BuildStatusField::Commit
+                    ]
+                )
+        ));
+
+        let history =
+            parse_build_command(&["history", "--project", "demo", "--env", "dc2", "--latest"]);
+        assert!(matches!(
+            history,
+            BuildCommands::History {
+                project: Some(project),
+                env: Some(env),
+                latest: true,
+                ..
+            } if project == "demo" && env == "dc2"
+        ));
+    }
+
+    #[test]
+    fn parses_compact_workspace_list() {
+        assert!(matches!(
+            parse_workspace_command(&["list", "--compact"]),
+            WorkspaceCommands::List { compact: true, .. }
+        ));
+        assert!(matches!(
+            parse_workspace_command(&["list", "--archived"]),
+            WorkspaceCommands::List {
+                archived: true,
+                all: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_workspace_archive_and_restore_commands() {
+        assert!(matches!(
+            parse_workspace_command(&[
+                "archive",
+                "feature-a",
+                "--reason",
+                "shipped",
+                "--stop-running"
+            ]),
+            WorkspaceCommands::Archive {
+                workspace,
+                reason: Some(reason),
+                stop_running: true,
+            } if workspace == "feature-a" && reason == "shipped"
+        ));
+        assert!(matches!(
+            parse_workspace_command(&["restore", "feature-a"]),
+            WorkspaceCommands::Restore { workspace } if workspace == "feature-a"
+        ));
+    }
+
+    #[test]
+    fn parses_command_scoped_workspace_before_project_command() {
+        let cli = Cli::try_parse_from([
+            "rdevtool",
+            "--workspace",
+            "feature-a",
+            "build",
+            "history",
+            "--latest",
+        ])
+        .expect("parse command-scoped workspace");
+
+        assert_eq!(cli.workspace_scope.as_deref(), Some("feature-a"));
+        assert!(matches!(
+            cli.command,
+            Commands::Build {
+                command: BuildCommands::History { latest: true, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn parses_promote_plan_and_followed_run_commands() {
+        let plan = Cli::try_parse_from([
+            "rdevtool",
+            "workflow",
+            "promote",
+            "plan",
+            "--project",
+            "admin",
+            "--source",
+            "feature/a",
+            "--target",
+            "env-dc2",
+            "--deploy-history-id",
+            "build:build-0123456789ab",
+            "--message",
+            "feat: promote",
+            "--path",
+            "src/a.ts",
+        ])
+        .expect("parse promote plan");
+        assert!(matches!(
+            plan.command,
+            Commands::Workflow {
+                command: WorkflowCommands::Promote {
+                    command: PromoteCommands::Plan { .. }
+                }
+            }
+        ));
+
+        let run = Cli::try_parse_from([
+            "rdevtool",
+            "workflow",
+            "promote",
+            "run",
+            "--plan-hash",
+            "promote-0123456789ab",
+            "--follow",
+            "--timeout-secs",
+            "900",
+        ])
+        .expect("parse promote run");
+        assert!(matches!(
+            run.command,
+            Commands::Workflow {
+                command: WorkflowCommands::Promote {
+                    command: PromoteCommands::Run { plan_hash, follow }
+                }
+            } if plan_hash == "promote-0123456789ab"
+                && follow.follow
+                && follow.timeout_secs == Some(900)
+        ));
+    }
+
+    #[test]
+    fn parses_workspace_chain_plan_and_followed_run_commands() {
+        let plan = Cli::try_parse_from([
+            "rdevtool",
+            "--workspace",
+            "feature-a",
+            "workflow",
+            "chain",
+            "plan",
+            "delivery",
+        ])
+        .expect("parse workspace chain plan");
+        assert_eq!(plan.workspace_scope.as_deref(), Some("feature-a"));
+        assert!(matches!(
+            plan.command,
+            Commands::Workflow {
+                command: WorkflowCommands::Chain {
+                    command: WorkflowChainCommands::Plan {
+                        chain,
+                        force: false
+                    }
+                }
+            } if chain == "delivery"
+        ));
+
+        let run = Cli::try_parse_from([
+            "rdevtool",
+            "workflow",
+            "chain",
+            "run",
+            "delivery",
+            "--follow",
+            "--poll-interval-ms",
+            "1000",
+            "--timeout-secs",
+            "900",
+        ])
+        .expect("parse workspace chain run");
+        assert!(matches!(
+            run.command,
+            Commands::Workflow {
+                command: WorkflowCommands::Chain {
+                    command: WorkflowChainCommands::Run {
+                        chain,
+                        force: false,
+                        follow
+                    }
+                }
+            } if chain == "delivery"
+                && follow.follow
+                && follow.poll_interval_ms == Some(1000)
+                && follow.timeout_secs == Some(900)
+        ));
+    }
+
+    #[test]
+    fn parses_git_switch_for_workspace_instance_path() {
+        let cli = Cli::try_parse_from([
+            "rdevtool",
+            "git",
+            "switch",
+            "--project",
+            "admin",
+            "--target",
+            "feature/a",
+            "--repo-path",
+            "/tmp/admin",
+        ])
+        .expect("parse workspace instance switch");
+        assert!(matches!(
+            cli.command,
+            Commands::Git {
+                command: GitCommands::Switch {
+                    project,
+                    target_branch,
+                    repo_path: Some(repo_path)
+                }
+            } if project == "admin"
+                && target_branch == "feature/a"
+                && repo_path == "/tmp/admin"
+        ));
+    }
+
+    #[test]
+    fn parses_followed_history_replay() {
+        let cli = Cli::try_parse_from([
+            "rdevtool",
+            "history",
+            "replay-run",
+            "build:42",
+            "--follow",
+            "--timeout-secs",
+            "900",
+        ])
+        .expect("parse followed replay");
+        assert!(matches!(
+            cli.command,
+            Commands::History {
+                command: HistoryCommands::ReplayRun { id, follow }
+            } if id == "build:42" && follow.follow && follow.timeout_secs == Some(900)
         ));
     }
 
@@ -4546,17 +5338,34 @@ fn run_workspace(
     json_mode: bool,
 ) -> Result<()> {
     match command {
-        WorkspaceCommands::List => {
+        WorkspaceCommands::List {
+            compact,
+            archived,
+            all,
+        } => {
             let (config, _) = load_cli_config(config_override)?;
             let paths = ensure_default_configs()?;
             let workspace_config = load_workspace_config(&paths.workspace)?;
             let active_key = active_project_workspace_key(&workspace_config);
-            let workspaces = load_project_workspaces(&paths.project_workspaces)?
+            let workspaces = if archived || all {
+                load_all_project_workspaces(&paths.project_workspaces)?
+            } else {
+                load_project_workspaces(&paths.project_workspaces)?
+            };
+            let workspaces = workspaces
                 .into_iter()
+                .filter(|workspace| !archived || workspace.is_archived())
                 .map(|workspace| project_workspace_cli_info(workspace, &config, &active_key))
                 .collect::<Vec<_>>();
             if json_mode {
-                return print_json_command("workspace.list", &workspaces);
+                return if compact {
+                    print_json_command(
+                        "workspace.list",
+                        &cli_output::compact_workspaces(&workspaces),
+                    )
+                } else {
+                    print_json_command("workspace.list", &workspaces)
+                };
             }
             for workspace in workspaces {
                 let marker = if workspace.active { "*" } else { " " };
@@ -4572,7 +5381,9 @@ fn run_workspace(
             let paths = ensure_default_configs()?;
             let workspace_config = load_workspace_config(&paths.workspace)?;
             let active_key = active_project_workspace_key(&workspace_config);
-            let key = workspace.unwrap_or_else(|| active_key.clone());
+            let key = workspace
+                .or_else(cli_scope::workspace_key)
+                .unwrap_or_else(|| active_key.clone());
             let workspace = load_project_workspace_by_key(&paths.project_workspaces, &key)?;
             let info = project_workspace_cli_info(workspace, &config, &active_key);
             if json_mode {
@@ -4599,7 +5410,7 @@ fn run_workspace(
             let copy_from = if empty {
                 None
             } else {
-                Some(load_active_project_workspace(&paths)?)
+                Some(cli_scope::load_workspace(&paths)?)
             };
             let root_dir = match (root_dir, independent_dir) {
                 (Some(root_dir), _) => Some(normalize_cli_path_buf(root_dir)?),
@@ -4805,6 +5616,13 @@ fn run_workspace(
             let (config, _) = load_cli_config(config_override)?;
             let paths = ensure_default_configs()?;
             let workspace = load_project_workspace_by_key(&paths.project_workspaces, &workspace)?;
+            if workspace.is_archived() {
+                anyhow::bail!(
+                    "workspace is archived: {} (run `rdevtool workspace restore {}` first)",
+                    workspace.key,
+                    workspace.key
+                );
+            }
             let mut app_workspace = load_workspace_config(&paths.workspace)?;
             app_workspace.app.active_workspace = Some(workspace.key.clone());
             save_workspace_config(&paths.workspace, &app_workspace)?;
@@ -4820,6 +5638,97 @@ fn run_workspace(
                 return print_json_command("workspace.use", &info);
             }
             print_project_workspace(&info);
+            Ok(())
+        }
+        WorkspaceCommands::Archive {
+            workspace,
+            reason,
+            stop_running,
+        } => {
+            let (config, _) = load_cli_config(config_override)?;
+            let paths = ensure_default_configs()?;
+            let result =
+                archive_project_workspace(&paths, &config, &workspace, reason, stop_running)?;
+            let info = project_workspace_cli_info(
+                result.workspace.clone(),
+                &config,
+                &result.active_workspace_key,
+            );
+            record_cli_workspace_lifecycle_operation(
+                &result.workspace.key,
+                "archive",
+                "归档工作区",
+                if result.changed {
+                    format!("已归档工作区：{}", result.workspace.name)
+                } else {
+                    format!("工作区已归档：{}", result.workspace.name)
+                },
+                serde_json::to_value(&result).ok(),
+            );
+            if json_mode {
+                return print_json_command(
+                    "workspace.archive",
+                    &json!({
+                        "changed": result.changed,
+                        "activeWorkspaceKey": result.active_workspace_key,
+                        "stoppedItems": result.stopped_items,
+                        "workspace": info,
+                    }),
+                );
+            }
+            println!(
+                "{}: {}",
+                if result.changed {
+                    "archived workspace"
+                } else {
+                    "workspace already archived"
+                },
+                info.key
+            );
+            if !result.stopped_items.is_empty() {
+                println!("stopped       : {}", result.stopped_items.join(", "));
+            }
+            Ok(())
+        }
+        WorkspaceCommands::Restore { workspace } => {
+            let (config, _) = load_cli_config(config_override)?;
+            let paths = ensure_default_configs()?;
+            let result = restore_project_workspace(&paths, &workspace)?;
+            let info = project_workspace_cli_info(
+                result.workspace.clone(),
+                &config,
+                &result.active_workspace_key,
+            );
+            record_cli_workspace_lifecycle_operation(
+                &result.workspace.key,
+                "restore",
+                "恢复工作区",
+                if result.changed {
+                    format!("已恢复工作区：{}", result.workspace.name)
+                } else {
+                    format!("工作区未归档：{}", result.workspace.name)
+                },
+                serde_json::to_value(&result).ok(),
+            );
+            if json_mode {
+                return print_json_command(
+                    "workspace.restore",
+                    &json!({
+                        "changed": result.changed,
+                        "activeWorkspaceKey": result.active_workspace_key,
+                        "workspace": info,
+                    }),
+                );
+            }
+            println!(
+                "{}: {}",
+                if result.changed {
+                    "restored workspace"
+                } else {
+                    "workspace is already open"
+                },
+                info.key
+            );
             Ok(())
         }
         WorkspaceCommands::Scope {
@@ -4868,11 +5777,78 @@ fn run_workspace(
     }
 }
 
+fn run_docs(command: DocsCommands, json_mode: bool) -> Result<()> {
+    match command {
+        DocsCommands::GenerateCli { output, output_dir } => {
+            if let Some(output_dir) = output_dir {
+                fs::create_dir_all(&output_dir)?;
+                let docs = cli_docs::render_cli_domain_docs(Cli::command());
+                let mut index = String::from(
+                    "# rdevtool Generated CLI Reference\n\n\
+Generated from the Clap command definitions. Read only the requested domain.\n\n",
+                );
+                for doc in &docs {
+                    fs::write(output_dir.join(&doc.filename), &doc.markdown)?;
+                    index.push_str(&format!("- [{}]({})\n", doc.command, doc.filename));
+                }
+                fs::write(output_dir.join("index.md"), index)?;
+                let result = json!({
+                    "outputDir": normalize_cli_path(output_dir)?,
+                    "files": docs.len() + 1,
+                });
+                return if json_mode {
+                    print_json_command("docs.generate-cli", &result)
+                } else {
+                    println!(
+                        "generated CLI reference directory: {}",
+                        result["outputDir"].as_str().unwrap_or("")
+                    );
+                    Ok(())
+                };
+            }
+            let markdown = cli_docs::render_cli_markdown(Cli::command());
+            if let Some(output) = output {
+                if let Some(parent) = output.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                fs::write(&output, &markdown)?;
+                let result = json!({
+                    "output": normalize_cli_path(output)?,
+                    "bytes": markdown.len(),
+                });
+                if json_mode {
+                    print_json_command("docs.generate-cli", &result)
+                } else {
+                    println!(
+                        "generated CLI reference: {}",
+                        result["output"].as_str().unwrap_or("")
+                    );
+                    Ok(())
+                }
+            } else if json_mode {
+                print_json_command("docs.generate-cli", &json!({ "markdown": markdown }))
+            } else {
+                print!("{markdown}");
+                Ok(())
+            }
+        }
+    }
+}
+
 fn project_workspace_cli_info(
     workspace: ProjectWorkspaceConfig,
     config: &AppConfig,
     active_key: &str,
 ) -> ProjectWorkspaceCliInfo {
+    let archived = workspace.is_archived();
+    let archived_at = workspace
+        .archive
+        .as_ref()
+        .map(|archive| archive.archived_at.clone());
+    let archive_reason = workspace
+        .archive
+        .as_ref()
+        .and_then(|archive| archive.reason.clone());
     let workspace_kind = if workspace.is_system() {
         "global"
     } else if workspace.root_dir.is_some() {
@@ -4890,6 +5866,9 @@ fn project_workspace_cli_info(
     ProjectWorkspaceCliInfo {
         active: workspace.key == active_key,
         system: workspace.is_system(),
+        archived,
+        archived_at,
+        archive_reason,
         workspace_kind,
         workspace_type: workspace.workspace_type.clone(),
         metadata: workspace.metadata.clone(),
@@ -4951,26 +5930,48 @@ fn project_workspace_cli_info(
 }
 
 fn resolve_workspace_cli_key(paths: &ConfigPaths, workspace: Option<String>) -> Result<String> {
-    match workspace.and_then(|value| {
-        let value = value.trim().to_string();
-        (!value.is_empty()).then_some(value)
-    }) {
-        Some(key) => Ok(key),
-        None => Ok(active_project_workspace_key(&load_workspace_config(
-            &paths.workspace,
-        )?)),
-    }
+    cli_scope::resolve_workspace_key(paths, workspace)
 }
 
 fn record_cli_workspace_operation(event: WorkspaceOperationWorklogEvent) {
     let result = (|| {
         let paths = ensure_default_configs()?;
-        let workspace = load_active_project_workspace(&paths)?;
+        let workspace = cli_scope::load_workspace(&paths)?;
         append_workspace_operation_worklog(&paths, &workspace.key, event)?;
         Ok::<(), anyhow::Error>(())
     })();
     if let Err(error) = result {
         eprintln!("warning: failed to record workspace worklog: {error}");
+    }
+}
+
+fn record_cli_workspace_lifecycle_operation(
+    workspace_key: &str,
+    action: &str,
+    title: &str,
+    summary: String,
+    payload: Option<serde_json::Value>,
+) {
+    let result = (|| {
+        let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+        let event = lifecycle_operation_event(
+            operation_event_id(None, OperationEventOrigin::Cli, action),
+            OperationEventOrigin::Cli,
+            workspace_key.to_string(),
+            "workspace",
+            action,
+            OperationEventState::Success,
+            title,
+            &summary,
+            "",
+            None,
+            None,
+            payload,
+        );
+        save_cli_operation_event(&storage, event).map_err(anyhow::Error::msg)
+    })();
+    if let Err(error) = result {
+        eprintln!("warning: failed to record workspace {action} event: {error}");
     }
 }
 
@@ -4988,7 +5989,7 @@ fn record_cli_lifecycle_operation(
 ) {
     let result = (|| {
         let paths = ensure_default_configs()?;
-        let workspace = load_active_project_workspace(&paths)?;
+        let workspace = cli_scope::load_workspace(&paths)?;
         let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
         let event = lifecycle_operation_event(
             operation_event_id(None, OperationEventOrigin::Cli, action),
@@ -5004,7 +6005,7 @@ fn record_cli_lifecycle_operation(
             project_name,
             payload,
         );
-        save_operation_event(&storage, &event).map_err(anyhow::Error::msg)
+        save_cli_operation_event(&storage, event).map_err(anyhow::Error::msg)
     })();
     if let Err(error) = result {
         eprintln!("warning: failed to record {domain} operation event: {error}");
@@ -5045,23 +6046,29 @@ fn runtime_operation_payload<T: Serialize>(
     payload
 }
 
-fn record_cli_link_operation(action: &str, link_key: &str, result: &Result<LinkExecutionReport>) {
+fn record_cli_link_operation(
+    action: &str,
+    workspace_key: &str,
+    link_key: &str,
+    source_id: Option<&str>,
+    result: &Result<LinkExecutionReport>,
+) {
     let record_result = (|| {
-        let paths = ensure_default_configs()?;
-        let workspace = load_active_project_workspace(&paths)?;
         let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
         let error = result.as_ref().err().map(ToString::to_string);
         let event = link_operation_event(
             operation_event_id(None, OperationEventOrigin::Cli, &format!("link-{action}")),
             OperationEventOrigin::Cli,
-            workspace.key,
+            workspace_key.to_string(),
             action,
             link_key,
+            source_id,
+            None,
             None,
             result.as_ref().ok(),
             error.as_deref(),
         );
-        save_operation_event(&storage, &event).map_err(anyhow::Error::msg)
+        save_cli_operation_event(&storage, event).map_err(anyhow::Error::msg)
     })();
     if let Err(error) = record_result {
         eprintln!("warning: failed to record link operation event: {error}");
@@ -5096,7 +6103,7 @@ fn record_cli_branch_task_artifacts(
 ) {
     let result = (|| {
         let paths = ensure_default_configs()?;
-        let workspace = load_active_project_workspace(&paths)?;
+        let workspace = cli_scope::load_workspace(&paths)?;
         let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
         let event_id = operation_event_id(None, OperationEventOrigin::Cli, action_key);
         let mut related_history_keys = Vec::new();
@@ -5152,7 +6159,7 @@ fn record_cli_branch_task_artifacts(
                 payload.insert("replay".to_string(), replay.clone());
             }
         }
-        save_operation_event(&storage, &event).map_err(anyhow::Error::msg)?;
+        save_cli_operation_event(&storage, event).map_err(anyhow::Error::msg)?;
         Ok::<(), anyhow::Error>(())
     })();
     if let Err(error) = result {
@@ -5297,9 +6304,10 @@ fn build_operation_title(action: &str) -> &'static str {
     }
 }
 
-fn persist_cli_deploy_result(result: &BuildTriggerResponse, event_id: &str) -> Result<()> {
+fn persist_cli_deploy_result(result: &BuildTriggerResponse, event_id: &str) -> Result<String> {
     let workspace = active_history_workspace_cli()?;
     let request = build_history_request(&workspace, result, event_id);
+    let history_key = request.history_key.clone();
     let worklog_event = deploy_history_worklog_event(&request);
     let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
     let event = build_operation_event(
@@ -5313,11 +6321,11 @@ fn persist_cli_deploy_result(result: &BuildTriggerResponse, event_id: &str) -> R
     storage
         .save_deploy_history(request)
         .map_err(anyhow::Error::msg)?;
-    save_operation_event(&storage, &event).map_err(anyhow::Error::msg)?;
+    save_cli_operation_event(&storage, event).map_err(anyhow::Error::msg)?;
     if let Some(event) = worklog_event {
         record_cli_workspace_operation(event);
     }
-    Ok(())
+    Ok(history_key)
 }
 
 fn persist_cli_deploy_status(
@@ -5348,7 +6356,16 @@ fn persist_cli_deploy_status(
     Ok(())
 }
 
-fn execute_cli_deploy(config: &AppConfig, request: &DeployRequest) -> Result<BuildTriggerResponse> {
+struct CliDeployExecution {
+    result: BuildTriggerResponse,
+    operation_id: String,
+    history_key: String,
+}
+
+fn execute_cli_deploy_with_metadata(
+    config: &AppConfig,
+    request: &DeployRequest,
+) -> Result<CliDeployExecution> {
     let project_key = request.project.clone();
     let project_name = config
         .find_project(&project_key)
@@ -5360,10 +6377,18 @@ fn execute_cli_deploy(config: &AppConfig, request: &DeployRequest) -> Result<Bui
         .map(|plan| plan.action_kind);
     match core::trigger_deploy(config, request) {
         Ok(result) => {
-            if let Err(error) = persist_cli_deploy_result(&result, &event_id) {
-                eprintln!("warning: failed to save deploy history: {error}");
-            }
-            Ok(result)
+            let history_key = match persist_cli_deploy_result(&result, &event_id) {
+                Ok(history_key) => history_key,
+                Err(error) => {
+                    eprintln!("warning: failed to save deploy history: {error}");
+                    rdevtool_core::history_id::from_seed("build", &event_id)
+                }
+            };
+            Ok(CliDeployExecution {
+                result,
+                operation_id: event_id,
+                history_key,
+            })
         }
         Err(error) => {
             let action = planned_action.as_deref().unwrap_or("build");
@@ -5380,7 +6405,7 @@ fn execute_cli_deploy(config: &AppConfig, request: &DeployRequest) -> Result<Bui
                     request,
                     &error.to_string(),
                 );
-                save_operation_event(&storage, &event).map_err(anyhow::Error::msg)
+                save_cli_operation_event(&storage, event).map_err(anyhow::Error::msg)
             })();
             if let Err(save_error) = persistence_result {
                 eprintln!("warning: failed to save build failure event: {save_error}");
@@ -5397,6 +6422,10 @@ fn execute_cli_deploy(config: &AppConfig, request: &DeployRequest) -> Result<Bui
     }
 }
 
+fn execute_cli_deploy(config: &AppConfig, request: &DeployRequest) -> Result<BuildTriggerResponse> {
+    execute_cli_deploy_with_metadata(config, request).map(|execution| execution.result)
+}
+
 fn merge_history_request(
     workspace: &ProjectWorkspaceConfig,
     response: &MergeResponse,
@@ -5407,7 +6436,7 @@ fn merge_history_request(
         committed_at: value.committed_at.clone(),
     };
     SaveMergeHistoryRequest {
-        history_key: format!("cli-merge-{}", uuid::Uuid::new_v4()),
+        history_key: rdevtool_core::history_id::new("merge"),
         workspace_key: Some(workspace.key.clone()),
         project_instance_path: workspace
             .project_instance_path(&response.project_key)
@@ -5640,6 +6669,13 @@ fn run_workspace_scope(
     let key = workspace_key.unwrap_or_else(|| active_key.clone());
     let mut workspace = load_project_workspace_by_key(&paths.project_workspaces, &key)?;
 
+    if workspace.is_archived() && update.has_changes() {
+        anyhow::bail!(
+            "workspace is archived: {} (run `rdevtool workspace restore {}` first)",
+            workspace.key,
+            workspace.key
+        );
+    }
     if workspace.is_system() && update.has_changes() {
         anyhow::bail!("system workspace is global and cannot be scoped");
     }
@@ -7892,22 +8928,10 @@ fn trigger_build_command_with_follow(
     branch: Option<String>,
     extra_params: Vec<String>,
     follow: BuildFollowOptions,
+    compact: bool,
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
-    if !follow.follow {
-        return trigger_deploy_command(
-            config,
-            project,
-            target,
-            env,
-            branch,
-            extra_params,
-            json_mode,
-            command_name,
-        );
-    }
-
     let request = DeployRequest {
         project,
         target,
@@ -7917,9 +8941,31 @@ fn trigger_build_command_with_follow(
         extra_params: parse_extra_params_args(extra_params)?,
         params: BTreeMap::new(),
     };
-    let trigger = execute_cli_deploy(config, &request)?;
-    if !json_mode {
+    let execution = execute_cli_deploy_with_metadata(config, &request)?;
+    let trigger = &execution.result;
+    if !json_mode && !compact {
         print_trigger_result(&trigger);
+    }
+
+    if !follow.follow {
+        if compact {
+            let value = cli_output::compact_build_execution(
+                trigger,
+                &execution.operation_id,
+                &execution.history_key,
+                None,
+            );
+            return if json_mode {
+                print_json_command(command_name, &value)
+            } else {
+                print_compact_build_execution(&value)
+            };
+        }
+        return if json_mode {
+            print_json_command(command_name, trigger)
+        } else {
+            Ok(())
+        };
     }
 
     let outcome = if is_terminal_deploy_state(&trigger.state_key) {
@@ -7934,15 +8980,28 @@ fn trigger_build_command_with_follow(
             trigger.queue_url.clone(),
             trigger.build_url.clone(),
             follow,
-            json_mode,
+            json_mode || compact,
         )?
     };
 
+    if compact {
+        let value = cli_output::compact_build_execution(
+            trigger,
+            &execution.operation_id,
+            &execution.history_key,
+            Some(&outcome.status),
+        );
+        return if json_mode {
+            print_json_command(command_name, &value)
+        } else {
+            print_compact_build_execution(&value)
+        };
+    }
     if json_mode {
         return print_json_command(
             command_name,
             &BuildFollowResponse {
-                trigger,
+                trigger: execution.result,
                 final_status: outcome.status,
                 polls: outcome.polls,
                 elapsed_ms: outcome.elapsed_ms,
@@ -7959,20 +9018,50 @@ fn show_build_status_command(
     queue_url: Option<String>,
     build_url: Option<String>,
     follow: BuildFollowOptions,
+    fields: Vec<BuildStatusField>,
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
-    if !follow.follow {
+    if !follow.follow && fields.is_empty() {
         return show_status_command(config, queue_url, build_url, json_mode, command_name);
     }
 
-    let outcome = follow_build_status(config, queue_url, build_url, follow, json_mode)?;
-    if json_mode {
-        return print_json_command(command_name, &outcome.status);
+    let outcome = if follow.follow {
+        Some(follow_build_status(
+            config,
+            queue_url.clone(),
+            build_url.clone(),
+            follow,
+            json_mode,
+        )?)
+    } else {
+        None
+    };
+    let single_status;
+    let status = if let Some(outcome) = outcome.as_ref() {
+        &outcome.status
+    } else {
+        single_status = refresh_status_and_persist(config, queue_url, build_url)?;
+        &single_status
+    };
+    if !fields.is_empty() {
+        let projected = cli_output::project_build_status(&status, &fields);
+        return if json_mode {
+            print_json_command(command_name, &projected)
+        } else {
+            print_projected_build_status(&projected)
+        };
     }
-    println!("follow polls  : {}", outcome.polls);
-    println!("follow elapsed: {}ms", outcome.elapsed_ms);
-    Ok(())
+    if json_mode {
+        print_json_command(command_name, status)
+    } else if let Some(outcome) = outcome {
+        println!("follow polls  : {}", outcome.polls);
+        println!("follow elapsed: {}ms", outcome.elapsed_ms);
+        Ok(())
+    } else {
+        print_status(status);
+        Ok(())
+    }
 }
 
 fn follow_build_status(
@@ -8053,6 +9142,12 @@ fn build_status_from_trigger(trigger: &BuildTriggerResponse) -> BuildStatusRespo
         state_key: trigger.state_key.clone(),
         state_label: trigger.state_label.clone(),
         detail: trigger.detail.clone(),
+        commit: trigger
+            .plan
+            .observed
+            .commit
+            .as_ref()
+            .map(|commit| commit.short_hash.clone()),
     }
 }
 
@@ -8092,6 +9187,24 @@ fn print_trigger_result(result: &BuildTriggerResponse) {
     println!("detail        : {}", result.detail);
 }
 
+fn print_compact_build_execution<T: Serialize>(value: &T) -> Result<()> {
+    print_json(value)
+}
+
+fn print_projected_build_status(value: &serde_json::Value) -> Result<()> {
+    let Some(fields) = value.as_object() else {
+        return print_json(value);
+    };
+    for (key, value) in fields {
+        let display = value
+            .as_str()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| value.to_string());
+        println!("{key:<12}: {display}");
+    }
+    Ok(())
+}
+
 fn show_status(
     config: &AppConfig,
     queue_url: Option<String>,
@@ -8108,6 +9221,19 @@ fn show_status_command(
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
+    let status = refresh_status_and_persist(config, queue_url, build_url)?;
+    if json_mode {
+        return print_json_command(command_name, &status);
+    }
+    print_status(&status);
+    Ok(())
+}
+
+fn refresh_status_and_persist(
+    config: &AppConfig,
+    queue_url: Option<String>,
+    build_url: Option<String>,
+) -> Result<BuildStatusResponse> {
     let requested_queue_url = queue_url.clone();
     let requested_build_url = build_url.clone();
     let status = core::refresh_deploy_status(
@@ -8125,11 +9251,7 @@ fn show_status_command(
     ) {
         eprintln!("warning: failed to update deploy history: {error}");
     }
-    if json_mode {
-        return print_json_command(command_name, &status);
-    }
-    print_status(&status);
-    Ok(())
+    Ok(status)
 }
 
 fn run_deploy(config: &AppConfig, command: DeployCommands, json_mode: bool) -> Result<()> {
@@ -8221,6 +9343,7 @@ fn run_build(config: &AppConfig, command: BuildCommands, json_mode: bool) -> Res
             branch,
             extra_params,
             follow,
+            compact,
         }
         | BuildCommands::Trigger {
             project,
@@ -8229,6 +9352,7 @@ fn run_build(config: &AppConfig, command: BuildCommands, json_mode: bool) -> Res
             branch,
             extra_params,
             follow,
+            compact,
         } => trigger_build_command_with_follow(
             config,
             project,
@@ -8237,6 +9361,7 @@ fn run_build(config: &AppConfig, command: BuildCommands, json_mode: bool) -> Res
             branch,
             extra_params,
             follow,
+            compact,
             json_mode,
             "build.run",
         ),
@@ -8244,19 +9369,28 @@ fn run_build(config: &AppConfig, command: BuildCommands, json_mode: bool) -> Res
             queue_url,
             build_url,
             follow,
+            fields,
         } => show_build_status_command(
             config,
             queue_url,
             build_url,
             follow,
+            fields,
             json_mode,
             "build.status",
         ),
-        BuildCommands::History { project, limit } => {
+        BuildCommands::History {
+            project,
+            env,
+            latest,
+            limit,
+        } => {
             let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+            let fetch_limit = if env.is_some() { 500 } else { limit };
             let items = storage
-                .list_deploy_history_filtered(project.as_deref(), limit)
+                .list_deploy_history_filtered(project.as_deref(), fetch_limit)
                 .map_err(anyhow::Error::msg)?;
+            let items = cli_output::filter_build_history(items, env.as_deref(), latest, limit);
             if json_mode {
                 print_json_command("build.history", &items)
             } else {
@@ -8714,7 +9848,15 @@ fn run_git(config: &AppConfig, command: GitCommands, json_mode: bool) -> Result<
         GitCommands::Switch {
             project,
             target_branch,
-        } => run_branch_switch_command(config, project, target_branch, json_mode, "git.switch"),
+            repo_path,
+        } => run_branch_switch_command(
+            config,
+            project,
+            target_branch,
+            repo_path,
+            json_mode,
+            "git.switch",
+        ),
         GitCommands::PushStatus { project, repo_path } => {
             run_push_status_command(config, project, repo_path, json_mode, "git.push-status")
         }
@@ -8873,20 +10015,28 @@ fn run_branch_switch(
     target_branch: String,
     json_mode: bool,
 ) -> Result<()> {
-    run_branch_switch_command(config, project, target_branch, json_mode, "switch-branch")
+    run_branch_switch_command(
+        config,
+        project,
+        target_branch,
+        None,
+        json_mode,
+        "switch-branch",
+    )
 }
 
 fn run_branch_switch_command(
     config: &AppConfig,
     project: String,
     target_branch: String,
+    repo_path: Option<String>,
     json_mode: bool,
     command_name: &str,
 ) -> Result<()> {
     let request = BranchSwitchRequest {
         project,
         target_branch,
-        repo_path: None,
+        repo_path,
     };
     let result = execute_branch_switch(config, &request);
     let replay = cli_branch_replay_request(
@@ -9030,10 +10180,80 @@ fn run_push_branch_command(
     )
 }
 
-fn run_notes(command: NoteCommands, json_mode: bool) -> Result<()> {
-    let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+fn run_notes(config: Option<&AppConfig>, command: NoteCommands, json_mode: bool) -> Result<()> {
     match command {
+        NoteCommands::Path => {
+            let info = notes_info();
+            if json_mode {
+                print_json_command("notes.path", &info)
+            } else {
+                println!("{}", info.notes_dir.display());
+                Ok(())
+            }
+        }
+        NoteCommands::Init => {
+            let result = init_notes()?;
+            if json_mode {
+                print_json_command("notes.init", &result)
+            } else {
+                println!("{}", result.info.notes_dir.display());
+                Ok(())
+            }
+        }
+        NoteCommands::ProjectPath { project } => {
+            let config =
+                config.ok_or_else(|| anyhow::anyhow!("project configuration is required"))?;
+            let project = config.find_project(&project)?;
+            let info = project_notes_info(&project.key, &project.name)?;
+            if json_mode {
+                print_json_command("notes.project-path", &info)
+            } else {
+                println!("{}", info.project_dir.display());
+                Ok(())
+            }
+        }
+        NoteCommands::ProjectInit { project } => {
+            let config =
+                config.ok_or_else(|| anyhow::anyhow!("project configuration is required"))?;
+            let project = config.find_project(&project)?;
+            let result = init_project_notes(&project.key, &project.name)?;
+            if json_mode {
+                print_json_command("notes.project-init", &result)
+            } else {
+                println!("{}", result.info.project_dir.display());
+                Ok(())
+            }
+        }
+        NoteCommands::Index {
+            project,
+            query,
+            limit,
+        } => {
+            let project_key = resolve_notes_project_key(config, project.as_deref())?;
+            let index = search_note_documents(project_key.as_deref(), query.as_deref(), limit)?;
+            if json_mode {
+                print_json_command("notes.index", &index)
+            } else {
+                print_note_file_index(&index);
+                Ok(())
+            }
+        }
+        NoteCommands::FileSearch {
+            query,
+            project,
+            limit,
+        } => {
+            let project_key = resolve_notes_project_key(config, project.as_deref())?;
+            let index = search_note_documents(project_key.as_deref(), Some(&query), limit)?;
+            if json_mode {
+                print_json_command("notes.file-search", &index)
+            } else {
+                print_note_file_index(&index);
+                Ok(())
+            }
+        }
         NoteCommands::List { limit } => {
+            let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
             let notes = storage
                 .search_notes(None, limit)
                 .map_err(anyhow::Error::msg)?;
@@ -9045,6 +10265,7 @@ fn run_notes(command: NoteCommands, json_mode: bool) -> Result<()> {
             }
         }
         NoteCommands::Search { query, limit } => {
+            let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
             let notes = storage
                 .search_notes(Some(&query), limit)
                 .map_err(anyhow::Error::msg)?;
@@ -9056,6 +10277,7 @@ fn run_notes(command: NoteCommands, json_mode: bool) -> Result<()> {
             }
         }
         NoteCommands::Get { id } => {
+            let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
             let note = storage.get_note(&id).map_err(anyhow::Error::msg)?;
             if json_mode {
                 print_json_command("notes.get", &note)
@@ -9070,6 +10292,7 @@ fn run_notes(command: NoteCommands, json_mode: bool) -> Result<()> {
             }
         }
         NoteCommands::Create { title } => {
+            let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
             let note = storage
                 .create_note(title.as_deref())
                 .map_err(anyhow::Error::msg)?;
@@ -9089,6 +10312,7 @@ fn run_notes(command: NoteCommands, json_mode: bool) -> Result<()> {
             tags,
             pinned,
         } => {
+            let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
             let content = resolve_note_content(content, file, stdin)?;
             let note = storage
                 .save_note(SaveNoteRequest {
@@ -9107,6 +10331,7 @@ fn run_notes(command: NoteCommands, json_mode: bool) -> Result<()> {
             }
         }
         NoteCommands::Delete { id } => {
+            let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
             storage.delete_note(&id).map_err(anyhow::Error::msg)?;
             if json_mode {
                 print_json_command("notes.delete", &json!({ "deleted": true, "id": id }))
@@ -9114,6 +10339,34 @@ fn run_notes(command: NoteCommands, json_mode: bool) -> Result<()> {
                 println!("deleted note: {id}");
                 Ok(())
             }
+        }
+    }
+}
+
+fn resolve_notes_project_key(
+    config: Option<&AppConfig>,
+    requested: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(requested) = requested.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let config = config.ok_or_else(|| anyhow::anyhow!("project configuration is required"))?;
+    Ok(Some(config.find_project(requested)?.key.clone()))
+}
+
+fn print_note_file_index(index: &NotesFileIndex) {
+    println!("notes root : {}", index.notes_root.display());
+    println!("scanned    : {}", index.scanned_count);
+    println!("matched    : {}", index.matched_count);
+    for document in &index.documents {
+        println!(
+            "  [{}] {} - {}",
+            document.scope,
+            document.title,
+            document.path.display()
+        );
+        if !document.summary.is_empty() {
+            println!("      {}", document.summary);
         }
     }
 }
@@ -9131,7 +10384,7 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
         }
         NavigationCommands::List { limit } => {
             let paths = ensure_default_configs()?;
-            let workspace = load_active_project_workspace(&paths)?;
+            let workspace = cli_scope::load_workspace(&paths)?;
             let entries = list_navigation_entries_for_workspace(&workspace, limit)?;
             if json_mode {
                 print_json_command("navigation.list", &entries)
@@ -9142,7 +10395,7 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
         }
         NavigationCommands::Search { query, limit } => {
             let paths = ensure_default_configs()?;
-            let workspace = load_active_project_workspace(&paths)?;
+            let workspace = cli_scope::load_workspace(&paths)?;
             let entries = search_navigation_entries_for_workspace(&workspace, Some(&query), limit)?;
             if json_mode {
                 print_json_command("navigation.search", &entries)
@@ -9157,7 +10410,7 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
             query,
         } => {
             let paths = ensure_default_configs()?;
-            let workspace = load_active_project_workspace(&paths)?;
+            let workspace = cli_scope::load_workspace(&paths)?;
             let (matched_category, entry) = find_navigation_entry_for_workspace(
                 &workspace,
                 name.as_deref(),
@@ -9239,7 +10492,7 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
                     print_json_command("navigation.add", &data)
                 } else {
                     print_navigation_entries(&list_navigation_entries_for_workspace(
-                        &load_active_project_workspace(&ensure_default_configs()?)?,
+                        &cli_scope::load_workspace(&ensure_default_configs()?)?,
                         24,
                     )?);
                     Ok(())
@@ -9330,20 +10583,38 @@ fn run_navigation(command: NavigationCommands, json_mode: bool) -> Result<()> {
     }
 }
 
-fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bool) -> Result<()> {
+fn run_link(
+    command: LinkCommands,
+    config_override: Option<&Path>,
+    source_override: Option<&str>,
+    json_mode: bool,
+) -> Result<()> {
     match command {
         LinkCommands::Path => {
-            let path = links_file_path();
+            let context = load_link_storage_cli_context(None, source_override)?;
+            let path = context.links_path.display().to_string();
             if json_mode {
-                print_json_command("link.path", &json!({ "path": path }))
+                print_json_command(
+                    "link.path",
+                    &json!({
+                        "workspaceKey": context.workspace.key,
+                        "source": context.link_source,
+                        "path": path,
+                    }),
+                )
             } else {
                 println!("{path}");
                 Ok(())
             }
         }
         LinkCommands::List => {
-            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
-            let summaries = list_link_summaries(&config, &workspaces, &proxy_config)?;
+            let context = load_link_cli_context(config_override, None, source_override)?;
+            let summaries = list_link_summaries_from_path(
+                &context.links_path,
+                &context.config,
+                &context.workspaces,
+                &context.proxy_config,
+            )?;
             if json_mode {
                 print_json_command("link.list", &summaries)
             } else {
@@ -9351,12 +10622,78 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
                 Ok(())
             }
         }
-        LinkCommands::Show { key } => {
-            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
-            let link = get_link(&key)?;
-            let plan = core_plan_link(&key, &config, &workspaces, &proxy_config)?;
+        LinkCommands::Inspect { key } => {
+            let context = load_link_storage_cli_context(None, source_override)?;
+            let sources = list_config_sources(&context.workspaces)?;
+            let discovery = discover_link_sources(&sources, &key)?;
+            let (link, status, error) = inspect_link_file(&context.links_path, &key);
+            let (plan, plan_error) = if link.is_some() {
+                match load_link_cli_context(config_override, None, source_override)
+                    .and_then(|context| plan_link_for_cli_context(&context, &key))
+                {
+                    Ok(plan) => (Some(plan), None),
+                    Err(error) => (None, Some(error.to_string())),
+                }
+            } else {
+                (None, None)
+            };
+            let data = json!({
+                "key": key,
+                "status": status,
+                "workspaceKey": context.workspace.key,
+                "source": context.link_source,
+                "path": context.links_path,
+                "link": link,
+                "plan": plan,
+                "error": error,
+                "planError": plan_error,
+                "discovery": discovery,
+            });
             if json_mode {
-                print_json_command("link.show", &json!({ "link": link, "plan": plan }))
+                print_json_command("link.inspect", &data)
+            } else {
+                println!("status      : {status}");
+                println!(
+                    "source      : {} ({})",
+                    context.link_source.name, context.link_source.id
+                );
+                println!("path        : {}", context.links_path.display());
+                if let Some(error) = error.as_deref() {
+                    println!("error       : {error}");
+                }
+                if let Some(error) = plan_error.as_deref() {
+                    println!("plan error  : {error}");
+                }
+                if let Some(plan) = plan {
+                    print_link_plan(&plan);
+                } else if discovery.matches.is_empty() {
+                    println!("found in    : none");
+                } else {
+                    println!(
+                        "found in    : {}",
+                        discovery
+                            .matches
+                            .iter()
+                            .map(|item| item.source.id.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                for warning in discovery.warnings {
+                    println!("warning     : {warning}");
+                }
+                Ok(())
+            }
+        }
+        LinkCommands::Show { key } => {
+            let context = load_link_cli_context(config_override, None, source_override)?;
+            let link = get_link_for_cli_context(&context, &key)?;
+            let plan = plan_link_for_cli_context(&context, &key)?;
+            if json_mode {
+                print_json_command(
+                    "link.show",
+                    &json!({ "source": context.link_source, "link": link, "plan": plan }),
+                )
             } else {
                 println!("{} {}", link.key, link.name);
                 if let Some(workspace_key) = link.workspace_key.as_deref() {
@@ -9370,8 +10707,9 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
             }
         }
         LinkCommands::Plan { key } => {
-            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
-            let plan = core_plan_link(&key, &config, &workspaces, &proxy_config)?;
+            let context = load_link_cli_context(config_override, None, source_override)?;
+            get_link_for_cli_context(&context, &key)?;
+            let plan = plan_link_for_cli_context(&context, &key)?;
             if json_mode {
                 print_json_command("link.plan", &plan)
             } else {
@@ -9380,7 +10718,7 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
             }
         }
         LinkCommands::Check { key } => {
-            let report = execute_link_cli(&key, "check", config_override)?;
+            let report = execute_link_cli(&key, "check", config_override, source_override, None)?;
             if json_mode {
                 print_json_command("link.check", &report)
             } else {
@@ -9389,8 +10727,15 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
             }
         }
         LinkCommands::Run { key } => {
-            let result = execute_link_cli(&key, "run", config_override);
-            record_cli_link_operation("run", &key, &result);
+            let workspace_key = current_link_workspace_key()?;
+            let result = execute_link_cli(
+                &key,
+                "run",
+                config_override,
+                source_override,
+                Some(&workspace_key),
+            );
+            record_cli_link_operation("run", &workspace_key, &key, source_override, &result);
             let report = result?;
             if json_mode {
                 print_json_command("link.run", &report)
@@ -9400,8 +10745,15 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
             }
         }
         LinkCommands::Stop { key } => {
-            let result = execute_link_cli(&key, "stop", config_override);
-            record_cli_link_operation("stop", &key, &result);
+            let workspace_key = current_link_workspace_key()?;
+            let result = execute_link_cli(
+                &key,
+                "stop",
+                config_override,
+                source_override,
+                Some(&workspace_key),
+            );
+            record_cli_link_operation("stop", &workspace_key, &key, source_override, &result);
             let report = result?;
             if json_mode {
                 print_json_command("link.stop", &report)
@@ -9417,6 +10769,7 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
             project,
             steps,
         } => {
+            let context = load_link_cli_context(config_override, None, source_override)?;
             let link = LinkConfig {
                 key,
                 name,
@@ -9431,11 +10784,13 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
                     .map(|(index, value)| parse_link_step_cli_arg(value, index))
                     .collect::<Result<Vec<_>>>()?,
             };
-            let link = upsert_link(link)?;
-            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
-            let plan = core_plan_link(&link.key, &config, &workspaces, &proxy_config)?;
+            let link = upsert_link_to_path(&context.links_path, link)?;
+            let plan = plan_link_for_cli_context(&context, &link.key)?;
             if json_mode {
-                print_json_command("link.save", &json!({ "link": link, "plan": plan }))
+                print_json_command(
+                    "link.save",
+                    &json!({ "source": context.link_source, "link": link, "plan": plan }),
+                )
             } else {
                 println!("saved link: {} {}", link.key, link.name);
                 print_link_plan(&plan);
@@ -9443,9 +10798,18 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
             }
         }
         LinkCommands::Delete { key } => {
-            let deleted = core_delete_link(&key)?;
+            let context = load_link_storage_cli_context(None, source_override)?;
+            let deleted = delete_link_from_path(&context.links_path, &key)?;
             if json_mode {
-                print_json_command("link.delete", &json!({ "key": key, "deleted": deleted }))
+                print_json_command(
+                    "link.delete",
+                    &json!({
+                        "key": key,
+                        "deleted": deleted,
+                        "source": context.link_source,
+                        "path": context.links_path,
+                    }),
+                )
             } else {
                 println!(
                     "{} link: {}",
@@ -9453,6 +10817,53 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
                     key
                 );
                 Ok(())
+            }
+        }
+        LinkCommands::Migrate {
+            key,
+            from,
+            to,
+            copy,
+            replace,
+            dry_run,
+        } => {
+            validate_link_migration_source_override(source_override)?;
+            let paths = ensure_default_configs()?;
+            let workspaces = load_project_workspaces(&paths.project_workspaces)?;
+            let source = resolve_link_source_by_id(&workspaces, &from)?;
+            let target = resolve_link_source_by_id(&workspaces, &to)?;
+            let source_path = PathBuf::from(&source.files.links);
+            let target_path = PathBuf::from(&target.files.links);
+            let plan = plan_link_migration(&source_path, &target_path, &key, copy, replace)?;
+            if dry_run {
+                if json_mode {
+                    print_json_command(
+                        "link.migrate-plan",
+                        &json!({ "source": source, "target": target, "plan": plan }),
+                    )
+                } else {
+                    print_link_migration_plan(&source, &target, &plan);
+                    Ok(())
+                }
+            } else {
+                if !plan.can_apply {
+                    anyhow::bail!(
+                        "invalid arguments: Link 迁移计划不可执行：{}",
+                        plan.risks.join("；")
+                    );
+                }
+                let result =
+                    execute_link_migration(&source_path, &target_path, &key, copy, replace)?;
+                if json_mode {
+                    print_json_command(
+                        "link.migrate",
+                        &json!({ "source": source, "target": target, "result": result }),
+                    )
+                } else {
+                    print_link_migration_plan(&source, &target, &result.plan);
+                    println!("applied     : {}", result.applied);
+                    Ok(())
+                }
             }
         }
         LinkCommands::Attach {
@@ -9468,10 +10879,28 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
                 Some(value) => value,
                 None => load_active_project_workspace(&paths)?.key,
             };
-            let result = attach_link_to_workspace(
+            let context = load_link_cli_context(config_override, Some(&workspace_key), None)?;
+            if let Some(source_override) = source_override {
+                let override_context = load_link_cli_context(
+                    config_override,
+                    Some(&workspace_key),
+                    Some(source_override),
+                )?;
+                if override_context.link_source.id != context.link_source.id {
+                    anyhow::bail!(
+                        "不能从临时 Link 配置源附加工作区工具：工作区 {} 的持久化 Link 源是 {}，请求源是 {}；请先使用 config-source use {} --capability link",
+                        workspace_key,
+                        context.link_source.id,
+                        override_context.link_source.id,
+                        override_context.link_source.id,
+                    );
+                }
+            }
+            let result = attach_link_to_workspace_from_path(
                 &paths.project_workspaces,
+                &context.links_path,
                 LinkWorkspaceAttachRequest {
-                    workspace_key,
+                    workspace_key: workspace_key.clone(),
                     link_key: key.clone(),
                     category: Some(category),
                     short_label,
@@ -9479,10 +10908,12 @@ fn run_link(command: LinkCommands, config_override: Option<&Path>, json_mode: bo
                     note,
                 },
             )?;
-            let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
-            let plan = core_plan_link(&key, &config, &workspaces, &proxy_config)?;
+            let plan = plan_link_for_cli_context(&context, &key)?;
             if json_mode {
-                print_json_command("link.attach", &json!({ "result": result, "plan": plan }))
+                print_json_command(
+                    "link.attach",
+                    &json!({ "source": context.link_source, "result": result, "plan": plan }),
+                )
             } else {
                 println!(
                     "{} workspace tool entry: {}/{} -> {}",
@@ -9571,24 +11002,247 @@ fn parse_link_step_cli_arg(value: &str, index: usize) -> Result<LinkStepConfig> 
     Ok(step)
 }
 
-fn load_link_cli_context(
-    config_override: Option<&Path>,
-) -> Result<(AppConfig, Vec<ProjectWorkspaceConfig>, ProxyConfig)> {
-    let (config, _) = load_cli_effective_config(config_override)?;
+fn validate_link_migration_source_override(source_override: Option<&str>) -> Result<()> {
+    if source_override.is_some() {
+        anyhow::bail!(
+            "invalid arguments: link migrate/move 使用 --from 和 --to，不能同时使用 --source"
+        );
+    }
+    Ok(())
+}
+
+fn inspect_link_file(path: &Path, key: &str) -> (Option<LinkConfig>, &'static str, Option<String>) {
+    match load_links_config_from_path(path) {
+        Err(error) => (None, "invalid", Some(error.to_string())),
+        Ok(_) => match get_link_from_path(path, key) {
+            Ok(link) => (Some(link), "ready", None),
+            Err(error) if error.to_string().contains("link not found") => (None, "missing", None),
+            Err(error) => (None, "invalid", Some(error.to_string())),
+        },
+    }
+}
+
+struct LinkStorageCliContext {
+    paths: ConfigPaths,
+    workspace: ProjectWorkspaceConfig,
+    workspaces: Vec<ProjectWorkspaceConfig>,
+    link_source: ConfigSource,
+    links_path: PathBuf,
+}
+
+fn load_link_storage_cli_context(
+    workspace_key: Option<&str>,
+    link_source_override: Option<&str>,
+) -> Result<LinkStorageCliContext> {
     let paths = ensure_default_configs()?;
     let workspaces = load_project_workspaces(&paths.project_workspaces)?;
-    let proxy_config = load_proxy_config(&default_proxy_path())?;
-    Ok((config, workspaces, proxy_config))
+    let workspace = match workspace_key
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(workspace_key) => {
+            load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?
+        }
+        None => cli_scope::load_workspace(&paths)?,
+    };
+    let link_source = resolve_config_source_for_workspace(
+        &paths,
+        &workspace,
+        &workspaces,
+        "link",
+        link_source_override,
+    )?;
+    let links_path = PathBuf::from(&link_source.files.links);
+    Ok(LinkStorageCliContext {
+        paths,
+        workspace,
+        workspaces,
+        link_source,
+        links_path,
+    })
+}
+
+fn current_link_workspace_key() -> Result<String> {
+    let paths = ensure_default_configs()?;
+    Ok(cli_scope::load_workspace(&paths)?.key)
+}
+
+struct LinkCliContext {
+    workspaces: Vec<ProjectWorkspaceConfig>,
+    config: AppConfig,
+    link_source: ConfigSource,
+    proxy_source: ConfigSource,
+    runtime_source: ConfigSourceReference,
+    links_path: PathBuf,
+    proxy_path: PathBuf,
+    proxy_config: ProxyConfig,
+}
+
+fn load_link_cli_context(
+    config_override: Option<&Path>,
+    workspace_key: Option<&str>,
+    link_source_override: Option<&str>,
+) -> Result<LinkCliContext> {
+    let storage = load_link_storage_cli_context(workspace_key, link_source_override)?;
+    let (base_config, config_path) = load_cli_config(config_override)?;
+    let mut config = if config_override.is_some() {
+        base_config
+    } else {
+        apply_project_workspace_context(&base_config, &storage.workspace)
+    };
+    let runtime_source = if config_override.is_none() {
+        let runtime_source = resolve_config_source_for_workspace(
+            &storage.paths,
+            &storage.workspace,
+            &storage.workspaces,
+            "runtime",
+            None,
+        )?;
+        apply_runtime_overrides_for_source(&mut config, &runtime_source)?;
+        ConfigSourceReference {
+            id: runtime_source.id,
+            name: runtime_source.name,
+            kind: runtime_source.kind,
+        }
+    } else {
+        ConfigSourceReference {
+            id: "cli-config-override".to_string(),
+            name: format!("CLI 配置 {}", config_path.display()),
+            kind: "file".to_string(),
+        }
+    };
+    let proxy_source = resolve_config_source_for_workspace(
+        &storage.paths,
+        &storage.workspace,
+        &storage.workspaces,
+        "proxy",
+        None,
+    )?;
+    let proxy_path = proxy_source
+        .files
+        .proxy
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| anyhow::anyhow!("配置源没有代理配置文件：{}", proxy_source.name))?;
+    let proxy_config = load_proxy_config(&proxy_path)?;
+    let proxy_config = if proxy_source.is_default {
+        filter_proxy_config_for_workspace(proxy_config, &storage.workspace)
+    } else {
+        proxy_config
+    };
+    Ok(LinkCliContext {
+        workspaces: storage.workspaces,
+        config,
+        link_source: storage.link_source,
+        proxy_source,
+        runtime_source,
+        links_path: storage.links_path,
+        proxy_path,
+        proxy_config,
+    })
+}
+
+fn link_source_context_for_cli(context: &LinkCliContext) -> LinkSourceContext {
+    LinkSourceContext {
+        link_source_id: context.link_source.id.clone(),
+        link_source_name: context.link_source.name.clone(),
+        proxy_source_id: context.proxy_source.id.clone(),
+        proxy_source_name: context.proxy_source.name.clone(),
+        runtime_source_id: context.runtime_source.id.clone(),
+        runtime_source_name: context.runtime_source.name.clone(),
+        aligned: context.link_source.id == context.proxy_source.id
+            && context.link_source.id == context.runtime_source.id,
+    }
+}
+
+fn plan_link_for_cli_context(
+    context: &LinkCliContext,
+    key: &str,
+) -> Result<rdevtool_core::link::LinkPlan> {
+    let mut plan = plan_link_from_path(
+        &context.links_path,
+        key,
+        &context.config,
+        &context.workspaces,
+        &context.proxy_config,
+    )?;
+    plan.source_context = Some(link_source_context_for_cli(context));
+    Ok(plan)
+}
+
+fn get_link_for_cli_context(context: &LinkCliContext, key: &str) -> Result<LinkConfig> {
+    match get_link_from_path(&context.links_path, key) {
+        Ok(link) => Ok(link),
+        Err(error) if error.to_string().contains("link not found") => {
+            let sources = list_config_sources(&context.workspaces)?;
+            let discovery = discover_link_sources(&sources, key)?;
+            let candidates = discovery
+                .matches
+                .iter()
+                .filter(|item| item.source.id != context.link_source.id)
+                .map(|item| item.source.id.as_str())
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                Err(anyhow::anyhow!(
+                    "Link 配置不存在：{key}（当前源：{}，路径：{}）",
+                    context.link_source.id,
+                    context.links_path.display()
+                ))
+            } else {
+                Err(anyhow::anyhow!(
+                    "Link 配置不存在：{key}（当前源：{}，路径：{}）；在配置源 {} 中发现同名 Link，可先运行 link migrate {key} --from <source> --to {} --dry-run",
+                    context.link_source.id,
+                    context.links_path.display(),
+                    candidates.join(", "),
+                    context.link_source.id,
+                ))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn resolve_link_source_by_id(
+    workspaces: &[ProjectWorkspaceConfig],
+    source_id: &str,
+) -> Result<ConfigSource> {
+    let source = resolve_config_source(Some(source_id), workspaces)?;
+    if !config_source_supports(&source, "link") {
+        anyhow::bail!("配置源不支持 link：{} ({})", source.name, source.id);
+    }
+    Ok(source)
+}
+
+fn print_link_migration_plan(
+    source: &ConfigSource,
+    target: &ConfigSource,
+    plan: &rdevtool_core::link::LinkMigrationPlan,
+) {
+    println!("link        : {}", plan.key);
+    println!("source      : {} ({})", source.name, source.id);
+    println!("target      : {} ({})", target.name, target.id);
+    println!("mode        : {}", plan.mode);
+    println!("source state: {}", plan.source_state);
+    println!("target state: {}", plan.target_state);
+    println!("can apply   : {}", plan.can_apply);
+    if !plan.actions.is_empty() {
+        println!("actions     : {}", plan.actions.join(", "));
+    }
+    for risk in &plan.risks {
+        println!("risk        : {risk}");
+    }
 }
 
 fn execute_link_cli(
     key: &str,
     mode: &str,
     config_override: Option<&Path>,
+    source_override: Option<&str>,
+    workspace_key: Option<&str>,
 ) -> Result<LinkExecutionReport> {
-    let (config, workspaces, proxy_config) = load_link_cli_context(config_override)?;
-    let link = get_link(key)?;
-    let plan = core_plan_link(&link.key, &config, &workspaces, &proxy_config)?;
+    let context = load_link_cli_context(config_override, workspace_key, source_override)?;
+    let link = get_link_for_cli_context(&context, key)?;
+    let plan = plan_link_for_cli_context(&context, &link.key)?;
     let mut warnings = plan.warnings.clone();
     let mut indices = (0..link.steps.len()).collect::<Vec<_>>();
     if mode == "stop" {
@@ -9600,8 +11254,9 @@ fn execute_link_cli(
         let step = &link.steps[index];
         let report = execute_link_step_cli(
             mode,
-            &config,
-            &proxy_config,
+            &context.config,
+            &context.proxy_path,
+            &context.proxy_config,
             &link,
             step,
             plan.steps.get(index),
@@ -9628,6 +11283,7 @@ fn execute_link_cli(
 fn execute_link_step_cli(
     mode: &str,
     config: &AppConfig,
+    proxy_path: &Path,
     proxy_config: &ProxyConfig,
     link: &LinkConfig,
     step: &LinkStepConfig,
@@ -9667,6 +11323,7 @@ fn execute_link_step_cli(
     match mode {
         "check" => check_link_step_cli(
             config,
+            proxy_path,
             proxy_config,
             link,
             step,
@@ -9678,6 +11335,7 @@ fn execute_link_step_cli(
         ),
         "run" => run_link_step_cli(
             config,
+            proxy_path,
             proxy_config,
             link,
             step,
@@ -9687,6 +11345,7 @@ fn execute_link_step_cli(
             planned_summary,
         ),
         "stop" => stop_link_step_cli(
+            proxy_path,
             proxy_config,
             link,
             step,
@@ -9709,6 +11368,7 @@ fn execute_link_step_cli(
 
 fn check_link_step_cli(
     config: &AppConfig,
+    proxy_path: &Path,
     proxy_config: &ProxyConfig,
     link: &LinkConfig,
     step: &LinkStepConfig,
@@ -9759,7 +11419,7 @@ fn check_link_step_cli(
             .and_then(|profile_key| find_proxy_profile_cli(proxy_config, &profile_key))
         {
             Some(profile) => {
-                let runtime_status = proxy_daemon_status(&default_proxy_path(), &profile.id).ok();
+                let runtime_status = proxy_daemon_status(proxy_path, &profile.id).ok();
                 let listening = runtime_status.as_ref().is_some_and(|status| status.running);
                 let managed = runtime_status.as_ref().is_some_and(|status| status.managed);
                 let status = link_proxy_check_status(&step_type, listening, managed);
@@ -9883,6 +11543,7 @@ fn check_link_step_cli(
 
 fn run_link_step_cli(
     config: &AppConfig,
+    proxy_path: &Path,
     proxy_config: &ProxyConfig,
     link: &LinkConfig,
     step: &LinkStepConfig,
@@ -9919,7 +11580,7 @@ fn run_link_step_cli(
                     risks: vec!["代理 profile 不存在，无法启动。".to_string()],
                 };
             };
-            match proxy_daemon_start(&default_proxy_path(), &profile.id) {
+            match proxy_daemon_start(proxy_path, &profile.id) {
                 Ok(status) => LinkExecutionStepReport {
                     id,
                     step_type,
@@ -9997,6 +11658,7 @@ fn run_link_step_cli(
 }
 
 fn stop_link_step_cli(
+    proxy_path: &Path,
     proxy_config: &ProxyConfig,
     link: &LinkConfig,
     step: &LinkStepConfig,
@@ -10020,7 +11682,7 @@ fn stop_link_step_cli(
                     risks: vec!["代理 profile 不存在，无法停止。".to_string()],
                 };
             };
-            match proxy_daemon_stop(&default_proxy_path(), &profile.id) {
+            match proxy_daemon_stop(proxy_path, &profile.id) {
                 Ok(status) => LinkExecutionStepReport {
                     id,
                     step_type,
@@ -10566,9 +12228,9 @@ fn apply_optional_cli_text(target: &mut Option<String>, value: Option<String>) {
 fn run_config_source(command: ConfigSourceCommands, json_mode: bool) -> Result<()> {
     let paths = ensure_default_configs()?;
     let app_workspace = load_workspace_config(&paths.workspace)?;
-    let workspace_key = active_project_workspace_key(&app_workspace);
-    let workspace = load_project_workspace_by_key(&paths.project_workspaces, &workspace_key)?;
-    let workspaces = load_project_workspaces(&paths.project_workspaces)?;
+    let workspace = cli_scope::load_workspace(&paths)?;
+    let workspace_key = workspace.key.clone();
+    let workspaces = load_all_project_workspaces(&paths.project_workspaces)?;
     match command {
         ConfigSourceCommands::List => {
             let sources = list_config_sources(&workspaces)?;
@@ -11532,7 +13194,7 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
             expected_port,
             env,
         } => {
-            let proxy_config = load_proxy_config(&default_proxy_path())?;
+            let proxy_config = load_cli_effective_proxy_config()?;
             let options = ProjectRuntimeLaunchOptions {
                 debug_profile,
                 runtime_profile,
@@ -11565,8 +13227,18 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                 expected_port,
                 env: parse_key_value_map(&env)?,
             };
-            let response = project_runtime_preflight_with_options(config, &project, &options)
+            let mut response = project_runtime_preflight_with_options(config, &project, &options)
                 .map_err(|error| anyhow::anyhow!(error))?;
+            if let Ok(proxy_config) = load_cli_effective_proxy_config() {
+                rdevtool_core::runtime::enrich_project_runtime_preflight_proxy_topology(
+                    config,
+                    &proxy_config,
+                    &project,
+                    &options,
+                    &mut response,
+                )
+                .map_err(anyhow::Error::msg)?;
+            }
             if json_mode {
                 print_json_command(json_command, &response)
             } else {
@@ -12024,18 +13696,23 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
             project,
             kind,
             max_lines,
+            grep,
+            errors_only,
+            case_sensitive,
             clear,
             current,
             run_id,
         } => {
-            if clear && (current || run_id.is_some()) {
-                anyhow::bail!("--clear cannot be combined with --current or --run-id");
+            if clear
+                && (current || run_id.is_some() || grep.is_some() || errors_only || case_sensitive)
+            {
+                anyhow::bail!("--clear cannot be combined with selection or filter options");
             }
             if current && run_id.is_some() {
                 anyhow::bail!("choose only one of --current or --run-id");
             }
             let kind = ProjectRuntimeLogKind::from(kind);
-            let response = if clear {
+            let mut response = if clear {
                 clear_project_runtime_log(config, &project, kind)
             } else {
                 read_project_runtime_log_with_selection(
@@ -12048,6 +13725,14 @@ fn run_runtime(config: &AppConfig, command: RuntimeCommands, json_mode: bool) ->
                 )
             }
             .map_err(|error| anyhow::anyhow!(error))?;
+            if !clear {
+                filter_project_runtime_log(
+                    &mut response,
+                    grep.as_deref(),
+                    errors_only,
+                    case_sensitive,
+                );
+            }
             if json_mode {
                 print_json_command(json_command, &response)
             } else {
@@ -12073,6 +13758,11 @@ fn run_artifacts(
             project,
             kinds,
         } => {
+            let workspace = if all_workspaces {
+                workspace
+            } else {
+                workspace.or_else(cli_scope::workspace_key)
+            };
             let response = managed_artifact_inventory(
                 &config,
                 &paths,
@@ -12097,6 +13787,11 @@ fn run_artifacts(
             kinds,
             artifact_ids,
         } => {
+            let workspace = if all_workspaces {
+                workspace
+            } else {
+                workspace.or_else(cli_scope::workspace_key)
+            };
             let response = managed_artifact_cleanup_plan(
                 &config,
                 &paths,
@@ -12428,6 +14123,13 @@ fn print_runtime_focus(response: &ProjectRuntimeFocusResponse) {
 fn print_runtime_log(response: &ProjectRuntimeLogResponse) {
     println!("log: {}", response.path);
     println!("selection: {}", response.selection);
+    println!("size bytes: {}", response.file_size_bytes);
+    if response.filter.query.is_some() || response.filter.errors_only {
+        println!(
+            "filter: matched {}/{} lines",
+            response.matched_line_count, response.scanned_line_count
+        );
+    }
     println!(
         "ready: {} - {}",
         response.ready_summary.status_label,
@@ -12629,8 +14331,7 @@ fn resolve_web_action_script_content(
 
 fn save_proxy_source_preference_for_active_workspace(source_id: &str) -> Result<()> {
     let paths = ensure_default_configs()?;
-    let app_workspace = load_workspace_config(&paths.workspace)?;
-    let workspace_key = active_project_workspace_key(&app_workspace);
+    let workspace_key = cli_scope::load_workspace(&paths)?.key;
     save_config_source_preference(&paths, &workspace_key, "proxy", source_id)?;
     Ok(())
 }
@@ -12643,8 +14344,8 @@ fn load_proxy_cli_info(
     let paths = ensure_default_configs()?;
     let app_workspace = load_workspace_config(&paths.workspace)?;
     let active_key = active_project_workspace_key(&app_workspace);
-    let workspace = load_active_project_workspace(&paths)?;
-    let workspaces = load_project_workspaces(&paths.project_workspaces)?;
+    let workspace = cli_scope::load_workspace(&paths)?;
+    let workspaces = load_all_project_workspaces(&paths.project_workspaces)?;
     let source_id = requested_source_id
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -13636,7 +15337,7 @@ fn resolve_proxy_workspace_key(workspace: Option<String>, global: bool) -> Resul
         let workspace = load_project_workspace_by_key(&paths.project_workspaces, &workspace)?;
         return Ok((!workspace.is_system()).then_some(workspace.key));
     }
-    let workspace = load_active_project_workspace(&paths)?;
+    let workspace = cli_scope::load_workspace(&paths)?;
     Ok((!workspace.is_system()).then_some(workspace.key))
 }
 
@@ -14106,7 +15807,7 @@ fn proxy_rule_action_label(action: &ProxyRuleAction) -> &'static str {
 
 fn active_history_workspace_cli() -> Result<ProjectWorkspaceConfig> {
     let paths = ensure_default_configs()?;
-    load_active_project_workspace(&paths)
+    cli_scope::load_workspace(&paths)
 }
 
 fn list_deploy_history_for_workspace(
@@ -14217,7 +15918,8 @@ fn find_history_replay_action(storage: &Storage, id: &str) -> Result<ReplayActio
 fn preview_history_replay(config: &AppConfig, action: &ReplayAction) -> Result<serde_json::Value> {
     match action.kind.as_str() {
         "build" => {
-            let request: DeployRequest = serde_json::from_value(action.request.clone())?;
+            let mut request: DeployRequest = serde_json::from_value(action.request.clone())?;
+            normalize_build_replay_request(config, &mut request)?;
             serde_json::to_value(core::build_plan(config, &request)?).map_err(anyhow::Error::from)
         }
         "merge" => {
@@ -14234,13 +15936,47 @@ fn preview_history_replay(config: &AppConfig, action: &ReplayAction) -> Result<s
     }
 }
 
-fn run_history_replay(config: &AppConfig, action: &ReplayAction) -> Result<serde_json::Value> {
+fn run_history_replay(
+    config: &AppConfig,
+    action: &ReplayAction,
+    follow: BuildFollowOptions,
+    json_mode: bool,
+) -> Result<serde_json::Value> {
     match action.kind.as_str() {
         "build" => {
-            let request: DeployRequest = serde_json::from_value(action.request.clone())?;
-            serde_json::to_value(execute_cli_deploy(config, &request)?).map_err(anyhow::Error::from)
+            let mut request: DeployRequest = serde_json::from_value(action.request.clone())?;
+            normalize_build_replay_request(config, &mut request)?;
+            let execution = execute_cli_deploy_with_metadata(config, &request)?;
+            if !follow.follow {
+                return serde_json::to_value(execution.result).map_err(anyhow::Error::from);
+            }
+            let outcome = if is_terminal_deploy_state(&execution.result.state_key) {
+                BuildFollowOutcome {
+                    status: build_status_from_trigger(&execution.result),
+                    polls: 0,
+                    elapsed_ms: 0,
+                }
+            } else {
+                follow_build_status(
+                    config,
+                    execution.result.queue_url.clone(),
+                    execution.result.build_url.clone(),
+                    follow,
+                    json_mode,
+                )?
+            };
+            serde_json::to_value(BuildFollowResponse {
+                trigger: execution.result,
+                final_status: outcome.status,
+                polls: outcome.polls,
+                elapsed_ms: outcome.elapsed_ms,
+            })
+            .map_err(anyhow::Error::from)
         }
         "merge" => {
+            if follow.follow {
+                anyhow::bail!("--follow is only available for build replay actions");
+            }
             let request: MergeRequest = serde_json::from_value(action.request.clone())?;
             let result = core::execute_merge(config, &request);
             record_cli_merge_result(
@@ -14325,8 +16061,16 @@ fn run_history(config: &AppConfig, command: HistoryCommands, json_mode: bool) ->
                 Ok(())
             }
         }
-        HistoryCommands::Build { project, limit } => {
-            let items = list_deploy_history_for_workspace(&storage, project.as_deref(), limit)?;
+        HistoryCommands::Build {
+            project,
+            env,
+            latest,
+            limit,
+        } => {
+            let fetch_limit = if env.is_some() { 500 } else { limit };
+            let items =
+                list_deploy_history_for_workspace(&storage, project.as_deref(), fetch_limit)?;
+            let items = cli_output::filter_build_history(items, env.as_deref(), latest, limit);
             if json_mode {
                 print_json_command("history.build", &items)
             } else {
@@ -14368,9 +16112,9 @@ fn run_history(config: &AppConfig, command: HistoryCommands, json_mode: bool) ->
                 Ok(())
             }
         }
-        HistoryCommands::ReplayRun { id } => {
+        HistoryCommands::ReplayRun { id, follow } => {
             let action = find_history_replay_action(&storage, &id)?;
-            let result = run_history_replay(config, &action)?;
+            let result = run_history_replay(config, &action, follow, json_mode)?;
             let value = HistoryReplayRun { action, result };
             if json_mode {
                 print_json_command("history.replay-run", &value)
@@ -14494,12 +16238,28 @@ fn print_branch_task_json_command(
 }
 
 fn print_json_error(code: &str, message: &str) -> Result<()> {
+    print_json_error_with_details(code, message, serde_json::Value::Null)
+}
+
+fn print_json_error_with_details(
+    code: &str,
+    message: &str,
+    details: serde_json::Value,
+) -> Result<()> {
+    let mut error = serde_json::Map::from_iter([
+        ("code".to_string(), json!(code)),
+        ("message".to_string(), json!(message)),
+    ]);
+    match details {
+        serde_json::Value::Object(details) => error.extend(details),
+        serde_json::Value::Null => {}
+        details => {
+            error.insert("details".to_string(), details);
+        }
+    }
     print_json(&json!({
         "ok": false,
-        "error": {
-            "code": code,
-            "message": message,
-        }
+        "error": error,
     }))
 }
 
@@ -14663,8 +16423,20 @@ fn print_doctor_report(value: &DoctorReport) {
     }
     println!("web actions   : {}", value.paths.web_actions);
     println!("storage       : {}", value.paths.storage);
+    println!(
+        "executable    : {} ({})",
+        value.health.identity.executable_path.display(),
+        value.health.identity.install_kind
+    );
+    println!("managed data  : {} bytes", value.health.storage_total_bytes);
     if let Some(workspace) = &value.active_workspace {
         println!("active scope  : {} ({})", workspace.name, workspace.key);
+    }
+    if let Some(preflight) = &value.runtime_preflight {
+        println!(
+            "runtime       : {} ({}) - {}",
+            preflight.project_name, preflight.status_label, preflight.summary
+        );
     }
     println!("checks:");
     for check in &value.checks {

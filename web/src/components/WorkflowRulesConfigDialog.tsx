@@ -23,6 +23,7 @@ import {
   Typography,
 } from "@mui/material";
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
+import { useI18n } from "../i18n";
 import { ClearIcon, PanelSideIcon, TrashIcon } from "./AppIcons";
 import { AppEmptyState } from "./AppEmptyState";
 
@@ -148,6 +149,8 @@ function SignalSectionHeader({
   onClear: () => void;
   children?: ReactNode;
 }) {
+  const { t } = useI18n();
+
   return (
     <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
       <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 800 }}>
@@ -156,7 +159,7 @@ function SignalSectionHeader({
       <Stack direction="row" alignItems="center" spacing={0.5}>
         {canClear ? (
           <Button size="small" color="inherit" onClick={onClear}>
-            清空
+            {t("清空")}
           </Button>
         ) : null}
         {children}
@@ -176,6 +179,7 @@ function SignalManagerPanel({
   onDeleteSignal: (signalId: string) => void;
   onClearSignals: () => void;
 }) {
+  const { t } = useI18n();
   const hasSignals = summaries.length > 0;
 
   return (
@@ -209,20 +213,20 @@ function SignalManagerPanel({
         >
           <Box minWidth={0}>
             <Typography variant="subtitle1" sx={{ fontWeight: 850, lineHeight: 1.25 }}>
-              Signal 管理
+              {t("Signal 管理")}
             </Typography>
             <Typography variant="caption" color="text.secondary" sx={{ fontWeight: 700 }}>
-              {hasSignals ? `${summaries.length} 个 Signal` : "暂无 Signal"}
+              {hasSignals ? t("{count} 个 Signal", { count: summaries.length }) : t("暂无 Signal")}
             </Typography>
           </Box>
           <Stack direction="row" spacing={0.6} alignItems="center">
-            <Tooltip title={hasSignals ? "清空全部 Signal 配置" : "暂无可清空配置"}>
+            <Tooltip title={hasSignals ? t("清空全部 Signal 配置") : t("暂无可清空配置")}>
               <span>
                 <IconButton
                   size="small"
                   disabled={!hasSignals}
                   onClick={onClearSignals}
-                  aria-label="清空全部 Signal 配置"
+                  aria-label={t("清空全部 Signal 配置")}
                   sx={{
                     width: 34,
                     height: 34,
@@ -240,11 +244,11 @@ function SignalManagerPanel({
                 </IconButton>
               </span>
             </Tooltip>
-            <Tooltip title="关闭">
+            <Tooltip title={t("关闭")}>
               <IconButton
                 size="small"
                 onClick={onClose}
-                aria-label="关闭 Signal 管理"
+                aria-label={t("关闭 Signal 管理")}
                 sx={{
                   width: 34,
                   height: 34,
@@ -304,16 +308,16 @@ function SignalManagerPanel({
                         <Chip
                           size="small"
                           variant="outlined"
-                          label={`待处理 ${summary.pendingCount}`}
+                          label={t("待处理 {count}", { count: summary.pendingCount })}
                         />
                       ) : null}
                     </Stack>
                   </Box>
-                  <Tooltip title="删除该 Signal 及关联 Receive / Broadcast">
+                  <Tooltip title={t("删除该 Signal 及关联 Receive / Broadcast")}>
                     <IconButton
                       size="small"
                       onClick={() => onDeleteSignal(summary.id)}
-                      aria-label={`删除 Signal ${summary.id}`}
+                      aria-label={t("删除 Signal {id}", { id: summary.id })}
                       sx={{
                         width: 32,
                         height: 32,
@@ -334,7 +338,11 @@ function SignalManagerPanel({
               </Box>
             ))
           ) : (
-            <AppEmptyState compact title="暂无 Signal" description="配置联动后会显示可管理项。" />
+            <AppEmptyState
+              compact
+              title={t("暂无 Signal")}
+              description={t("配置联动后会显示可管理项。")}
+            />
           )}
         </Stack>
       </Box>
@@ -344,7 +352,7 @@ function SignalManagerPanel({
 
 export function WorkflowRulesConfigDialog({
   open,
-  title = "联动配置",
+  title,
   context,
   receiveSignalIds,
   broadcastSignalIds,
@@ -353,13 +361,14 @@ export function WorkflowRulesConfigDialog({
   signalSummaries = [],
   showReceive = true,
   showBroadcast = true,
-  receiveHelperText = "收到这些 Signal 后重放当前动作。",
-  broadcastHelperText = "当前动作成功后发送这些 Signal。",
+  receiveHelperText,
+  broadcastHelperText,
   onDeleteSignal,
   onClearSignals,
   onClose,
   onSave,
 }: WorkflowRulesConfigDialogProps) {
+  const { t } = useI18n();
   const [receiveDraft, setReceiveDraft] = useState<string[]>([]);
   const [broadcastDraft, setBroadcastDraft] = useState<string[]>([]);
   const [receiveInputDraft, setReceiveInputDraft] = useState("");
@@ -444,6 +453,11 @@ export function WorkflowRulesConfigDialog({
   }
 
   const canManageSignals = Boolean(onDeleteSignal || onClearSignals);
+  const displayTitle = title ?? t("联动配置");
+  const displayReceiveHelperText =
+    receiveHelperText ?? t("收到这些 Signal 后重放当前动作。");
+  const displayBroadcastHelperText =
+    broadcastHelperText ?? t("当前动作成功后发送这些 Signal。");
 
   return (
     <Dialog
@@ -479,15 +493,19 @@ export function WorkflowRulesConfigDialog({
           <DialogTitle>
             <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
               <Typography variant="h6" sx={{ fontSize: "1.05rem", fontWeight: 850 }}>
-                {title}
+                {displayTitle}
               </Typography>
               {canManageSignals ? (
-                <Tooltip title={signalManagerOpen ? "收起 Signal 管理" : "管理 Signal"}>
+                <Tooltip
+                  title={signalManagerOpen ? t("收起 Signal 管理") : t("管理 Signal")}
+                >
                   <IconButton
                     size="small"
                     color={signalManagerOpen ? "primary" : "default"}
                     onClick={() => setSignalManagerOpen((current) => !current)}
-                    aria-label={signalManagerOpen ? "收起 Signal 管理" : "管理 Signal"}
+                    aria-label={
+                      signalManagerOpen ? t("收起 Signal 管理") : t("管理 Signal")
+                    }
                     sx={{
                       borderRadius: "12px",
                       bgcolor: signalManagerOpen ? "rgba(37,99,235,0.08)" : undefined,
@@ -522,12 +540,12 @@ export function WorkflowRulesConfigDialog({
                       }}
                     />
                     <SignalSelector
-                      label="接收 Signal"
+                      label={t("接收 Signal")}
                       value={receiveDraft}
                       inputValue={receiveInputDraft}
                       options={options}
-                      placeholder="选择或输入 Signal"
-                      helperText={receiveHelperText}
+                      placeholder={t("选择或输入 Signal")}
+                      helperText={displayReceiveHelperText}
                       onChange={setReceiveDraft}
                       onInputValueChange={setReceiveInputDraft}
                     />
@@ -562,20 +580,23 @@ export function WorkflowRulesConfigDialog({
                             )
                           }
                         >
-                          使用默认
+                          {t("使用默认")}
                         </Button>
                       ) : null}
                     </SignalSectionHeader>
                     <SignalSelector
-                      label="发送 Signal"
+                      label={t("发送 Signal")}
                       value={broadcastDraft}
                       inputValue={broadcastInputDraft}
                       options={options}
-                      placeholder={defaultBroadcastSignalId || "输入 Signal"}
+                      placeholder={defaultBroadcastSignalId || t("输入 Signal")}
                       helperText={
                         defaultBroadcastSignalId
-                          ? `${broadcastHelperText} 默认：${defaultBroadcastSignalId}`
-                          : broadcastHelperText
+                          ? t("{helperText} 默认：{signalId}", {
+                              helperText: displayBroadcastHelperText,
+                              signalId: defaultBroadcastSignalId,
+                            })
+                          : displayBroadcastHelperText
                       }
                       onChange={setBroadcastDraft}
                       onInputValueChange={setBroadcastInputDraft}
@@ -585,19 +606,19 @@ export function WorkflowRulesConfigDialog({
               ) : null}
               {loopSignals.length > 0 ? (
                 <Alert severity="warning" variant="outlined">
-                  Receive 和 Broadcast 包含同名 Signal，可能形成循环。
+                  {t("Receive 和 Broadcast 包含同名 Signal，可能形成循环。")}
                 </Alert>
               ) : null}
             </Stack>
           </DialogContent>
           <DialogActions className="workflow-rules-config-dialog-actions">
-            <Button onClick={onClose}>取消</Button>
+            <Button onClick={onClose}>{t("取消")}</Button>
             <Button
               variant="contained"
               onPointerDown={handleSavePointerDown}
               onClick={handleSaveClick}
             >
-              保存
+              {t("保存")}
             </Button>
           </DialogActions>
         </Box>

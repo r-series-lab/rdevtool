@@ -72,6 +72,10 @@ active_workspace = "r-series"
 
 `system` 工作区的配置源偏好保存在 `workspace.toml`；普通工作区的偏好保存在各自 `workspaces/<key>.toml` 的 `metadata` 中。App 会自动维护这些字段，通常不需要手改。
 
+CLI 与 App 使用同一套按工作区、按能力解析规则。Link 定义、代理 profile 和 Runtime override 可以来自不同配置源，计划结果中的 `sourceContext` 会明确列出三者；缺失或不支持能力时会失败，不会静默回退到默认源。
+
+App 从资源卡片、活动重试和托盘菜单执行 Link 时会固定工作区和 Link、Proxy、Runtime 三个来源。`skipped` 仅在没有风险时视为正常跳过，带风险的跳过会保持阻断状态。
+
 ## Config Sources
 
 配置源把资源入口、链路、代理和运行配置映射到一组可独立迁移的文件。内置来源包括默认配置和每个普通工作区的自动来源，也可以在 App 的“配置源管理”中添加团队目录或个人目录。

@@ -27,8 +27,19 @@ export const TRAY_DOMAIN_ACTION_REQUESTED_EVENT =
 
 type DomainRunOptions = {
   force: true;
-  origin: "tray";
+  origin: "app" | "tray";
   workspaceKey?: string | null;
+  chainId?: string | null;
+  parentId?: string | null;
+  stepLabel?: string | null;
+};
+
+export type TrayActionExecutionContext = {
+  origin?: "app" | "tray";
+  chainId?: string | null;
+  parentId?: string | null;
+  stepLabel?: string | null;
+  chainLabel?: string | null;
 };
 
 export type TrayActionExecutionHandlers = {
@@ -104,13 +115,25 @@ function branchReplayFromAction(action: TrayPinnedAction): BranchTaskReplayReque
 export async function executeTrayPinnedActionWorkflow(
   action: TrayPinnedAction,
   handlers: TrayActionExecutionHandlers,
+  context: TrayActionExecutionContext = {},
 ) {
   const workspaceKey = action.workspaceKey?.trim() || null;
   const domainAction =
     BUILD_REPLAY_KINDS.has(action.kind) || action.kind === "branch.replay";
 
   if (!domainAction) {
-    await handlers.executeFallback(action);
+    const executionContext = context.chainId
+      ? {
+          chainId: context.chainId,
+          parentId: context.parentId ?? null,
+          stepLabel: context.stepLabel ?? action.label,
+          chainLabel: context.chainLabel ?? "工作区联动",
+        }
+      : null;
+    await handlers.executeFallback({
+      ...action,
+      ...(executionContext ? { executionContext } : {}),
+    });
     return "fallback" as const;
   }
 
@@ -118,7 +141,14 @@ export async function executeTrayPinnedActionWorkflow(
     await handlers.activateWorkspace(workspaceKey);
   }
 
-  const options = { force: true, origin: "tray", workspaceKey } as const;
+  const options: DomainRunOptions = {
+    force: true,
+    origin: context.origin ?? "tray",
+    workspaceKey,
+    ...(context.chainId ? { chainId: context.chainId } : {}),
+    ...(context.parentId ? { parentId: context.parentId } : {}),
+    ...(context.stepLabel ? { stepLabel: context.stepLabel } : {}),
+  };
   if (BUILD_REPLAY_KINDS.has(action.kind)) {
     const completed = await handlers.replayBuild(
       buildRequestFromAction(action),

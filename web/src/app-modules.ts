@@ -11,6 +11,7 @@ import {
   workflowReplayFromBuildHistory,
   workflowReplayFromProjectRuntime,
 } from "./lib/workflowSignals";
+import { workspaceWorkflowRunStates } from "./lib/workflowChains";
 import { executeTrayPinnedActionWorkflow } from "./lib/trayActionExecution";
 
 function isBuildReplayTarget(target: string) {
@@ -69,8 +70,7 @@ function buildBuildPageProps({
     contextLoading: buildModule.buildContextStatus === "loading",
     contextError: buildModule.buildContextStatus === "error",
     contextErrorText: buildModule.buildContextError,
-    onSyncBranches: () =>
-      void branchContext.handleSyncBranches(appShell.selectedProject),
+    onSyncBranches: () => void branchContext.handleSyncBranches(),
     sourceBranchEntries: mergeSelection.sourceBranchEntries,
     sourceBranchOptions: mergeSelection.sourceBranchOptions,
     branchSyncText: branchContext.branchSyncText,
@@ -86,8 +86,8 @@ function buildBuildPageProps({
     buildHistory: buildModule.visibleBuildHistory,
     onReplayBuildHistory: (entry) =>
       void buildModule.handleReplayBuildHistory(entry),
-    workflowReceiveRules: workflowSignals.rules.receivers.filter(
-      (rule) => isBuildReplayTarget(rule.replay.target),
+    workflowReceiveRules: workflowSignals.rules.receivers.filter((rule) =>
+      isBuildReplayTarget(rule.replay.target),
     ),
     workflowSignalIdsForBuildReplay: (entry) =>
       workflowSignals.signalIdsForReplay(workflowReplayFromBuildHistory(entry)),
@@ -105,8 +105,7 @@ function buildBuildPageProps({
     onWorkflowSignalDelete: (signalId) =>
       void workflowSignals.deleteWorkflowSignal(signalId),
     onWorkflowSignalsClear: () => void workflowSignals.clearWorkflowSignals(),
-    onRefreshBuildHistory: () =>
-      void buildModule.refreshBuildHistoryStatuses(),
+    onRefreshBuildHistory: () => void buildModule.refreshBuildHistoryStatuses(),
     onClearBuildHistory: () =>
       void (async () => {
         await buildModule.handleClearBuildHistory();
@@ -179,19 +178,19 @@ function buildMergePageProps({
     selectedWorktreePath: mergeModule.selectedWorktreePath,
     onWorktreePathChange: mergeModule.setSelectedWorktreePath,
     onChooseWorktreeDirectory: mergeModule.handleChooseWorktreeDirectory,
-    onRepairWorktree: (repoPath) => void mergeModule.handleRepairWorktree(repoPath),
+    onRepairWorktree: (repoPath) =>
+      void mergeModule.handleRepairWorktree(repoPath),
     onRefreshWorktrees: () =>
       void mergeModule.loadProjectWorktrees(appShell.selectedProject),
     onRefreshPushStatus: () => void mergeModule.loadPushStatus(),
-    onSyncBranches: () =>
-      void branchContext.handleSyncBranches(appShell.selectedProject),
+    onSyncBranches: () => void branchContext.handleSyncBranches(),
     sourceBranchEntries: mergeSelection.sourceBranchEntries,
     targetBranchEntries: mergeSelection.targetBranchEntries,
     sourceBranchOptions: mergeSelection.sourceBranchOptions,
     targetBranchOptions: mergeSelection.targetBranchOptions,
     busy,
     currentBranchTaskHistoryId: mergeModule.currentBranchTaskHistoryId,
-    currentBranchTaskRunningLabel: mergeModule.currentBranchTaskRunningLabel,
+    currentBranchTask: mergeModule.currentBranchTask,
     branchTaskHistory: mergeModule.visibleBranchTaskHistory,
     onPlanSync: mergeModule.handlePlanSync,
     onExecuteSync: mergeModule.handleExecuteSync,
@@ -279,31 +278,16 @@ export const APP_MODULES = [
       mergeModule,
       projectsModule,
       proxyModule,
+      workflowSignals,
       activityCenter,
-    }) => ({
-      projectWorkspaces: appShell.projectWorkspaces,
-      activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
-      onProjectWorkspaceChange: appShell.onProjectWorkspaceChange,
-      onNavigateToPage: appShell.setPage,
-      onProjectManagementViewChange: appShell.setProjectManagementView,
-      onProjectChange: appShell.setSelectedProject,
-      onCreateProjectWorkspace: appShell.onCreateProjectWorkspace,
-      onInitDemandWorkspace: appShell.onInitDemandWorkspace,
-      onProjectConfigSaved: appShell.onProjectConfigSaved,
-      workspaceConfigOpenSignal: appShell.workspaceConfigOpenSignal,
-      runtimeEntries: projectsModule.runtimeEntries,
-      selectedDebugProfileKeys: projectsModule.selectedDebugProfileKeys,
-      projectRuntimePreferencesHydrated:
-        "preferencesHydrated" in projectsModule &&
-        projectsModule.preferencesHydrated === true,
-      onStartProjectRuntime: projectsModule.handleStartRuntime,
-      onStartProxyProfile: proxyModule.startProxyProfile,
-      onStopProxyProfile: proxyModule.stopProxyProfile,
-      onFocusProjectRuntime: projectsModule.handleFocusRuntime,
-      recordActivity: activityCenter.recordActivity,
-      updateActivity: activityCenter.updateActivity,
-      onExecutePinnedAction: async (action) => {
-        await executeTrayPinnedActionWorkflow(action, {
+    }) => {
+      const executeWorkspaceAction = (
+        action: Parameters<typeof executeTrayPinnedActionWorkflow>[0],
+        context?: Parameters<typeof executeTrayPinnedActionWorkflow>[2],
+      ) =>
+        executeTrayPinnedActionWorkflow(
+          action,
+          {
           activateWorkspace: async (workspaceKey) => {
             if (workspaceKey !== appShell.activeProjectWorkspaceKey) {
               await appShell.onProjectWorkspaceChange(workspaceKey);
@@ -323,8 +307,97 @@ export const APP_MODULES = [
             invoke("record_tray_pinned_action_execution", {
               action: nextAction,
             }),
-        });
-      },
+          },
+          context,
+        );
+      const workflowRunStates = workspaceWorkflowRunStates(
+        workflowSignals.workspaceChains,
+        activityCenter.items,
+        workflowSignals.cancelledWorkflowRunIds,
+      );
+
+      return {
+        projectWorkspaces: appShell.projectWorkspaces,
+        archivedProjectWorkspaces: appShell.archivedProjectWorkspaces,
+        activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
+        onProjectWorkspaceChange: appShell.onProjectWorkspaceChange,
+        onNavigateToPage: appShell.setPage,
+        onProjectManagementViewChange: appShell.setProjectManagementView,
+        onProjectChange: appShell.setSelectedProject,
+        onOpenProjectManagementTarget: appShell.onOpenProjectManagementTarget,
+        onCreateProjectWorkspace: appShell.onCreateProjectWorkspace,
+        onInitDemandWorkspace: appShell.onInitDemandWorkspace,
+        onProjectConfigSaved: appShell.onProjectConfigSaved,
+        workspaceConfigOpenSignal: appShell.workspaceConfigOpenSignal,
+        workspaceConfigFocusRequest: appShell.workspaceConfigFocusRequest,
+        onWorkspaceConfigOpenHandled: appShell.onWorkspaceConfigOpenHandled,
+        runtimeEntries: projectsModule.runtimeEntries,
+        selectedDebugProfileKeys: projectsModule.selectedDebugProfileKeys,
+        runtimeStartPromptMode: projectsModule.runtimeStartPromptMode,
+        projectRuntimePreferencesHydrated:
+          "preferencesHydrated" in projectsModule &&
+          projectsModule.preferencesHydrated === true,
+        onProjectDebugProfileChange: projectsModule.setProjectDebugProfile,
+        onRuntimeStartPromptModeChange:
+          projectsModule.setRuntimeStartPromptMode,
+        onStartProjectRuntime: projectsModule.handleStartRuntime,
+        onStartProxyProfile: proxyModule.startProxyProfile,
+        onStopProxyProfile: proxyModule.stopProxyProfile,
+        onFocusProjectRuntime: projectsModule.handleFocusRuntime,
+        recordActivity: activityCenter.recordActivity,
+        updateActivity: activityCenter.updateActivity,
+        workflowChains: workflowSignals.workspaceChains,
+        workflowRunStates,
+        onSaveWorkflowChain: async (chain) => {
+          await workflowSignals.saveWorkspaceChain(chain);
+        },
+        onDeleteWorkflowChain: workflowSignals.deleteWorkspaceChain,
+        onWorkflowChainEnabledChange:
+          workflowSignals.setWorkspaceChainEnabled,
+        onRunWorkflowChain: async (chain) => {
+          if (!chain.enabled) {
+            throw new Error("联动流程已停用");
+          }
+          if (chain.steps.length === 0) {
+            throw new Error("联动流程没有可运行的步骤");
+          }
+          if (workflowRunStates.some((run) => run.status === "running")) {
+            throw new Error("已有联动流程正在运行，请等待完成或停止后续联动");
+          }
+          const runId = `workspace-chain:${chain.id}:${Date.now()}`;
+          for (const step of chain.steps) {
+            if (workflowSignals.isWorkflowRunCancelled(runId)) {
+              break;
+            }
+            await executeWorkspaceAction(step.action, {
+              origin: "app",
+              chainId: runId,
+              stepLabel: step.label,
+              chainLabel: chain.name,
+            });
+          }
+          return runId;
+        },
+        onCancelWorkflowRun: workflowSignals.cancelWorkflowRun,
+        onExecutePinnedAction: async (action) => {
+          await executeWorkspaceAction(action, { origin: "app" });
+        },
+      };
+    },
+  },
+  {
+    key: "knowledge",
+    label: "知识库",
+    shortLabel: "知识库",
+    component: lazy(() =>
+      import("./pages/KnowledgePage").then((module) => ({
+        default: module.KnowledgePage,
+      })),
+    ),
+    loadOnStartup: undefined,
+    buildProps: ({ appShell }) => ({
+      projects: appShell.projects.map(({ key, name }) => ({ key, name })),
+      selectedProject: appShell.selectedProject,
     }),
   },
   {
@@ -336,12 +409,16 @@ export const APP_MODULES = [
         default: module.ProjectManagementPage,
       })),
     ),
-    loadOnStartup: ({ projectsModule }) => projectsModule.loadFinderData({ force: true }),
+    loadOnStartup: ({ projectsModule }) =>
+      projectsModule.loadFinderData({ force: true }),
     buildProps: (context) => {
-      const { appShell, projectsModule, workflowSignals, activityCenter } = context;
+      const { appShell, projectsModule, workflowSignals, activityCenter } =
+        context;
       return {
         view: appShell.projectManagementView,
         onViewChange: appShell.setProjectManagementView,
+        openRequest: appShell.projectManagementOpenRequest,
+        onOpenRequestHandled: appShell.onProjectManagementOpenRequestHandled,
         projectProps: {
           finderTypeOptions: projectsModule.finderTypeOptions,
           finderType: "项目",
@@ -362,6 +439,7 @@ export const APP_MODULES = [
           favoriteShortcutKeys: projectsModule.favoriteShortcutKeys,
           recentShortcutKeys: projectsModule.recentShortcutKeys,
           selectedDebugProfileKeys: projectsModule.selectedDebugProfileKeys,
+          runtimeStartPromptMode: projectsModule.runtimeStartPromptMode,
           workflowReceiveRules: workflowSignals.rules.receivers.filter(
             (rule) => rule.replay.target === "project.replay",
           ),
@@ -371,7 +449,9 @@ export const APP_MODULES = [
           workflowSignalOptions: workflowSignals.signalOptions,
           workflowSignalSummaries: workflowSignals.signalSummaries,
           workflowReceiveSignalIdsForProjectReplay: (entry, action) =>
-            workflowSignals.signalIdsForReplay(workflowReplayFromProjectRuntime(entry, action)),
+            workflowSignals.signalIdsForReplay(
+              workflowReplayFromProjectRuntime(entry, action),
+            ),
           workflowBroadcastSignalIdsForProjectReplay: (entry, action) =>
             workflowSignals.signalIdsForBroadcastReplay(
               workflowReplayFromProjectRuntime(entry, action),
@@ -393,19 +473,28 @@ export const APP_MODULES = [
             void workflowSignals.deleteBroadcastRules(ruleIds),
           onWorkflowSignalDelete: (signalId) =>
             void workflowSignals.deleteWorkflowSignal(signalId),
-          onWorkflowSignalsClear: () => void workflowSignals.clearWorkflowSignals(),
+          onWorkflowSignalsClear: () =>
+            void workflowSignals.clearWorkflowSignals(),
           onToggleProjectFavorite: projectsModule.toggleProjectFavorite,
           onToggleShortcutFavorite: projectsModule.toggleShortcutFavorite,
           onProjectDebugProfileChange: projectsModule.setProjectDebugProfile,
+          onRuntimeStartPromptModeChange:
+            projectsModule.setRuntimeStartPromptMode,
           onMarkShortcutUsed: projectsModule.markShortcutUsed,
           onRefresh: () => void projectsModule.loadFinderData({ force: true }),
           onOpenFinderEntry: (entry) =>
             projectsModule.handleOpenFinderEntry(entry),
-          onStartRuntime: (projectKey, debugProfileKey, envOverrides) =>
-            void projectsModule.handleStartRuntime(
+          onStartRuntime: (
+            projectKey,
+            debugProfileKey,
+            envOverrides,
+            expectedPort,
+          ) =>
+            projectsModule.handleStartRuntime(
               projectKey,
               debugProfileKey,
               envOverrides,
+              expectedPort,
             ),
           onStopRuntime: (projectKey) =>
             void projectsModule.handleStopRuntime(projectKey),
@@ -454,10 +543,13 @@ export const APP_MODULES = [
         default: module.ResourcesPage,
       })),
     ),
-    loadOnStartup: ({ projectsModule }) => projectsModule.loadFinderData({ force: true }),
+    loadOnStartup: ({ projectsModule }) =>
+      projectsModule.loadFinderData({ force: true }),
     buildProps: ({ appShell, projectsModule, activityCenter }) => {
       const resourceFinderType =
-        projectsModule.finderType === "项目" ? "网站" : projectsModule.finderType;
+        projectsModule.finderType === "项目"
+          ? "网站"
+          : projectsModule.finderType;
       return {
         finderTypeOptions: ["网站", "目录", "工具"] as const,
         finderType: resourceFinderType,
@@ -481,6 +573,7 @@ export const APP_MODULES = [
         recordActivity: activityCenter.recordActivity,
         updateActivity: activityCenter.updateActivity,
         resourceConfigOpenSignal: appShell.resourceConfigOpenSignal,
+        onResourceConfigOpenHandled: appShell.onResourceConfigOpenHandled,
         activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
         projectWorkspaces: appShell.projectWorkspaces,
         onOpenNavigationConfigFile: appShell.onOpenNavigationConfigFile,
@@ -544,6 +637,7 @@ export const APP_MODULES = [
   },
 ] as const satisfies readonly [
   AppModuleDefinition<"overview">,
+  AppModuleDefinition<"knowledge">,
   AppModuleDefinition<"projectManagement">,
   AppModuleDefinition<"resources">,
   AppModuleDefinition<"build">,
@@ -566,6 +660,7 @@ export function buildPageProps(
 ): AppPagePropsMap {
   return {
     overview: APP_MODULE_MAP.overview.buildProps(context),
+    knowledge: APP_MODULE_MAP.knowledge.buildProps(context),
     projectManagement: APP_MODULE_MAP.projectManagement.buildProps(context),
     resources: APP_MODULE_MAP.resources.buildProps(context),
     build: APP_MODULE_MAP.build.buildProps(context),
@@ -583,21 +678,12 @@ export function buildPagePropsFor<TKey extends AppModuleKey>(
 }
 
 export function buildStartupTasks(
-  enabledPages: AppModuleKey[],
-  startupPage: AppModuleKey,
+  _enabledPages: AppModuleKey[],
+  _startupPage: AppModuleKey,
   preferredProject: string,
   context: ModuleRuntimeContext,
 ): Array<Promise<void>> {
-  const tasks: Array<Promise<void>> = [
-    context.appShell.loadProjects(preferredProject),
-  ];
-
-  const task = buildModuleLoadTask(startupPage, enabledPages, context);
-  if (task) {
-    tasks.push(task);
-  }
-
-  return tasks;
+  return [context.appShell.loadProjects(preferredProject)];
 }
 
 export function buildModuleLoadTask(

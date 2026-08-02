@@ -9,7 +9,10 @@ use crate::config::{
     ProjectWorkspaceResourceEntryConfig, RuntimeProfileConfig, default_config_dir,
     load_project_workspace_by_key, normalize_project_workspace_key, save_project_workspace_config,
 };
-use crate::config_store::write_config_text_atomic;
+use crate::config_sources::{ConfigSource, ConfigSourceReference};
+use crate::config_store::{
+    with_config_file_lock, with_config_file_locks, write_config_text_atomic,
+};
 use crate::proxy::{ProxyConfig, ProxyProfile};
 use crate::runtime::{
     ProjectRuntimeContextSnapshot, ProjectRuntimeLaunchOptions, project_runtime_context_snapshot,
@@ -31,7 +34,7 @@ pub struct LinkFileConfig {
     pub links: Vec<LinkConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkConfig {
     pub key: String,
@@ -54,7 +57,7 @@ pub struct LinkConfig {
     pub steps: Vec<LinkStepConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct LinkStepConfig {
     #[serde(default)]
@@ -213,6 +216,45 @@ pub struct LinkWorkspaceAttachResult {
     pub workspace: ProjectWorkspaceConfig,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkSourceMatch {
+    pub source: ConfigSourceReference,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkSourceDiscovery {
+    pub key: String,
+    pub matches: Vec<LinkSourceMatch>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkMigrationPlan {
+    pub key: String,
+    pub source_path: String,
+    pub target_path: String,
+    pub mode: String,
+    pub replace: bool,
+    pub source_state: String,
+    pub target_state: String,
+    pub can_apply: bool,
+    pub actions: Vec<String>,
+    pub risks: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkMigrationResult {
+    pub plan: LinkMigrationPlan,
+    pub applied: bool,
+    pub target_written: bool,
+    pub source_deleted: bool,
+}
+
 pub fn load_links_config() -> Result<LinkFileConfig> {
     load_links_config_from_path(&default_links_path())
 }
@@ -234,6 +276,13 @@ pub fn save_links_config(config: LinkFileConfig) -> Result<LinkFileConfig> {
 }
 
 pub fn save_links_config_to_path(path: &Path, config: LinkFileConfig) -> Result<LinkFileConfig> {
+    with_config_file_lock(path, || save_links_config_to_path_unlocked(path, config))
+}
+
+fn save_links_config_to_path_unlocked(
+    path: &Path,
+    config: LinkFileConfig,
+) -> Result<LinkFileConfig> {
     let mut config = config;
     normalize_links_config(&mut config);
     if let Some(parent) = path.parent() {
@@ -264,6 +313,16 @@ pub fn upsert_link_to_path(path: &Path, link: LinkConfig) -> Result<LinkConfig> 
 }
 
 pub fn upsert_link_to_path_with_previous_key(
+    path: &Path,
+    link: LinkConfig,
+    previous_key: Option<&str>,
+) -> Result<LinkConfig> {
+    with_config_file_lock(path, || {
+        upsert_link_to_path_with_previous_key_unlocked(path, link, previous_key)
+    })
+}
+
+fn upsert_link_to_path_with_previous_key_unlocked(
     path: &Path,
     link: LinkConfig,
     previous_key: Option<&str>,
@@ -299,7 +358,7 @@ pub fn upsert_link_to_path_with_previous_key(
     } else {
         config.links.push(link.clone());
     }
-    save_links_config_to_path(path, config)?;
+    save_links_config_to_path_unlocked(path, config)?;
     Ok(link)
 }
 
@@ -308,13 +367,17 @@ pub fn delete_link(key: &str) -> Result<bool> {
 }
 
 pub fn delete_link_from_path(path: &Path, key: &str) -> Result<bool> {
+    with_config_file_lock(path, || delete_link_from_path_unlocked(path, key))
+}
+
+fn delete_link_from_path_unlocked(path: &Path, key: &str) -> Result<bool> {
     let key = normalize_key(key).ok_or_else(|| anyhow!("link key is required"))?;
     let mut config = load_links_config_from_path(path)?;
     let original_len = config.links.len();
     config.links.retain(|link| link.key != key);
     let deleted = config.links.len() != original_len;
     if deleted {
-        save_links_config_to_path(path, config)?;
+        save_links_config_to_path_unlocked(path, config)?;
     }
     Ok(deleted)
 }
@@ -332,15 +395,298 @@ pub fn get_link_from_path(path: &Path, key: &str) -> Result<LinkConfig> {
         .ok_or_else(|| anyhow!("link not found: {key}"))
 }
 
+pub fn discover_link_sources(sources: &[ConfigSource], key: &str) -> Result<LinkSourceDiscovery> {
+    let key = normalize_key(key).ok_or_else(|| anyhow!("link key is required"))?;
+    let mut matches = Vec::new();
+    let mut warnings = Vec::new();
+    for source in sources {
+        if !source
+            .capabilities
+            .iter()
+            .any(|capability| capability.eq_ignore_ascii_case("link"))
+        {
+            continue;
+        }
+        let path = PathBuf::from(&source.files.links);
+        match get_link_from_path(&path, &key) {
+            Ok(_) => matches.push(LinkSourceMatch {
+                source: ConfigSourceReference {
+                    id: source.id.clone(),
+                    name: source.name.clone(),
+                    kind: source.kind.clone(),
+                },
+                path: path.display().to_string(),
+            }),
+            Err(error) if !path.exists() || error.to_string().contains("link not found") => {}
+            Err(error) => warnings.push(format!(
+                "无法检查配置源 {} ({})：{}",
+                source.name, source.id, error
+            )),
+        }
+    }
+    Ok(LinkSourceDiscovery {
+        key,
+        matches,
+        warnings,
+    })
+}
+
+pub fn plan_link_migration(
+    source_path: &Path,
+    target_path: &Path,
+    key: &str,
+    copy: bool,
+    replace: bool,
+) -> Result<LinkMigrationPlan> {
+    let key = normalize_key(key).ok_or_else(|| anyhow!("link key is required"))?;
+    if same_config_path(source_path, target_path) {
+        anyhow::bail!("Link 源和目标配置文件必须不同：{}", source_path.display());
+    }
+    let source = load_links_config_from_path(source_path)?;
+    let target = load_links_config_from_path(target_path)?;
+    Ok(build_link_migration_plan(
+        source_path,
+        target_path,
+        &key,
+        copy,
+        replace,
+        &source,
+        &target,
+    ))
+}
+
+pub fn execute_link_migration(
+    source_path: &Path,
+    target_path: &Path,
+    key: &str,
+    copy: bool,
+    replace: bool,
+) -> Result<LinkMigrationResult> {
+    let key = normalize_key(key).ok_or_else(|| anyhow!("link key is required"))?;
+    if same_config_path(source_path, target_path) {
+        anyhow::bail!("Link 源和目标配置文件必须不同：{}", source_path.display());
+    }
+    with_config_file_locks(
+        [source_path.to_path_buf(), target_path.to_path_buf()],
+        || {
+            let mut source = load_links_config_from_path(source_path)?;
+            let mut target = load_links_config_from_path(target_path)?;
+            let plan = build_link_migration_plan(
+                source_path,
+                target_path,
+                &key,
+                copy,
+                replace,
+                &source,
+                &target,
+            );
+            if !plan.can_apply {
+                anyhow::bail!("Link 迁移计划不可执行：{}", plan.risks.join("；"));
+            }
+            if plan.actions.is_empty() {
+                return Ok(LinkMigrationResult {
+                    plan,
+                    applied: false,
+                    target_written: false,
+                    source_deleted: false,
+                });
+            }
+
+            let source_link = source
+                .links
+                .iter()
+                .find(|link| link.key == key)
+                .cloned()
+                .ok_or_else(|| anyhow!("Link 源配置不存在：{key}"))?;
+            let original_target = target.clone();
+            let target_existed = target_path.exists();
+            let mut target_written = false;
+            let mut source_deleted = false;
+
+            if plan
+                .actions
+                .iter()
+                .any(|action| action == "writeTarget" || action == "replaceTarget")
+            {
+                if let Some(index) = target.links.iter().position(|link| link.key == key) {
+                    target.links[index] = source_link.clone();
+                } else {
+                    target.links.push(source_link.clone());
+                }
+                save_links_config_to_path_unlocked(target_path, target)?;
+                target_written = true;
+                let verified = get_link_from_path(target_path, &key)
+                    .is_ok_and(|target_link| target_link == source_link);
+                if !verified {
+                    let rollback = if target_existed {
+                        save_links_config_to_path_unlocked(target_path, original_target.clone())
+                            .map(|_| ())
+                    } else if target_path.exists() {
+                        fs::remove_file(target_path).with_context(|| {
+                            format!(
+                                "failed to remove unverified target: {}",
+                                target_path.display()
+                            )
+                        })
+                    } else {
+                        Ok(())
+                    };
+                    if let Err(rollback_error) = rollback {
+                        return Err(anyhow!(
+                            "Link 目标写入后校验失败，且目标回滚失败：{rollback_error}"
+                        ));
+                    }
+                    anyhow::bail!("Link 目标写入后校验失败，已回滚目标配置");
+                }
+            }
+
+            if !copy {
+                source.links.retain(|link| link.key != key);
+                if let Err(error) = save_links_config_to_path_unlocked(source_path, source) {
+                    if target_written {
+                        let rollback = if target_existed {
+                            save_links_config_to_path_unlocked(target_path, original_target)
+                                .map(|_| ())
+                        } else if target_path.exists() {
+                            fs::remove_file(target_path).with_context(|| {
+                                format!(
+                                    "failed to remove rolled back target: {}",
+                                    target_path.display()
+                                )
+                            })
+                        } else {
+                            Ok(())
+                        };
+                        if let Err(rollback_error) = rollback {
+                            return Err(anyhow!(
+                                "Link 源删除失败：{error}；目标回滚也失败：{rollback_error}"
+                            ));
+                        }
+                    }
+                    return Err(error).context("Link 目标已回滚，源配置删除失败");
+                }
+                source_deleted = true;
+            }
+
+            Ok(LinkMigrationResult {
+                plan,
+                applied: target_written || source_deleted,
+                target_written,
+                source_deleted,
+            })
+        },
+    )
+}
+
+fn build_link_migration_plan(
+    source_path: &Path,
+    target_path: &Path,
+    key: &str,
+    copy: bool,
+    replace: bool,
+    source: &LinkFileConfig,
+    target: &LinkFileConfig,
+) -> LinkMigrationPlan {
+    let source_link = source.links.iter().find(|link| link.key == key);
+    let target_link = target.links.iter().find(|link| link.key == key);
+    let source_state = if source_link.is_some() {
+        "present"
+    } else {
+        "missing"
+    };
+    let target_state = match (source_link, target_link) {
+        (_, None) => "missing",
+        (Some(source_link), Some(target_link)) if source_link == target_link => "equivalent",
+        (None, Some(_)) => "presentUnverified",
+        (Some(_), Some(_)) => "conflict",
+    };
+    let mut actions = Vec::new();
+    let mut risks = Vec::new();
+    let can_apply = match (source_link, target_link) {
+        (None, None) => {
+            risks.push(format!("源配置中不存在 Link：{key}"));
+            false
+        }
+        (None, Some(_)) => {
+            risks.push(format!(
+                "源配置中不存在 Link {key}，但目标存在同名配置；无法验证目标是否来自本次迁移。请检查 --from/--to。"
+            ));
+            false
+        }
+        (Some(_), None) => {
+            actions.push("writeTarget".to_string());
+            if !copy {
+                actions.push("deleteSource".to_string());
+            }
+            true
+        }
+        (Some(source_link), Some(target_link)) if source_link == target_link => {
+            if !copy {
+                actions.push("deleteSource".to_string());
+            }
+            true
+        }
+        (Some(_), Some(_)) if replace => {
+            actions.push("replaceTarget".to_string());
+            if !copy {
+                actions.push("deleteSource".to_string());
+            }
+            risks.push("目标配置中的同名 Link 将被显式覆盖。".to_string());
+            true
+        }
+        (Some(_), Some(_)) => {
+            risks.push("目标配置存在内容不同的同名 Link；使用 --replace 才能覆盖。".to_string());
+            false
+        }
+    };
+    LinkMigrationPlan {
+        key: key.to_string(),
+        source_path: source_path.display().to_string(),
+        target_path: target_path.display().to_string(),
+        mode: if copy { "copy" } else { "move" }.to_string(),
+        replace,
+        source_state: source_state.to_string(),
+        target_state: target_state.to_string(),
+        can_apply,
+        actions,
+        risks,
+    }
+}
+
+fn same_config_path(left: &Path, right: &Path) -> bool {
+    fn resolved(path: &Path) -> PathBuf {
+        path.canonicalize().unwrap_or_else(|_| {
+            let Some(parent) = path.parent() else {
+                return path.to_path_buf();
+            };
+            let parent = parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf());
+            path.file_name()
+                .map(|file_name| parent.join(file_name))
+                .unwrap_or(parent)
+        })
+    }
+    resolved(left) == resolved(right)
+}
+
 pub fn attach_link_to_workspace(
     workspaces_dir: &Path,
+    request: LinkWorkspaceAttachRequest,
+) -> Result<LinkWorkspaceAttachResult> {
+    attach_link_to_workspace_from_path(workspaces_dir, &default_links_path(), request)
+}
+
+pub fn attach_link_to_workspace_from_path(
+    workspaces_dir: &Path,
+    links_path: &Path,
     request: LinkWorkspaceAttachRequest,
 ) -> Result<LinkWorkspaceAttachResult> {
     let workspace_key = normalize_text(&request.workspace_key)
         .ok_or_else(|| anyhow!("workspace key is required"))?;
     let link_key =
         normalize_key(&request.link_key).ok_or_else(|| anyhow!("link key is required"))?;
-    let link = get_link(&link_key)?;
+    let link = get_link_from_path(links_path, &link_key)?;
     let mut workspace = load_project_workspace_by_key(workspaces_dir, &workspace_key)?;
     if workspace.is_system() {
         anyhow::bail!("system workspace cannot own tool entries");
@@ -670,7 +1016,7 @@ fn plan_step(
                 }
 
                 (
-                "运行配置".to_string(),
+                "运行环境".to_string(),
                 match (project_key, debug_profile, runtime_profile, runtime.as_ref()) {
                     (Some(project_key), Some(debug_profile), _, Some(context)) => context
                         .effective
@@ -691,12 +1037,12 @@ fn plan_step(
                         .as_ref()
                         .map(|target| {
                             format!(
-                                "计划用运行配置 {runtime_profile} 启动项目 {project_key}，cwd={}",
+                                "计划用运行环境 {runtime_profile} 启动项目 {project_key}，cwd={}",
                                 target.cwd
                             )
                         })
                         .unwrap_or_else(|| {
-                            format!("计划用运行配置 {runtime_profile} 启动项目 {project_key}")
+                            format!("计划用运行环境 {runtime_profile} 启动项目 {project_key}")
                         }),
                     (Some(project_key), _, _, Some(context)) => context
                         .effective
@@ -708,10 +1054,10 @@ fn plan_step(
                         format!("计划用调试配置 {debug_profile} 启动项目 {project_key}")
                     }
                     (Some(project_key), _, Some(runtime_profile), _) => {
-                        format!("计划用运行配置 {runtime_profile} 启动项目 {project_key}")
+                        format!("计划用运行环境 {runtime_profile} 启动项目 {project_key}")
                     }
                     (Some(project_key), _, _, _) => format!("计划启动项目 {project_key}"),
-                    _ => "计划启动项目运行配置".to_string(),
+                    _ => "计划启动项目运行环境".to_string(),
                 },
             )
             }
@@ -959,6 +1305,8 @@ fn _runtime_profile_label(profile: &RuntimeProfileConfig) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Barrier};
+    use std::thread;
 
     fn test_path() -> PathBuf {
         std::env::temp_dir().join(format!("rdevtool-link-{}.toml", uuid::Uuid::new_v4()))
@@ -967,6 +1315,12 @@ mod tests {
     fn cleanup(path: &Path) {
         let _ = std::fs::remove_file(path);
         let _ = std::fs::remove_file(crate::config_store::backup_path(path));
+    }
+
+    fn cleanup_paths(paths: &[&Path]) {
+        for path in paths {
+            cleanup(path);
+        }
     }
 
     fn link(key: &str, name: &str) -> LinkConfig {
@@ -1011,6 +1365,92 @@ mod tests {
         assert_eq!(get_link_from_path(&path, "first").unwrap().name, "First");
         assert_eq!(get_link_from_path(&path, "second").unwrap().name, "Second");
         cleanup(&path);
+    }
+
+    #[test]
+    fn concurrent_upserts_preserve_both_links() {
+        let path = test_path();
+        let barrier = Arc::new(Barrier::new(3));
+        let handles = [("first", "First"), ("second", "Second")]
+            .into_iter()
+            .map(|(key, name)| {
+                let path = path.clone();
+                let barrier = Arc::clone(&barrier);
+                thread::spawn(move || {
+                    barrier.wait();
+                    upsert_link_to_path(&path, link(key, name)).unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        barrier.wait();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let links = list_links_from_path(&path).unwrap();
+        assert_eq!(links.len(), 2);
+        assert!(links.iter().any(|item| item.key == "first"));
+        assert!(links.iter().any(|item| item.key == "second"));
+        cleanup(&path);
+    }
+
+    #[test]
+    fn moves_one_link_without_replacing_unrelated_entries() {
+        let source = test_path();
+        let target = test_path();
+        upsert_link_to_path(&source, link("moving", "Moving")).unwrap();
+        upsert_link_to_path(&source, link("source-only", "Source Only")).unwrap();
+        upsert_link_to_path(&target, link("target-only", "Target Only")).unwrap();
+
+        let result = execute_link_migration(&source, &target, "moving", false, false).unwrap();
+        assert!(result.applied);
+        assert!(result.target_written);
+        assert!(result.source_deleted);
+        assert!(get_link_from_path(&source, "moving").is_err());
+        assert!(get_link_from_path(&source, "source-only").is_ok());
+        assert_eq!(
+            get_link_from_path(&target, "moving").unwrap().name,
+            "Moving"
+        );
+        assert!(get_link_from_path(&target, "target-only").is_ok());
+        cleanup_paths(&[&source, &target]);
+    }
+
+    #[test]
+    fn migration_conflict_requires_explicit_replace() {
+        let source = test_path();
+        let target = test_path();
+        upsert_link_to_path(&source, link("shared", "Source")).unwrap();
+        upsert_link_to_path(&target, link("shared", "Target")).unwrap();
+
+        let plan = plan_link_migration(&source, &target, "shared", false, false).unwrap();
+        assert_eq!(plan.target_state, "conflict");
+        assert!(!plan.can_apply);
+        assert!(execute_link_migration(&source, &target, "shared", false, false).is_err());
+
+        let result = execute_link_migration(&source, &target, "shared", false, true).unwrap();
+        assert!(result.applied);
+        assert_eq!(
+            get_link_from_path(&target, "shared").unwrap().name,
+            "Source"
+        );
+        assert!(get_link_from_path(&source, "shared").is_err());
+        cleanup_paths(&[&source, &target]);
+    }
+
+    #[test]
+    fn migration_rejects_an_unverified_target_when_source_is_missing() {
+        let source = test_path();
+        let target = test_path();
+        upsert_link_to_path(&target, link("shared", "Shared")).unwrap();
+
+        let plan = plan_link_migration(&source, &target, "shared", false, false).unwrap();
+        assert_eq!(plan.source_state, "missing");
+        assert_eq!(plan.target_state, "presentUnverified");
+        assert!(!plan.can_apply);
+        assert!(execute_link_migration(&source, &target, "shared", false, false).is_err());
+        assert!(get_link_from_path(&target, "shared").is_ok());
+        cleanup_paths(&[&source, &target]);
     }
 
     #[test]

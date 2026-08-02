@@ -1,10 +1,19 @@
 import { describe, expect, it } from "vitest";
-import type { ProjectDebugProfileSummary } from "../app-types";
+import type {
+  ProjectDebugProfileSummary,
+  ProjectRuntimeEntry,
+} from "../app-types";
 import {
   buildProjectRuntimeLaunchPlan,
   projectRuntimePreflightBlocksStart,
+  projectRuntimePollingEnabled,
   projectRuntimePreferencesAllowStart,
   resolveProjectRuntimeDebugProfile,
+  resolveWorkspaceDebugProfileKeys,
+  resolveWorkspaceRuntimeStartPromptMode,
+  sameRuntimeEntries,
+  updateWorkspaceDebugProfileKey,
+  updateWorkspaceRuntimeStartPromptMode,
 } from "./useProjectsModule";
 
 function debugProfile(
@@ -79,11 +88,15 @@ describe("project runtime debug profile inheritance", () => {
     expect(plan.preflightArgs).toEqual({
       project: "demo",
       debugProfile: "proxy",
+      runtimeProfile: null,
+      command: null,
+      expectedPort: null,
+      envOverrides: {
+        API_URL: "http://localhost:3000",
+      },
     });
     expect(plan.startArgs.debugProfile).toBe(plan.preflightArgs.debugProfile);
-    expect(plan.startArgs.envOverrides).toEqual({
-      API_URL: "http://localhost:3000",
-    });
+    expect(plan.startArgs.envOverrides).toEqual(plan.preflightArgs.envOverrides);
   });
 
   it("uses null for both requests after a stale key falls back to default", () => {
@@ -95,6 +108,60 @@ describe("project runtime debug profile inheritance", () => {
 
     expect(plan.preflightArgs.debugProfile).toBeNull();
     expect(plan.startArgs.debugProfile).toBe(plan.preflightArgs.debugProfile);
+    expect(plan.preflightArgs.envOverrides).toBeNull();
+    expect(plan.startArgs.envOverrides).toBe(plan.preflightArgs.envOverrides);
+  });
+
+  it("keeps a one-off port override identical across preflight and start", () => {
+    const plan = buildProjectRuntimeLaunchPlan({
+      projectKey: "demo",
+      runtimeEntry,
+      requestedDebugProfileKey: "proxy",
+      expectedPort: 5174,
+    });
+
+    expect(plan.preflightArgs.expectedPort).toBe(5174);
+    expect(plan.startArgs.expectedPort).toBe(5174);
+  });
+});
+
+describe("project runtime polling equality", () => {
+  it("ignores observation timestamps when runtime state is unchanged", () => {
+    const current = [
+      {
+        key: "demo",
+        statusKey: "running",
+        updatedAtMs: 100,
+      },
+    ] as ProjectRuntimeEntry[];
+    const refreshed = [
+      {
+        key: "demo",
+        statusKey: "running",
+        updatedAtMs: 2200,
+      },
+    ] as ProjectRuntimeEntry[];
+
+    expect(sameRuntimeEntries(current, refreshed)).toBe(true);
+  });
+
+  it("detects a real runtime status transition", () => {
+    const current = [
+      {
+        key: "demo",
+        statusKey: "starting",
+        updatedAtMs: 100,
+      },
+    ] as ProjectRuntimeEntry[];
+    const refreshed = [
+      {
+        key: "demo",
+        statusKey: "running",
+        updatedAtMs: 2200,
+      },
+    ] as ProjectRuntimeEntry[];
+
+    expect(sameRuntimeEntries(current, refreshed)).toBe(false);
   });
 });
 
@@ -110,10 +177,91 @@ describe("project runtime preflight gate", () => {
   });
 });
 
+describe("workspace launch profile preferences", () => {
+  it("keeps the selected launch profile isolated per workspace", () => {
+    const first = updateWorkspaceDebugProfileKey(
+      "workspace-a",
+      "demo",
+      "uat",
+      {},
+      { demo: "legacy" },
+    );
+    const second = updateWorkspaceDebugProfileKey(
+      "workspace-b",
+      "demo",
+      "dc2",
+      first,
+      { demo: "legacy" },
+    );
+
+    expect(
+      resolveWorkspaceDebugProfileKeys("workspace-a", second, {}),
+    ).toEqual({ demo: "uat" });
+    expect(
+      resolveWorkspaceDebugProfileKeys("workspace-b", second, {}),
+    ).toEqual({ demo: "dc2" });
+  });
+
+  it("uses the old project preference until a workspace stores its own value", () => {
+    expect(
+      resolveWorkspaceDebugProfileKeys("workspace-a", {}, { demo: "legacy" }),
+    ).toEqual({ demo: "legacy" });
+  });
+
+  it("persists an explicit project base selection", () => {
+    const next = updateWorkspaceDebugProfileKey(
+      "workspace-a",
+      "demo",
+      "",
+      {},
+      { demo: "legacy" },
+    );
+
+    expect(
+      Object.prototype.hasOwnProperty.call(next["workspace-a"], "demo"),
+    ).toBe(true);
+    expect(next["workspace-a"].demo).toBe("");
+  });
+});
+
+describe("workspace runtime start prompt preferences", () => {
+  it("defaults to auto and keeps workspace choices isolated", () => {
+    const first = updateWorkspaceRuntimeStartPromptMode(
+      "workspace-a",
+      "always",
+      {},
+    );
+    const second = updateWorkspaceRuntimeStartPromptMode(
+      "workspace-b",
+      "never",
+      first,
+    );
+
+    expect(resolveWorkspaceRuntimeStartPromptMode("missing", second)).toBe(
+      "auto",
+    );
+    expect(resolveWorkspaceRuntimeStartPromptMode("workspace-a", second)).toBe(
+      "always",
+    );
+    expect(resolveWorkspaceRuntimeStartPromptMode("workspace-b", second)).toBe(
+      "never",
+    );
+  });
+});
+
 describe("project runtime preference hydration gate", () => {
   it("allows start only after enabled preferences have hydrated", () => {
     expect(projectRuntimePreferencesAllowStart(true, false)).toBe(false);
     expect(projectRuntimePreferencesAllowStart(false, true)).toBe(false);
     expect(projectRuntimePreferencesAllowStart(true, true)).toBe(true);
+  });
+});
+
+describe("project runtime polling scope", () => {
+  it("polls only while projects or resources are visible", () => {
+    expect(projectRuntimePollingEnabled(true, true, "demo")).toBe(true);
+    expect(projectRuntimePollingEnabled(true, false, "demo")).toBe(false);
+    expect(projectRuntimePollingEnabled(true, true, "")).toBe(false);
+    expect(projectRuntimePollingEnabled(false, true, "demo")).toBe(false);
   });
 });

@@ -87,7 +87,7 @@ export function useRuntimeProfiles({ sourceId, onRefresh }: UseRuntimeProfilesOp
   const persistProfiles = useCallback(
     async (nextProfiles: RuntimeProfileDraft[], selectedKey?: string) => {
       if (scope === "unsupported") {
-        setError("当前配置源不支持运行配置覆盖。");
+        setError("当前配置源不支持运行环境模板覆盖。");
         return false;
       }
       setSaving(true);

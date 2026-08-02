@@ -1,4 +1,5 @@
 use crate::config::default_config_dir;
+use crate::log_support::rotate_runtime_log_if_needed;
 use crate::runtime_local_proxy::{
     RunningLocalProxy, RuntimeLocalProxySpec, remove_local_proxy_artifacts, spawn_local_proxy,
     validate_local_proxy_spec,
@@ -883,6 +884,7 @@ fn spawn_worker(request: &StoredRuntimeDaemonRequest) -> Result<(Child, u64)> {
     if let Some(parent) = log_path.parent() {
         fs::create_dir_all(parent)?;
     }
+    rotate_runtime_log_if_needed(log_path).map_err(anyhow::Error::msg)?;
     let mut log_file = OpenOptions::new()
         .create(true)
         .append(true)

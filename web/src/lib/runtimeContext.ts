@@ -1,6 +1,7 @@
 import type {
   ProjectRuntimeContextSnapshot,
   ProjectRuntimeReadyProbeSummary,
+  ProjectRuntimeWorkspaceContext,
 } from "../app-types";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -107,4 +108,67 @@ export function runtimeContextSelectionLabel(
     context.effective.runtimeProfileLabel?.trim() ||
     context.effective.runtimeProfileKey?.trim();
   return runtimeProfile ? `${debugProfile} · ${runtimeProfile}` : debugProfile;
+}
+
+export function runtimeWorkspaceScopeLabel(
+  workspace?: Pick<ProjectRuntimeWorkspaceContext, "runtimeProfileScope"> | null,
+): string {
+  if (!workspace) {
+    return "当前工作区";
+  }
+  if (workspace.runtimeProfileScope === "workspaceOverride") {
+    return "工作区运行环境";
+  }
+  if (workspace.runtimeProfileScope === "inherited") {
+    return "继承的共享环境";
+  }
+  return "全局共享环境";
+}
+
+export function runtimeValueSourceLabel(
+  source?: string | null,
+  workspace?: ProjectRuntimeWorkspaceContext | null,
+): string {
+  const normalized = source?.trim() ?? "";
+  if (normalized.startsWith("debugProfile")) {
+    return "项目启动档案";
+  }
+  if (normalized.startsWith("runtimeProfile")) {
+    return runtimeWorkspaceScopeLabel(workspace);
+  }
+  if (normalized.startsWith("workspaceProjectInstance.debugProfile")) {
+    return "工作区实例 + 启动档案";
+  }
+  if (normalized.startsWith("workspaceProjectInstance")) {
+    return "工作区项目实例";
+  }
+  switch (normalized) {
+    case "launchOverride":
+    case "launch override":
+      return "本次启动覆盖";
+    case "project.dev.env":
+    case "projectDev":
+    case "projectFocus":
+    case "projectFocusUrl":
+      return "项目基础";
+    case "projectRepo":
+      return workspace?.projectInstancePath ? "工作区项目实例" : "项目目录";
+    case "workspaceContext":
+      return "工作区上下文";
+    case "networkProxy":
+    case "networkProxy.nodeHook":
+      return "代理注入";
+    case "commandArg":
+      return "启动命令参数";
+    case "packageScript":
+      return "package 脚本";
+    case "envPort":
+      return "环境变量 PORT";
+    case "systemDefault":
+      return "系统默认";
+    case "direct":
+      return "直连";
+    default:
+      return normalized || "未解析";
+  }
 }

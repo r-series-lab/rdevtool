@@ -2,7 +2,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{SecondsFormat, Utc};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -10,10 +10,11 @@ use uuid::Uuid;
 
 use crate::config::ProjectWorkspaceConfig;
 use crate::core::{BranchTaskResponse, BuildStatusResponse};
+use crate::history_id;
 
 const DEPLOY_HISTORY_LIMIT: usize = 20;
 const MERGE_HISTORY_LIMIT: usize = 20;
-const CURRENT_SCHEMA_VERSION: i64 = 2;
+const CURRENT_SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA_V1_SQL: &str = r#"
     CREATE TABLE IF NOT EXISTS kv_store (
@@ -282,6 +283,42 @@ impl Storage {
             )
             .map_err(|error| error.to_string())?;
         Ok(())
+    }
+
+    pub fn update_json<F>(&self, namespace: &str, key: &str, update: F) -> Result<Value, String>
+    where
+        F: FnOnce(Option<Value>) -> Result<Value, String>,
+    {
+        let mut connection = self.open()?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        let stored = transaction
+            .query_row(
+                "SELECT value FROM kv_store WHERE namespace = ?1 AND key = ?2",
+                params![namespace, key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?
+            .map(|value| serde_json::from_str::<Value>(&value).map_err(|error| error.to_string()))
+            .transpose()?;
+        let result = update(stored)?;
+        let payload = serde_json::to_string(&result).map_err(|error| error.to_string())?;
+        transaction
+            .execute(
+                r#"
+                INSERT INTO kv_store(namespace, key, value, updated_at)
+                VALUES (?1, ?2, ?3, ?4)
+                ON CONFLICT(namespace, key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = excluded.updated_at
+                "#,
+                params![namespace, key, payload, now_iso()],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(result)
     }
 
     pub fn prepend_json_array(
@@ -670,6 +707,16 @@ impl Storage {
         let Some(entry) = entry else {
             return Ok(None);
         };
+        let queue_url = status.queue_url.clone().or(entry.queue_url.clone());
+        let build_url = status.build_url.clone().or(entry.build_url.clone());
+        if entry.state_key == status.state_key
+            && entry.state_label == status.state_label
+            && entry.detail == status.detail
+            && entry.queue_url == queue_url
+            && entry.build_url == build_url
+        {
+            return Ok(None);
+        }
         let request = SaveDeployHistoryRequest {
             history_key: entry.history_key,
             workspace_key: entry.workspace_key,
@@ -682,8 +729,8 @@ impl Storage {
             state_key: status.state_key.clone(),
             state_label: status.state_label.clone(),
             detail: status.detail.clone(),
-            queue_url: status.queue_url.clone().or(entry.queue_url),
-            build_url: status.build_url.clone().or(entry.build_url),
+            queue_url,
+            build_url,
             params: entry.params,
         };
         self.save_deploy_history(request.clone())?;
@@ -978,7 +1025,8 @@ impl Storage {
             let Some(target_branch) = item.target_branch.as_deref() else {
                 continue;
             };
-            let history_key = format!("branch-sync-{origin}-{event_id}-{index}");
+            let history_key =
+                history_id::from_seed("merge", &format!("branch-sync-{origin}-{event_id}-{index}"));
             let target_commit = item.commit.as_ref().map(|commit| HistoryCommitInfo {
                 short_hash: commit.short_hash.clone(),
                 subject: commit.subject.clone(),
@@ -1247,6 +1295,43 @@ fn migrate_schema(connection: &mut Connection) -> Result<(), String> {
             )
             .map_err(|error| error.to_string())?;
         transaction.commit().map_err(|error| error.to_string())?;
+        version = 2;
+    }
+
+    if version < 3 {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        transaction
+            .execute_batch(
+                r#"
+                UPDATE kv_store
+                SET updated_at = replace(updated_at, ' ', 'T') || 'Z'
+                WHERE updated_at GLOB '????-??-?? ??:??:??';
+
+                UPDATE notes
+                SET created_at = replace(created_at, ' ', 'T') || 'Z'
+                WHERE created_at GLOB '????-??-?? ??:??:??';
+                UPDATE notes
+                SET updated_at = replace(updated_at, ' ', 'T') || 'Z'
+                WHERE updated_at GLOB '????-??-?? ??:??:??';
+
+                UPDATE deploy_history
+                SET created_at = replace(created_at, ' ', 'T') || 'Z'
+                WHERE created_at GLOB '????-??-?? ??:??:??';
+                UPDATE deploy_history
+                SET updated_at = replace(updated_at, ' ', 'T') || 'Z'
+                WHERE updated_at GLOB '????-??-?? ??:??:??';
+
+                UPDATE merge_history
+                SET created_at = replace(created_at, ' ', 'T') || 'Z'
+                WHERE created_at GLOB '????-??-?? ??:??:??';
+
+                PRAGMA user_version = 3;
+                "#,
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
     }
 
     Ok(())
@@ -1414,7 +1499,7 @@ fn prune_merge_history(connection: &Connection) -> Result<(), String> {
 }
 
 fn now_iso() -> String {
-    Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
 #[allow(dead_code)]
@@ -1541,11 +1626,9 @@ mod tests {
 
         assert_eq!(saved, 2);
         assert_eq!(history.len(), 2);
-        assert!(
-            history
-                .iter()
-                .all(|item| item.history_key.starts_with("branch-sync-test-"))
-        );
+        assert!(history.iter().all(|item| {
+            item.history_key.starts_with("merge-") && item.history_key.len() == 18
+        }));
         assert!(
             history
                 .iter()
@@ -1622,6 +1705,48 @@ mod tests {
 
         drop(connection);
         remove_test_db(&path);
+    }
+
+    #[test]
+    fn migrates_legacy_utc_timestamps_to_rfc3339() {
+        let path = temp_db_path("timestamp-migration");
+        let storage = Storage::new(path.clone()).expect("create current storage");
+        let connection = storage.open().expect("open current storage");
+        connection
+            .execute(
+                "INSERT INTO kv_store(namespace, key, value, updated_at) VALUES (?1, ?2, ?3, ?4)",
+                params!["test", "legacy", "{}", "2026-07-27 09:08:07"],
+            )
+            .expect("insert legacy timestamp");
+        connection
+            .execute_batch("PRAGMA user_version = 2;")
+            .expect("downgrade schema marker");
+        drop(connection);
+
+        let storage = Storage::new(path.clone()).expect("migrate legacy timestamp");
+        let connection = storage.open().expect("open migrated storage");
+        let timestamp = connection
+            .query_row(
+                "SELECT updated_at FROM kv_store WHERE namespace = 'test' AND key = 'legacy'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read migrated timestamp");
+
+        assert_eq!(timestamp, "2026-07-27T09:08:07Z");
+        let version = connection
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .expect("read schema version");
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+        drop(connection);
+        remove_test_db(&path);
+    }
+
+    #[test]
+    fn writes_rfc3339_timestamps_with_explicit_utc_zone() {
+        let timestamp = now_iso();
+        assert!(timestamp.ends_with('Z'));
+        assert!(chrono::DateTime::parse_from_rfc3339(&timestamp).is_ok());
     }
 
     #[test]
@@ -1702,6 +1827,7 @@ mod tests {
                     state_key: "success".to_string(),
                     state_label: "构建成功".to_string(),
                     detail: "SUCCESS".to_string(),
+                    commit: Some("abc123".to_string()),
                 },
                 Some("http://jenkins/queue/item/42/"),
                 None,
@@ -1724,6 +1850,7 @@ mod tests {
                     state_key: "failure".to_string(),
                     state_label: "构建失败".to_string(),
                     detail: "command exited with status 1".to_string(),
+                    commit: None,
                 },
                 None,
                 None,
@@ -1734,6 +1861,24 @@ mod tests {
             .expect("match local build");
         assert_eq!(local_update.history_key, "activity-local-build");
         assert_eq!(local_update.state_key, "failure");
+
+        let unchanged_local_update = storage
+            .update_deploy_history_status(
+                &BuildStatusResponse {
+                    queue_url: None,
+                    build_url: None,
+                    state_key: "failure".to_string(),
+                    state_label: "构建失败".to_string(),
+                    detail: "command exited with status 1".to_string(),
+                    commit: None,
+                },
+                None,
+                None,
+                Some("local-app"),
+                Some("feature"),
+            )
+            .expect("skip unchanged local build");
+        assert!(unchanged_local_update.is_none());
 
         remove_test_db(&path);
     }

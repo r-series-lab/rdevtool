@@ -5,6 +5,7 @@ import {
   enrichBranchActivityFailureDetails,
   latestActivityExecutionStatus,
   normalizeActivityEntry,
+  retainActivityEntries,
 } from "./activityCenter";
 
 describe("config change activities", () => {
@@ -38,11 +39,48 @@ describe("config change activities", () => {
 
     expect(activityRequiresAttention(runningBuild)).toBe(false);
     expect(activityRequiresAttention(actionableConfig)).toBe(true);
+    expect(activityRequiresAttention({
+      ...actionableConfig,
+      acknowledgedAt: "2026-07-21T08:00:00.000Z",
+    })).toBe(false);
     expect(activityRequiresAttention(failedBuild)).toBe(true);
     expect(activityRequiresAttention({
       ...failedBuild,
       acknowledgedAt: "2026-07-21T08:00:00.000Z",
     })).toBe(false);
+  });
+
+  it("retains unresolved activities before newer completed history", () => {
+    const items = [
+      createActivityEntry({
+        id: "pending-config",
+        kind: "config",
+        status: "running",
+        title: "配置已变更",
+        summary: "需要重新加载",
+        action: {
+          kind: "reloadConfig",
+          label: "重新加载",
+          scope: "workspace",
+        },
+        updatedAt: "2026-07-20T08:00:00.000Z",
+      }),
+      ...Array.from({ length: 3 }, (_, index) =>
+        createActivityEntry({
+          id: `success-${index}`,
+          kind: "build",
+          status: "success",
+          title: "构建完成",
+          summary: "成功",
+          updatedAt: `2026-07-21T08:0${index}:00.000Z`,
+        }),
+      ),
+    ];
+
+    expect(retainActivityEntries(items, 2).map((item) => item.id)).toEqual([
+      "success-2",
+      "pending-config",
+    ]);
   });
 
   it("preserves structured build parameters while normalizing stored activities", () => {
@@ -65,6 +103,31 @@ describe("config change activities", () => {
       { key: "environment", label: "环境", value: "dc2", masked: false },
       { key: "token", label: "Token", value: "已配置", masked: true },
     ]);
+  });
+
+  it("preserves workspace archive deep links", () => {
+    const entry = normalizeActivityEntry({
+      id: "workspace-archive",
+      kind: "config",
+      status: "success",
+      title: "归档工作区",
+      summary: "已归档 Feature A",
+      target: {
+        page: "overview",
+        workspaceKey: "feature-a",
+        workspaceView: "archived",
+      },
+      createdAt: "2026-07-28T08:00:00.000Z",
+      updatedAt: "2026-07-28T08:00:00.000Z",
+    });
+
+    expect(entry?.target).toEqual({
+      page: "overview",
+      projectKey: null,
+      branchMode: null,
+      workspaceKey: "feature-a",
+      workspaceView: "archived",
+    });
   });
 
   it("keeps a reload action when persisting a config activity", () => {
@@ -132,6 +195,9 @@ describe("config change activities", () => {
         linkKey: "cooperation-debug",
         linkName: "合作渠道联调",
         sourceId: "workspace-links",
+        proxySourceId: "workspace-proxy",
+        runtimeSourceId: "workspace-runtime",
+        workspaceKey: "feature-a",
         replayAction: "run",
       },
       createdAt: "2026-07-21T08:00:00.000Z",
@@ -150,6 +216,9 @@ describe("config change activities", () => {
     expect(entry?.action).toMatchObject({
       kind: "linkRecover",
       sourceId: "workspace-links",
+      proxySourceId: "workspace-proxy",
+      runtimeSourceId: "workspace-runtime",
+      workspaceKey: "feature-a",
       replayAction: "run",
     });
   });
@@ -216,6 +285,7 @@ describe("config change activities", () => {
       projectName: "管理端",
       debugProfileKey: "dc2",
       envOverrides: { APP_ENV: "dc2", PORT: "8080" },
+      expectedPort: null,
       replayAction: "start",
     });
     expect(proxy?.action).toMatchObject({

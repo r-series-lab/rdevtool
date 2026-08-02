@@ -21,6 +21,8 @@ import type {
   BranchPushFileStatus,
   BranchPushStatus,
 } from "../../app-types";
+import { useI18n } from "../../i18n";
+import { CopyIcon } from "../AppIcons";
 
 const BRANCH_CHANGED_FILE_VISIBLE_ROWS = 10;
 const BRANCH_CHANGED_FILE_LIST_MAX_HEIGHT = 320;
@@ -44,6 +46,8 @@ type BranchChangedFileGroupKey =
   | "unstaged"
   | "untracked"
   | "other";
+
+type BranchChangedFileRisk = "conflict" | "delete" | "sensitive";
 
 const BRANCH_CHANGED_FILE_FILTERS: Array<{
   key: BranchChangedFileFilter;
@@ -125,14 +129,14 @@ function branchChangedFileStatusLabel(item: BranchPushFileStatus) {
   return item.code || "变更";
 }
 
-function branchChangedFileRiskLabels(item: BranchPushFileStatus) {
-  const labels: string[] = [];
+function branchChangedFileRisks(item: BranchPushFileStatus) {
+  const risks: BranchChangedFileRisk[] = [];
   const path = item.path.toLowerCase();
   if (item.conflicted) {
-    labels.push("冲突");
+    risks.push("conflict");
   }
   if (item.code.includes("D")) {
-    labels.push("删除");
+    risks.push("delete");
   }
   if (
     /(^|\/)\.env($|[.-])/.test(path) ||
@@ -145,9 +149,15 @@ function branchChangedFileRiskLabels(item: BranchPushFileStatus) {
     path.includes("assets.car") ||
     path.includes("src-tauri/icons/")
   ) {
-    labels.push("敏感配置");
+    risks.push("sensitive");
   }
-  return labels;
+  return risks;
+}
+
+function branchChangedFileRiskLabel(risk: BranchChangedFileRisk) {
+  if (risk === "conflict") return "冲突";
+  if (risk === "delete") return "删除";
+  return "敏感配置";
 }
 
 function branchChangedFileMatchesFilter(
@@ -155,7 +165,7 @@ function branchChangedFileMatchesFilter(
   filter: BranchChangedFileFilter,
 ) {
   if (filter === "all") return true;
-  if (filter === "risk") return branchChangedFileRiskLabels(item).length > 0;
+  if (filter === "risk") return branchChangedFileRisks(item).length > 0;
   if (filter === "conflicted") return item.conflicted;
   if (filter === "staged") return item.staged;
   if (filter === "unstaged") return item.unstaged;
@@ -169,12 +179,12 @@ function branchChangedFileSummary(files: BranchPushFileStatus[]) {
     staged: files.filter((item) => item.staged).length,
     unstaged: files.filter((item) => item.unstaged).length,
     untracked: files.filter((item) => item.untracked).length,
-    risk: files.filter((item) => branchChangedFileRiskLabels(item).length > 0).length,
+    risk: files.filter((item) => branchChangedFileRisks(item).length > 0).length,
   };
 }
 
 function branchChangedFileGroupKey(item: BranchPushFileStatus): BranchChangedFileGroupKey {
-  const risks = branchChangedFileRiskLabels(item).filter((label) => label !== "冲突");
+  const risks = branchChangedFileRisks(item).filter((risk) => risk !== "conflict");
   if (item.conflicted) {
     return "conflicted";
   }
@@ -530,6 +540,7 @@ function BranchFileDiffPreview({
   state?: BranchFileDiffState;
   panel?: boolean;
 }) {
+  const { t } = useI18n();
   const [viewMode, setViewMode] = useState<BranchDiffViewMode>("unified");
 
   if (!state || state.status === "loading") {
@@ -544,7 +555,7 @@ function BranchFileDiffPreview({
         }}
       >
         <Typography variant="caption" color="text.secondary">
-          正在加载差异...
+          {t("正在加载差异...")}
         </Typography>
       </Box>
     );
@@ -580,29 +591,37 @@ function BranchFileDiffPreview({
       sx={{
         mt: 0.7,
         ...(panel ? { mt: 0, minHeight: 0, height: "100%" } : {}),
-        px: 0.85,
-        py: 0.75,
-        borderRadius: "10px",
+        px: panel ? 0 : 0.85,
+        py: panel ? 0 : 0.75,
+        borderRadius: "8px",
         border: "1px solid",
         borderColor: "divider",
-        bgcolor: "rgba(0,0,0,0.03)",
+        bgcolor: panel ? "transparent" : "rgba(0,0,0,0.03)",
         minWidth: 0,
       }}
     >
-      <Stack spacing={0.55}>
-        <Stack direction="row" columnGap={0.45} rowGap={0.45} flexWrap="wrap">
+      <Stack spacing={panel ? 0 : 0.55}>
+        <Stack
+          className="branch-diff-toolbar"
+          direction="row"
+          columnGap={0.45}
+          rowGap={0.45}
+          flexWrap="wrap"
+        >
           <Stack direction="row" columnGap={0.45} rowGap={0.45} flexWrap="wrap" sx={{ flex: "1 1 auto", minWidth: 0 }}>
-            <Chip
-              size="small"
-              label={branchFileDiffModeLabel(data.mode)}
-              color="primary"
-              variant="outlined"
-              sx={{ height: 21, fontSize: "0.68rem" }}
-            />
+            {!panel ? (
+              <Chip
+                size="small"
+                label={t(branchFileDiffModeLabel(data.mode))}
+                color="primary"
+                variant="outlined"
+                sx={{ height: 21, fontSize: "0.68rem" }}
+              />
+            ) : null}
             {data.truncated ? (
               <Chip
                 size="small"
-                label="已截断"
+                label={t("已截断")}
                 color="warning"
                 variant="outlined"
                 sx={{ height: 21, fontSize: "0.68rem" }}
@@ -611,7 +630,7 @@ function BranchFileDiffPreview({
             {data.binary ? (
               <Chip
                 size="small"
-                label="二进制"
+                label={t("二进制")}
                 color="default"
                 variant="outlined"
                 sx={{ height: 21, fontSize: "0.68rem" }}
@@ -640,19 +659,19 @@ function BranchFileDiffPreview({
                 }
               }}
             >
-              <ToggleButton value="unified">统一</ToggleButton>
-              <ToggleButton value="split">左右</ToggleButton>
+              <ToggleButton value="unified">{t("统一")}</ToggleButton>
+              <ToggleButton value="split">{t("左右")}</ToggleButton>
             </ToggleButtonGroup>
           ) : null}
         </Stack>
 
         {data.binary ? (
           <Typography variant="caption" color="text.secondary">
-            二进制文件不展示文本差异。
+            {t("二进制文件不展示文本差异。")}
           </Typography>
         ) : emptyDiff ? (
           <Typography variant="caption" color="text.secondary">
-            没有可展示的文本差异。
+            {t("没有可展示的文本差异。")}
           </Typography>
         ) : viewMode === "split" ? (
           <BranchSplitDiffViewer lines={diffLines} panel={panel} />
@@ -681,6 +700,7 @@ export function BranchChangesDialog({
   selectedPaths = [],
   onSelectedPathsChange,
 }: BranchChangesDialogProps) {
+  const { t } = useI18n();
   const [filter, setFilter] = useState<BranchChangedFileFilter>("all");
   const [query, setQuery] = useState("");
   const [activePath, setActivePath] = useState("");
@@ -708,11 +728,11 @@ export function BranchChangesDialog({
         return (
           item.path.toLowerCase().includes(normalizedQuery) ||
           item.code.toLowerCase().includes(normalizedQuery) ||
-          branchChangedFileChangeLabel(item).toLowerCase().includes(normalizedQuery) ||
-          branchChangedFileStatusLabel(item).toLowerCase().includes(normalizedQuery)
+          t(branchChangedFileChangeLabel(item)).toLowerCase().includes(normalizedQuery) ||
+          t(branchChangedFileStatusLabel(item)).toLowerCase().includes(normalizedQuery)
         );
       }),
-    [filter, normalizedQuery, status.files],
+    [filter, normalizedQuery, status.files, t],
   );
   const groupedFiles = useMemo(() => branchChangedFileGrouped(filteredFiles), [filteredFiles]);
   const activeItem = useMemo(
@@ -804,7 +824,7 @@ export function BranchChangesDialog({
   }
 
   function renderChangedFileRow(item: BranchPushFileStatus) {
-    const risks = branchChangedFileRiskLabels(item);
+    const risks = branchChangedFileRisks(item);
     const selected = selectedPathSet.has(item.path);
     const active = activeItem?.path === item.path;
 
@@ -837,10 +857,10 @@ export function BranchChangesDialog({
             {item.path}
           </Typography>
           <Stack direction="row" columnGap={0.35} rowGap={0.35} flexWrap="wrap" sx={{ mt: 0.35 }}>
-            <Chip size="small" label={branchChangedFileChangeLabel(item)} variant="outlined" />
+            <Chip size="small" label={t(branchChangedFileChangeLabel(item))} variant="outlined" />
             <Chip
               size="small"
-              label={branchChangedFileStatusLabel(item)}
+              label={t(branchChangedFileStatusLabel(item))}
               color={item.conflicted ? "error" : "default"}
               variant={item.conflicted ? "filled" : "outlined"}
             />
@@ -848,8 +868,8 @@ export function BranchChangesDialog({
               <Chip
                 key={risk}
                 size="small"
-                label={risk}
-                color={risk === "冲突" ? "error" : "warning"}
+                label={t(branchChangedFileRiskLabel(risk))}
+                color={risk === "conflict" ? "error" : "warning"}
                 variant="outlined"
               />
             ))}
@@ -872,7 +892,7 @@ export function BranchChangesDialog({
         <Stack direction="row" justifyContent="space-between" alignItems="flex-start" spacing={1.2}>
           <Box minWidth={0}>
             <Typography variant="subtitle1" fontWeight={860} noWrap>
-              变更文件
+              {t("变更文件")}
             </Typography>
             <Typography
               variant="caption"
@@ -890,9 +910,9 @@ export function BranchChangesDialog({
             flexWrap="wrap"
             justifyContent="flex-end"
           >
-            <Chip size="small" label={`全部 ${status.files.length}`} variant="outlined" />
-            <Chip size="small" label={`已选 ${selectedPaths.length}`} color={selectedPaths.length > 0 ? "primary" : "default"} variant="outlined" />
-            <Chip size="small" label={`冲突 ${summary.conflicted}`} color={summary.conflicted > 0 ? "error" : "default"} variant="outlined" />
+            <Chip size="small" label={t("全部 {count}", { count: status.files.length })} variant="outlined" />
+            <Chip size="small" label={t("已选 {count}", { count: selectedPaths.length })} color={selectedPaths.length > 0 ? "primary" : "default"} variant="outlined" />
+            <Chip size="small" label={t("冲突 {count}", { count: summary.conflicted })} color={summary.conflicted > 0 ? "error" : "default"} variant="outlined" />
           </Stack>
         </Stack>
       </DialogTitle>
@@ -901,10 +921,10 @@ export function BranchChangesDialog({
           <Box className="branch-changes-sidebar">
             <Stack className="branch-changes-sidebar-stack" spacing={0.75} sx={{ minHeight: 0, height: "100%" }}>
               <Stack className="branch-changes-summary-strip" direction="row" columnGap={0.45} rowGap={0.45} flexWrap="wrap">
-                <Chip size="small" label={`风险 ${summary.risk}`} color={summary.risk > 0 ? "warning" : "default"} variant={summary.risk > 0 ? "filled" : "outlined"} />
-                <Chip size="small" label={`已暂存 ${summary.staged}`} variant="outlined" />
-                <Chip size="small" label={`未暂存 ${summary.unstaged}`} variant="outlined" />
-                <Chip size="small" label={`新文件 ${summary.untracked}`} variant="outlined" />
+                <Chip size="small" label={t("风险 {count}", { count: summary.risk })} color={summary.risk > 0 ? "warning" : "default"} variant={summary.risk > 0 ? "filled" : "outlined"} />
+                <Chip size="small" label={t("已暂存 {count}", { count: summary.staged })} variant="outlined" />
+                <Chip size="small" label={t("未暂存 {count}", { count: summary.unstaged })} variant="outlined" />
+                <Chip size="small" label={t("新文件 {count}", { count: summary.untracked })} variant="outlined" />
               </Stack>
               {selectable ? (
                 <Stack className="branch-changes-selection-actions" direction="row" columnGap={0.45} rowGap={0.45} flexWrap="wrap">
@@ -914,7 +934,7 @@ export function BranchChangesDialog({
                     disabled={selectableFiles.length === 0 || allSelectableSelected}
                     onClick={() => updateSelectedPaths(selectableFiles.map((item) => item.path))}
                   >
-                    全选可提交
+                    {t("全选可提交")}
                   </Button>
                   <Button
                     size="small"
@@ -922,7 +942,7 @@ export function BranchChangesDialog({
                     disabled={selectedPaths.length === 0}
                     onClick={() => updateSelectedPaths([])}
                   >
-                    清空选择
+                    {t("清空选择")}
                   </Button>
                 </Stack>
               ) : null}
@@ -931,7 +951,7 @@ export function BranchChangesDialog({
                   <Chip
                     key={item.key}
                     size="small"
-                    label={item.label}
+                    label={t(item.label)}
                     clickable
                     color={filter === item.key ? "primary" : "default"}
                     variant={filter === item.key ? "filled" : "outlined"}
@@ -943,7 +963,7 @@ export function BranchChangesDialog({
                 className="branch-changes-search"
                 size="small"
                 value={query}
-                placeholder="筛选文件路径、状态或 Git 代码"
+                placeholder={t("筛选文件路径、状态或 Git 代码")}
                 onChange={(event) => setQuery(event.target.value)}
                 fullWidth
               />
@@ -951,7 +971,7 @@ export function BranchChangesDialog({
                 <Stack spacing={0.55}>
                   {filteredFiles.length === 0 ? (
                     <Typography variant="caption" color="text.secondary">
-                      当前筛选没有匹配的变更文件。
+                      {t("当前筛选没有匹配的变更文件。")}
                     </Typography>
                   ) : null}
                   {groupedFiles.map((group) => {
@@ -983,7 +1003,7 @@ export function BranchChangesDialog({
                             ›
                           </Box>
                           <Typography className="branch-changes-file-group-title">
-                            {group.label}
+                            {t(group.label)}
                           </Typography>
                           <Stack className="branch-changes-file-group-actions" direction="row" spacing={0.35} alignItems="center">
                             <Chip
@@ -1009,7 +1029,7 @@ export function BranchChangesDialog({
                                   selectGroupPaths(selectableGroupPaths);
                                 }}
                               >
-                                {allGroupSelected ? "清空" : "选择"}
+                                {t(allGroupSelected ? "清空" : "选择")}
                               </Button>
                             ) : null}
                           </Stack>
@@ -1029,25 +1049,32 @@ export function BranchChangesDialog({
           <Box className="branch-changes-diff-panel">
             {activeItem ? (
               <Stack spacing={0.9} sx={{ minHeight: 0, height: "100%" }}>
-                <Stack direction="row" alignItems="flex-start" justifyContent="space-between" spacing={1}>
-                  <Box minWidth={0}>
+                <Box className="branch-changes-diff-header">
+                  <Box className="branch-changes-diff-file-info">
                     <Typography className="branch-changes-diff-title" title={activeItem.path}>
                       {activeItem.path}
                     </Typography>
-                    <Typography variant="caption" color="text.secondary">
-                      {branchChangedFileStatusLabel(activeItem)}
-                    </Typography>
+                    <Chip
+                      className="branch-changes-diff-status"
+                      size="small"
+                      label={t(branchChangedFileStatusLabel(activeItem))}
+                      color={activeItem.conflicted ? "error" : "default"}
+                      variant="outlined"
+                    />
                   </Box>
                   <Button
+                    className="branch-changes-copy-path"
                     size="small"
                     variant="outlined"
+                    startIcon={<CopyIcon fontSize="small" />}
+                    aria-label={t("复制文件路径：{path}", { path: activeItem.path })}
                     onClick={() => {
                       void copyChangedFilePath(activeItem.path).then(() => setCopiedPath(activeItem.path));
                     }}
                   >
-                    {copiedPath === activeItem.path ? "已复制" : "复制路径"}
+                    {t(copiedPath === activeItem.path ? "已复制" : "复制路径")}
                   </Button>
-                </Stack>
+                </Box>
                 <Box sx={{ minHeight: 0, flex: "1 1 auto" }}>
                   <BranchFileDiffPreview state={activeDiffState} panel />
                 </Box>
@@ -1055,7 +1082,7 @@ export function BranchChangesDialog({
             ) : (
               <Box className="branch-changes-empty">
                 <Typography variant="body2" color="text.secondary">
-                  选择一个文件查看差异。
+                  {t("选择一个文件查看差异。")}
                 </Typography>
               </Box>
             )}
@@ -1063,9 +1090,13 @@ export function BranchChangesDialog({
         </Box>
       </DialogContent>
       <DialogActions className="branch-changes-dialog-actions">
-        <Chip size="small" label={`已选择 ${selectedPaths.length} 个文件`} variant="outlined" />
+        <Chip
+          size="small"
+          label={t("已选择 {count} 个文件", { count: selectedPaths.length })}
+          variant="outlined"
+        />
         <Button onClick={onClose} variant="contained">
-          完成
+          {t("完成")}
         </Button>
       </DialogActions>
     </Dialog>
@@ -1093,6 +1124,7 @@ export function BranchChangedFilesList({
   selectedPaths = [],
   onSelectedPathsChange,
 }: BranchChangedFilesListProps) {
+  const { t } = useI18n();
   const [filter, setFilter] = useState<BranchChangedFileFilter>("all");
   const [query, setQuery] = useState("");
   const [copiedPath, setCopiedPath] = useState("");
@@ -1105,7 +1137,7 @@ export function BranchChangedFilesList({
       staged: files.filter((item) => item.staged).length,
       unstaged: files.filter((item) => item.unstaged).length,
       untracked: files.filter((item) => item.untracked).length,
-      risk: files.filter((item) => branchChangedFileRiskLabels(item).length > 0).length,
+      risk: files.filter((item) => branchChangedFileRisks(item).length > 0).length,
     }),
     [files],
   );
@@ -1122,11 +1154,11 @@ export function BranchChangedFilesList({
       return (
         item.path.toLowerCase().includes(normalizedQuery) ||
         item.code.toLowerCase().includes(normalizedQuery) ||
-        branchChangedFileChangeLabel(item).toLowerCase().includes(normalizedQuery) ||
-        branchChangedFileStatusLabel(item).toLowerCase().includes(normalizedQuery)
+        t(branchChangedFileChangeLabel(item)).toLowerCase().includes(normalizedQuery) ||
+        t(branchChangedFileStatusLabel(item)).toLowerCase().includes(normalizedQuery)
       );
     });
-  }, [files, filter, query]);
+  }, [files, filter, query, t]);
 
   const filesFingerprint = useMemo(
     () => files.map((item) => `${item.code}:${item.path}`).join("\n"),
@@ -1211,29 +1243,29 @@ export function BranchChangedFilesList({
     <Collapse in={expanded}>
       <Stack spacing={0.7}>
         <Stack direction="row" columnGap={0.45} rowGap={0.45} flexWrap="wrap">
-          <Chip size="small" label={`全部 ${files.length}`} variant="outlined" />
+          <Chip size="small" label={t("全部 {count}", { count: files.length })} variant="outlined" />
           <Chip
             size="small"
-            label={`风险 ${summary.risk}`}
+            label={t("风险 {count}", { count: summary.risk })}
             color={summary.risk > 0 ? "warning" : "default"}
             variant={summary.risk > 0 ? "filled" : "outlined"}
           />
           <Chip
             size="small"
-            label={`冲突 ${summary.conflicted}`}
+            label={t("冲突 {count}", { count: summary.conflicted })}
             color={summary.conflicted > 0 ? "error" : "default"}
             variant={summary.conflicted > 0 ? "filled" : "outlined"}
           />
-          <Chip size="small" label={`已暂存 ${summary.staged}`} variant="outlined" />
-          <Chip size="small" label={`未暂存 ${summary.unstaged}`} variant="outlined" />
-          <Chip size="small" label={`新文件 ${summary.untracked}`} variant="outlined" />
+          <Chip size="small" label={t("已暂存 {count}", { count: summary.staged })} variant="outlined" />
+          <Chip size="small" label={t("未暂存 {count}", { count: summary.unstaged })} variant="outlined" />
+          <Chip size="small" label={t("新文件 {count}", { count: summary.untracked })} variant="outlined" />
         </Stack>
 
         {selectable ? (
           <Stack direction="row" columnGap={0.45} rowGap={0.45} flexWrap="wrap">
             <Chip
               size="small"
-              label={`已选择 ${selectedCount}`}
+              label={t("已选择 {count}", { count: selectedCount })}
               color={selectedCount > 0 ? "primary" : "default"}
               variant={selectedCount > 0 ? "filled" : "outlined"}
             />
@@ -1244,7 +1276,7 @@ export function BranchChangedFilesList({
               onClick={() => updateSelectedPaths(selectableFiles.map((item) => item.path))}
               sx={{ minHeight: 24, px: 0.8, fontSize: "0.7rem" }}
             >
-              全选可提交
+              {t("全选可提交")}
             </Button>
             <Button
               size="small"
@@ -1253,7 +1285,7 @@ export function BranchChangedFilesList({
               onClick={() => updateSelectedPaths([])}
               sx={{ minHeight: 24, px: 0.8, fontSize: "0.7rem" }}
             >
-              清空
+              {t("清空")}
             </Button>
           </Stack>
         ) : null}
@@ -1263,7 +1295,7 @@ export function BranchChangedFilesList({
             <Chip
               key={item.key}
               size="small"
-              label={item.label}
+              label={t(item.label)}
               clickable
               color={filter === item.key ? "primary" : "default"}
               variant={filter === item.key ? "filled" : "outlined"}
@@ -1276,7 +1308,7 @@ export function BranchChangedFilesList({
           <TextField
             size="small"
             value={query}
-            placeholder="筛选文件路径、状态或 Git 代码"
+            placeholder={t("筛选文件路径、状态或 Git 代码")}
             onChange={(event) => setQuery(event.target.value)}
             fullWidth
             inputProps={{
@@ -1291,7 +1323,9 @@ export function BranchChangedFilesList({
 
         {overflow ? (
           <Typography variant="caption" color="text.secondary">
-            默认显示前 {BRANCH_CHANGED_FILE_VISIBLE_ROWS} 条高度，可下拉查看更多。
+            {t("默认显示前 {count} 条高度，可下拉查看更多。", {
+              count: BRANCH_CHANGED_FILE_VISIBLE_ROWS,
+            })}
           </Typography>
         ) : null}
 
@@ -1307,7 +1341,7 @@ export function BranchChangedFilesList({
             }}
           >
             <Typography variant="caption" color="text.secondary">
-              当前筛选没有匹配的变更文件。
+              {t("当前筛选没有匹配的变更文件。")}
             </Typography>
           </Box>
         ) : null}
@@ -1321,7 +1355,7 @@ export function BranchChangedFilesList({
         >
           <Stack spacing={0.55}>
             {filteredFiles.map((item, index) => {
-              const risks = branchChangedFileRiskLabels(item);
+              const risks = branchChangedFileRisks(item);
               const diffKey = diffKeyForFile(item);
               const diffState = diffCache[diffKey];
               const diffExpanded = expandedDiffKey === diffKey;
@@ -1361,7 +1395,7 @@ export function BranchChangedFilesList({
                           onChange={(event) => toggleSelectedPath(item.path, event.target.checked)}
                           sx={{ p: 0.1, mt: 0.1 }}
                           inputProps={{
-                            "aria-label": `选择 ${item.path}`,
+                            "aria-label": t("选择 {path}", { path: item.path }),
                           }}
                         />
                       ) : null}
@@ -1387,8 +1421,8 @@ export function BranchChangedFilesList({
                               <Chip
                                 key={risk}
                                 size="small"
-                                label={risk}
-                                color={risk === "冲突" ? "error" : "warning"}
+                                label={t(branchChangedFileRiskLabel(risk))}
+                                color={risk === "conflict" ? "error" : "warning"}
                                 variant="outlined"
                                 sx={{ height: 20, fontSize: "0.68rem" }}
                               />
@@ -1408,13 +1442,13 @@ export function BranchChangedFilesList({
                     >
                       <Chip
                         size="small"
-                        label={branchChangedFileChangeLabel(item)}
+                        label={t(branchChangedFileChangeLabel(item))}
                         variant="outlined"
                         sx={{ flexShrink: 0 }}
                       />
                       <Chip
                         size="small"
-                        label={branchChangedFileStatusLabel(item)}
+                        label={t(branchChangedFileStatusLabel(item))}
                         color={item.conflicted ? "error" : "default"}
                         variant={item.conflicted ? "filled" : "outlined"}
                         sx={{ flexShrink: 0 }}
@@ -1428,7 +1462,7 @@ export function BranchChangedFilesList({
                         }}
                         sx={{ minWidth: 0, px: 0.7, minHeight: 24, fontSize: "0.7rem" }}
                       >
-                        {diffExpanded ? "收起差异" : "查看差异"}
+                        {t(diffExpanded ? "收起差异" : "查看差异")}
                       </Button>
                       <Button
                         size="small"
@@ -1438,7 +1472,7 @@ export function BranchChangedFilesList({
                         }}
                         sx={{ minWidth: 0, px: 0.7, minHeight: 24, fontSize: "0.7rem" }}
                       >
-                        {copiedPath === item.path ? "已复制" : "复制"}
+                        {t(copiedPath === item.path ? "已复制" : "复制")}
                       </Button>
                     </Stack>
                   </Stack>

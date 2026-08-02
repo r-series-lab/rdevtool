@@ -107,6 +107,19 @@ export function configSourceKindLabel(kind?: string | null): string {
   return kind?.trim() || "配置源";
 }
 
+export function archivedConfigSourceCount(sources: ConfigSource[]): number {
+  return sources.filter((source) => source.workspaceArchived).length;
+}
+
+export function visibleConfigSources(
+  sources: ConfigSource[],
+  showArchived: boolean,
+): ConfigSource[] {
+  return showArchived
+    ? sources
+    : sources.filter((source) => !source.workspaceArchived);
+}
+
 export function findConfigSource(
   sources: ConfigSource[],
   sourceId?: string | null,

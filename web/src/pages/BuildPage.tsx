@@ -63,6 +63,7 @@ import {
 } from "../components/AppIcons";
 import { groupConsecutiveBy, stableStringify } from "../lib/historyGroups";
 import { shouldHandlePrimaryEnter } from "../lib/keyboard";
+import { isOperationActiveState } from "../lib/operationLifecycle";
 import type { TrayPinnedAction } from "../lib/trayPins";
 import { useTrayPinnedActions } from "../hooks/useTrayPinnedActions";
 import type { WorkflowSignalSummary } from "../hooks/useWorkflowSignals";
@@ -72,6 +73,8 @@ import type {
   BuildTargetMeta,
   BuildTargetSummary,
 } from "../hooks/useBuildContext";
+import { useI18n, type Translate } from "../i18n";
+import { translateInternalMessage } from "../i18n/internalMessages";
 import {
   type WorkflowReceiveRule,
 } from "../lib/workflowSignals";
@@ -103,13 +106,9 @@ const BUILD_ENV_PARAM_KEYS = new Set(["ENV_PROFILE", "projectEnv", "env"]);
 const BUILD_BRANCH_PARAM_KEYS = new Set(["BRANCH", "branch", "Branch"]);
 const SENSITIVE_BUILD_PARAM_PATTERN = /(token|secret|password|passwd|pwd|credential|auth|private)/i;
 
-function isActiveBuildState(stateKey?: string | null) {
-  return stateKey === "accepted" || stateKey === "queued" || stateKey === "running";
-}
-
 function buildHistoryAccent(item: BuildHistoryEntry): HistoryAccent {
   const state = item.stateKey.toLowerCase();
-  if (isActiveBuildState(state)) {
+  if (isOperationActiveState(state)) {
     return "warning";
   }
   if (
@@ -131,18 +130,25 @@ function buildHistoryAccent(item: BuildHistoryEntry): HistoryAccent {
   return "info";
 }
 
-function buildActionCopy(actionKind?: string | null): BuildActionCopy {
+function buildActionCopy(
+  actionKind: string | null | undefined,
+  t: Translate,
+): BuildActionCopy {
   switch (actionKind) {
     case "build":
-      return { noun: "构建", start: "开始构建", config: "构建配置" };
+      return { noun: t("构建"), start: t("开始构建"), config: t("构建配置") };
     case "package":
-      return { noun: "产物构建", start: "开始产物构建", config: "产物构建配置" };
+      return {
+        noun: t("产物构建"),
+        start: t("开始产物构建"),
+        config: t("产物构建配置"),
+      };
     case "release":
-      return { noun: "发布", start: "开始发布", config: "发布配置" };
+      return { noun: t("发布"), start: t("开始发布"), config: t("发布配置") };
     case "deploy":
-      return { noun: "部署", start: "开始部署", config: "部署配置" };
+      return { noun: t("部署"), start: t("开始部署"), config: t("部署配置") };
     default:
-      return { noun: "构建", start: "开始构建", config: "构建配置" };
+      return { noun: t("构建"), start: t("开始构建"), config: t("构建配置") };
   }
 }
 
@@ -188,13 +194,20 @@ function workspacePinnedKey(workspaceKey: string | null | undefined, dedupeKey: 
 function buildTrayActionFromHistory(
   item: BuildHistoryEntry,
   targetLabel: string,
-  actionLabel = "部署",
+  t: Translate,
+  actionLabel = t("部署"),
 ): TrayPinnedAction {
   const params = normalizeBuildHistoryParams(item.params);
   return {
     kind: "build.replay",
-    label: `${actionLabel}：${item.projectName} / ${targetLabel || item.mode || "默认配置"}`,
-    detail: [item.env, item.branch].filter(Boolean).join(" · ") || item.stateLabel,
+    label: t("{action}：{project} / {target}", {
+      action: actionLabel,
+      project: item.projectName,
+      target: targetLabel || item.mode || t("默认配置"),
+    }),
+    detail:
+      [item.env, item.branch].filter(Boolean).join(" · ") ||
+      translateInternalMessage(item.stateLabel, t),
     workspaceKey: item.workspaceKey ?? null,
     projectKey: item.projectKey,
     entry: null,
@@ -357,6 +370,7 @@ function buildParamInvalidMessage(
   param: BuildParamMeta,
   value: string,
   sourceBranchOptions: string[],
+  t: Translate,
 ) {
   const currentValue = value.trim();
   if (!currentValue) {
@@ -367,21 +381,30 @@ function buildParamInvalidMessage(
     sourceBranchOptions.length > 0 &&
     !sourceBranchOptions.includes(currentValue)
   ) {
-    return `${param.label} 不在当前项目分支列表中：${currentValue}`;
+    return t("{label} 不在当前项目分支列表中：{value}", {
+      label: param.label,
+      value: currentValue,
+    });
   }
   if (
     param.kind === "select" &&
     param.options.length > 0 &&
     !param.options.includes(currentValue)
   ) {
-    return `${param.label} 不在当前选项中：${currentValue}`;
+    return t("{label} 不在当前选项中：{value}", {
+      label: param.label,
+      value: currentValue,
+    });
   }
   if (
     param.kind === "boolean" &&
     currentValue !== param.trueValue &&
     currentValue !== param.falseValue
   ) {
-    return `${param.label} 不是有效的开关值：${currentValue}`;
+    return t("{label} 不是有效的开关值：{value}", {
+      label: param.label,
+      value: currentValue,
+    });
   }
   return "";
 }
@@ -399,15 +422,19 @@ function hasRecordValue(record: Record<string, string>, key: string) {
   return Object.prototype.hasOwnProperty.call(record, key);
 }
 
-function buildHistoryParamLabel(key: string, param?: BuildParamMeta) {
+function buildHistoryParamLabel(
+  key: string,
+  t: Translate,
+  param?: BuildParamMeta,
+) {
   if (param?.label) {
     return param.label;
   }
   if (BUILD_ENV_PARAM_KEYS.has(key)) {
-    return "环境";
+    return t("环境");
   }
   if (BUILD_BRANCH_PARAM_KEYS.has(key)) {
-    return "分支";
+    return t("分支");
   }
   return key;
 }
@@ -439,6 +466,7 @@ function buildHistoryParamEntries(
   item: BuildHistoryEntry,
   paramMetaByKey: Map<string, BuildParamMeta>,
   defaultParamValues: Record<string, string>,
+  t: Translate,
 ): BuildHistoryParamEntry[] {
   return Object.entries(item.params ?? {})
     .filter(([key, value]) => !shouldSkipBuildHistoryParam(item, key, String(value ?? "")))
@@ -452,8 +480,12 @@ function buildHistoryParamEntries(
       const hidden = shouldMaskBuildHistoryParam(key, param);
       return {
         key,
-        label: buildHistoryParamLabel(key, param),
-        valueLabel: hidden ? (textValue ? "已配置" : "未配置") : textValue || "-",
+        label: buildHistoryParamLabel(key, t, param),
+        valueLabel: hidden
+          ? textValue
+            ? t("已配置")
+            : t("未配置")
+          : textValue || "-",
         hidden,
         changed: defaultKnown && textValue !== defaultValue,
         defaultKnown,
@@ -465,8 +497,14 @@ function buildHistoryParamMetaLabels(
   item: BuildHistoryEntry,
   paramMetaByKey: Map<string, BuildParamMeta>,
   defaultParamValues: Record<string, string>,
+  t: Translate,
 ) {
-  const entries = buildHistoryParamEntries(item, paramMetaByKey, defaultParamValues);
+  const entries = buildHistoryParamEntries(
+    item,
+    paramMetaByKey,
+    defaultParamValues,
+    t,
+  );
   if (entries.length === 0) {
     return [];
   }
@@ -581,6 +619,7 @@ export function BuildPage({
   onClearBuildHistory,
   formatRelativeTime,
 }: BuildPageProps) {
+  const { t } = useI18n();
   const [historyExpanded, setHistoryExpanded] = useState(true);
   const [historyVisibleCount, setHistoryVisibleCount] = useState(
     HISTORY_SCROLL_PAGE_SIZE,
@@ -623,7 +662,7 @@ export function BuildPage({
       return false;
     });
     const projectOption = projects.find((item) => item.key === selectedProject);
-    const planParams = plan?.params ?? matchedEntry?.params ?? paramValues;
+    const planParams = matchedEntry?.params ?? plan?.params ?? paramValues;
     const updatedAt = new Date(buildResultUpdatedAtMs || Date.now()).toISOString();
     return {
       historyKey:
@@ -814,6 +853,7 @@ export function BuildPage({
   );
   const actionCopy = buildActionCopy(
     plan?.actionKind || targetMetaByKey.get(target)?.actionKind,
+    t,
   );
   const targetOptions = targetMeta?.targets.length
     ? targetMeta.targets
@@ -838,7 +878,7 @@ export function BuildPage({
   const canRefreshBuild = Boolean(
     buildResult?.queueUrl || buildResult?.buildUrl || localBuildProjectKey,
   );
-  const buildResultActive = isActiveBuildState(buildResult?.stateKey);
+  const buildResultActive = isOperationActiveState(buildResult?.stateKey);
   const groupedBuildHistory = useMemo(
     () =>
       groupConsecutiveBy(
@@ -951,6 +991,12 @@ export function BuildPage({
     () => groupWorkflowReceiveRules(workflowReceiveRules),
     [workflowReceiveRules],
   );
+
+  useEffect(() => {
+    if (currentBuildHistoryKey) {
+      setHistoryExpanded(true);
+    }
+  }, [currentBuildHistoryKey]);
 
   useEffect(() => {
     setHistoryVisibleCount((current) => {
@@ -1120,6 +1166,7 @@ export function BuildPage({
       param,
       value,
       sourceBranchOptions,
+      t,
     );
     const handleResetParam = () =>
       onParamChange(param.key, buildParamResetValue(param, sourceBranchOptions));
@@ -1206,7 +1253,7 @@ export function BuildPage({
                 <TextField
                   {...params}
                   variant="standard"
-                  placeholder="选择或输入分支"
+                  placeholder={t("选择或输入分支")}
                   InputProps={{
                     ...params.InputProps,
                     disableUnderline: true,
@@ -1223,8 +1270,8 @@ export function BuildPage({
                             onMouseDown={(event) => event.preventDefault()}
                             onClick={() => onParamChange(param.key, "")}
                             edge="end"
-                            aria-label="清空分支"
-                            title="清空分支"
+                            aria-label={t("清空分支")}
+                            title={t("清空分支")}
                           >
                             <ClearIcon fontSize="small" />
                           </IconButton>
@@ -1234,8 +1281,8 @@ export function BuildPage({
                             onClick={onSyncBranches}
                             disabled={!selectedProject || Boolean(busy)}
                             edge="end"
-                            aria-label="同步分支"
-                            title="同步分支"
+                            aria-label={t("同步分支")}
+                            title={t("同步分支")}
                           >
                             <RefreshIcon fontSize="small" />
                           </IconButton>
@@ -1312,7 +1359,7 @@ export function BuildPage({
                 gap: 0.65,
               }}
             >
-              <FieldRow label="项目">
+              <FieldRow label={t("项目")}>
                 <FormControl fullWidth variant="standard">
                   <Select
                     value={selectedProject}
@@ -1339,7 +1386,7 @@ export function BuildPage({
 
               {targetOptions.length > 1 ? (
                 <Stack spacing={0.55}>
-                  <FieldRow label="配置">
+                  <FieldRow label={t("配置")}>
                     <FormControl fullWidth variant="standard">
                       <Select
                         value={targetValueInvalid ? "" : target}
@@ -1372,7 +1419,10 @@ export function BuildPage({
                   <BuildValueWarning
                     message={
                       targetValueInvalid
-                        ? `${actionCopy.config}不在当前项目配置中：${target}`
+                        ? t("{config}不在当前项目配置中：{target}", {
+                            config: actionCopy.config,
+                            target,
+                          })
                         : ""
                     }
                     disabled={contextLoading}
@@ -1405,19 +1455,28 @@ export function BuildPage({
 
             {visibleParams.some((param) => param.kind === "branch") ? (
               <Typography variant="caption" color="text.secondary">
-                {branchSyncText} {sourceBranchEntries.some((item) => item.updatedTs > 0) ? " · 已按最近活跃排序" : ""}
+                {branchSyncText}
+                {sourceBranchEntries.some((item) => item.updatedTs > 0)
+                  ? t(" · 已按最近活跃排序")
+                  : ""}
               </Typography>
             ) : null}
 
             {plan ? (
-              <Stack spacing={0.25} minWidth={0} aria-label="构建计划摘要">
+              <Stack spacing={0.25} minWidth={0} aria-label={t("构建计划摘要")}>
                 <Typography
                   variant="caption"
                   color="text.secondary"
                   sx={{ overflowWrap: "anywhere" }}
                 >
-                  计划：{plan.projectName} / {targetMetaByKey.get(plan.jobKind)?.label ?? plan.jobKind}
-                  {planBranch ? ` · 分支 ${planBranch}` : ""}
+                  {t("计划：{project} / {target}", {
+                    project: plan.projectName,
+                    target:
+                      targetMetaByKey.get(plan.jobKind)?.label ?? plan.jobKind,
+                  })}
+                  {planBranch
+                    ? t(" · 分支 {branch}", { branch: planBranch })
+                    : ""}
                 </Typography>
                 {planBranch ? (
                   <Typography
@@ -1426,13 +1485,19 @@ export function BuildPage({
                     title={planCommit?.subject || undefined}
                     sx={{ overflowWrap: "anywhere" }}
                   >
-                    目标提交：{planCommit?.shortHash || "未解析"}
-                    {planChangedPathCount > 0 ? ` · 检测到 ${planChangedPathCount} 个改动文件` : ""}
+                    {t("目标提交：{commit}", {
+                      commit: planCommit?.shortHash || t("未解析"),
+                    })}
+                    {planChangedPathCount > 0
+                      ? t(" · 检测到 {count} 个改动文件", {
+                          count: planChangedPathCount,
+                        })
+                      : ""}
                   </Typography>
                 ) : null}
                 {planRisks.length > 0 ? (
                   <InlineWarningNotice
-                    title={planBlocked ? "计划检查未通过" : "计划提醒"}
+                    title={t(planBlocked ? "计划检查未通过" : "计划提醒")}
                     details={planRisks.map((risk) => risk.detail)}
                   />
                 ) : null}
@@ -1441,7 +1506,7 @@ export function BuildPage({
 
             {plan?.outputDir ? (
               <Typography variant="caption" color="text.secondary" noWrap title={plan.outputDir}>
-                产物目录：{plan.outputDir}
+                {t("产物目录：{path}", { path: plan.outputDir })}
               </Typography>
             ) : null}
 
@@ -1465,20 +1530,35 @@ export function BuildPage({
       <Box className="workflow-panel workflow-history-panel">
           <Stack direction="row" justifyContent="space-between" alignItems="center" spacing={0.8} flexWrap="wrap" rowGap={0.45} minWidth={0} mb={historyExpanded ? 0.8 : 0}>
             <Typography variant="h6" sx={{ flexShrink: 0, fontWeight: 700 }}>
-              记录
+              {t("记录")}
             </Typography>
             <Stack direction="row" spacing={0.55} alignItems="center" flexWrap="wrap" rowGap={0.4} justifyContent="flex-end">
               <WorkflowLinkSummaryButton
                 count={workflowReceiveGroups.length}
                 onClick={() => setWorkflowListOpen(true)}
               />
-              <IconButton size="small" onClick={onRefreshBuildHistory} title={`刷新${actionCopy.noun}记录`}>
+              <IconButton
+                size="small"
+                onClick={onRefreshBuildHistory}
+                title={t("刷新{noun}记录", { noun: actionCopy.noun })}
+              >
                 <RefreshIcon fontSize="small" />
               </IconButton>
-              <IconButton size="small" onClick={onClearBuildHistory} title={`清空${actionCopy.noun}记录`}>
+              <IconButton
+                size="small"
+                onClick={onClearBuildHistory}
+                title={t("清空{noun}记录", { noun: actionCopy.noun })}
+              >
                 <TrashIcon fontSize="small" />
               </IconButton>
-              <IconButton size="small" onClick={() => setHistoryExpanded((current) => !current)} title={historyExpanded ? `收起${actionCopy.noun}记录` : `展开${actionCopy.noun}记录`}>
+              <IconButton
+                size="small"
+                onClick={() => setHistoryExpanded((current) => !current)}
+                title={t(
+                  historyExpanded ? "收起{noun}记录" : "展开{noun}记录",
+                  { noun: actionCopy.noun },
+                )}
+              >
                 {historyExpanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
               </IconButton>
             </Stack>
@@ -1513,14 +1593,18 @@ export function BuildPage({
                         );
                       const taskBadgeActive =
                         isTaskAnchorGroup &&
-                        isActiveBuildState(latestTaskAnchorEntry?.stateKey);
+                        isOperationActiveState(latestTaskAnchorEntry?.stateKey);
                       const workflowSignalIds = workflowSignalIdsForBuildReplay(item);
                       const historyTargetMeta = targetMetaByKey.get(item.mode);
-                      const historyActionCopy = buildActionCopy(historyTargetMeta?.actionKind);
+                      const historyActionCopy = buildActionCopy(
+                        historyTargetMeta?.actionKind,
+                        t,
+                      );
                       const targetLabel = historyTargetMeta?.label ?? item.mode;
                       const trayAction = buildTrayActionFromHistory(
                         item,
                         targetLabel,
+                        t,
                         historyActionCopy.noun,
                       );
                       const groupPinnedAction = pinnedActionForBuildGroup(group);
@@ -1529,12 +1613,13 @@ export function BuildPage({
                         item,
                         paramMetaByKey,
                         defaultParamValues,
+                        t,
                       );
                       return (
                         <HistoryCard
                           key={group.id}
-                          title={`${item.projectName} / ${targetLabel || "默认配置"}`}
-                          subtitle={`${item.stateLabel} · ${formatRelativeTime(item.updatedAt)}`}
+                          title={`${item.projectName} / ${targetLabel || t("默认配置")}`}
+                          subtitle={`${translateInternalMessage(item.stateLabel, t)} · ${formatRelativeTime(item.updatedAt)}`}
                           pinned={pinned}
                           accent={buildHistoryAccent(item)}
                           badge={
@@ -1549,7 +1634,7 @@ export function BuildPage({
                               {!item.workspaceKey ? (
                                 <Chip
                                   size="small"
-                                  label="未归属"
+                                  label={t("未归属")}
                                   color="default"
                                   variant="outlined"
                                 />
@@ -1557,7 +1642,9 @@ export function BuildPage({
                               {isTaskAnchorGroup ? (
                                 <Chip
                                   size="small"
-                                  label={taskBadgeActive ? "正在执行" : "最新任务"}
+                                  label={t(
+                                    taskBadgeActive ? "正在执行" : "最新任务",
+                                  )}
                                   color={taskBadgeActive ? "warning" : "primary"}
                                   variant="filled"
                                 />
@@ -1568,7 +1655,9 @@ export function BuildPage({
                                     onClick={onRefreshBuild}
                                     disabled={!canRefreshBuild}
                                     size="small"
-                                    title={`刷新${actionCopy.noun}状态`}
+                                    title={t("刷新{noun}状态", {
+                                      noun: actionCopy.noun,
+                                    })}
                                   >
                                     <RefreshIcon fontSize="small" />
                                   </IconButton>
@@ -1578,7 +1667,7 @@ export function BuildPage({
                                         onClick={openLocalBuildLog}
                                         disabled={!localBuildProjectKey || runtimeLogLoading}
                                         size="small"
-                                        title="查看构建日志"
+                                        title={t("查看构建日志")}
                                       >
                                         <TerminalIcon fontSize="small" />
                                       </IconButton>
@@ -1586,7 +1675,7 @@ export function BuildPage({
                                         onClick={stopLocalBuild}
                                         disabled={!buildResultActive || localBuildAction === "stop"}
                                         size="small"
-                                        title="停止本地构建"
+                                        title={t("停止本地构建")}
                                       >
                                         <StopIcon fontSize="small" />
                                       </IconButton>
@@ -1594,7 +1683,7 @@ export function BuildPage({
                                         onClick={openLocalBuildOutput}
                                         disabled={!localBuildProjectKey || localBuildAction === "output"}
                                         size="small"
-                                        title="打开产物目录"
+                                        title={t("打开产物目录")}
                                       >
                                         <FolderIcon fontSize="small" />
                                       </IconButton>
@@ -1604,7 +1693,7 @@ export function BuildPage({
                                     onClick={onOpenBuildRecord}
                                     disabled={!buildResult?.queueUrl && !buildResult?.buildUrl}
                                     size="small"
-                                    title="打开构建记录页"
+                                    title={t("打开构建记录页")}
                                   >
                                     <OpenExternalIcon fontSize="small" />
                                   </IconButton>
@@ -1614,8 +1703,10 @@ export function BuildPage({
                                 size="small"
                                 onClick={() => onReplayBuildHistory(item)}
                                 disabled={Boolean(busy)}
-                                aria-label={`重播${historyActionCopy.noun}`}
-                                title="使用相同参数重播"
+                                aria-label={t("重播{noun}", {
+                                  noun: historyActionCopy.noun,
+                                })}
+                                title={t("使用相同参数重播")}
                               >
                                 <ReplayIcon fontSize="small" />
                               </IconButton>
@@ -1627,8 +1718,8 @@ export function BuildPage({
                                 <IconButton
                                   size="small"
                                   onClick={() => onOpenBuildUrl((item.buildUrl || item.queueUrl)!)}
-                                  aria-label="打开记录"
-                                  title="打开记录"
+                                  aria-label={t("打开记录")}
+                                  title={t("打开记录")}
                                 >
                                   <OpenExternalIcon fontSize="small" />
                                 </IconButton>
@@ -1641,8 +1732,8 @@ export function BuildPage({
                                     : handleTogglePinned(trayAction)
                                 }
                                 color={pinned ? "primary" : "default"}
-                                aria-label={pinned ? "取消标记" : "标记记录"}
-                                title={pinned ? "取消标记" : "标记记录"}
+                                aria-label={t(pinned ? "取消标记" : "标记记录")}
+                                title={t(pinned ? "取消标记" : "标记记录")}
                                 sx={
                                   pinned
                                     ? {
@@ -1662,8 +1753,18 @@ export function BuildPage({
                                 <IconButton
                                   size="small"
                                   onClick={() => toggleHistoryGroup(group.id)}
-                                  aria-label={groupExpanded ? `收起同参数${historyActionCopy.noun}` : `展开同参数${historyActionCopy.noun}`}
-                                  title={groupExpanded ? `收起同参数${historyActionCopy.noun}` : `展开同参数${historyActionCopy.noun}`}
+                                  aria-label={t(
+                                    groupExpanded
+                                      ? "收起同参数{noun}"
+                                      : "展开同参数{noun}",
+                                    { noun: historyActionCopy.noun },
+                                  )}
+                                  title={t(
+                                    groupExpanded
+                                      ? "收起同参数{noun}"
+                                      : "展开同参数{noun}",
+                                    { noun: historyActionCopy.noun },
+                                  )}
                                 >
                                   {groupExpanded ? (
                                     <CollapseIcon fontSize="small" />
@@ -1674,9 +1775,13 @@ export function BuildPage({
                               ) : null}
                             </Stack>
                           }
-                          detail={item.detail}
+                          detail={translateInternalMessage(item.detail, t)}
                           meta={[
-                            isGrouped ? `连续 ${group.items.length} 次` : "",
+                            isGrouped
+                              ? t("连续 {count} 次", {
+                                  count: group.items.length,
+                                })
+                              : "",
                             item.env,
                             item.branch,
                             ...paramMetaLabels,
@@ -1709,10 +1814,14 @@ export function BuildPage({
                                         color="text.secondary"
                                         sx={{ flexShrink: 0, fontWeight: 800 }}
                                       >
-                                        {index === 0 ? "最新" : `第 ${index + 1} 次`}
+                                        {index === 0
+                                          ? t("最新")
+                                          : t("第 {count} 次", {
+                                              count: index + 1,
+                                            })}
                                       </Typography>
                                       <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
-                                        {historyItem.stateLabel} · {historyItem.detail}
+                                        {translateInternalMessage(historyItem.stateLabel, t)} · {translateInternalMessage(historyItem.detail, t)}
                                       </Typography>
                                       <Typography variant="caption" color="text.secondary" noWrap sx={{ flexShrink: 0 }}>
                                         {formatRelativeTime(historyItem.updatedAt)}
@@ -1740,10 +1849,10 @@ export function BuildPage({
                           onClick={loadMoreBuildHistoryGroups}
                           className="workflow-history-footer-action"
                         >
-                          下滑加载更多
+                          {t("下滑加载更多")}
                         </Button>
                       ) : (
-                        <AppListEndState />
+                        <AppListEndState label={t("没有更多了")} />
                       )}
                     </Box>
                   </Stack>
@@ -1752,8 +1861,8 @@ export function BuildPage({
             ) : (
               <AppEmptyState
                 compact
-                title={`暂无${actionCopy.noun}记录`}
-                description="执行任务后会保留最近结果。"
+                title={t("暂无{noun}记录", { noun: actionCopy.noun })}
+                description={t("执行任务后会保留最近结果。")}
               />
             )}
           </Collapse>
@@ -1765,7 +1874,7 @@ export function BuildPage({
         maxWidth="md"
         fullWidth
       >
-        <DialogTitle>构建日志</DialogTitle>
+        <DialogTitle>{t("构建日志")}</DialogTitle>
         <DialogContent dividers>
           <Stack spacing={1.2}>
             {runtimeLogPath ? (
@@ -1793,26 +1902,28 @@ export function BuildPage({
               }}
             >
               {runtimeLogLoading
-                ? "加载中..."
+                ? t("加载中...")
                 : runtimeLogLines.length > 0
                   ? runtimeLogLines.join("\n")
-                  : "暂无构建日志。"}
+                  : t("暂无构建日志。")}
             </Box>
             {runtimeLogTruncated ? (
               <Typography variant="caption" color="text.secondary">
-                已显示最后 {runtimeLogLines.length} 行
+                {t("已显示最后 {count} 行", {
+                  count: runtimeLogLines.length,
+                })}
               </Typography>
             ) : null}
           </Stack>
         </DialogContent>
         <DialogActions>
-          <Button onClick={() => setRuntimeLogOpen(false)}>关闭</Button>
+          <Button onClick={() => setRuntimeLogOpen(false)}>{t("关闭")}</Button>
         </DialogActions>
       </Dialog>
 
       <WorkflowRulesConfigDialog
         open={workflowOpen}
-        title="联动配置"
+        title={t("联动配置")}
         context={
           workflowEntry ? (
             <Stack direction="row" flexWrap="wrap" gap={0.7}>
@@ -1846,7 +1957,7 @@ export function BuildPage({
       />
       <WorkflowLinksDialog
         open={workflowListOpen}
-        title="联动清单"
+        title={t("联动清单")}
         items={workflowReceiveGroups}
         onClose={() => setWorkflowListOpen(false)}
         onEnabledChange={(item, enabled) =>

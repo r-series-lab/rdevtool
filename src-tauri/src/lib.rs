@@ -19,22 +19,30 @@ use rdevtool_core::config::{
     active_project_workspace_key, apply_project_workspace_context, create_project_workspace,
     default_config_dir, default_project_workspace_root_dir, default_project_workspaces_dir,
     default_projects_path, default_workspace_path, ensure_default_configs,
-    load_active_project_workspace, load_config, load_project_workspace_by_key,
-    load_project_workspaces, load_workspace_config, save_config, save_project_workspace_config,
-    save_workspace_config, set_project_workspace_instance,
+    load_active_project_workspace, load_all_project_workspaces, load_config,
+    load_project_workspace_by_key, load_project_workspaces, load_workspace_config, save_config,
+    save_project_workspace_config, save_workspace_config, set_project_workspace_instance,
 };
 use rdevtool_core::config_sources::{
     ConfigSource, ConfigSourceComparison, ConfigSourceCopyResult, ConfigSourceDefinition,
-    CopyConfigSourceRequest, compare_config_sources as core_compare_config_sources,
-    config_sources_file_path, copy_config_source as core_copy_config_source,
+    CopyConfigSourceRequest, RuntimeOverridesFile,
+    apply_runtime_overrides_for_source as core_apply_runtime_overrides_for_source,
+    compare_config_sources as core_compare_config_sources,
+    config_source_supports as core_config_source_supports, config_sources_file_path,
+    copy_config_source as core_copy_config_source,
     delete_custom_config_source as core_delete_custom_config_source,
     get_custom_config_source_definition, list_config_sources as core_list_config_sources,
     load_config_source_preference as core_load_config_source_preference,
+    load_runtime_overrides as core_load_runtime_overrides, preferred_config_source_id_for_scope,
     resolve_config_source as core_resolve_config_source,
+    resolve_config_source_for_workspace as core_resolve_config_source_for_workspace,
+    resolve_config_source_from_sources as core_resolve_config_source_from_sources,
+    runtime_overrides_path_for_config_source as core_runtime_overrides_path_for_config_source,
     save_config_source_preference as core_save_config_source_preference,
     save_custom_config_source as core_save_custom_config_source,
+    save_runtime_overrides as core_save_runtime_overrides,
 };
-use rdevtool_core::config_store::{is_recent_internal_config_write, write_config_text_atomic};
+use rdevtool_core::config_store::is_recent_internal_config_write;
 use rdevtool_core::core::{
     BranchCatalogResponse, BranchCheckoutRequest, BranchCommitOverview, BranchCreateRequest,
     BranchFileDiffRequest, BranchFileDiffResponse, BranchPushRequest, BranchPushStatus,
@@ -49,10 +57,12 @@ use rdevtool_core::core::{
 };
 use rdevtool_core::core::{MergeRequest, MergeResponse};
 use rdevtool_core::git;
+use rdevtool_core::health::{HealthSnapshot, collect_health_snapshot};
 use rdevtool_core::link::{
     LinkConfig, LinkExecutionReport, LinkExecutionStepReport, LinkPlan, LinkRuntimeSummary,
     LinkSourceContext, LinkStepConfig, LinkSummary, LinkWorkspaceAttachRequest,
-    LinkWorkspaceAttachResult, attach_link_to_workspace as core_attach_link_to_workspace,
+    LinkWorkspaceAttachResult,
+    attach_link_to_workspace_from_path as core_attach_link_to_workspace_from_path,
     delete_link_from_path as core_delete_link_from_path,
     get_link_from_path as core_get_link_from_path, link_proxy_check_status, links_file_path,
     list_link_summaries_from_path as core_list_link_summaries_from_path,
@@ -68,10 +78,21 @@ use rdevtool_core::navigation::{
     save_navigation_editor_data_to_path,
 };
 use rdevtool_core::operation::{
-    OperationEvent, OperationEventOrigin, OperationEventState, branch_task_operation_event,
-    build_history_request, build_operation_event, failed_build_operation_event,
-    lifecycle_operation_event, link_operation_event, list_operation_events, operation_event_id,
-    save_operation_event, update_build_operation_event_from_history,
+    OperationChainContext, OperationEvent, OperationEventOrigin, OperationEventState,
+    branch_task_operation_event, build_history_request, build_operation_event,
+    failed_build_operation_event, lifecycle_operation_event, link_operation_event,
+    list_operation_events, operation_event_id, save_operation_event,
+    update_build_operation_event_from_history,
+};
+use rdevtool_core::pinned_actions::{
+    TrayReplayAction, list_tray_pinned_actions as core_list_tray_pinned_actions, valid_tray_action,
+};
+use rdevtool_core::project_notes::{
+    CreateNoteDocumentRequest, CreateNoteDocumentResult, NoteDocument, NotesFileIndex,
+    ResolveNoteDocumentLinkResult, create_note_document as create_file_note,
+    init_notes as init_file_notes, read_note_document as read_file_note,
+    resolve_note_document_link as resolve_file_note_link,
+    search_note_documents_scoped as search_file_notes,
 };
 use rdevtool_core::proxy::{
     ProxyConfig, ProxyDashboard, ProxyProfile, ProxyProfilePack, ProxyRequestDiagnosis, ProxyRule,
@@ -85,6 +106,7 @@ use rdevtool_core::proxy::{
 };
 use rdevtool_core::proxy_daemon::{ProxyDaemonRuntime as ProxyRuntimeState, proxy_daemon_status};
 use rdevtool_core::runtime as core_runtime;
+use rdevtool_core::runtime_daemon;
 use rdevtool_core::runtime_link::{
     BindProxyRuntimeRequest, BindProxyRuntimeResult, bind_proxy_runtime_profile,
 };
@@ -119,11 +141,13 @@ use tauri::{
     menu::{IconMenuItem, Menu, MenuItem, NativeIcon, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 #[cfg(target_os = "macos")]
 use window_vibrancy::{NSVisualEffectMaterial, NSVisualEffectState, apply_vibrancy};
 
 mod commands;
 mod project_runtime;
+mod runtime_preflight;
 
 #[derive(Clone)]
 struct AppState {
@@ -134,6 +158,7 @@ struct AppState {
     exit_coordinator: AppExitCoordinator,
     tray_replay_running: Arc<AtomicBool>,
     tray_menu_actions: Arc<RwLock<BTreeMap<String, TrayReplayAction>>>,
+    tray_menu_refresh_revision: Arc<AtomicU64>,
     workspace_config_watcher_stop: Arc<AtomicBool>,
 }
 
@@ -236,6 +261,7 @@ struct ProjectWorkspaceState {
     active_key: String,
     workspaces_dir: String,
     workspaces: Vec<ProjectWorkspaceSummary>,
+    archived_workspaces: Vec<ProjectWorkspaceSummary>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,6 +272,9 @@ struct ProjectWorkspaceSummary {
     description: Option<String>,
     active: bool,
     system: bool,
+    archived: bool,
+    archived_at: Option<String>,
+    archive_reason: Option<String>,
     workspace_type: String,
     workspace_type_label: String,
     project_count: usize,
@@ -473,12 +502,6 @@ struct ConfigSourceInspection {
     issues: Vec<String>,
     files: Vec<ConfigSourceFileInspection>,
     runtime_profile_scope: String,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-struct RuntimeOverridesFile {
-    #[serde(default)]
-    runtime_profiles: Vec<RuntimeProfileConfig>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -768,6 +791,35 @@ struct SaveProjectConfigBasicsRequest {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct SaveProjectRuntimeLaunchProfileRequest {
+    project_key: String,
+    mode: String,
+    profile_key: String,
+    label: String,
+    #[serde(default)]
+    base_profile_key: Option<String>,
+    #[serde(default)]
+    env_overrides: BTreeMap<String, String>,
+    #[serde(default)]
+    expected_port: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveProjectRuntimeLaunchProfileResponse {
+    project_key: String,
+    profile_key: String,
+    profile_label: String,
+    mode: String,
+    env_count: usize,
+    expected_port: Option<u16>,
+    config_path: String,
+    scope: String,
+    available_in_all_workspaces: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct SaveDefaultBranchRulesRequest {
     branch_rules: BranchRulesEditor,
 }
@@ -808,7 +860,13 @@ struct SaveProjectDeployTargetsRequest {
     deploy_targets: Vec<DeployTargetEditor>,
 }
 
-const DEFAULT_PAGE_KEYS: [&str; 4] = ["overview", "projectManagement", "resources", "proxy"];
+const DEFAULT_PAGE_KEYS: [&str; 5] = [
+    "overview",
+    "knowledge",
+    "projectManagement",
+    "resources",
+    "proxy",
+];
 const MAIN_WINDOW_LABEL: &str = "main";
 const TRAY_ID: &str = "main-tray";
 const TRAY_SHOW_ID: &str = "tray_show_main";
@@ -818,15 +876,11 @@ const TRAY_MORE_WORKSPACES_ID: &str = "tray_more_workspaces";
 const TRAY_QUIT_ID: &str = "tray_quit";
 const TRAY_STORAGE_NAMESPACE: &str = "tray";
 const TRAY_RECENT_STORAGE_KEY: &str = "recent-actions";
-const TRAY_PINNED_STORAGE_KEY: &str = "pinned-actions";
 const APP_EXIT_STORAGE_NAMESPACE: &str = "app";
 const APP_EXIT_RUNTIME_POLICY_KEY: &str = "exit-runtime-policy";
 const APP_EXIT_REQUESTED_EVENT: &str = "rdevtool://app-exit-requested";
 const APP_EXIT_FAILED_EVENT: &str = "rdevtool://app-exit-failed";
-const BRANCH_WORKFLOW_STORAGE_NAMESPACE: &str = "branch-workflow";
-const BRANCH_WORKFLOW_HISTORY_KEY: &str = "history";
 const TRAY_RECENT_LIMIT: usize = 6;
-const TRAY_PINNED_STORAGE_LIMIT: usize = 60;
 const TRAY_WORKSPACE_MENU_LIMIT: usize = 6;
 const TRAY_CATEGORY_ITEM_LIMIT: usize = 10;
 
@@ -873,22 +927,6 @@ struct AppExitFailedPayload {
     message: String,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TrayReplayAction {
-    kind: String,
-    label: String,
-    detail: Option<String>,
-    #[serde(default)]
-    workspace_key: Option<String>,
-    project_key: Option<String>,
-    entry: Option<NavigationEntry>,
-    #[serde(default)]
-    payload: Option<serde_json::Value>,
-    dedupe_key: String,
-    updated_at_ms: u64,
-}
-
 #[derive(Debug, Clone)]
 struct TrayMenuActionItem {
     label: String,
@@ -925,6 +963,11 @@ struct WorkspacePinnedActionsOverview {
     name: String,
     description: Option<String>,
     system: bool,
+    runtime_config_source_id: String,
+    runtime_config_source_name: String,
+    runtime_config_source_kind: String,
+    runtime_config_path: Option<String>,
+    runtime_profile_scope: String,
     root_dir: Option<String>,
     resource_dir: Option<String>,
     worklog_path: Option<String>,
@@ -974,6 +1017,14 @@ struct WorkspacePinnedActionItem {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct WorkspacePinnedActionsPatch {
+    key: String,
+    action_count: usize,
+    actions: Vec<WorkspacePinnedActionItem>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceActionParamItem {
     label: String,
     value: String,
@@ -983,6 +1034,7 @@ struct WorkspaceActionParamItem {
 #[serde(rename_all = "camelCase")]
 struct WorkspaceResourceShortcutItem {
     key: String,
+    workspace_key: String,
     config_source_id: String,
     category: String,
     label: String,
@@ -1002,6 +1054,8 @@ struct WorkspaceResourceShortcutItem {
     tool_config_source_id: Option<String>,
     #[serde(skip)]
     tool_proxy_source_id: Option<String>,
+    #[serde(skip)]
+    tool_runtime_source_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1170,9 +1224,7 @@ fn workspace_config_event_impact(
 }
 
 fn load_config_source_watch_targets() -> Result<Vec<ConfigSourceWatchTarget>, String> {
-    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-    let workspaces =
-        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
+    let workspaces = load_config_source_workspaces()?;
     let sources = core_list_config_sources(&workspaces).map_err(|error| error.to_string())?;
     Ok(sources
         .into_iter()
@@ -1501,7 +1553,14 @@ fn normalize_page_key(value: Option<String>) -> Option<String> {
     match value.as_str() {
         "navigation" | "projects" => Some("resources".to_string()),
         "deploy" => Some("build".to_string()),
-        "overview" | "projectManagement" | "resources" | "build" | "merge" | "proxy" => Some(value),
+        "health" => Some("knowledge".to_string()),
+        "overview"
+        | "knowledge"
+        | "projectManagement"
+        | "resources"
+        | "build"
+        | "merge"
+        | "proxy" => Some(value),
         _ => None,
     }
 }
@@ -1561,8 +1620,11 @@ fn project_workspace_state(config: &AppConfig) -> Result<ProjectWorkspaceState, 
     let app_workspace =
         load_workspace_config(&paths.workspace).map_err(|error| error.to_string())?;
     let requested_active_key = active_project_workspace_key(&app_workspace);
-    let workspaces =
-        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
+    let all_workspaces = load_all_project_workspaces(&paths.project_workspaces)
+        .map_err(|error| error.to_string())?;
+    let (archived_workspaces, workspaces): (Vec<_>, Vec<_>) = all_workspaces
+        .into_iter()
+        .partition(ProjectWorkspaceConfig::is_archived);
     let active_key = if workspaces
         .iter()
         .any(|workspace| workspace.key == requested_active_key)
@@ -1575,11 +1637,16 @@ fn project_workspace_state(config: &AppConfig) -> Result<ProjectWorkspaceState, 
         .into_iter()
         .map(|workspace| project_workspace_summary(workspace, config, &active_key))
         .collect();
+    let archived_summaries = archived_workspaces
+        .into_iter()
+        .map(|workspace| project_workspace_summary(workspace, config, &active_key))
+        .collect();
 
     Ok(ProjectWorkspaceState {
         active_key,
         workspaces_dir: paths.project_workspaces.display().to_string(),
         workspaces: summaries,
+        archived_workspaces: archived_summaries,
     })
 }
 
@@ -1589,6 +1656,15 @@ fn project_workspace_summary(
     active_key: &str,
 ) -> ProjectWorkspaceSummary {
     let system = workspace.is_system();
+    let archived = workspace.is_archived();
+    let archived_at = workspace
+        .archive
+        .as_ref()
+        .map(|archive| archive.archived_at.clone());
+    let archive_reason = workspace
+        .archive
+        .as_ref()
+        .and_then(|archive| archive.reason.clone());
     let project_count = workspace.project_count_for(config);
     let resource_count = workspace_resource_count(&workspace);
     let workspace_type = workspace.workspace_type.clone();
@@ -1619,6 +1695,9 @@ fn project_workspace_summary(
     ProjectWorkspaceSummary {
         active: workspace.key == active_key,
         system,
+        archived,
+        archived_at,
+        archive_reason,
         key: workspace.key,
         name: if system {
             "全局".to_string()
@@ -1866,10 +1945,8 @@ fn apply_workspace_context(
     workspace: &ProjectWorkspaceConfig,
     paths: &ConfigPaths,
 ) -> Result<AppConfig, String> {
-    let workspaces =
-        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
     let mut next_config = apply_project_workspace_context(config, workspace);
-    let source = resolve_workspace_capability_source(paths, workspace, &workspaces, "runtime")?;
+    let source = resolve_workspace_capability_source(paths, workspace, "runtime")?;
     apply_runtime_overrides_for_source(&mut next_config, &source)?;
     Ok(next_config)
 }
@@ -1877,9 +1954,7 @@ fn apply_workspace_context(
 fn active_workspace_proxy_path() -> Result<PathBuf, String> {
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
     let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
-    let workspaces =
-        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
-    let source = resolve_workspace_capability_source(&paths, &workspace, &workspaces, "proxy")?;
+    let source = resolve_workspace_capability_source(&paths, &workspace, "proxy")?;
     proxy_path_for_config_source(&source)
 }
 
@@ -1903,6 +1978,12 @@ fn save_project_workspace_editor_state(
     if current_workspace.is_system() {
         return Err("全局工作区显示全部项目、入口和代理，不需要编辑范围".to_string());
     }
+    if current_workspace.is_archived() {
+        return Err(format!(
+            "工作区“{}”已归档，请先恢复后再编辑",
+            current_workspace.name
+        ));
+    }
     let name = draft.name.trim();
     if name.is_empty() {
         return Err("工作区名称不能为空".to_string());
@@ -1915,6 +1996,7 @@ fn save_project_workspace_editor_state(
             let value = value.trim().to_string();
             (!value.is_empty()).then_some(value)
         }),
+        archive: current_workspace.archive,
         workspace_type: draft.workspace_type,
         metadata: current_workspace.metadata,
         root_dir: draft.root_dir.and_then(|value| {
@@ -2122,10 +2204,7 @@ fn sync_build_history_side_effects(storage: &Storage, request: &SaveDeployHistor
         eprintln!("failed to update build operation event: {error}");
     }
     if let Some(event) = build_history_worklog_event(request) {
-        record_workspace_operation(
-            request.workspace_key.as_deref().unwrap_or_default(),
-            event,
-        );
+        record_workspace_operation(request.workspace_key.as_deref().unwrap_or_default(), event);
     }
 }
 
@@ -2268,6 +2347,41 @@ fn record_lifecycle_operation_event(
     project_name: Option<&str>,
     payload: Option<serde_json::Value>,
 ) {
+    record_lifecycle_operation_event_with_context(
+        storage,
+        event_id,
+        origin,
+        workspace_key,
+        domain,
+        action,
+        state,
+        title,
+        summary,
+        detail,
+        project_key,
+        project_name,
+        payload,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_lifecycle_operation_event_with_context(
+    storage: &Storage,
+    event_id: String,
+    origin: OperationEventOrigin,
+    workspace_key: &str,
+    domain: &str,
+    action: &str,
+    state: OperationEventState,
+    title: &str,
+    summary: &str,
+    detail: &str,
+    project_key: Option<&str>,
+    project_name: Option<&str>,
+    payload: Option<serde_json::Value>,
+    chain_context: Option<&OperationChainContext>,
+) {
     let event = lifecycle_operation_event(
         event_id,
         origin,
@@ -2281,7 +2395,8 @@ fn record_lifecycle_operation_event(
         project_key,
         project_name,
         payload,
-    );
+    )
+    .with_chain_context(chain_context);
     if let Err(error) = save_operation_event(storage, &event) {
         eprintln!("failed to save {domain} operation event: {error}");
     }
@@ -2295,7 +2410,38 @@ fn record_link_operation_event(
     action: &str,
     link_key: &str,
     source_id: Option<&str>,
+    proxy_source_id: Option<&str>,
+    runtime_source_id: Option<&str>,
     result: &Result<LinkExecutionReport, String>,
+) {
+    record_link_operation_event_with_context(
+        storage,
+        event_id,
+        origin,
+        workspace_key,
+        action,
+        link_key,
+        source_id,
+        proxy_source_id,
+        runtime_source_id,
+        result,
+        None,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_link_operation_event_with_context(
+    storage: &Storage,
+    event_id: String,
+    origin: OperationEventOrigin,
+    workspace_key: &str,
+    action: &str,
+    link_key: &str,
+    source_id: Option<&str>,
+    proxy_source_id: Option<&str>,
+    runtime_source_id: Option<&str>,
+    result: &Result<LinkExecutionReport, String>,
+    chain_context: Option<&OperationChainContext>,
 ) {
     let event = link_operation_event(
         event_id,
@@ -2304,9 +2450,12 @@ fn record_link_operation_event(
         action,
         link_key,
         source_id,
+        proxy_source_id,
+        runtime_source_id,
         result.as_ref().ok(),
         result.as_ref().err().map(String::as_str),
-    );
+    )
+    .with_chain_context(chain_context);
     if let Err(error) = save_operation_event(storage, &event) {
         eprintln!("failed to save link operation event: {error}");
     }
@@ -2714,6 +2863,12 @@ fn activate_project_workspace(
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
     let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)
         .map_err(|error| error.to_string())?;
+    if workspace.is_archived() {
+        return Err(format!(
+            "工作区“{}”已归档，请先恢复后再切换",
+            workspace.name
+        ));
+    }
     let mut app_workspace =
         load_workspace_config(&paths.workspace).map_err(|error| error.to_string())?;
     app_workspace.app.active_workspace = Some(workspace.key);
@@ -2822,6 +2977,9 @@ async fn delete_project_workspace_config(
             .map_err(|error| error.to_string())?;
         if workspace.is_system() {
             return Err("全局工作区不能删除".to_string());
+        }
+        if !workspace.is_archived() {
+            return Err("请先归档工作区，再执行永久删除".to_string());
         }
 
         let path = paths
@@ -2944,11 +3102,12 @@ async fn save_project_workspace_editor(
 async fn get_proxy_dashboard(
     state: tauri::State<'_, AppState>,
     source_id: Option<String>,
+    workspace_key: Option<String>,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let (source, path) = proxy_path_for_source_id(source_id)?;
-        proxy_dashboard_for_source(&runtime, &source, &path)
+        proxy_dashboard_for_source_in_workspace(&runtime, &source, &path, workspace_key.as_deref())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -3132,7 +3291,11 @@ async fn start_proxy_profile(
                 },
                 &format!(
                     "{profile_name} · {}",
-                    if running { "已启动" } else { "启动后未监听" }
+                    if running {
+                        "已启动"
+                    } else {
+                        "启动后未监听"
+                    }
                 ),
                 &format!("监听地址：{listen_url}"),
                 None,
@@ -3235,7 +3398,11 @@ async fn stop_proxy_profile(
                 },
                 &format!(
                     "{profile_name} · {}",
-                    if running { "停止后仍在监听" } else { "已停止" }
+                    if running {
+                        "停止后仍在监听"
+                    } else {
+                        "已停止"
+                    }
                 ),
                 &format!("监听地址：{listen_url}"),
                 None,
@@ -3587,20 +3754,20 @@ fn network_proxy_from_editor(
 
     if editor.enabled {
         if proxy_url.is_empty() {
-            return Err(format!("调试档案 {} 的代理地址不能为空", profile_key));
+            return Err(format!("启动档案 {} 的代理地址不能为空", profile_key));
         }
         let supported = ["http://", "https://", "socks5://", "socks5h://"]
             .iter()
             .any(|prefix| proxy_url.to_lowercase().starts_with(prefix));
         if !supported {
             return Err(format!(
-                "调试档案 {} 的代理地址需要以 http://、https://、socks5:// 或 socks5h:// 开头",
+                "启动档案 {} 的代理地址需要以 http://、https://、socks5:// 或 socks5h:// 开头",
                 profile_key
             ));
         }
         if editor.node_hook && !proxy_url.to_lowercase().starts_with("http://") {
             return Err(format!(
-                "调试档案 {} 的 Node Hook 当前只支持 http:// 代理",
+                "启动档案 {} 的 Node Hook 当前只支持 http:// 代理",
                 profile_key
             ));
         }
@@ -3669,22 +3836,22 @@ fn local_proxy_from_editor(
     if editor.enabled {
         if listen.is_empty() || !listen.contains(':') {
             return Err(format!(
-                "调试档案 {} 的本地代理监听地址需要形如 127.0.0.1:3000",
+                "启动档案 {} 的本地代理监听地址需要形如 127.0.0.1:3000",
                 profile_key
             ));
         }
         if frontend_url.is_empty() {
-            return Err(format!("调试档案 {} 的前端地址不能为空", profile_key));
+            return Err(format!("启动档案 {} 的前端地址不能为空", profile_key));
         }
         if !is_http_url(&frontend_url) {
             return Err(format!(
-                "调试档案 {} 的前端地址需要以 http:// 或 https:// 开头",
+                "启动档案 {} 的前端地址需要以 http:// 或 https:// 开头",
                 profile_key
             ));
         }
         if !upstream_proxy.is_empty() && !upstream_proxy.to_lowercase().starts_with("http://") {
             return Err(format!(
-                "调试档案 {} 的上游代理当前只支持 http://",
+                "启动档案 {} 的上游代理当前只支持 http://",
                 profile_key
             ));
         }
@@ -3704,11 +3871,11 @@ fn local_proxy_from_editor(
         })
         .map(|(match_prefix, target, route)| {
             if match_prefix.is_empty() {
-                return Err(format!("调试档案 {} 的代理路由前缀不能为空", profile_key));
+                return Err(format!("启动档案 {} 的代理路由前缀不能为空", profile_key));
             }
             if target.is_empty() || !is_http_url(&target) {
                 return Err(format!(
-                    "调试档案 {} 的代理路由目标需要以 http:// 或 https:// 开头",
+                    "启动档案 {} 的代理路由目标需要以 http:// 或 https:// 开头",
                     profile_key
                 ));
             }
@@ -3741,13 +3908,13 @@ fn auth_helper_from_editor(
     if editor.enabled {
         if !path.starts_with('/') {
             return Err(format!(
-                "调试档案 {} 的 Auth Helper 路径需要以 / 开头",
+                "启动档案 {} 的 Auth Helper 路径需要以 / 开头",
                 profile_key
             ));
         }
         if redirect_path.is_empty() {
             return Err(format!(
-                "调试档案 {} 的 Auth Helper 跳转路径不能为空",
+                "启动档案 {} 的 Auth Helper 跳转路径不能为空",
                 profile_key
             ));
         }
@@ -3770,14 +3937,14 @@ fn auth_helper_from_editor(
         .map(|(key, item)| {
             if key.is_empty() {
                 return Err(format!(
-                    "调试档案 {} 的 Auth Helper key 不能为空",
+                    "启动档案 {} 的 Auth Helper key 不能为空",
                     profile_key
                 ));
             }
             let storage = item.storage.trim();
             if !matches!(storage, "localStorage" | "sessionStorage" | "cookie") {
                 return Err(format!(
-                    "调试档案 {} 的 Auth Helper storage 不支持: {}",
+                    "启动档案 {} 的 Auth Helper storage 不支持: {}",
                     profile_key, storage
                 ));
             }
@@ -3851,21 +4018,21 @@ fn runtime_profiles_from_editor(
     let mut next_profiles = Vec::with_capacity(profiles.len());
 
     for profile in profiles {
-        let key = validate_config_key("运行配置", &profile.key)?;
+        let key = validate_config_key("运行环境", &profile.key)?;
         if !profile_keys.insert(key.clone()) {
-            return Err(format!("运行配置 key 重复: {}", key));
+            return Err(format!("运行环境 key 重复: {}", key));
         }
         let label = profile.label.trim();
-        let profile_label = format!("运行配置 {}", key);
+        let profile_label = format!("运行环境 {}", key);
         let proxy_url = profile.proxy_url.trim().to_string();
         if !proxy_url.is_empty() && !is_supported_browser_proxy_url(&proxy_url) {
             return Err(format!(
-                "运行配置 {} 的浏览器代理地址需要以 http://、https://、socks5:// 或 socks5h:// 开头",
+                "运行环境 {} 的浏览器代理地址需要以 http://、https://、socks5:// 或 socks5h:// 开头",
                 key
             ));
         }
         if profile.web_actions_enabled && profile.web_actions_port == 0 {
-            return Err(format!("运行配置 {} 的网页动作端口不能为 0", key));
+            return Err(format!("运行环境 {} 的网页动作端口不能为 0", key));
         }
         if profile.web_actions_enabled
             && profile
@@ -3878,7 +4045,7 @@ fn runtime_profiles_from_editor(
                 })
         {
             return Err(format!(
-                "运行配置 {} 已启用网页动作受控模式，请使用调试端口字段，不要在浏览器参数里填写 --remote-debugging-port",
+                "运行环境 {} 已启用网页动作受控模式，请使用调试端口字段，不要在浏览器参数里填写 --remote-debugging-port",
                 key
             ));
         }
@@ -3947,7 +4114,7 @@ fn prepare_rdev_proxy_runtime_profile(
         .iter_mut()
         .find(|profile| profile.key == runtime_profile_key)
     else {
-        return Err(format!("运行配置不存在: {}", runtime_profile_key));
+        return Err(format!("运行环境不存在: {}", runtime_profile_key));
     };
     let Some(proxy_profile_id) = profile
         .rdev_proxy_profile_id
@@ -3967,7 +4134,7 @@ fn prepare_rdev_proxy_runtime_profile(
         .find(|item| item.id == proxy_profile_id.as_str())
         .ok_or_else(|| {
             format!(
-                "运行配置 {} 绑定的代理服务不存在: {}",
+                "运行环境 {} 绑定的代理服务不存在: {}",
                 profile.key, proxy_profile_id
             )
         })?;
@@ -4000,7 +4167,7 @@ fn project_runtime_profile_key(
         .debug_profiles
         .iter()
         .find(|profile| profile.key == debug_profile_key)
-        .ok_or_else(|| format!("调试档案不存在: {}", debug_profile_key))?;
+        .ok_or_else(|| format!("启动档案不存在: {}", debug_profile_key))?;
     Ok(optional_editor_string(profile.runtime_profile.clone()))
 }
 
@@ -4052,20 +4219,20 @@ fn debug_profiles_from_editor(
     let mut next_profiles = Vec::with_capacity(profiles.len());
 
     for profile in profiles {
-        let key = validate_config_key("调试档案", &profile.key)?;
+        let key = validate_config_key("启动档案", &profile.key)?;
         if !profile_keys.insert(key.clone()) {
-            return Err(format!("调试档案 key 重复: {}", key));
+            return Err(format!("启动档案 key 重复: {}", key));
         }
         let label = profile.label.trim();
         if profile.expected_port == Some(0) {
-            return Err(format!("调试档案 {} 的预期端口必须在 1-65535 之间", key));
+            return Err(format!("启动档案 {} 的预期端口必须在 1-65535 之间", key));
         }
         let focus_url = optional_editor_string(profile.focus_url);
         if focus_url
             .as_deref()
             .is_some_and(|url| !url.starts_with("http://") && !url.starts_with("https://"))
         {
-            return Err(format!("调试档案 {} 的启动页面必须使用 http 或 https", key));
+            return Err(format!("启动档案 {} 的启动页面必须使用 http 或 https", key));
         }
         let ready_probe = profile
             .ready_probe
@@ -4076,7 +4243,7 @@ fn debug_profiles_from_editor(
                     .is_some_and(|url| !url.starts_with("http://") && !url.starts_with("https://"))
                 {
                     return Err(format!(
-                        "调试档案 {} 的 Ready URL 必须使用 http 或 https",
+                        "启动档案 {} 的 Ready URL 必须使用 http 或 https",
                         key
                     ));
                 }
@@ -4086,7 +4253,7 @@ fn debug_profiles_from_editor(
                     .any(|status| !(100..=599).contains(status))
                 {
                     return Err(format!(
-                        "调试档案 {} 的 Ready 状态码必须在 100-599 之间",
+                        "启动档案 {} 的 Ready 状态码必须在 100-599 之间",
                         key
                     ));
                 }
@@ -4095,7 +4262,7 @@ fn debug_profiles_from_editor(
                     .is_some_and(|timeout| !(100..=600_000).contains(&timeout))
                 {
                     return Err(format!(
-                        "调试档案 {} 的 Ready 超时必须在 100-600000ms 之间",
+                        "启动档案 {} 的 Ready 超时必须在 100-600000ms 之间",
                         key
                     ));
                 }
@@ -4120,14 +4287,14 @@ fn debug_profiles_from_editor(
             })
             .map(|(path, file)| {
                 if path.is_empty() {
-                    return Err(format!("调试档案 {} 的本地文件路径不能为空", key));
+                    return Err(format!("启动档案 {} 的本地文件路径不能为空", key));
                 }
                 let mode = match file.mode.trim() {
                     "" | "overwrite" => "overwrite".to_string(),
                     "append_block" => "append_block".to_string(),
                     other => {
                         return Err(format!(
-                            "调试档案 {} 的本地文件写入方式不支持: {}",
+                            "启动档案 {} 的本地文件写入方式不支持: {}",
                             key, other
                         ));
                     }
@@ -4169,6 +4336,112 @@ fn debug_profiles_from_editor(
     Ok(next_profiles)
 }
 
+fn valid_runtime_env_key(value: &str) -> bool {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .is_some_and(|first| first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|character| character == '_' || character.is_ascii_alphanumeric())
+}
+
+fn save_runtime_launch_profile_to_config(
+    config: &mut AppConfig,
+    request: SaveProjectRuntimeLaunchProfileRequest,
+    config_path: &Path,
+) -> Result<SaveProjectRuntimeLaunchProfileResponse, String> {
+    let project_key = request.project_key.trim();
+    let profile_key = validate_config_key("启动档案", &request.profile_key)?;
+    let mode = request.mode.trim().to_ascii_lowercase();
+    if !matches!(mode.as_str(), "create" | "update") {
+        return Err("保存方式必须是 create 或 update".to_string());
+    }
+    let project = config
+        .projects
+        .iter_mut()
+        .find(|project| project.key == project_key)
+        .ok_or_else(|| format!("项目不存在: {}", project_key))?;
+    let mut env_overrides = BTreeMap::new();
+    for (key, value) in request.env_overrides {
+        let key = key.trim();
+        if !valid_runtime_env_key(key) {
+            return Err(format!("环境变量名无效: {}", key));
+        }
+        env_overrides.insert(key.to_string(), value);
+    }
+    let expected_port = request.expected_port;
+    if expected_port == Some(0) {
+        return Err("预期端口必须在 1-65535 之间".to_string());
+    }
+    if env_overrides.is_empty() && expected_port.is_none() {
+        return Err("没有可保存的本次启动覆盖".to_string());
+    }
+
+    let profile = if mode == "update" {
+        let profile = project
+            .debug_profiles
+            .iter_mut()
+            .find(|profile| profile.key == profile_key)
+            .ok_or_else(|| format!("启动档案不存在: {}", profile_key))?;
+        if !request.label.trim().is_empty() {
+            profile.label = request.label.trim().to_string();
+        }
+        profile.env.extend(env_overrides);
+        if let Some(expected_port) = expected_port {
+            profile.expected_port = Some(expected_port);
+        }
+        profile
+    } else {
+        if project
+            .debug_profiles
+            .iter()
+            .any(|profile| profile.key == profile_key)
+        {
+            return Err(format!("启动档案 key 已存在: {}", profile_key));
+        }
+        let base_profile_key = optional_editor_string(request.base_profile_key);
+        let mut profile = base_profile_key
+            .as_deref()
+            .and_then(|key| {
+                project
+                    .debug_profiles
+                    .iter()
+                    .find(|profile| profile.key == key)
+            })
+            .cloned()
+            .unwrap_or_default();
+        profile.key = profile_key.clone();
+        profile.label = {
+            let label = request.label.trim();
+            if label.is_empty() {
+                profile_key.clone()
+            } else {
+                label.to_string()
+            }
+        };
+        profile.env.extend(env_overrides);
+        if let Some(expected_port) = expected_port {
+            profile.expected_port = Some(expected_port);
+        }
+        project.debug_profiles.push(profile);
+        project
+            .debug_profiles
+            .last_mut()
+            .expect("a launch profile was just inserted")
+    };
+
+    Ok(SaveProjectRuntimeLaunchProfileResponse {
+        project_key: project_key.to_string(),
+        profile_key: profile.key.clone(),
+        profile_label: profile.label.clone(),
+        mode,
+        env_count: profile.env.len(),
+        expected_port: profile.expected_port,
+        config_path: config_path.display().to_string(),
+        scope: "project".to_string(),
+        available_in_all_workspaces: true,
+    })
+}
+
 fn browser_args_from_editor_text(profile_key: &str, value: &str) -> Result<Vec<String>, String> {
     value
         .lines()
@@ -4177,7 +4450,7 @@ fn browser_args_from_editor_text(profile_key: &str, value: &str) -> Result<Vec<S
         .map(|line| {
             if !line.starts_with("--") {
                 return Err(format!(
-                    "调试档案 {} 的浏览器参数必须以 -- 开头: {}",
+                    "启动档案 {} 的浏览器参数必须以 -- 开头: {}",
                     profile_key, line
                 ));
             }
@@ -4483,6 +4756,25 @@ async fn save_project_config_basics(
 }
 
 #[tauri::command]
+async fn save_project_runtime_launch_profile(
+    state: tauri::State<'_, AppState>,
+    request: SaveProjectRuntimeLaunchProfileRequest,
+) -> Result<SaveProjectRuntimeLaunchProfileResponse, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        let mut config = load_config(&paths.projects).map_err(|error| error.to_string())?;
+        let response =
+            save_runtime_launch_profile_to_config(&mut config, request, &paths.projects)?;
+        save_config(&paths.projects, &config).map_err(|error| error.to_string())?;
+        config_state.invalidate()?;
+        Ok(response)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn save_default_branch_rules(
     state: tauri::State<'_, AppState>,
     request: SaveDefaultBranchRulesRequest,
@@ -4518,7 +4810,7 @@ async fn save_runtime_profiles(
         let runtime_profiles = runtime_profiles_from_editor(request.runtime_profiles)?;
         if !source.is_default {
             let runtime_path = runtime_overrides_path_for_config_source(&source)?
-                .ok_or_else(|| format!("配置源不支持运行配置：{}", source.name))?;
+                .ok_or_else(|| format!("配置源不支持运行环境：{}", source.name))?;
             save_runtime_overrides(&runtime_path, runtime_profiles)?;
             return load_project_config_editor_state_for_source(&paths.projects, &source);
         }
@@ -4543,13 +4835,13 @@ async fn restore_runtime_profile_inheritance(
         let paths = ensure_default_configs().map_err(|error| error.to_string())?;
         let source = resolve_app_config_source(Some(source_id))?;
         if source.is_default {
-            return Err("默认配置没有可恢复的上级运行配置".to_string());
+            return Err("默认配置没有可恢复的上级运行环境".to_string());
         }
         let runtime_path = runtime_overrides_path_for_config_source(&source)?
-            .ok_or_else(|| format!("配置源不支持运行配置：{}", source.name))?;
+            .ok_or_else(|| format!("配置源不支持运行环境：{}", source.name))?;
         if runtime_path.exists() {
             fs::remove_file(&runtime_path).map_err(|error| {
-                format!("删除运行配置覆盖失败：{} ({error})", runtime_path.display())
+                format!("删除运行环境覆盖失败：{} ({error})", runtime_path.display())
             })?;
         }
         load_project_config_editor_state_for_source(&paths.projects, &source)
@@ -4855,7 +5147,10 @@ async fn trigger_build(
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| default_build_operation_title(&response.plan.action_kind));
-                let history = build_history_request(&workspace, response, &event_id);
+                let mut history = build_history_request(&workspace, response, &event_id);
+                // The web client persists the same operation after trigger_build returns.
+                // Keep one shared key so the backend and client upsert a single record.
+                history.history_key = event_id.clone();
                 let event = build_operation_event(
                     event_id,
                     origin,
@@ -4940,15 +5235,12 @@ async fn refresh_build_status(
         let history_workspace_key = (!workspace.is_system()).then_some(workspace.key);
         let config = config_state.load()?;
         let config = apply_active_workspace_context(&config)?;
-        let result = if let Some(project) = request
-            .project
-            .as_deref()
-            .filter(|value| !value.is_empty())
-        {
-            refresh_runtime_build_status(&runtime, &config, project)
-        } else {
-            refresh_deploy_status(&config, &request).map_err(|error| error.to_string())
-        }?;
+        let result =
+            if let Some(project) = request.project.as_deref().filter(|value| !value.is_empty()) {
+                refresh_runtime_build_status(&runtime, &config, project)
+            } else {
+                refresh_deploy_status(&config, &request).map_err(|error| error.to_string())
+            }?;
         match storage.update_deploy_history_status(
             &result,
             request.queue_url.as_deref(),
@@ -5033,12 +5325,22 @@ fn refresh_runtime_build_status(
         .into_iter()
         .next()
         .ok_or_else(|| format!("项目不存在: {}", project))?;
+    let state_key = runtime_build_state_key(&snapshot).to_string();
+    let (state_label, detail) = if snapshot.build_status_key == "stopped" {
+        (
+            "状态未确认".to_string(),
+            runtime_build_untracked_detail(&snapshot),
+        )
+    } else {
+        (snapshot.build_status_label.clone(), runtime_build_detail(&snapshot))
+    };
     Ok(BuildStatusResponse {
         queue_url: None,
         build_url: None,
-        state_key: runtime_build_state_key(&snapshot).to_string(),
-        state_label: snapshot.build_status_label.clone(),
-        detail: runtime_build_detail(&snapshot),
+        state_key,
+        state_label,
+        detail,
+        commit: None,
     })
 }
 
@@ -5064,7 +5366,7 @@ fn runtime_build_state_key(snapshot: &ProjectRuntimeSnapshot) -> &str {
         "succeeded" => "success",
         "failed" | "exited" | "invalidConfig" | "notConfigured" => "failure",
         "running" => "running",
-        "stopped" => "cancelled",
+        "stopped" => "unknown",
         other => other,
     }
 }
@@ -5081,11 +5383,27 @@ fn runtime_build_detail(snapshot: &ProjectRuntimeSnapshot) -> String {
     runtime_build_detail_with_plan(snapshot, None)
 }
 
+fn runtime_build_untracked_detail(snapshot: &ProjectRuntimeSnapshot) -> String {
+    runtime_build_detail_with_base(
+        snapshot,
+        None,
+        "未找到正在运行或最近完成的打包任务；请检查日志或重新执行打包".to_string(),
+    )
+}
+
 fn runtime_build_detail_with_plan(
     snapshot: &ProjectRuntimeSnapshot,
     plan: Option<&DeployPlan>,
 ) -> String {
-    let mut parts = vec![snapshot.build_detail.clone()];
+    runtime_build_detail_with_base(snapshot, plan, snapshot.build_detail.clone())
+}
+
+fn runtime_build_detail_with_base(
+    snapshot: &ProjectRuntimeSnapshot,
+    plan: Option<&DeployPlan>,
+    base_detail: String,
+) -> String {
+    let mut parts = vec![base_detail];
     if let Some(pid) = snapshot.build_pid {
         parts.push(format!("PID: {}", pid));
     }
@@ -5171,11 +5489,10 @@ async fn execute_branch_sync_task(
                 Err(error) => eprintln!("failed to save batch merge history: {error}"),
             }
         }
-        let fallback_project_key = request
-            .projects
-            .first()
-            .map(String::as_str)
-            .or_else(|| (!request.project.trim().is_empty()).then_some(request.project.as_str()));
+        let fallback_project_key =
+            request.projects.first().map(String::as_str).or_else(|| {
+                (!request.project.trim().is_empty()).then_some(request.project.as_str())
+            });
         record_branch_task_event(
             &storage,
             event_id,
@@ -5641,6 +5958,66 @@ async fn execute_branch_push_task(
 }
 
 #[tauri::command]
+async fn get_health_snapshot() -> Result<HealthSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(collect_health_snapshot)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_notes_file_index(
+    project: Option<String>,
+    scope: Option<String>,
+    query: Option<String>,
+    limit: Option<usize>,
+) -> Result<NotesFileIndex, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        init_file_notes().map_err(|error| error.to_string())?;
+        search_file_notes(
+            project.as_deref(),
+            scope.as_deref(),
+            query.as_deref(),
+            limit.unwrap_or(24),
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_note_document(path: String) -> Result<NoteDocument, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        read_file_note(Path::new(&path)).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn resolve_note_document_link(
+    source_path: String,
+    href: String,
+) -> Result<ResolveNoteDocumentLinkResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        resolve_file_note_link(Path::new(&source_path), &href).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn create_note_document(
+    request: CreateNoteDocumentRequest,
+) -> Result<CreateNoteDocumentResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        create_file_note(request).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn open_local_path(path: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || open_path(PathBuf::from(path)))
         .await
@@ -5670,12 +6047,9 @@ async fn load_page_navigation(source_id: Option<String>) -> Result<NavigationDat
     tauri::async_runtime::spawn_blocking(move || {
         let paths = ensure_default_configs().map_err(|error| error.to_string())?;
         let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
-        let source = core_resolve_config_source(
-            source_id.as_deref(),
-            &load_project_workspaces(&paths.project_workspaces)
-                .map_err(|error| error.to_string())?,
-        )
-        .map_err(|error| error.to_string())?;
+        let source =
+            core_resolve_config_source(source_id.as_deref(), &load_config_source_workspaces()?)
+                .map_err(|error| error.to_string())?;
         if source.is_default {
             load_navigation_data_for_workspace(&workspace).map_err(|error| error.to_string())
         } else {
@@ -5874,7 +6248,7 @@ fn inspect_config_source_state(source: ConfigSource) -> Result<ConfigSourceInspe
         ),
         inspect_config_source_file(
             "runtimeOverrides",
-            "运行配置覆盖",
+            "运行环境覆盖",
             "runtime",
             source.files.runtime_overrides.as_deref(),
             runtime_supported,
@@ -6036,7 +6410,7 @@ async fn save_config_source_preference(
 
 fn load_config_source_workspaces() -> Result<Vec<ProjectWorkspaceConfig>, String> {
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-    load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())
+    load_all_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())
 }
 
 fn resolve_app_config_source(source_id: Option<String>) -> Result<ConfigSource, String> {
@@ -6045,10 +6419,7 @@ fn resolve_app_config_source(source_id: Option<String>) -> Result<ConfigSource, 
 }
 
 fn config_source_supports(source: &ConfigSource, capability: &str) -> bool {
-    source
-        .capabilities
-        .iter()
-        .any(|item| item.trim() == capability)
+    core_config_source_supports(source, capability)
 }
 
 fn proxy_path_for_config_source(source: &ConfigSource) -> Result<PathBuf, String> {
@@ -6076,47 +6447,22 @@ fn proxy_path_for_source_id(source_id: Option<String>) -> Result<(ConfigSource, 
 fn runtime_overrides_path_for_config_source(
     source: &ConfigSource,
 ) -> Result<Option<PathBuf>, String> {
-    if !config_source_supports(source, "runtime") {
-        return Ok(None);
-    }
-    Ok(source.files.runtime_overrides.as_deref().map(PathBuf::from))
+    core_runtime_overrides_path_for_config_source(source).map_err(|error| error.to_string())
 }
 
 fn load_runtime_overrides(path: &Path) -> Result<RuntimeOverridesFile, String> {
-    if !path.exists() {
-        return Ok(RuntimeOverridesFile::default());
-    }
-    let content = fs::read_to_string(path).map_err(|error| error.to_string())?;
-    toml::from_str(&content).map_err(|error| error.to_string())
+    core_load_runtime_overrides(path).map_err(|error| error.to_string())
 }
 
 fn save_runtime_overrides(path: &Path, profiles: Vec<RuntimeProfileConfig>) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    }
-    let data = RuntimeOverridesFile {
-        runtime_profiles: profiles,
-    };
-    let content = toml::to_string_pretty(&data).map_err(|error| error.to_string())?;
-    write_config_text_atomic(path, content).map_err(|error| error.to_string())
+    core_save_runtime_overrides(path, profiles).map_err(|error| error.to_string())
 }
 
 fn apply_runtime_overrides_for_source(
     config: &mut AppConfig,
     source: &ConfigSource,
 ) -> Result<(), String> {
-    if source.is_default {
-        return Ok(());
-    }
-    let Some(path) = runtime_overrides_path_for_config_source(source)? else {
-        return Ok(());
-    };
-    if !path.exists() {
-        return Ok(());
-    }
-    let overrides = load_runtime_overrides(&path)?;
-    config.defaults.runtime_profiles = overrides.runtime_profiles;
-    Ok(())
+    core_apply_runtime_overrides_for_source(config, source).map_err(|error| error.to_string())
 }
 
 fn proxy_dashboard_for_source(
@@ -6124,9 +6470,28 @@ fn proxy_dashboard_for_source(
     source: &ConfigSource,
     path: &Path,
 ) -> Result<ProxyDashboard, String> {
+    proxy_dashboard_for_source_in_workspace(runtime, source, path, None)
+}
+
+fn proxy_dashboard_for_source_in_workspace(
+    runtime: &ProxyRuntimeState,
+    source: &ConfigSource,
+    path: &Path,
+    workspace_key: Option<&str>,
+) -> Result<ProxyDashboard, String> {
     let dashboard = runtime.dashboard(path).map_err(|error| error.to_string())?;
     if source.is_default {
-        let workspace = active_proxy_workspace()?;
+        let workspace = match workspace_key
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            Some(workspace_key) => {
+                let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+                load_project_workspace_by_key(&paths.project_workspaces, workspace_key)
+                    .map_err(|error| error.to_string())?
+            }
+            None => active_proxy_workspace()?,
+        };
         Ok(filter_proxy_dashboard_by_workspace(dashboard, &workspace))
     } else {
         Ok(dashboard)
@@ -6162,17 +6527,22 @@ async fn save_navigation_editor(
 async fn list_links(
     state: tauri::State<'_, AppState>,
     source_id: Option<String>,
+    workspace_key: Option<String>,
 ) -> Result<Vec<LinkSummary>, String> {
     let config_state = state.config_state.clone();
     let proxy_runtime = state.proxy_runtime.clone();
     let project_runtime = state.project_runtime.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let context = workspace_execution_context(&config_state, None)?;
-        let link_source = core_resolve_config_source(source_id.as_deref(), &context.workspaces)
-            .map_err(|error| error.to_string())?;
-        let proxy_path = proxy_path_for_config_source(&context.proxy_source)?;
-        let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
-        let links_path = PathBuf::from(link_source.files.links);
+        let context = workspace_execution_context_with_sources(
+            &config_state,
+            workspace_key.as_deref(),
+            source_id.as_deref(),
+            None,
+            None,
+        )?;
+        let proxy_config =
+            load_execution_proxy_config(&context, &context.proxy_source, &context.proxy_path)?;
+        let links_path = PathBuf::from(&context.link_source.files.links);
         let mut summaries = core_list_link_summaries_from_path(
             &links_path,
             &context.config,
@@ -6189,7 +6559,7 @@ async fn list_links(
         attach_link_runtime_summaries(
             &mut summaries,
             &links,
-            &proxy_path,
+            &context.proxy_path,
             &proxy_config,
             &proxy_runtime,
             &project_statuses,
@@ -6215,24 +6585,31 @@ async fn get_link(source_id: Option<String>, key: String) -> Result<LinkConfig, 
 async fn plan_link(
     state: tauri::State<'_, AppState>,
     source_id: Option<String>,
+    proxy_source_id: Option<String>,
+    runtime_source_id: Option<String>,
+    workspace_key: Option<String>,
     key: String,
 ) -> Result<LinkPlan, String> {
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let context = workspace_execution_context(&config_state, None)?;
-        let link_source = core_resolve_config_source(source_id.as_deref(), &context.workspaces)
-            .map_err(|error| error.to_string())?;
-        let proxy_path = proxy_path_for_config_source(&context.proxy_source)?;
-        let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+        let context = workspace_execution_context_with_sources(
+            &config_state,
+            workspace_key.as_deref(),
+            source_id.as_deref(),
+            proxy_source_id.as_deref(),
+            runtime_source_id.as_deref(),
+        )?;
+        let proxy_config =
+            load_execution_proxy_config(&context, &context.proxy_source, &context.proxy_path)?;
         let mut plan = core_plan_link_from_path(
-            &PathBuf::from(&link_source.files.links),
+            &PathBuf::from(&context.link_source.files.links),
             &key,
             &context.config,
             &context.workspaces,
             &proxy_config,
         )
         .map_err(|error| error.to_string())?;
-        plan.source_context = Some(link_source_context(&context, &link_source));
+        plan.source_context = Some(link_source_context(&context, &context.link_source));
         Ok(plan)
     })
     .await
@@ -6243,17 +6620,24 @@ async fn plan_link(
 async fn save_link(
     state: tauri::State<'_, AppState>,
     source_id: Option<String>,
+    proxy_source_id: Option<String>,
+    runtime_source_id: Option<String>,
+    workspace_key: Option<String>,
     previous_key: Option<String>,
     link: LinkConfig,
 ) -> Result<serde_json::Value, String> {
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let context = workspace_execution_context(&config_state, None)?;
-        let link_source = core_resolve_config_source(source_id.as_deref(), &context.workspaces)
-            .map_err(|error| error.to_string())?;
-        let proxy_path = proxy_path_for_config_source(&context.proxy_source)?;
-        let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
-        let links_path = PathBuf::from(&link_source.files.links);
+        let context = workspace_execution_context_with_sources(
+            &config_state,
+            workspace_key.as_deref(),
+            source_id.as_deref(),
+            proxy_source_id.as_deref(),
+            runtime_source_id.as_deref(),
+        )?;
+        let proxy_config =
+            load_execution_proxy_config(&context, &context.proxy_source, &context.proxy_path)?;
+        let links_path = PathBuf::from(&context.link_source.files.links);
         let link =
             core_upsert_link_to_path_with_previous_key(&links_path, link, previous_key.as_deref())
                 .map_err(|error| error.to_string())?;
@@ -6265,7 +6649,7 @@ async fn save_link(
             &proxy_config,
         )
         .map_err(|error| error.to_string())?;
-        plan.source_context = Some(link_source_context(&context, &link_source));
+        plan.source_context = Some(link_source_context(&context, &context.link_source));
         Ok(json!({ "link": link, "plan": plan }))
     })
     .await
@@ -6273,11 +6657,24 @@ async fn save_link(
 }
 
 #[tauri::command]
-async fn delete_link(source_id: Option<String>, key: String) -> Result<serde_json::Value, String> {
+async fn delete_link(
+    state: tauri::State<'_, AppState>,
+    source_id: Option<String>,
+    workspace_key: Option<String>,
+    key: String,
+) -> Result<serde_json::Value, String> {
+    let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let source = resolve_app_config_source(source_id)?;
-        let deleted = core_delete_link_from_path(&PathBuf::from(source.files.links), &key)
-            .map_err(|error| error.to_string())?;
+        let context = workspace_execution_context_with_sources(
+            &config_state,
+            workspace_key.as_deref(),
+            source_id.as_deref(),
+            None,
+            None,
+        )?;
+        let deleted =
+            core_delete_link_from_path(&PathBuf::from(&context.link_source.files.links), &key)
+                .map_err(|error| error.to_string())?;
         Ok(json!({ "key": key, "deleted": deleted }))
     })
     .await
@@ -6294,10 +6691,13 @@ async fn attach_link_to_workspace(
         let paths = ensure_default_configs().map_err(|error| error.to_string())?;
         let link_key = request.link_key.clone();
         let workspace_key = request.workspace_key.clone();
-        let result: LinkWorkspaceAttachResult =
-            core_attach_link_to_workspace(&paths.project_workspaces, request)
-                .map_err(|error| error.to_string())?;
         let context = workspace_execution_context(&config_state, Some(&workspace_key))?;
+        let result: LinkWorkspaceAttachResult = core_attach_link_to_workspace_from_path(
+            &paths.project_workspaces,
+            &PathBuf::from(&context.link_source.files.links),
+            request,
+        )
+        .map_err(|error| error.to_string())?;
         let proxy_path = proxy_path_for_config_source(&context.proxy_source)?;
         let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
         let mut plan = core_plan_link_from_path(
@@ -6319,9 +6719,21 @@ async fn attach_link_to_workspace(
 async fn check_link(
     state: tauri::State<'_, AppState>,
     source_id: Option<String>,
+    proxy_source_id: Option<String>,
+    runtime_source_id: Option<String>,
+    workspace_key: Option<String>,
     key: String,
 ) -> Result<LinkExecutionReport, String> {
-    execute_link_app_command(state, source_id, key, "check").await
+    execute_link_app_command(
+        state,
+        source_id,
+        proxy_source_id,
+        runtime_source_id,
+        workspace_key,
+        key,
+        "check",
+    )
+    .await
 }
 
 #[tauri::command]
@@ -6329,27 +6741,48 @@ async fn run_link(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     source_id: Option<String>,
+    proxy_source_id: Option<String>,
+    runtime_source_id: Option<String>,
+    workspace_key: Option<String>,
     key: String,
     activity_id: Option<String>,
     operation_origin: Option<String>,
 ) -> Result<LinkExecutionReport, String> {
     let origin = operation_event_origin(operation_origin.as_deref());
     let event_id = operation_event_id(activity_id.as_deref(), origin, "link-run");
-    let workspace_key = active_history_workspace()
-        .map(|workspace| workspace.key)
-        .unwrap_or_else(|_| SYSTEM_PROJECT_WORKSPACE_KEY.to_string());
+    let operation_workspace_key = workspace_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+        .unwrap_or_else(|| {
+            active_history_workspace()
+                .map(|workspace| workspace.key)
+                .unwrap_or_else(|_| SYSTEM_PROJECT_WORKSPACE_KEY.to_string())
+        });
     let link_key = key.clone();
     let event_source_id = source_id.clone();
+    let event_proxy_source_id = proxy_source_id.clone();
+    let event_runtime_source_id = runtime_source_id.clone();
     let storage = state.storage.clone();
-    let result = execute_link_app_command(state, source_id, key, "run").await;
+    let result = execute_link_app_command(
+        state,
+        source_id,
+        proxy_source_id,
+        runtime_source_id,
+        Some(operation_workspace_key.clone()),
+        key,
+        "run",
+    )
+    .await;
     record_link_operation_event(
         &storage,
         event_id,
         origin,
-        &workspace_key,
+        &operation_workspace_key,
         "run",
         &link_key,
         event_source_id.as_deref(),
+        event_proxy_source_id.as_deref(),
+        event_runtime_source_id.as_deref(),
         &result,
     );
     if result.is_ok() {
@@ -6363,27 +6796,48 @@ async fn stop_link(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
     source_id: Option<String>,
+    proxy_source_id: Option<String>,
+    runtime_source_id: Option<String>,
+    workspace_key: Option<String>,
     key: String,
     activity_id: Option<String>,
     operation_origin: Option<String>,
 ) -> Result<LinkExecutionReport, String> {
     let origin = operation_event_origin(operation_origin.as_deref());
     let event_id = operation_event_id(activity_id.as_deref(), origin, "link-stop");
-    let workspace_key = active_history_workspace()
-        .map(|workspace| workspace.key)
-        .unwrap_or_else(|_| SYSTEM_PROJECT_WORKSPACE_KEY.to_string());
+    let operation_workspace_key = workspace_key
+        .clone()
+        .filter(|key| !key.trim().is_empty())
+        .unwrap_or_else(|| {
+            active_history_workspace()
+                .map(|workspace| workspace.key)
+                .unwrap_or_else(|_| SYSTEM_PROJECT_WORKSPACE_KEY.to_string())
+        });
     let link_key = key.clone();
     let event_source_id = source_id.clone();
+    let event_proxy_source_id = proxy_source_id.clone();
+    let event_runtime_source_id = runtime_source_id.clone();
     let storage = state.storage.clone();
-    let result = execute_link_app_command(state, source_id, key, "stop").await;
+    let result = execute_link_app_command(
+        state,
+        source_id,
+        proxy_source_id,
+        runtime_source_id,
+        Some(operation_workspace_key.clone()),
+        key,
+        "stop",
+    )
+    .await;
     record_link_operation_event(
         &storage,
         event_id,
         origin,
-        &workspace_key,
+        &operation_workspace_key,
         "stop",
         &link_key,
         event_source_id.as_deref(),
+        event_proxy_source_id.as_deref(),
+        event_runtime_source_id.as_deref(),
         &result,
     );
     if result.is_ok() {
@@ -6395,6 +6849,9 @@ async fn stop_link(
 async fn execute_link_app_command(
     state: tauri::State<'_, AppState>,
     source_id: Option<String>,
+    proxy_source_id: Option<String>,
+    runtime_source_id: Option<String>,
+    workspace_key: Option<String>,
     key: String,
     mode: &'static str,
 ) -> Result<LinkExecutionReport, String> {
@@ -6408,8 +6865,9 @@ async fn execute_link_app_command(
             &project_runtime,
             LinkAppExecutionRequest {
                 link_source_id: source_id,
-                proxy_source_id: None,
-                workspace_key: None,
+                proxy_source_id,
+                runtime_source_id,
+                workspace_key,
                 key,
                 mode: mode.to_string(),
             },
@@ -6531,6 +6989,7 @@ fn link_runtime_summary_app(
 struct LinkAppExecutionRequest {
     link_source_id: Option<String>,
     proxy_source_id: Option<String>,
+    runtime_source_id: Option<String>,
     workspace_key: Option<String>,
     key: String,
     mode: String,
@@ -6542,24 +7001,18 @@ fn execute_link_app(
     project_runtime: &ProjectRuntimeState,
     request: LinkAppExecutionRequest,
 ) -> Result<LinkExecutionReport, String> {
-    let context = workspace_execution_context(config_state, request.workspace_key.as_deref())?;
-    let link_source = if let Some(source_id) = request.link_source_id.as_deref() {
-        core_resolve_config_source(Some(source_id), &context.workspaces)
-            .map_err(|error| error.to_string())?
-    } else {
-        context.link_source.clone()
-    };
-    let proxy_source = if let Some(source_id) = request.proxy_source_id.as_deref() {
-        core_resolve_config_source(Some(source_id), &context.workspaces)
-            .map_err(|error| error.to_string())?
-    } else {
-        context.proxy_source.clone()
-    };
-    let links_path = PathBuf::from(&link_source.files.links);
+    let context = workspace_execution_context_with_sources(
+        config_state,
+        request.workspace_key.as_deref(),
+        request.link_source_id.as_deref(),
+        request.proxy_source_id.as_deref(),
+        request.runtime_source_id.as_deref(),
+    )?;
+    let links_path = PathBuf::from(&context.link_source.files.links);
     let link =
         core_get_link_from_path(&links_path, &request.key).map_err(|error| error.to_string())?;
-    let proxy_path = proxy_path_for_config_source(&proxy_source)?;
-    let proxy_config = load_proxy_config(&proxy_path).map_err(|error| error.to_string())?;
+    let proxy_config =
+        load_execution_proxy_config(&context, &context.proxy_source, &context.proxy_path)?;
     let mut plan = core_plan_link_from_path(
         &links_path,
         &link.key,
@@ -6568,7 +7021,7 @@ fn execute_link_app(
         &proxy_config,
     )
     .map_err(|error| error.to_string())?;
-    plan.source_context = Some(link_source_context(&context, &link_source));
+    plan.source_context = Some(link_source_context(&context, &context.link_source));
     let mut warnings = plan.warnings.clone();
     let mut indices = (0..link.steps.len()).collect::<Vec<_>>();
     if request.mode == "stop" {
@@ -6583,7 +7036,7 @@ fn execute_link_app(
             &context.config,
             proxy_runtime,
             project_runtime,
-            &proxy_path,
+            &context.proxy_path,
             &proxy_config,
             &link,
             step,
@@ -7006,7 +7459,7 @@ fn run_link_step_app(
                             step_type,
                             label,
                             status: "failed".to_string(),
-                            summary: format!("运行配置解析失败：{error}"),
+                            summary: format!("运行环境解析失败：{error}"),
                             detail: None,
                             risks: vec![error],
                         };
@@ -7024,7 +7477,7 @@ fn run_link_step_app(
                     step_type,
                     label,
                     status: "failed".to_string(),
-                    summary: format!("运行配置代理准备失败：{error}"),
+                    summary: format!("运行环境代理准备失败：{error}"),
                     detail: None,
                     risks: vec![error],
                 };
@@ -7340,16 +7793,6 @@ async fn storage_delete_json(
 }
 
 #[tauri::command]
-async fn get_tray_pinned_actions(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<TrayReplayAction>, String> {
-    let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || Ok(tray_pinned_actions(&storage)))
-        .await
-        .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
 async fn get_workspace_pinned_actions_overview(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<WorkspacePinnedActionsOverview>, String> {
@@ -7360,6 +7803,48 @@ async fn get_workspace_pinned_actions_overview(
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
         workspace_pinned_actions_overview(&config, &storage, &proxy_runtime, &project_runtime)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_workspace_pinned_actions_overview_summary(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<WorkspacePinnedActionsOverview>, String> {
+    let storage = state.storage.clone();
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        workspace_pinned_actions_overview_summary(&config, &storage)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_workspace_pinned_actions_overview_details(
+    state: tauri::State<'_, AppState>,
+    workspace_keys: Vec<String>,
+) -> Result<Vec<WorkspacePinnedActionsOverview>, String> {
+    let storage = state.storage.clone();
+    let config_state = state.config_state.clone();
+    let proxy_runtime = state.proxy_runtime.clone();
+    let project_runtime = state.project_runtime.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        let workspace_keys = workspace_keys
+            .into_iter()
+            .map(|key| key.trim().to_string())
+            .filter(|key| !key.is_empty())
+            .collect::<BTreeSet<_>>();
+        workspace_pinned_actions_overview_filtered(
+            &config,
+            &storage,
+            &proxy_runtime,
+            &project_runtime,
+            Some(&workspace_keys),
+        )
     })
     .await
     .map_err(|error| error.to_string())?
@@ -7419,23 +7904,6 @@ fn record_tray_pinned_action_execution(
 }
 
 #[tauri::command]
-async fn set_tray_pinned_actions(
-    app: AppHandle,
-    state: tauri::State<'_, AppState>,
-    actions: Vec<TrayReplayAction>,
-) -> Result<(), String> {
-    let storage = state.storage.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let normalized = normalize_tray_pinned_actions(actions);
-        save_tray_pinned_actions(&storage, &normalized)?;
-        refresh_tray_menu(&app);
-        Ok(())
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-#[tauri::command]
 async fn list_managed_artifacts(
     state: tauri::State<'_, AppState>,
     workspace: Option<String>,
@@ -7470,6 +7938,7 @@ async fn start_project_runtime(
     project: String,
     debug_profile: Option<String>,
     env_overrides: Option<BTreeMap<String, String>>,
+    expected_port: Option<u16>,
     activity_id: Option<String>,
     operation_origin: Option<String>,
 ) -> Result<ProjectRuntimeSnapshot, String> {
@@ -7483,6 +7952,7 @@ async fn start_project_runtime(
     let log_project = project.clone();
     let event_debug_profile = optional_editor_string(debug_profile.clone());
     let event_env_overrides = env_overrides.clone();
+    let event_expected_port = expected_port;
     let result = tauri::async_runtime::spawn_blocking(move || {
         let mut config = apply_active_workspace_context(&config_state.load()?)?;
         let proxy_path = active_workspace_proxy_path()?;
@@ -7499,6 +7969,7 @@ async fn start_project_runtime(
         let env_overrides = normalize_runtime_env_overrides(env_overrides);
         let launch_options = ProjectRuntimeLaunchOptions {
             debug_profile: debug_profile_key.clone(),
+            expected_port,
             env: env_overrides.clone(),
             ..ProjectRuntimeLaunchOptions::default()
         };
@@ -7517,9 +7988,19 @@ async fn start_project_runtime(
                 format!("启动前检查未通过：{}（{}）", preflight.summary, details)
             });
         }
+        let launch_focus_url = preflight
+            .target
+            .as_ref()
+            .and_then(|target| target.focus_url.clone());
         let mut updated = runtime.start_with_options(&config, &project, &launch_options)?;
         if should_auto_focus_project(&config, &project, &updated) {
-            match runtime.focus_runtime(&config, &project, debug_profile_key.as_deref()) {
+            match runtime.focus_runtime_with_profile_and_url(
+                &config,
+                &project,
+                debug_profile_key.as_deref(),
+                None,
+                launch_focus_url.as_deref(),
+            ) {
                 Ok(next_snapshot) => {
                     updated = next_snapshot;
                 }
@@ -7537,7 +8018,7 @@ async fn start_project_runtime(
         if let Some(profile_key) = debug_profile_key.as_ref() {
             action.detail = Some(match action.detail.as_ref() {
                 Some(detail) => format!("{} · {}", detail, profile_key),
-                None => format!("调试档案 {}", profile_key),
+                None => format!("启动档案 {}", profile_key),
             });
             action.dedupe_key = format!("project.runtime.start:{}:{}", project, profile_key);
             action.payload = Some(json!({ "debugProfile": profile_key }));
@@ -7561,6 +8042,22 @@ async fn start_project_runtime(
             action.payload = Some(json!({
                 "debugProfile": debug_profile_key,
                 "envOverrides": env_overrides,
+                "expectedPort": expected_port,
+            }));
+        } else if let Some(expected_port) = expected_port {
+            action.detail = Some(match action.detail.as_ref() {
+                Some(detail) => format!("{} · 临时端口 {}", detail, expected_port),
+                None => format!("临时端口 {}", expected_port),
+            });
+            action.dedupe_key = format!(
+                "project.runtime.start:{}:{}:port-{}",
+                project,
+                debug_profile_key.as_deref().unwrap_or("default"),
+                expected_port
+            );
+            action.payload = Some(json!({
+                "debugProfile": debug_profile_key,
+                "expectedPort": expected_port,
             }));
         }
         if let Err(error) = record_tray_replay_action(&app, action) {
@@ -7620,6 +8117,7 @@ async fn start_project_runtime(
                     "envOverrides".to_string(),
                     json!(event_env_overrides.clone()),
                 );
+                payload.insert("expectedPort".to_string(), json!(event_expected_port));
             }
             record_lifecycle_operation_event(
                 &storage,
@@ -7654,6 +8152,7 @@ async fn start_project_runtime(
                 "projectKey": log_project.clone(),
                 "debugProfile": event_debug_profile.clone(),
                 "envOverrides": event_env_overrides.clone(),
+                "expectedPort": event_expected_port,
             })),
         ),
     }
@@ -7974,7 +8473,7 @@ async fn focus_project_runtime(
         if let Some(profile_key) = debug_profile_key.as_ref() {
             action.detail = Some(match action.detail.as_ref() {
                 Some(detail) => format!("{} · {}", detail, profile_key),
-                None => format!("调试档案 {}", profile_key),
+                None => format!("启动档案 {}", profile_key),
             });
             action.dedupe_key = format!(
                 "project.runtime.focus:{}:{}",
@@ -8079,6 +8578,9 @@ fn open_url(url: &str) -> Result<(), String> {
 }
 
 fn show_main_window<R: tauri::Runtime>(app: &AppHandle<R>) {
+    #[cfg(target_os = "macos")]
+    let _ = app.set_dock_visibility(true);
+
     let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) else {
         return;
     };
@@ -8086,6 +8588,13 @@ fn show_main_window<R: tauri::Runtime>(app: &AppHandle<R>) {
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
+}
+
+fn hide_main_window_to_tray<R: tauri::Runtime>(window: &tauri::Window<R>) {
+    let _ = window.hide();
+
+    #[cfg(target_os = "macos")]
+    let _ = window.app_handle().set_dock_visibility(false);
 }
 
 fn unix_time_ms() -> u64 {
@@ -8110,6 +8619,7 @@ fn tray_action_for_project(
         project_key: Some(project_key),
         entry: None,
         payload: None,
+        execution_context: None,
         updated_at_ms: unix_time_ms(),
     }
 }
@@ -8131,6 +8641,7 @@ fn tray_action_for_navigation_entry(entry: &NavigationEntry) -> TrayReplayAction
         project_key: None,
         entry: Some(entry.clone()),
         payload: None,
+        execution_context: None,
         dedupe_key,
         updated_at_ms: unix_time_ms(),
     }
@@ -8152,25 +8663,6 @@ fn tray_recent_actions(storage: &Storage) -> Vec<TrayReplayAction> {
 fn save_tray_recent_actions(storage: &Storage, actions: &[TrayReplayAction]) -> Result<(), String> {
     let value = serde_json::to_value(actions).map_err(|error| error.to_string())?;
     storage.set_json(TRAY_STORAGE_NAMESPACE, TRAY_RECENT_STORAGE_KEY, &value)
-}
-
-fn valid_tray_action(action: &TrayReplayAction) -> bool {
-    !action.kind.trim().is_empty()
-        && !action.label.trim().is_empty()
-        && !action.dedupe_key.trim().is_empty()
-}
-
-fn tray_pinned_actions(storage: &Storage) -> Vec<TrayReplayAction> {
-    storage
-        .get_json(TRAY_STORAGE_NAMESPACE, TRAY_PINNED_STORAGE_KEY)
-        .ok()
-        .flatten()
-        .and_then(|value| serde_json::from_value::<Vec<TrayReplayAction>>(value).ok())
-        .unwrap_or_default()
-        .into_iter()
-        .filter(valid_tray_action)
-        .take(TRAY_PINNED_STORAGE_LIMIT)
-        .collect()
 }
 
 fn json_string(value: &serde_json::Value) -> String {
@@ -8215,68 +8707,6 @@ fn build_history_matches_pinned_action(
             && entry.project_key == project_key
             && entry.mode == target
             && normalized_params(Some(&entry.params)) == params
-    })
-}
-
-fn branch_history_items(storage: &Storage) -> Vec<serde_json::Value> {
-    storage
-        .get_json(
-            BRANCH_WORKFLOW_STORAGE_NAMESPACE,
-            BRANCH_WORKFLOW_HISTORY_KEY,
-        )
-        .ok()
-        .flatten()
-        .and_then(|value| value.as_array().cloned())
-        .unwrap_or_default()
-}
-
-fn branch_history_entry_allowed(
-    entry: &serde_json::Value,
-    workspace: Option<&ProjectWorkspaceConfig>,
-) -> bool {
-    let Some(workspace) = workspace.filter(|workspace| !workspace.is_system()) else {
-        return true;
-    };
-    if entry.get("workspaceKey").and_then(|value| value.as_str()) != Some(workspace.key.as_str()) {
-        return false;
-    }
-    entry
-        .get("items")
-        .and_then(|value| value.as_array())
-        .is_some_and(|items| {
-            items.iter().any(|item| {
-                item.get("projectKey")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|project_key| workspace.allows_project(project_key))
-            })
-        })
-}
-
-fn branch_history_matches_pinned_action(
-    action: &TrayReplayAction,
-    branch_history: &[serde_json::Value],
-    workspace: Option<&ProjectWorkspaceConfig>,
-) -> bool {
-    let Some(serde_json::Value::Object(payload)) = action.payload.as_ref() else {
-        return false;
-    };
-    let Some(command) = payload.get("command") else {
-        return false;
-    };
-    let Some(request) = payload.get("request") else {
-        return false;
-    };
-
-    branch_history.iter().any(|entry| {
-        entry.get("workspaceKey").and_then(|value| value.as_str())
-            == action.workspace_key.as_deref()
-            && branch_history_entry_allowed(entry, workspace)
-            && entry
-                .get("replay")
-                .and_then(|value| value.as_object())
-                .is_some_and(|replay| {
-                    replay.get("command") == Some(command) && replay.get("request") == Some(request)
-                })
     })
 }
 
@@ -8337,6 +8767,56 @@ fn branch_action_project_keys(action: &TrayReplayAction) -> BTreeSet<String> {
         }
     }
     keys
+}
+
+fn branch_replay_action_available(action: &TrayReplayAction) -> bool {
+    let Some(payload) = action.payload.as_ref() else {
+        return false;
+    };
+    let Ok(payload) = serde_json::from_value::<TrayBranchReplayPayload>(payload.clone()) else {
+        return false;
+    };
+
+    match payload.command.as_str() {
+        "execute_branch_sync_task" => serde_json::from_value::<BranchSyncRequest>(payload.request)
+            .is_ok_and(|request| {
+                (!request.project.trim().is_empty()
+                    || request
+                        .projects
+                        .iter()
+                        .any(|project| !project.trim().is_empty()))
+                    && !request.source_branch.trim().is_empty()
+                    && request
+                        .target_branches
+                        .iter()
+                        .any(|branch| !branch.trim().is_empty())
+            }),
+        "execute_branch_create_task" => {
+            serde_json::from_value::<BranchCreateRequest>(payload.request).is_ok_and(|request| {
+                request
+                    .projects
+                    .iter()
+                    .any(|project| !project.trim().is_empty())
+                    && !request.source_branch.trim().is_empty()
+                    && !request.target_branch.trim().is_empty()
+            })
+        }
+        "checkout_branch_to_directory_task" => {
+            serde_json::from_value::<BranchCheckoutRequest>(payload.request).is_ok_and(|request| {
+                !request.project.trim().is_empty()
+                    && !request.source_branch.trim().is_empty()
+                    && !request.destination_dir.trim().is_empty()
+            })
+        }
+        "execute_branch_switch_task" => {
+            serde_json::from_value::<BranchSwitchRequest>(payload.request).is_ok_and(|request| {
+                !request.project.trim().is_empty() && !request.target_branch.trim().is_empty()
+            })
+        }
+        "execute_branch_push_task" => serde_json::from_value::<BranchPushRequest>(payload.request)
+            .is_ok_and(|request| !request.project.trim().is_empty()),
+        _ => false,
+    }
 }
 
 fn tray_action_project_keys(action: &TrayReplayAction) -> BTreeSet<String> {
@@ -8551,6 +9031,7 @@ fn workspace_resource_shortcuts(
                             let openable = kind != "tool" && open_kind.is_some() && value.is_some();
                             WorkspaceResourceShortcutItem {
                                 key: format!("{}:{}:{}", workspace_key, category_title, index),
+                                workspace_key: workspace_key.clone(),
                                 config_source_id: config_source_id.clone(),
                                 category: category_title.clone(),
                                 label,
@@ -8567,6 +9048,7 @@ fn workspace_resource_shortcuts(
                                 entry: menu_entry,
                                 tool_config_source_id: None,
                                 tool_proxy_source_id: None,
+                                tool_runtime_source_id: None,
                             }
                         })
                 })
@@ -8616,7 +9098,7 @@ fn workspace_resource_detail(
                     .map(str::trim)
                     .filter(|value| !value.is_empty())
                 {
-                    parts.push(format!("运行配置 {profile}"));
+                    parts.push(format!("运行环境 {profile}"));
                 }
             }
             _ => {
@@ -8810,16 +9292,12 @@ fn workspace_key_for_pinned_action(
     }
 }
 
-fn tray_action_available(
-    action: &TrayReplayAction,
-    build_history: &[BuildHistoryEntry],
-    branch_history: &[serde_json::Value],
-) -> bool {
+fn tray_action_available(action: &TrayReplayAction, build_history: &[BuildHistoryEntry]) -> bool {
     match action.kind.as_str() {
         "build.replay" | "deploy.replay" => {
             build_history_matches_pinned_action(action, build_history)
         }
-        "branch.replay" => branch_history_matches_pinned_action(action, branch_history, None),
+        "branch.replay" => branch_replay_action_available(action),
         _ => true,
     }
 }
@@ -9185,12 +9663,12 @@ fn workspace_proxy_profile_items(
 fn resolve_workspace_capability_source(
     paths: &ConfigPaths,
     workspace: &ProjectWorkspaceConfig,
-    workspaces: &[ProjectWorkspaceConfig],
     capability: &str,
 ) -> Result<ConfigSource, String> {
     let source_id = core_load_config_source_preference(paths, &workspace.key, capability)
         .map_err(|error| error.to_string())?;
-    core_resolve_config_source(Some(&source_id), workspaces).map_err(|error| error.to_string())
+    let workspaces = load_config_source_workspaces()?;
+    core_resolve_config_source(Some(&source_id), &workspaces).map_err(|error| error.to_string())
 }
 
 fn workspace_link_summary_map(
@@ -9221,63 +9699,238 @@ fn workspace_link_summary_map(
         .collect()
 }
 
+fn group_workspace_pinned_actions(
+    workspaces: &[ProjectWorkspaceConfig],
+    actions: &[TrayReplayAction],
+    build_history: &[BuildHistoryEntry],
+) -> BTreeMap<String, Vec<TrayReplayAction>> {
+    let mut grouped = workspaces
+        .iter()
+        .map(|workspace| (workspace.key.clone(), Vec::<TrayReplayAction>::new()))
+        .collect::<BTreeMap<_, _>>();
+    for action in actions
+        .iter()
+        .filter(|action| tray_action_available(action, build_history))
+    {
+        let target_key = workspace_key_for_pinned_action(workspaces, action);
+        grouped.entry(target_key).or_default().push(action.clone());
+    }
+    grouped
+}
+
+fn workspace_pinned_actions_overview_summary(
+    config: &AppConfig,
+    storage: &Storage,
+) -> Result<Vec<WorkspacePinnedActionsOverview>, String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let config_source_workspaces = load_all_project_workspaces(&paths.project_workspaces)
+        .map_err(|error| error.to_string())?;
+    let workspaces = config_source_workspaces
+        .iter()
+        .filter(|workspace| !workspace.is_archived())
+        .cloned()
+        .collect::<Vec<_>>();
+    let app_workspace =
+        load_workspace_config(&paths.workspace).map_err(|error| error.to_string())?;
+    let config_sources =
+        core_list_config_sources(&config_source_workspaces).map_err(|error| error.to_string())?;
+    let resolve_source = |workspace: &ProjectWorkspaceConfig,
+                          capability: &str|
+     -> Result<ConfigSource, String> {
+        let source_id = preferred_config_source_id_for_scope(workspace, &app_workspace, capability);
+        core_resolve_config_source_from_sources(Some(&source_id), &config_sources)
+            .map_err(|error| error.to_string())
+    };
+    let actions = core_list_tray_pinned_actions(storage).unwrap_or_default();
+    let build_history = storage.list_all_deploy_history()?;
+    let mut grouped = group_workspace_pinned_actions(&workspaces, &actions, &build_history);
+    let empty_link_summaries = BTreeMap::<String, LinkSummary>::new();
+    let mut overview = Vec::with_capacity(workspaces.len());
+
+    for workspace in workspaces {
+        let resource_source = resolve_source(&workspace, "resource")?;
+        let link_source = resolve_source(&workspace, "link")?;
+        let proxy_source = resolve_source(&workspace, "proxy")?;
+        let runtime_source = resolve_source(&workspace, "runtime")?;
+        let runtime_config_path = runtime_source.files.runtime_overrides.clone();
+        let runtime_profile_scope = if runtime_source.is_default {
+            "global"
+        } else if runtime_config_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).exists())
+        {
+            "workspaceOverride"
+        } else {
+            "inherited"
+        };
+        let effective_config = apply_project_workspace_context(config, &workspace);
+        let actions = grouped.remove(&workspace.key).unwrap_or_default();
+        let mut resources =
+            workspace_resource_shortcuts(&workspace, &empty_link_summaries, &resource_source);
+        for resource in &mut resources {
+            if resource.kind == "tool" {
+                resource.tool_config_source_id = Some(link_source.id.clone());
+                resource.tool_proxy_source_id = Some(proxy_source.id.clone());
+                resource.tool_runtime_source_id = Some(runtime_source.id.clone());
+            }
+        }
+        let items = actions
+            .into_iter()
+            .map(|action| workspace_pinned_action_item(&effective_config, action))
+            .collect::<Vec<_>>();
+        let resource_status = workspace_resource_status(&workspace);
+
+        overview.push(WorkspacePinnedActionsOverview {
+            key: workspace.key.clone(),
+            name: workspace_display_name(&workspace),
+            description: workspace.description.clone(),
+            system: workspace.is_system(),
+            runtime_config_source_id: runtime_source.id,
+            runtime_config_source_name: runtime_source.name,
+            runtime_config_source_kind: runtime_source.kind,
+            runtime_config_path,
+            runtime_profile_scope: runtime_profile_scope.to_string(),
+            root_dir: workspace
+                .root_dir
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            resource_dir: resource_status
+                .as_ref()
+                .map(|status| status.resource_dir.clone()),
+            worklog_path: resource_status
+                .as_ref()
+                .map(|status| status.worklog_path.clone()),
+            worklog_exists: resource_status
+                .as_ref()
+                .is_some_and(|status| status.worklog_exists),
+            worklog_auto_record: workspace.worklog_auto_record,
+            workspace_kind: workspace_kind_label(&workspace),
+            workspace_type: workspace.workspace_type.clone(),
+            workspace_type_label: workspace_type_label(&workspace),
+            project_count: workspace.project_count_for(config),
+            entry_count: resources.len(),
+            action_count: items.len(),
+            proxy_profile_count: 0,
+            resources,
+            project_directories: Vec::new(),
+            proxy_profiles: Vec::new(),
+            actions: items,
+        });
+    }
+
+    Ok(overview)
+}
+
 fn workspace_pinned_actions_overview(
     config: &AppConfig,
     storage: &Storage,
     proxy_runtime: &ProxyRuntimeState,
     project_runtime: &ProjectRuntimeState,
 ) -> Result<Vec<WorkspacePinnedActionsOverview>, String> {
+    workspace_pinned_actions_overview_filtered(
+        config,
+        storage,
+        proxy_runtime,
+        project_runtime,
+        None,
+    )
+}
+
+fn workspace_pinned_actions_overview_filtered(
+    config: &AppConfig,
+    storage: &Storage,
+    proxy_runtime: &ProxyRuntimeState,
+    project_runtime: &ProjectRuntimeState,
+    requested_workspace_keys: Option<&BTreeSet<String>>,
+) -> Result<Vec<WorkspacePinnedActionsOverview>, String> {
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
-    let workspaces =
-        load_project_workspaces(&paths.project_workspaces).map_err(|error| error.to_string())?;
-    let actions = tray_pinned_actions(storage);
+    let config_source_workspaces = load_all_project_workspaces(&paths.project_workspaces)
+        .map_err(|error| error.to_string())?;
+    let workspaces = config_source_workspaces
+        .iter()
+        .filter(|workspace| !workspace.is_archived())
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected_workspaces = workspaces
+        .iter()
+        .filter(|workspace| {
+            requested_workspace_keys
+                .map(|keys| keys.contains(&workspace.key))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let app_workspace =
+        load_workspace_config(&paths.workspace).map_err(|error| error.to_string())?;
+    let config_sources =
+        core_list_config_sources(&config_source_workspaces).map_err(|error| error.to_string())?;
+    let resolve_source = |workspace: &ProjectWorkspaceConfig,
+                          capability: &str|
+     -> Result<ConfigSource, String> {
+        let source_id = preferred_config_source_id_for_scope(workspace, &app_workspace, capability);
+        core_resolve_config_source_from_sources(Some(&source_id), &config_sources)
+            .map_err(|error| error.to_string())
+    };
+    let daemon_statuses = runtime_daemon::list().map_err(|error| error.to_string())?;
+    let mut runtime_overrides_by_path = BTreeMap::<PathBuf, RuntimeOverridesFile>::new();
+    let mut proxy_dashboards_by_path = BTreeMap::<PathBuf, ProxyDashboard>::new();
+    let actions = core_list_tray_pinned_actions(storage).unwrap_or_default();
     let workspace_names = workspaces
         .iter()
         .map(|workspace| (workspace.key.clone(), workspace_display_name(workspace)))
         .collect::<BTreeMap<_, _>>();
     let build_history = storage.list_all_deploy_history()?;
-    let branch_history = branch_history_items(storage);
-    let mut grouped = workspaces
-        .iter()
-        .map(|workspace| (workspace.key.clone(), Vec::<TrayReplayAction>::new()))
-        .collect::<BTreeMap<_, _>>();
-
-    for action in actions {
-        if !tray_action_available(&action, &build_history, &branch_history) {
-            continue;
-        }
-
-        let target_key = workspace_key_for_pinned_action(&workspaces, &action);
-
-        grouped.entry(target_key).or_default().push(action);
-    }
+    let mut grouped = group_workspace_pinned_actions(&workspaces, &actions, &build_history);
 
     let workspace_configs = workspaces.clone();
     let mut overview = Vec::new();
-    for workspace in workspaces {
-        let resource_source = resolve_workspace_capability_source(
-            &paths,
-            &workspace,
-            &workspace_configs,
-            "resource",
-        )?;
-        let link_source =
-            resolve_workspace_capability_source(&paths, &workspace, &workspace_configs, "link")?;
-        let proxy_source =
-            resolve_workspace_capability_source(&paths, &workspace, &workspace_configs, "proxy")?;
-        let runtime_source =
-            resolve_workspace_capability_source(&paths, &workspace, &workspace_configs, "runtime")?;
+    for workspace in selected_workspaces {
+        let resource_source = resolve_source(&workspace, "resource")?;
+        let link_source = resolve_source(&workspace, "link")?;
+        let proxy_source = resolve_source(&workspace, "proxy")?;
+        let runtime_source = resolve_source(&workspace, "runtime")?;
+        let runtime_config_path = runtime_source.files.runtime_overrides.clone();
+        let runtime_profile_scope = if runtime_source.is_default {
+            "global"
+        } else if runtime_config_path
+            .as_deref()
+            .is_some_and(|path| Path::new(path).exists())
+        {
+            "workspaceOverride"
+        } else {
+            "inherited"
+        };
         let mut effective_config = apply_project_workspace_context(config, &workspace);
-        apply_runtime_overrides_for_source(&mut effective_config, &runtime_source)?;
+        if !runtime_source.is_default
+            && let Some(path) = runtime_overrides_path_for_config_source(&runtime_source)?
+            && path.exists()
+        {
+            let overrides = match runtime_overrides_by_path.get(&path) {
+                Some(overrides) => overrides.clone(),
+                None => {
+                    let overrides = load_runtime_overrides(&path)?;
+                    runtime_overrides_by_path.insert(path, overrides.clone());
+                    overrides
+                }
+            };
+            effective_config.defaults.runtime_profiles = overrides.runtime_profiles;
+        }
         let project_runtime_statuses = project_runtime
-            .list(&effective_config)?
+            .list_with_daemon_statuses(&effective_config, &daemon_statuses)?
             .into_iter()
             .map(|snapshot| (snapshot.key.clone(), snapshot))
             .collect::<BTreeMap<_, _>>();
         let proxy_path = proxy_path_for_config_source(&proxy_source)?;
-        let proxy_dashboard = proxy_runtime
-            .dashboard(&proxy_path)
-            .map_err(|error| error.to_string())?;
+        let proxy_dashboard = match proxy_dashboards_by_path.get(&proxy_path) {
+            Some(dashboard) => dashboard.clone(),
+            None => {
+                let dashboard = proxy_runtime
+                    .dashboard_summary(&proxy_path)
+                    .map_err(|error| error.to_string())?;
+                proxy_dashboards_by_path.insert(proxy_path.clone(), dashboard.clone());
+                dashboard
+            }
+        };
         let proxy_dashboard = if proxy_source.is_default {
             filter_proxy_dashboard_by_workspace(proxy_dashboard, &workspace)
         } else {
@@ -9302,6 +9955,7 @@ fn workspace_pinned_actions_overview(
             if resource.kind == "tool" {
                 resource.tool_config_source_id = Some(link_source.id.clone());
                 resource.tool_proxy_source_id = Some(proxy_source.id.clone());
+                resource.tool_runtime_source_id = Some(runtime_source.id.clone());
             }
         }
         let entry_count = resources.len();
@@ -9329,6 +9983,11 @@ fn workspace_pinned_actions_overview(
             name: workspace_display_name(&workspace),
             description: workspace.description.clone(),
             system: workspace.is_system(),
+            runtime_config_source_id: runtime_source.id,
+            runtime_config_source_name: runtime_source.name,
+            runtime_config_source_kind: runtime_source.kind,
+            runtime_config_path,
+            runtime_profile_scope: runtime_profile_scope.to_string(),
             root_dir: workspace
                 .root_dir
                 .as_ref()
@@ -9358,6 +10017,53 @@ fn workspace_pinned_actions_overview(
     }
 
     Ok(overview)
+}
+
+pub(crate) fn workspace_pinned_actions_patches(
+    config: &AppConfig,
+    storage: &Storage,
+    actions: &[TrayReplayAction],
+) -> Result<Vec<WorkspacePinnedActionsPatch>, String> {
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspaces = load_all_project_workspaces(&paths.project_workspaces)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .filter(|workspace| !workspace.is_archived())
+        .collect::<Vec<_>>();
+    let build_history = storage.list_all_deploy_history()?;
+    Ok(build_workspace_pinned_actions_patches(
+        config,
+        &workspaces,
+        actions,
+        &build_history,
+    ))
+}
+
+fn build_workspace_pinned_actions_patches(
+    config: &AppConfig,
+    workspaces: &[ProjectWorkspaceConfig],
+    actions: &[TrayReplayAction],
+    build_history: &[BuildHistoryEntry],
+) -> Vec<WorkspacePinnedActionsPatch> {
+    let mut grouped = group_workspace_pinned_actions(workspaces, actions, build_history);
+
+    workspaces
+        .iter()
+        .map(|workspace| {
+            let effective_config = apply_project_workspace_context(config, workspace);
+            let actions = grouped
+                .remove(&workspace.key)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|action| workspace_pinned_action_item(&effective_config, action))
+                .collect::<Vec<_>>();
+            WorkspacePinnedActionsPatch {
+                key: workspace.key.clone(),
+                action_count: actions.len(),
+                actions,
+            }
+        })
+        .collect()
 }
 
 fn workspace_ai_context_response(
@@ -9801,39 +10507,6 @@ fn workspace_ai_context_scope_labels(options: &WorkspaceAiContextOptions) -> Vec
     labels
 }
 
-fn normalize_tray_pinned_actions(mut actions: Vec<TrayReplayAction>) -> Vec<TrayReplayAction> {
-    let mut normalized = Vec::new();
-    for mut action in actions.drain(..) {
-        if !valid_tray_action(&action) {
-            continue;
-        }
-        action.workspace_key = action
-            .workspace_key
-            .take()
-            .map(|workspace_key| workspace_key.trim().to_string())
-            .filter(|workspace_key| !workspace_key.is_empty());
-        if action.updated_at_ms == 0 {
-            action.updated_at_ms = unix_time_ms();
-        }
-        if normalized
-            .iter()
-            .any(|item: &TrayReplayAction| item.dedupe_key == action.dedupe_key)
-        {
-            continue;
-        }
-        normalized.push(action);
-        if normalized.len() >= TRAY_PINNED_STORAGE_LIMIT {
-            break;
-        }
-    }
-    normalized
-}
-
-fn save_tray_pinned_actions(storage: &Storage, actions: &[TrayReplayAction]) -> Result<(), String> {
-    let value = serde_json::to_value(actions).map_err(|error| error.to_string())?;
-    storage.set_json(TRAY_STORAGE_NAMESPACE, TRAY_PINNED_STORAGE_KEY, &value)
-}
-
 fn record_tray_replay_action<R: Runtime>(
     app: &AppHandle<R>,
     mut action: TrayReplayAction,
@@ -9922,6 +10595,7 @@ fn tray_workspace_action(
         project_key,
         entry: None,
         payload,
+        execution_context: None,
         dedupe_key: format!("{kind}:{workspace_key}:{dedupe_suffix}"),
         updated_at_ms: unix_time_ms(),
     }
@@ -10220,6 +10894,7 @@ fn tray_link_menu_actions(
         let payload = json!({
             "sourceId": resource.tool_config_source_id,
             "proxySourceId": resource.tool_proxy_source_id,
+            "runtimeSourceId": resource.tool_runtime_source_id,
             "linkKey": link_key,
         });
         if runtime.can_run {
@@ -10610,7 +11285,18 @@ fn refresh_tray_menu<R: Runtime>(app: &AppHandle<R>) {
     }
 }
 
+fn schedule_tray_menu_refresh<R: Runtime>(app: AppHandle<R>, refresh_revision: Arc<AtomicU64>) {
+    let revision = refresh_revision.fetch_add(1, Ordering::AcqRel) + 1;
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        std::thread::sleep(Duration::from_millis(80));
+        if refresh_revision.load(Ordering::Acquire) == revision {
+            refresh_tray_menu(&app);
+        }
+    });
+}
+
 struct WorkspaceExecutionContext {
+    workspace: ProjectWorkspaceConfig,
     workspaces: Vec<ProjectWorkspaceConfig>,
     config: AppConfig,
     link_source: ConfigSource,
@@ -10622,6 +11308,16 @@ struct WorkspaceExecutionContext {
 fn workspace_execution_context(
     config_state: &AppConfigState,
     workspace_key: Option<&str>,
+) -> Result<WorkspaceExecutionContext, String> {
+    workspace_execution_context_with_sources(config_state, workspace_key, None, None, None)
+}
+
+fn workspace_execution_context_with_sources(
+    config_state: &AppConfigState,
+    workspace_key: Option<&str>,
+    link_source_id: Option<&str>,
+    proxy_source_id: Option<&str>,
+    runtime_source_id: Option<&str>,
 ) -> Result<WorkspaceExecutionContext, String> {
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
     let workspaces =
@@ -10635,15 +11331,41 @@ fn workspace_execution_context(
     } else {
         load_active_project_workspace(&paths).map_err(|error| error.to_string())?
     };
+    if workspace.is_archived() {
+        return Err(format!(
+            "工作区“{}”已归档，请先恢复后再执行快捷操作",
+            workspace.name
+        ));
+    }
     let mut config = apply_project_workspace_context(&config_state.load()?, &workspace);
-    let runtime_source =
-        resolve_workspace_capability_source(&paths, &workspace, &workspaces, "runtime")?;
+    let runtime_source = core_resolve_config_source_for_workspace(
+        &paths,
+        &workspace,
+        &workspaces,
+        "runtime",
+        runtime_source_id,
+    )
+    .map_err(|error| error.to_string())?;
     apply_runtime_overrides_for_source(&mut config, &runtime_source)?;
-    let link_source = resolve_workspace_capability_source(&paths, &workspace, &workspaces, "link")?;
-    let proxy_source =
-        resolve_workspace_capability_source(&paths, &workspace, &workspaces, "proxy")?;
+    let link_source = core_resolve_config_source_for_workspace(
+        &paths,
+        &workspace,
+        &workspaces,
+        "link",
+        link_source_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let proxy_source = core_resolve_config_source_for_workspace(
+        &paths,
+        &workspace,
+        &workspaces,
+        "proxy",
+        proxy_source_id,
+    )
+    .map_err(|error| error.to_string())?;
     let proxy_path = proxy_path_for_config_source(&proxy_source)?;
     Ok(WorkspaceExecutionContext {
+        workspace,
         workspaces,
         config,
         link_source,
@@ -10653,19 +11375,39 @@ fn workspace_execution_context(
     })
 }
 
+fn load_execution_proxy_config(
+    context: &WorkspaceExecutionContext,
+    source: &ConfigSource,
+    path: &Path,
+) -> Result<ProxyConfig, String> {
+    let config = load_proxy_config(path).map_err(|error| error.to_string())?;
+    Ok(if source.is_default {
+        filter_proxy_config_for_workspace(config, &context.workspace)
+    } else {
+        config
+    })
+}
+
 fn link_source_context(
     context: &WorkspaceExecutionContext,
     link_source: &ConfigSource,
 ) -> LinkSourceContext {
+    link_source_context_with_proxy(context, link_source, &context.proxy_source)
+}
+
+fn link_source_context_with_proxy(
+    context: &WorkspaceExecutionContext,
+    link_source: &ConfigSource,
+    proxy_source: &ConfigSource,
+) -> LinkSourceContext {
     LinkSourceContext {
         link_source_id: link_source.id.clone(),
         link_source_name: link_source.name.clone(),
-        proxy_source_id: context.proxy_source.id.clone(),
-        proxy_source_name: context.proxy_source.name.clone(),
+        proxy_source_id: proxy_source.id.clone(),
+        proxy_source_name: proxy_source.name.clone(),
         runtime_source_id: context.runtime_source.id.clone(),
         runtime_source_name: context.runtime_source.name.clone(),
-        aligned: link_source.id == context.proxy_source.id
-            && link_source.id == context.runtime_source.id,
+        aligned: link_source.id == proxy_source.id && link_source.id == context.runtime_source.id,
     }
 }
 
@@ -10801,6 +11543,11 @@ fn execute_tray_replay_action<R: Runtime>(
     let Some(state) = app.try_state::<AppState>() else {
         return Err("应用状态尚未就绪".to_string());
     };
+    let operation_origin = if action.execution_context.is_some() {
+        OperationEventOrigin::App
+    } else {
+        OperationEventOrigin::Tray
+    };
 
     match action.kind.as_str() {
         "workspace.open" => {
@@ -10827,7 +11574,7 @@ fn execute_tray_replay_action<R: Runtime>(
                 .as_deref()
                 .ok_or_else(|| "缺少项目 Key".to_string())?;
             let workspace_key = tray_action_workspace_key(action)?;
-            let event_id = operation_event_id(None, OperationEventOrigin::Tray, "runtime-start");
+            let event_id = operation_event_id(None, operation_origin, "runtime-start");
             let result = (|| {
                 let mut context = workspace_execution_context(
                     &state.config_state,
@@ -10869,10 +11616,10 @@ fn execute_tray_replay_action<R: Runtime>(
                 )
             })();
             match &result {
-                Ok(snapshot) => record_lifecycle_operation_event(
+                Ok(snapshot) => record_lifecycle_operation_event_with_context(
                     &state.storage,
                     event_id,
-                    OperationEventOrigin::Tray,
+                    operation_origin,
                     &workspace_key,
                     "runtime",
                     "start",
@@ -10887,11 +11634,12 @@ fn execute_tray_replay_action<R: Runtime>(
                     Some(&snapshot.key),
                     Some(&snapshot.name),
                     serde_json::to_value(snapshot).ok(),
+                    action.execution_context.as_ref(),
                 ),
-                Err(error) => record_lifecycle_operation_event(
+                Err(error) => record_lifecycle_operation_event_with_context(
                     &state.storage,
                     event_id,
-                    OperationEventOrigin::Tray,
+                    operation_origin,
                     &workspace_key,
                     "runtime",
                     "start",
@@ -10902,6 +11650,7 @@ fn execute_tray_replay_action<R: Runtime>(
                     Some(project_key),
                     None,
                     Some(json!({ "projectKey": project_key })),
+                    action.execution_context.as_ref(),
                 ),
             }
             result?;
@@ -10912,7 +11661,7 @@ fn execute_tray_replay_action<R: Runtime>(
                 .as_deref()
                 .ok_or_else(|| "缺少项目 Key".to_string())?;
             let workspace_key = tray_action_workspace_key(action)?;
-            let event_id = operation_event_id(None, OperationEventOrigin::Tray, "runtime-stop");
+            let event_id = operation_event_id(None, operation_origin, "runtime-stop");
             let result = (|| {
                 let context = workspace_execution_context(
                     &state.config_state,
@@ -10921,10 +11670,10 @@ fn execute_tray_replay_action<R: Runtime>(
                 state.project_runtime.stop(&context.config, project_key)
             })();
             match &result {
-                Ok(snapshot) => record_lifecycle_operation_event(
+                Ok(snapshot) => record_lifecycle_operation_event_with_context(
                     &state.storage,
                     event_id,
-                    OperationEventOrigin::Tray,
+                    operation_origin,
                     &workspace_key,
                     "runtime",
                     "stop",
@@ -10935,11 +11684,12 @@ fn execute_tray_replay_action<R: Runtime>(
                     Some(&snapshot.key),
                     Some(&snapshot.name),
                     serde_json::to_value(snapshot).ok(),
+                    action.execution_context.as_ref(),
                 ),
-                Err(error) => record_lifecycle_operation_event(
+                Err(error) => record_lifecycle_operation_event_with_context(
                     &state.storage,
                     event_id,
-                    OperationEventOrigin::Tray,
+                    operation_origin,
                     &workspace_key,
                     "runtime",
                     "stop",
@@ -10950,6 +11700,7 @@ fn execute_tray_replay_action<R: Runtime>(
                     Some(project_key),
                     None,
                     Some(json!({ "projectKey": project_key })),
+                    action.execution_context.as_ref(),
                 ),
             }
             result?;
@@ -11041,7 +11792,7 @@ fn execute_tray_replay_action<R: Runtime>(
             };
             let event_id = operation_event_id(
                 None,
-                OperationEventOrigin::Tray,
+                operation_origin,
                 &format!("proxy-{action_key}"),
             );
             let result: Result<(String, String, bool, serde_json::Value), String> = (|| {
@@ -11101,14 +11852,15 @@ fn execute_tray_replay_action<R: Runtime>(
                         }),
                     ))
                 }
-            })();
+            })(
+            );
             match &result {
                 Ok((profile_name, listen_url, running, payload)) => {
                     let expected_running = action_key == "start";
-                    record_lifecycle_operation_event(
+                    record_lifecycle_operation_event_with_context(
                         &state.storage,
                         event_id,
-                        OperationEventOrigin::Tray,
+                        operation_origin,
                         &workspace_key,
                         "proxy",
                         action_key,
@@ -11125,18 +11877,23 @@ fn execute_tray_replay_action<R: Runtime>(
                         &format!(
                             "{} · {}",
                             profile_name,
-                            if expected_running { "已启动" } else { "已停止" }
+                            if expected_running {
+                                "已启动"
+                            } else {
+                                "已停止"
+                            }
                         ),
                         &format!("监听地址：{listen_url}"),
                         None,
                         None,
                         Some(payload.clone()),
+                        action.execution_context.as_ref(),
                     );
                 }
-                Err(error) => record_lifecycle_operation_event(
+                Err(error) => record_lifecycle_operation_event_with_context(
                     &state.storage,
                     event_id,
-                    OperationEventOrigin::Tray,
+                    operation_origin,
                     &workspace_key,
                     "proxy",
                     action_key,
@@ -11158,6 +11915,7 @@ fn execute_tray_replay_action<R: Runtime>(
                         "profileId": profile_id.clone(),
                         "sourceId": event_source_id.clone(),
                     })),
+                    action.execution_context.as_ref(),
                 ),
             }
             result?;
@@ -11167,6 +11925,9 @@ fn execute_tray_replay_action<R: Runtime>(
             let source_id = tray_optional_payload_string(action, "sourceId");
             let event_source_id = source_id.clone();
             let proxy_source_id = tray_optional_payload_string(action, "proxySourceId");
+            let event_proxy_source_id = proxy_source_id.clone();
+            let runtime_source_id = tray_optional_payload_string(action, "runtimeSourceId");
+            let event_runtime_source_id = runtime_source_id.clone();
             let workspace_key = tray_action_workspace_key(action)?;
             let action_key = if action.kind == "link.run" {
                 "run"
@@ -11175,7 +11936,7 @@ fn execute_tray_replay_action<R: Runtime>(
             };
             let event_id = operation_event_id(
                 None,
-                OperationEventOrigin::Tray,
+                operation_origin,
                 &format!("link-{action_key}"),
             );
             let result = execute_link_app(
@@ -11185,20 +11946,24 @@ fn execute_tray_replay_action<R: Runtime>(
                 LinkAppExecutionRequest {
                     link_source_id: source_id,
                     proxy_source_id,
-                    workspace_key: action.workspace_key.clone(),
+                    runtime_source_id,
+                    workspace_key: Some(workspace_key.clone()),
                     key: link_key.clone(),
                     mode: action_key.to_string(),
                 },
             );
-            record_link_operation_event(
+            record_link_operation_event_with_context(
                 &state.storage,
                 event_id,
-                OperationEventOrigin::Tray,
+                operation_origin,
                 &workspace_key,
                 action_key,
                 &link_key,
                 event_source_id.as_deref(),
+                event_proxy_source_id.as_deref(),
+                event_runtime_source_id.as_deref(),
                 &result,
+                action.execution_context.as_ref(),
             );
             result?;
         }
@@ -11504,7 +12269,7 @@ pub fn run() {
 
                     api.prevent_close();
                     if should_use_tray() {
-                        let _ = window.hide();
+                        hide_main_window_to_tray(window);
                     } else {
                         request_app_exit(window.app_handle());
                     }
@@ -11512,7 +12277,24 @@ pub fn run() {
             }
         })
         .setup(move |app| {
-            let storage = Storage::new_default().map_err(std::io::Error::other)?;
+            let storage = match Storage::new_default() {
+                Ok(storage) => storage,
+                Err(error) => {
+                    eprintln!("[storage-startup] {error}");
+                    if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                        let _ = window.hide();
+                    }
+                    let app_handle = app.handle().clone();
+                    app.dialog()
+                        .message(format!(
+                            "本地数据由更新版本的 rDevTool 创建，当前版本无法安全读取。\n\n详情：{error}\n\n请安装最新版本后重新打开。数据不会被删除或降级。"
+                        ))
+                        .title("rDevTool 无法启动")
+                        .kind(MessageDialogKind::Error)
+                        .show(move |_| app_handle.exit(1));
+                    return Ok(());
+                }
+            };
             let workspace_config_watcher_stop = Arc::new(AtomicBool::new(false));
             app.manage(AppState {
                 storage,
@@ -11522,6 +12304,7 @@ pub fn run() {
                 exit_coordinator: setup_exit_coordinator.clone(),
                 tray_replay_running: Arc::new(AtomicBool::new(false)),
                 tray_menu_actions: Arc::new(RwLock::new(BTreeMap::new())),
+                tray_menu_refresh_revision: Arc::new(AtomicU64::new(0)),
                 workspace_config_watcher_stop: workspace_config_watcher_stop.clone(),
             });
             if let Err(error) =
@@ -11557,6 +12340,9 @@ pub fn run() {
             set_active_project_workspace,
             create_project_workspace_config,
             delete_project_workspace_config,
+            commands::workspace_lifecycle::plan_project_workspace_archive,
+            commands::workspace_lifecycle::archive_project_workspace,
+            commands::workspace_lifecycle::restore_project_workspace,
             init_demand_workspace_config,
             get_project_workspace_editor,
             save_project_workspace_editor,
@@ -11577,6 +12363,7 @@ pub fn run() {
             save_runtime_profiles,
             restore_runtime_profile_inheritance,
             save_project_config_basics,
+            save_project_runtime_launch_profile,
             add_project_config,
             delete_project_config,
             save_project_deploy_target_basics,
@@ -11606,6 +12393,11 @@ pub fn run() {
             get_project_push_status,
             get_project_file_diff,
             execute_branch_push_task,
+            get_health_snapshot,
+            get_notes_file_index,
+            get_note_document,
+            resolve_note_document_link,
+            create_note_document,
             open_local_path,
             open_external_resource,
             list_config_sources,
@@ -11643,12 +12435,17 @@ pub fn run() {
             storage_set_json,
             storage_prepend_json_array,
             storage_delete_json,
-            get_tray_pinned_actions,
+            commands::pinned_actions::get_tray_pinned_actions,
+            commands::pinned_actions::get_tray_pinned_actions_snapshot,
+            commands::pinned_actions::upsert_tray_pinned_action,
+            commands::pinned_actions::remove_tray_pinned_actions,
             get_workspace_pinned_actions_overview,
+            get_workspace_pinned_actions_overview_summary,
+            get_workspace_pinned_actions_overview_details,
             get_workspace_ai_context,
             execute_tray_pinned_action,
             record_tray_pinned_action_execution,
-            set_tray_pinned_actions,
+            commands::pinned_actions::set_tray_pinned_actions,
             commands::history::list_build_history,
             commands::history::save_build_history,
             commands::history::clear_build_history,
@@ -11679,6 +12476,10 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| match event {
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen { .. } => {
+                show_main_window(app);
+            }
             RunEvent::ExitRequested { api, .. } => {
                 if let Some(state) = app.try_state::<AppState>()
                     && !state.exit_coordinator.is_quitting.load(Ordering::Acquire)
@@ -11702,6 +12503,18 @@ pub fn run() {
 #[cfg(test)]
 mod workspace_config_watcher_tests {
     use super::*;
+
+    #[test]
+    fn migrates_the_former_health_page_to_knowledge() {
+        assert_eq!(
+            normalize_page_key(Some("health".to_string())).as_deref(),
+            Some("knowledge")
+        );
+        assert_eq!(
+            effective_page_list(vec!["overview".to_string(), "health".to_string()]),
+            vec!["overview".to_string(), "knowledge".to_string()]
+        );
+    }
 
     fn workspace(key: &str, projects: &[&str]) -> ProjectWorkspaceConfig {
         ProjectWorkspaceConfig {
@@ -11729,6 +12542,129 @@ mod workspace_config_watcher_tests {
             build_url: Some("https://ci.example/build/1".to_string()),
             params: json!({}),
         }
+    }
+
+    fn local_build_snapshot(status_key: &str) -> ProjectRuntimeSnapshot {
+        ProjectRuntimeSnapshot {
+            key: "rdevtool".to_string(),
+            name: "rDevTool".to_string(),
+            category: "local".to_string(),
+            repo_path: Some("/workspace/rdevtool".to_string()),
+            command: None,
+            cwd: None,
+            focus_url: None,
+            ready_url: None,
+            status_key: "stopped".to_string(),
+            status_label: "未启动".to_string(),
+            detail: "dev 服务未启动".to_string(),
+            pid: None,
+            started_at_ms: None,
+            log_path: None,
+            build_command: Some("npm run build".to_string()),
+            build_cwd: Some("/workspace/rdevtool".to_string()),
+            build_output_dir: Some("/workspace/rdevtool/target/release/bundle".to_string()),
+            build_status_key: status_key.to_string(),
+            build_status_label: "待打包".to_string(),
+            build_detail: "配置已就绪，可执行打包任务".to_string(),
+            build_pid: None,
+            build_started_at_ms: None,
+            build_log_path: Some("/workspace/rdevtool/.rdevtool/build.log".to_string()),
+            updated_at_ms: 1,
+            can_start: false,
+            can_stop: false,
+            can_adopt: false,
+            can_build: true,
+            can_stop_build: false,
+            can_open_build_output: true,
+            can_focus_runtime: false,
+            debug_profiles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn untracked_local_build_refresh_is_reported_as_unknown() {
+        let snapshot = local_build_snapshot("stopped");
+
+        assert_eq!(runtime_build_state_key(&snapshot), "unknown");
+        let detail = runtime_build_untracked_detail(&snapshot);
+        assert!(detail.contains("未找到正在运行或最近完成的打包任务"));
+        assert!(detail.contains("命令: npm run build"));
+    }
+
+    #[test]
+    fn saves_launch_overrides_as_reusable_project_profile() {
+        let mut config: AppConfig = serde_json::from_value(json!({
+            "defaults": {},
+            "projects": [{
+                "key": "demo",
+                "name": "Demo",
+                "git_url": "",
+                "dev": { "command": "npm run dev" },
+                "debug_profiles": [{
+                    "key": "uat",
+                    "label": "UAT",
+                    "command": "npm run dev:uat",
+                    "env": { "BASE": "uat" }
+                }]
+            }]
+        }))
+        .unwrap();
+        let config_path = Path::new("/config/projects.toml");
+
+        let created = save_runtime_launch_profile_to_config(
+            &mut config,
+            SaveProjectRuntimeLaunchProfileRequest {
+                project_key: "demo".to_string(),
+                mode: "create".to_string(),
+                profile_key: "uat-custom".to_string(),
+                label: "UAT Custom".to_string(),
+                base_profile_key: Some("uat".to_string()),
+                env_overrides: BTreeMap::from([
+                    ("BASE".to_string(), "custom".to_string()),
+                    ("FEATURE".to_string(), "on".to_string()),
+                ]),
+                expected_port: Some(5174),
+            },
+            config_path,
+        )
+        .unwrap();
+
+        let profile = config.projects[0]
+            .debug_profiles
+            .iter()
+            .find(|profile| profile.key == "uat-custom")
+            .unwrap();
+        assert_eq!(profile.command.as_deref(), Some("npm run dev:uat"));
+        assert_eq!(profile.env.get("BASE").map(String::as_str), Some("custom"));
+        assert_eq!(profile.env.get("FEATURE").map(String::as_str), Some("on"));
+        assert_eq!(profile.expected_port, Some(5174));
+        assert_eq!(created.expected_port, Some(5174));
+        assert_eq!(created.scope, "project");
+        assert!(created.available_in_all_workspaces);
+
+        let updated = save_runtime_launch_profile_to_config(
+            &mut config,
+            SaveProjectRuntimeLaunchProfileRequest {
+                project_key: "demo".to_string(),
+                mode: "update".to_string(),
+                profile_key: "uat-custom".to_string(),
+                label: "UAT Custom".to_string(),
+                base_profile_key: None,
+                env_overrides: BTreeMap::from([("FEATURE".to_string(), "off".to_string())]),
+                expected_port: None,
+            },
+            config_path,
+        )
+        .unwrap();
+
+        assert_eq!(updated.env_count, 2);
+        assert_eq!(
+            config.projects[0].debug_profiles[1]
+                .env
+                .get("FEATURE")
+                .map(String::as_str),
+            Some("off")
+        );
     }
 
     #[test]
@@ -11794,7 +12730,31 @@ mod workspace_config_watcher_tests {
             project_key: Some("demo".to_string()),
             entry: None,
             payload: None,
+            execution_context: None,
             dedupe_key: "build.replay:demo".to_string(),
+            updated_at_ms: 1,
+        }
+    }
+
+    fn branch_pin(workspace_key: Option<&str>) -> TrayReplayAction {
+        TrayReplayAction {
+            kind: "branch.replay".to_string(),
+            label: "合并 demo 分支".to_string(),
+            detail: None,
+            workspace_key: workspace_key.map(ToString::to_string),
+            project_key: Some("demo".to_string()),
+            entry: None,
+            payload: Some(json!({
+                "command": "execute_branch_sync_task",
+                "request": {
+                    "project": "demo",
+                    "projects": ["demo"],
+                    "sourceBranch": "feature/demo",
+                    "targetBranches": ["main"]
+                }
+            })),
+            execution_context: None,
+            dedupe_key: "branch.replay:demo".to_string(),
             updated_at_ms: 1,
         }
     }
@@ -11823,6 +12783,7 @@ mod workspace_config_watcher_tests {
     fn test_resource(workspace_key: &str, name: &str) -> WorkspaceResourceShortcutItem {
         WorkspaceResourceShortcutItem {
             key: format!("{workspace_key}:{name}"),
+            workspace_key: workspace_key.to_string(),
             config_source_id: "default".to_string(),
             category: "常用".to_string(),
             label: name.to_string(),
@@ -11839,6 +12800,7 @@ mod workspace_config_watcher_tests {
             entry: test_navigation_entry(name, "url"),
             tool_config_source_id: None,
             tool_proxy_source_id: None,
+            tool_runtime_source_id: None,
         }
     }
 
@@ -11848,6 +12810,7 @@ mod workspace_config_watcher_tests {
         entry.tool_key = Some(format!("{workspace_key}-link"));
         WorkspaceResourceShortcutItem {
             key: format!("{workspace_key}:{name}"),
+            workspace_key: workspace_key.to_string(),
             config_source_id: "workspace-test".to_string(),
             category: "工具".to_string(),
             label: name.to_string(),
@@ -11872,6 +12835,7 @@ mod workspace_config_watcher_tests {
             entry,
             tool_config_source_id: Some("workspace-test".to_string()),
             tool_proxy_source_id: Some("default".to_string()),
+            tool_runtime_source_id: Some("workspace-runtime".to_string()),
         }
     }
 
@@ -11919,6 +12883,11 @@ mod workspace_config_watcher_tests {
             name: key.to_string(),
             description: None,
             system,
+            runtime_config_source_id: "default".to_string(),
+            runtime_config_source_name: "默认配置".to_string(),
+            runtime_config_source_kind: "default".to_string(),
+            runtime_config_path: None,
+            runtime_profile_scope: "global".to_string(),
             root_dir: None,
             resource_dir: None,
             worklog_path: None,
@@ -12001,6 +12970,57 @@ mod workspace_config_watcher_tests {
     }
 
     #[test]
+    fn keeps_valid_branch_pin_available_without_source_history() {
+        assert!(tray_action_available(&branch_pin(Some("feature")), &[]));
+    }
+
+    #[test]
+    fn builds_lightweight_workspace_action_patches() {
+        let config = serde_json::from_value::<AppConfig>(json!({
+            "defaults": {},
+            "projects": []
+        }))
+        .unwrap();
+        let workspaces = vec![
+            ProjectWorkspaceConfig::default(),
+            workspace("feature", &["demo"]),
+            workspace("release", &["demo"]),
+        ];
+        let patches = build_workspace_pinned_actions_patches(
+            &config,
+            &workspaces,
+            &[branch_pin(Some("feature"))],
+            &[],
+        );
+
+        assert_eq!(patches.len(), 3);
+        let feature = patches.iter().find(|patch| patch.key == "feature").unwrap();
+        assert_eq!(feature.action_count, 1);
+        assert_eq!(feature.actions[0].action.dedupe_key, "branch.replay:demo");
+        assert!(
+            patches
+                .iter()
+                .filter(|patch| patch.key != "feature")
+                .all(|patch| patch.actions.is_empty())
+        );
+    }
+
+    #[test]
+    fn rejects_branch_pin_with_incomplete_replay_payload() {
+        let mut action = branch_pin(Some("feature"));
+        action.payload = Some(json!({
+            "command": "execute_branch_sync_task",
+            "request": {
+                "project": "demo",
+                "sourceBranch": "feature/demo",
+                "targetBranches": []
+            }
+        }));
+
+        assert!(!tray_action_available(&action, &[]));
+    }
+
+    #[test]
     fn builds_workspace_first_three_level_tray_model() {
         let recent = TrayReplayAction {
             kind: "project.runtime.start".to_string(),
@@ -12010,6 +13030,7 @@ mod workspace_config_watcher_tests {
             project_key: Some("demo".to_string()),
             entry: None,
             payload: Some(json!({ "debugProfile": "dc2" })),
+            execution_context: None,
             dedupe_key: "project.runtime.start:active:demo:dc2".to_string(),
             updated_at_ms: 10,
         };

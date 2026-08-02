@@ -73,6 +73,7 @@ pub fn initialize_workspace_resources(
     create_worklog: bool,
 ) -> Result<(ProjectWorkspaceConfig, WorkspaceResourceStatus)> {
     let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    ensure_workspace_resources_mutable(&workspace)?;
     let (workspace, status) =
         materialize_workspace_resources(workspace, resource_dir, worklog_file, create_worklog)?;
     let workspace_path = paths
@@ -88,6 +89,7 @@ pub fn materialize_workspace_resources(
     worklog_file: Option<PathBuf>,
     create_worklog: bool,
 ) -> Result<(ProjectWorkspaceConfig, WorkspaceResourceStatus)> {
+    ensure_workspace_resources_mutable(&workspace)?;
     let (workspace, mut status) = plan_workspace_resources(workspace, resource_dir, worklog_file)?;
     let resource_dir = PathBuf::from(&status.resource_dir);
     let worklog_path = PathBuf::from(&status.worklog_path);
@@ -114,6 +116,7 @@ pub fn plan_workspace_resources(
     resource_dir: Option<PathBuf>,
     worklog_file: Option<PathBuf>,
 ) -> Result<(ProjectWorkspaceConfig, WorkspaceResourceStatus)> {
+    ensure_workspace_resources_mutable(&workspace)?;
     if workspace.is_system() {
         bail!("the system workspace cannot own a resource directory");
     }
@@ -189,6 +192,7 @@ pub fn set_workspace_worklog_auto_record(
     enabled: bool,
 ) -> Result<WorkspaceResourceStatus> {
     let mut workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    ensure_workspace_resources_mutable(&workspace)?;
     if workspace.is_system() {
         bail!("the system workspace cannot own a worklog");
     }
@@ -212,6 +216,7 @@ pub fn append_workspace_worklog(
     detail: Option<&str>,
 ) -> Result<WorkspaceWorklogAppendResult> {
     let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    ensure_workspace_resources_mutable(&workspace)?;
     let kind = require_heading_text("worklog kind", kind)?;
     let summary = require_heading_text("worklog summary", summary)?;
     let detail = detail.and_then(normalize_text);
@@ -225,6 +230,7 @@ pub fn append_workspace_operation_worklog(
     event: WorkspaceOperationWorklogEvent,
 ) -> Result<Option<WorkspaceWorklogAppendResult>> {
     let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)?;
+    ensure_workspace_resources_mutable(&workspace)?;
     if workspace.is_system() || !workspace.worklog_auto_record || workspace.resource_dir.is_none() {
         return Ok(None);
     }
@@ -251,6 +257,16 @@ pub fn append_workspace_operation_worklog(
         .and_then(normalize_worklog_event_id)
         .map(|event_id| format!("<!-- rdevtool:auto:{event_id} -->"));
     append_workspace_worklog_entry(&workspace, kind, summary, detail, marker.as_deref())
+}
+
+fn ensure_workspace_resources_mutable(workspace: &ProjectWorkspaceConfig) -> Result<()> {
+    if workspace.is_archived() {
+        bail!(
+            "project workspace is archived: {}; restore it before changing workspace resources",
+            workspace.key
+        );
+    }
+    Ok(())
 }
 
 pub fn read_workspace_worklog(

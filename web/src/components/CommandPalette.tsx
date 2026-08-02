@@ -3,9 +3,11 @@ import type { ProjectManagementViewKey, ProjectRuntimeEntry } from "../app-types
 import type { PageKey } from "../app-shell";
 import type { ProjectSummary } from "../hooks/useBranchContext";
 import type { FinderShortcutItem } from "../hooks/useProjectsModule";
+import { useI18n } from "../i18n";
 import {
   AppWindowIcon,
   FolderIcon,
+  KnowledgeIcon,
   PackageIcon,
   PlayIcon,
   StopIcon,
@@ -153,6 +155,7 @@ export function CommandPalette({
   onFocusRuntime,
   onOpenProjectDirectory,
 }: CommandPaletteProps) {
+  const { t } = useI18n();
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
@@ -168,12 +171,15 @@ export function CommandPalette({
     for (const item of navItems) {
       items.push({
         id: `page:${item.key}`,
-        title: item.label,
-        subtitle: item.key === activePage ? "当前页面" : `切换到${item.label}`,
-        group: "页面",
-        badge: item.shortLabel,
+        title: t(item.label),
+        subtitle:
+          item.key === activePage
+            ? t("当前页面")
+            : t("切换到 {page}", { page: t(item.label) }),
+        group: t("页面"),
+        badge: t(item.shortLabel),
         icon: <AppWindowIcon fontSize="small" />,
-        keywords: `${item.key} ${item.label} ${item.shortLabel} 页面 tab`,
+        keywords: `${item.key} ${item.label} ${item.shortLabel} ${t(item.label)} ${t(item.shortLabel)} 页面 pages tab`,
         priority: item.key === activePage ? 64 : 72,
         run: () => {
           if (item.key === "projectManagement") {
@@ -188,13 +194,13 @@ export function CommandPalette({
       items.push(
         {
           id: "page:projectManagement:build",
-          title: "项目管理 / 构建",
+          title: t("项目管理 / 构建"),
           subtitle:
             activePage === "projectManagement" && projectManagementView === "build"
-              ? "当前页面"
-              : "切换到项目构建",
-          group: "页面",
-          badge: "构建",
+              ? t("当前页面")
+              : t("切换到项目构建"),
+          group: t("页面"),
+          badge: t("构建"),
           icon: <PackageIcon fontSize="small" />,
           keywords: "projectManagement build deploy package 构建 任务 部署 项目管理",
           priority:
@@ -208,12 +214,12 @@ export function CommandPalette({
         },
         {
           id: "page:projectManagement:git",
-          title: "项目管理 / Git",
+          title: t("项目管理 / Git"),
           subtitle:
             activePage === "projectManagement" && projectManagementView === "git"
-              ? "当前页面"
-              : "切换到 Git 工作流",
-          group: "页面",
+              ? t("当前页面")
+              : t("切换到 Git 工作流"),
+          group: t("页面"),
           badge: "Git",
           icon: <WorkflowIcon fontSize="small" />,
           keywords: "projectManagement git merge branch workflow 分支 工作流 项目管理",
@@ -238,7 +244,7 @@ export function CommandPalette({
         id: `project:${project.key}`,
         title: project.name || project.key,
         subtitle: project.category || project.key,
-        group: "项目",
+        group: t("项目"),
         badge: project.key,
         icon: <AppWindowIcon fontSize="small" />,
         keywords: `${projectKeywords} 选择项目 select project`,
@@ -250,13 +256,31 @@ export function CommandPalette({
         },
       });
 
+      if (navItems.some((item) => item.key === "knowledge")) {
+        items.push({
+          id: `project:${project.key}:knowledge`,
+          title: t("{name} · 知识库", { name: project.name || project.key }),
+          subtitle: t("打开项目经验与共享手册"),
+          group: t("项目动作"),
+          badge: t("知识库"),
+          icon: <KnowledgeIcon fontSize="small" />,
+          keywords: `${projectKeywords} knowledge base note markdown 知识库 知识 笔记 文档`,
+          priority: projectPriority + 2,
+          run: () => {
+            onProjectChange(project.key);
+            onPageChange("knowledge");
+          },
+        });
+      }
+
       if (runtime?.repoPath || runtime?.cwd || project.repoPath) {
         items.push({
           id: `project:${project.key}:open-dir`,
-          title: `打开 ${project.name || project.key}`,
-          subtitle: runtime?.cwd || runtime?.repoPath || project.repoPath || "项目目录",
-          group: "项目动作",
-          badge: "目录",
+          title: t("打开 {name}", { name: project.name || project.key }),
+          subtitle:
+            runtime?.cwd || runtime?.repoPath || project.repoPath || t("项目目录"),
+          group: t("项目动作"),
+          badge: t("目录"),
           icon: <FolderIcon fontSize="small" />,
           keywords: `${projectKeywords} open folder directory 目录 打开`,
           priority: projectPriority + 4,
@@ -267,9 +291,9 @@ export function CommandPalette({
       if (runtime?.canStart) {
         items.push({
           id: `project:${project.key}:start`,
-          title: `启动 ${project.name || project.key}`,
-          subtitle: runtime.command || "运行 dev 服务",
-          group: "项目动作",
+          title: t("启动 {name}", { name: project.name || project.key }),
+          subtitle: runtime.command || t("运行 dev 服务"),
+          group: t("项目动作"),
           badge: "dev",
           icon: <PlayIcon fontSize="small" />,
           keywords: `${projectKeywords} start dev run 启动 运行`,
@@ -281,9 +305,9 @@ export function CommandPalette({
       if (runtime?.canStop) {
         items.push({
           id: `project:${project.key}:stop`,
-          title: `停止 ${project.name || project.key}`,
-          subtitle: runtime.detail || "停止 dev 服务",
-          group: "项目动作",
+          title: t("停止 {name}", { name: project.name || project.key }),
+          subtitle: runtime.detail || t("停止 dev 服务"),
+          group: t("项目动作"),
           badge: "stop",
           icon: <StopIcon fontSize="small" />,
           keywords: `${projectKeywords} stop dev 停止`,
@@ -295,9 +319,9 @@ export function CommandPalette({
       if (runtime?.canBuild) {
         items.push({
           id: `project:${project.key}:build`,
-          title: `构建 ${project.name || project.key}`,
-          subtitle: runtime.buildCommand || "执行构建命令",
-          group: "项目动作",
+          title: t("构建 {name}", { name: project.name || project.key }),
+          subtitle: runtime.buildCommand || t("执行构建命令"),
+          group: t("项目动作"),
           badge: "build",
           icon: <PackageIcon fontSize="small" />,
           keywords: `${projectKeywords} build package 构建 打包`,
@@ -309,9 +333,9 @@ export function CommandPalette({
       if (runtime?.canStopBuild) {
         items.push({
           id: `project:${project.key}:stop-build`,
-          title: `停止构建 ${project.name || project.key}`,
-          subtitle: runtime.buildDetail || "中止构建任务",
-          group: "项目动作",
+          title: t("停止构建 {name}", { name: project.name || project.key }),
+          subtitle: runtime.buildDetail || t("中止构建任务"),
+          group: t("项目动作"),
           badge: "stop",
           icon: <StopIcon fontSize="small" />,
           keywords: `${projectKeywords} stop build 停止 构建`,
@@ -323,10 +347,10 @@ export function CommandPalette({
       if (runtime?.canOpenBuildOutput) {
         items.push({
           id: `project:${project.key}:output`,
-          title: `打开产物 ${project.name || project.key}`,
-          subtitle: runtime.buildOutputDir || "构建产物目录",
-          group: "项目动作",
-          badge: "产物",
+          title: t("打开产物 {name}", { name: project.name || project.key }),
+          subtitle: runtime.buildOutputDir || t("构建产物目录"),
+          group: t("项目动作"),
+          badge: t("产物"),
           icon: <FolderIcon fontSize="small" />,
           keywords: `${projectKeywords} output dist build folder 产物 目录`,
           priority: projectPriority + 3,
@@ -337,10 +361,10 @@ export function CommandPalette({
       if (runtime?.canFocusRuntime) {
         items.push({
           id: `project:${project.key}:focus`,
-          title: `聚焦 ${project.name || project.key}`,
-          subtitle: runtime.detail || "唤起运行中的项目",
-          group: "项目动作",
-          badge: "聚焦",
+          title: t("聚焦 {name}", { name: project.name || project.key }),
+          subtitle: runtime.detail || t("唤起运行中的项目"),
+          group: t("项目动作"),
+          badge: t("聚焦"),
           icon: <AppWindowIcon fontSize="small" />,
           keywords: `${projectKeywords} focus open browser app 聚焦 唤起`,
           priority: projectPriority + 5,
@@ -355,8 +379,8 @@ export function CommandPalette({
         id: `shortcut:${item.categoryTitle}:${item.entry.kind}:${item.entry.name}`,
         title: item.entry.name,
         subtitle: item.entry.targetLabel || item.entry.note || item.categoryTitle,
-        group: "快捷入口",
-        badge: kindLabel,
+        group: t("快捷入口"),
+        badge: t(kindLabel),
         icon: shortcutIcon(item.entry.kind),
         keywords: [
           item.categoryTitle,
@@ -373,6 +397,7 @@ export function CommandPalette({
           item.entry.path ?? "",
           item.entry.cwd ?? "",
           kindLabel,
+          t(kindLabel),
         ].join(" "),
         priority: 50,
         run: async () => {
@@ -401,6 +426,7 @@ export function CommandPalette({
     runtimeByProject,
     selectedProjectKey,
     shortcutEntries,
+    t,
   ]);
 
   const results = useMemo(() => {
@@ -461,7 +487,7 @@ export function CommandPalette({
         className="command-panel"
         role="dialog"
         aria-modal="true"
-        aria-label="命令面板"
+        aria-label={t("命令面板")}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <div className="command-search-row">
@@ -491,19 +517,19 @@ export function CommandPalette({
                 executeCommand(results[selectedIndex]);
               }
             }}
-            placeholder="搜索页面、项目、快捷入口或动作"
-            aria-label="搜索命令"
+            placeholder={t("搜索页面、项目、快捷入口或动作")}
+            aria-label={t("搜索命令")}
           />
           <span className="command-shortcut">Cmd/Ctrl K</span>
         </div>
 
-        <div className="command-result-list" role="listbox" aria-label="命令结果">
+        <div className="command-result-list" role="listbox" aria-label={t("命令结果")}>
           {results.length === 0 ? (
             <AppEmptyState
               compact
               className="command-empty"
-              title="没有匹配命令"
-              description="换个关键词试试。"
+              title={t("没有匹配命令")}
+              description={t("换个关键词试试。")}
             />
           ) : (
             results.map((command, index) => (

@@ -15,6 +15,7 @@ import {
   type WorkspaceTypeOption,
 } from "../lib/workspaceTypes";
 import { PlusIcon, TrashIcon } from "./AppIcons";
+import { useI18n } from "../i18n";
 
 type WorkspaceTypeSelectOption = WorkspaceTypeOption & {
   createInput?: string;
@@ -52,6 +53,7 @@ export function WorkspaceTypeSelect({
   onCreate,
   onDelete,
 }: WorkspaceTypeSelectProps) {
+  const { t } = useI18n();
   const selectedOption = useMemo<WorkspaceTypeSelectOption>(() => {
     const key = normalizeWorkspaceType(value);
     const option = options.find((item) => item.key === key);
@@ -80,7 +82,7 @@ export function WorkspaceTypeSelect({
       options={options}
       value={selectedOption}
       isOptionEqualToValue={(option, optionValue) => option.key === optionValue.key}
-      getOptionLabel={(option) => option.label}
+      getOptionLabel={(option) => t(option.label)}
       filterOptions={(availableOptions, state) => {
         const input = normalizeWorkspaceTypeOptionLabel(state.inputValue);
         const filtered = input
@@ -90,7 +92,7 @@ export function WorkspaceTypeSelect({
         if (input && !exists && onCreate) {
           filtered.push({
             key: `__create_workspace_type__:${input}`,
-            label: `创建「${input}」`,
+            label: t("创建「{label}」", { label: input }),
             createInput: input,
             create: true,
           });
@@ -107,7 +109,7 @@ export function WorkspaceTypeSelect({
         paper: { className: "workspace-type-combo-paper" },
         listbox: { className: "workspace-type-combo-list" },
       }}
-      renderInput={(params) => <TextField {...params} label={label} />}
+      renderInput={(params) => <TextField {...params} label={t(label)} />}
       renderOption={(props, option) => {
         const { key, className: optionClassName, ...optionProps } = props;
         const usedCount = usageCounts?.get(option.key) ?? 0;
@@ -125,20 +127,22 @@ export function WorkspaceTypeSelect({
             </span>
             <span className="workspace-type-combo-copy">
               <Typography component="span" className="workspace-type-combo-label" noWrap>
-                {option.label}
+                {t(option.label)}
               </Typography>
               {custom && usedCount > 0 ? (
                 <Typography component="span" className="workspace-type-combo-meta" noWrap>
-                  已使用 {usedCount}
+                  {t("已使用 {count}", { count: usedCount })}
                 </Typography>
               ) : null}
             </span>
             {canDelete ? (
-              <Tooltip title="删除类型">
+              <Tooltip title={t("删除类型")}>
                 <IconButton
                   size="small"
                   className="workspace-type-combo-delete"
-                  aria-label={`删除类型 ${option.label}`}
+                  aria-label={t("删除类型 {label}", {
+                    label: option.label,
+                  })}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={(event) => {
                     event.preventDefault();

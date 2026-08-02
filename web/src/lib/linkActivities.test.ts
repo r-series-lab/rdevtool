@@ -6,6 +6,7 @@ import {
   linkActivityResultPatch,
   linkCheckActivityResultPatch,
   linkCheckPassed,
+  linkExecutionStepBlocks,
 } from "./linkActivities";
 
 function report(): LinkExecutionReport {
@@ -61,7 +62,7 @@ describe("Link activities", () => {
   });
 
   it("keeps failed step evidence in the terminal patch", () => {
-    expect(linkActivityResultPatch(report(), "run")).toMatchObject({
+    expect(linkActivityResultPatch(report(), "run", null, "actual-feature")).toMatchObject({
       status: "failed",
       summary: "合作渠道联调 · 完成 0 / 失败 1 / 跳过 1",
       detail: expect.stringContaining("启动代理：端口已被占用"),
@@ -74,6 +75,7 @@ describe("Link activities", () => {
       action: expect.objectContaining({
         kind: "linkRecover",
         linkKey: "cooperation-debug",
+        workspaceKey: "actual-feature",
         replayAction: "run",
       }),
     });
@@ -86,6 +88,7 @@ describe("Link activities", () => {
       "stop",
       "workspace-source",
       "守护进程不可用",
+      "feature-a",
     )).toMatchObject({
       status: "failed",
       summary: "合作渠道联调 · 停止失败",
@@ -96,6 +99,7 @@ describe("Link activities", () => {
         linkKey: "cooperation-debug",
         linkName: "合作渠道联调",
         sourceId: "workspace-source",
+        workspaceKey: "feature-a",
         replayAction: "stop",
       },
     });
@@ -118,11 +122,78 @@ describe("Link activities", () => {
     expect(linkCheckPassed(passed)).toBe(true);
     expect(linkCheckActivityResultPatch(blocked)).toMatchObject({
       status: "failed",
-      summary: "合作渠道联调 · 2 个步骤阻止重试",
+      summary: "合作渠道联调 · 1 个步骤阻止重试",
     });
     expect(linkCheckActivityResultPatch(passed)).toMatchObject({
       status: "success",
       summary: "合作渠道联调 · 检查通过",
+    });
+  });
+
+  it("treats only skipped steps with risks as blocking", () => {
+    const benignSkipped = report().steps[1];
+    const riskySkipped = {
+      ...benignSkipped,
+      risks: ["运行配置缺少 dev 命令"],
+    };
+
+    expect(linkExecutionStepBlocks(benignSkipped)).toBe(false);
+    expect(linkExecutionStepBlocks(riskySkipped)).toBe(true);
+
+    const benignReport: LinkExecutionReport = {
+      ...report(),
+      steps: [benignSkipped],
+      warnings: [],
+    };
+    const riskyReport: LinkExecutionReport = {
+      ...benignReport,
+      steps: [riskySkipped],
+    };
+
+    expect(linkActivityResultPatch(benignReport, "run")).toMatchObject({
+      status: "success",
+      summary: "合作渠道联调 · 完成 0 / 失败 0 / 跳过 1",
+      action: null,
+    });
+    expect(linkActivityResultPatch(riskyReport, "run")).toMatchObject({
+      status: "failed",
+      summary: "合作渠道联调 · 完成 0 / 失败 0 / 跳过 1",
+      detail: expect.stringContaining("启动项目：前置步骤失败"),
+      diagnostics: [
+        expect.objectContaining({ risks: ["运行配置缺少 dev 命令"] }),
+      ],
+      action: expect.objectContaining({ kind: "linkRecover" }),
+    });
+    expect(linkCheckPassed(benignReport)).toBe(true);
+    expect(linkCheckPassed(riskyReport)).toBe(false);
+  });
+
+  it("records the exact sources returned by the execution report", () => {
+    const exact = report();
+    exact.plan.sourceContext = {
+      linkSourceId: "links-exact",
+      linkSourceName: "Link 精确源",
+      proxySourceId: "proxy-exact",
+      proxySourceName: "代理精确源",
+      runtimeSourceId: "runtime-exact",
+      runtimeSourceName: "运行精确源",
+      aligned: false,
+    };
+
+    expect(
+      linkActivityResultPatch(
+        exact,
+        "run",
+        "links-fallback",
+        "feature-a",
+        "proxy-fallback",
+        "runtime-fallback",
+      ).action,
+    ).toMatchObject({
+      sourceId: "links-exact",
+      proxySourceId: "proxy-exact",
+      runtimeSourceId: "runtime-exact",
+      workspaceKey: "feature-a",
     });
   });
 });

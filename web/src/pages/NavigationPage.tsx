@@ -18,6 +18,7 @@ import {
   TerminalIcon,
 } from "../components/AppIcons";
 import { AppEmptyState } from "../components/AppEmptyState";
+import { useI18n, type Translate } from "../i18n";
 import { shouldHandlePrimaryEnter } from "../lib/keyboard";
 
 type NavigationEntry = {
@@ -65,20 +66,20 @@ export type NavigationPageProps = {
   onOpenNavigation: (entry: NavigationEntry) => void;
 };
 
-function navigationKindLabel(kind: string) {
+function navigationKindLabel(kind: string, t: Translate) {
   switch (kind) {
     case "app":
-      return "应用";
+      return t("应用");
     case "script":
-      return "脚本";
+      return t("脚本");
     case "tool":
-      return "工具";
+      return t("工具");
     case "directory":
-      return "目录";
+      return t("目录");
     case "file":
-      return "文件";
+      return t("文件");
     default:
-      return "网站";
+      return t("网站");
   }
 }
 
@@ -115,6 +116,7 @@ export function NavigationPage({
   navigationPreferredCategory,
   onOpenNavigation,
 }: NavigationPageProps) {
+  const { t } = useI18n();
   const theme = useTheme();
   const mono = theme.palette.mode === "dark";
   const isSearching = Boolean(navigationQuery.trim());
@@ -315,7 +317,7 @@ export function NavigationPage({
                       fullWidth
                       value={navigationQuery}
                       onChange={(event) => onNavigationQueryChange(event.target.value)}
-                      placeholder="搜索入口、路径或备注"
+                      placeholder={t("搜索入口、路径或备注")}
                       sx={{
                         "& .MuiOutlinedInput-root": {
                           bgcolor: "transparent",
@@ -340,8 +342,8 @@ export function NavigationPage({
                     <IconButton
                       onClick={() => onNavigationQueryChange("")}
                       disabled={!navigationQuery}
-                      aria-label="清空搜索"
-                      title="清空搜索"
+                      aria-label={t("清空搜索")}
+                      title={t("清空搜索")}
                     >
                       <ClearIcon fontSize="small" />
                     </IconButton>
@@ -362,7 +364,7 @@ export function NavigationPage({
                       color: secondaryFilterTone.label,
                     }}
                   >
-                    类型
+                    {t("类型")}
                   </Typography>
                   <Box
                     sx={{
@@ -436,7 +438,7 @@ export function NavigationPage({
                                 whiteSpace: "nowrap",
                               }}
                             >
-                              {type}
+                              {t(type)}
                             </Box>
                             <Box
                               component="span"
@@ -492,7 +494,7 @@ export function NavigationPage({
                           color: secondaryFilterTone.label,
                         }}
                       >
-                        分类
+                        {t("分类")}
                       </Typography>
                       <Box
                         sx={{
@@ -613,16 +615,16 @@ export function NavigationPage({
                         sx={{ fontWeight: 750, fontSize: { xs: "0.94rem", sm: "1rem" } }}
                       >
                         {navigationQuery.trim()
-                          ? "搜索结果"
-                          : navigationCategory || navigationPreferredCategory || "快捷入口"}
+                          ? t("搜索结果")
+                          : navigationCategory || navigationPreferredCategory || t("快捷入口")}
                       </Typography>
                       <Typography
                         variant="caption"
                         sx={{ color: shellTone.helperText, display: { xs: "none", sm: "block" } }}
                       >
                         {navigationQuery.trim()
-                          ? "按名称、备注和目标路径过滤"
-                          : "当前分类下的可用入口"}
+                          ? t("按名称、备注和目标路径过滤")
+                          : t("当前分类下的可用入口")}
                       </Typography>
                     </Box>
                     <Box
@@ -636,7 +638,7 @@ export function NavigationPage({
                         fontWeight: 700,
                       }}
                     >
-                      {resultCount} 个入口
+                      {t("{count} 个入口", { count: resultCount })}
                     </Box>
                   </Stack>
 
@@ -750,7 +752,7 @@ export function NavigationPage({
                                     noWrap
                                   >
                                     {[
-                                      navigationKindLabel(item.entry.kind),
+                                      navigationKindLabel(item.entry.kind, t),
                                       isSearching ? item.categoryLabel : null,
                                       item.entry.note ?? null,
                                     ]
@@ -806,7 +808,7 @@ export function NavigationPage({
                                     fontWeight: 700,
                                   }}
                                 >
-                                  {navigationKindLabel(item.entry.kind)}
+                                  {navigationKindLabel(item.entry.kind, t)}
                                 </Box>
                                 <Box
                                   sx={{
@@ -834,8 +836,8 @@ export function NavigationPage({
                   ) : (
                     <AppEmptyState
                       compact
-                      title="没有匹配入口"
-                      description="切到全部或清空搜索再试。"
+                      title={t("没有匹配入口")}
+                      description={t("切到全部或清空搜索再试。")}
                     />
                   )}
                 </Box>
@@ -843,8 +845,8 @@ export function NavigationPage({
             ) : (
               <AppEmptyState
                 compact
-                title="暂无快捷入口"
-                description="检查 navigation.toml 是否可读。"
+                title={t("暂无快捷入口")}
+                description={t("检查 navigation.toml 是否可读。")}
                 sx={{ mt: 0.3 }}
               />
             )}

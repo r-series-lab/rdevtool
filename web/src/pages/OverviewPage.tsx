@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -29,36 +35,46 @@ import type {
   LinkExecutionReport,
   LinkPlan,
   LinkRuntimeSummary,
+  ProjectManagementOpenRequest,
   ProjectManagementViewKey,
   ProjectRuntimeEntry,
+  ProjectRuntimeStartPromptMode,
   ProjectWorkspaceEditorDraft,
   ProjectWorkspaceEditorState,
   ProjectWorkspaceState,
   ProjectWorkspaceSummary,
+  WorkspaceConfigFocusRequest,
 } from "../app-types";
-import { resolveProjectRuntimeDebugProfile } from "../hooks/useProjectsModule";
 import {
   CheckIcon,
   CollapseIcon,
   ClearIcon,
   CopyIcon,
   ExpandIcon,
-  FolderIcon,
   AppWindowIcon,
+  FolderIcon,
   LocateIcon,
-  OpenExternalIcon,
   PackageIcon,
   PlayIcon,
   PlusIcon,
   ReplayIcon,
   SearchIcon,
   SettingsIcon,
-  StopIcon,
   TerminalIcon,
-  TrashIcon,
+  StopIcon,
   WebsiteIcon,
   WorkflowIcon,
 } from "../components/AppIcons";
+import { WorkspaceConfigSidebar } from "../components/WorkspaceConfigSidebar";
+import {
+  WorkspaceWorkflowPanel,
+  type WorkspaceWorkflowActionOption,
+} from "../components/WorkspaceWorkflowPanel";
+import {
+  WorkspaceProjectRuntimeRow,
+  type WorkspaceProjectDirectoryItem,
+} from "../components/WorkspaceProjectRuntimeRow";
+import type { WorkspaceRuntimePreflightAction } from "../lib/workspaceRuntimePreflightActions";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import { AppEmptyState } from "../components/AppEmptyState";
 import { AppListEndState } from "../components/AppListEndState";
@@ -75,6 +91,9 @@ import {
 } from "../components/WorkspacePageToolbar";
 import { useWorkspaceTypeOptions } from "../hooks/useWorkspaceTypeOptions";
 import { useConfirmationPreferences } from "../hooks/useConfirmationPreferences";
+import { useWorkspaceLifecycle } from "../hooks/useWorkspaceLifecycle";
+import { useWorkspaceOverviewData } from "../hooks/useWorkspaceOverviewData";
+import { useProjectRuntimeStartDialog } from "../hooks/useProjectRuntimeStartDialog";
 import {
   AI_CONTEXT_LIMIT_OPTIONS,
   AI_CONTEXT_SCOPE_OPTIONS,
@@ -89,12 +108,19 @@ import {
   type AiContextPreset as WorkspaceAiContextPreset,
 } from "../lib/aiContextTemplates";
 import type { TrayPinnedAction } from "../lib/trayPins";
+import {
+  isWorkspaceWorkflowActionSupported,
+  type WorkspaceWorkflowChain,
+  type WorkspaceWorkflowRunState,
+} from "../lib/workflowChains";
 import type { ActivityRecorder, ActivityUpdater } from "../lib/activityCenter";
 import {
   linkActivityDraft,
   linkActivityFailurePatch,
   linkActivityResultPatch,
+  linkExecutionStepBlocks,
 } from "../lib/linkActivities";
+import { translateInternalMessage } from "../i18n/internalMessages";
 import {
   DEFAULT_NEW_WORKSPACE_TYPE,
   normalizeWorkspaceType,
@@ -107,33 +133,63 @@ import {
   confirmationEnabled,
   confirmationPreferenceKeyForTrayAction,
 } from "../lib/confirmationPreferences";
+import { useI18n } from "../i18n";
 
 export type OverviewPageProps = {
   projectWorkspaces: ProjectWorkspaceSummary[];
+  archivedProjectWorkspaces: ProjectWorkspaceSummary[];
   activeProjectWorkspaceKey: string;
   onProjectWorkspaceChange: (workspaceKey: string) => Promise<void> | void;
   onNavigateToPage: (page: OverviewNavigationPage) => void;
   onProjectManagementViewChange: (view: ProjectManagementViewKey) => void;
   onProjectChange: (projectKey: string) => void;
-  onCreateProjectWorkspace: (payload: CreateProjectWorkspacePayload) => Promise<void> | void;
+  onOpenProjectManagementTarget: (
+    projectKey: string,
+    target: ProjectManagementOpenRequest["target"],
+  ) => void;
+  onCreateProjectWorkspace: (
+    payload: CreateProjectWorkspacePayload,
+  ) => Promise<void> | void;
   onInitDemandWorkspace: (
     payload: InitDemandWorkspacePayload,
   ) => Promise<InitDemandWorkspaceResult> | InitDemandWorkspaceResult;
   onProjectConfigSaved: () => Promise<void> | void;
   workspaceConfigOpenSignal?: number;
+  workspaceConfigFocusRequest?: WorkspaceConfigFocusRequest | null;
+  onWorkspaceConfigOpenHandled?: (signal: number) => void;
   runtimeEntries: ProjectRuntimeEntry[];
   selectedDebugProfileKeys: Record<string, string>;
+  runtimeStartPromptMode: ProjectRuntimeStartPromptMode;
   projectRuntimePreferencesHydrated: boolean;
+  onProjectDebugProfileChange: (projectKey: string, profileKey: string) => void;
+  onRuntimeStartPromptModeChange: (
+    mode: ProjectRuntimeStartPromptMode,
+  ) => void;
   onStartProjectRuntime: (
     projectKey: string,
     debugProfileKey?: string,
+    envOverrides?: Record<string, string>,
+    expectedPort?: number | null,
   ) => Promise<unknown> | unknown;
-  onStartProxyProfile: (profileId: string) => Promise<unknown> | unknown;
+  onStartProxyProfile: (
+    profileId: string,
+    sourceId?: string,
+  ) => Promise<unknown> | unknown;
   onStopProxyProfile: (profileId: string) => Promise<unknown> | unknown;
   onFocusProjectRuntime: (projectKey: string) => Promise<unknown> | unknown;
   recordActivity?: ActivityRecorder;
   updateActivity?: ActivityUpdater;
   onExecutePinnedAction: (action: TrayPinnedAction) => Promise<void>;
+  workflowChains: WorkspaceWorkflowChain[];
+  workflowRunStates: WorkspaceWorkflowRunState[];
+  onSaveWorkflowChain: (chain: WorkspaceWorkflowChain) => Promise<void>;
+  onDeleteWorkflowChain: (chainId: string) => Promise<void>;
+  onWorkflowChainEnabledChange: (
+    chainId: string,
+    enabled: boolean,
+  ) => Promise<void>;
+  onRunWorkflowChain: (chain: WorkspaceWorkflowChain) => Promise<string>;
+  onCancelWorkflowRun: (runId: string) => Promise<void>;
 };
 
 type OverviewNavigationPage = "projectManagement" | "resources" | "proxy";
@@ -166,6 +222,11 @@ type WorkspacePinnedActionsOverview = {
   name: string;
   description?: string | null;
   system: boolean;
+  runtimeConfigSourceId: string;
+  runtimeConfigSourceName: string;
+  runtimeConfigSourceKind: string;
+  runtimeConfigPath?: string | null;
+  runtimeProfileScope: string;
   rootDir?: string | null;
   resourceDir?: string | null;
   worklogPath?: string | null;
@@ -229,7 +290,11 @@ const workspaceTypeSelectMenuProps = {
 
 type WorkspaceResourceShortcutItem = {
   key: string;
+  workspaceKey: string;
   configSourceId: string;
+  toolConfigSourceId?: string | null;
+  toolProxySourceId?: string | null;
+  toolRuntimeSourceId?: string | null;
   category: string;
   label: string;
   kind: string;
@@ -242,21 +307,6 @@ type WorkspaceResourceShortcutItem = {
   linkRuntime?: LinkRuntimeSummary | null;
   openKind?: "url" | "localPath" | string | null;
   openable: boolean;
-};
-
-type WorkspaceProjectDirectoryItem = {
-  projectKey: string;
-  projectName: string;
-  mode: "global" | "managed" | "bound" | string;
-  modeLabel: string;
-  path?: string | null;
-  managed: boolean;
-  statusKey: string;
-  statusLabel: string;
-  running: boolean;
-  canStart: boolean;
-  canStop: boolean;
-  canFocusRuntime: boolean;
 };
 
 type WorkspaceProxyProfileItem = {
@@ -272,7 +322,8 @@ type WorkspaceProxyProfileItem = {
   startedAt?: string | null;
 };
 
-const COLLAPSED_WORKSPACES_STORAGE_KEY = "rdevtool:overview:collapsed-workspaces";
+const COLLAPSED_WORKSPACES_STORAGE_KEY =
+  "rdevtool:overview:collapsed-workspaces";
 const COLLAPSED_WORKSPACES_DEFAULTED_KEY =
   "rdevtool:overview:collapsed-workspaces:v3-system-defaulted";
 const SYSTEM_WORKSPACE_KEY = "system";
@@ -294,14 +345,21 @@ function readCollapsedWorkspaceKeys() {
     return defaultCollapsedWorkspaceKeys();
   }
   try {
-    const stored = window.localStorage.getItem(COLLAPSED_WORKSPACES_STORAGE_KEY);
+    const stored = window.localStorage.getItem(
+      COLLAPSED_WORKSPACES_STORAGE_KEY,
+    );
     const values = stored ? JSON.parse(stored) : [];
     const keys = new Set<string>(
-      Array.isArray(values) ? values.filter((value) => typeof value === "string") : [],
+      Array.isArray(values)
+        ? values.filter((value) => typeof value === "string")
+        : [],
     );
     if (!window.localStorage.getItem(COLLAPSED_WORKSPACES_DEFAULTED_KEY)) {
       keys.add(SYSTEM_WORKSPACE_KEY);
-      window.localStorage.setItem(COLLAPSED_WORKSPACES_STORAGE_KEY, JSON.stringify([...keys]));
+      window.localStorage.setItem(
+        COLLAPSED_WORKSPACES_STORAGE_KEY,
+        JSON.stringify([...keys]),
+      );
       window.localStorage.setItem(COLLAPSED_WORKSPACES_DEFAULTED_KEY, "1");
     }
     return keys;
@@ -356,7 +414,9 @@ function actionTone(kindLabel: string): "default" | "primary" | "warning" {
   return "default";
 }
 
-function actionGroupKind(item: WorkspacePinnedActionItem): "build" | "git" | "other" {
+function actionGroupKind(
+  item: WorkspacePinnedActionItem,
+): "build" | "git" | "other" {
   const kind = item.action.kind.toLowerCase();
   if (
     item.kindLabel === "构建" ||
@@ -366,7 +426,11 @@ function actionGroupKind(item: WorkspacePinnedActionItem): "build" | "git" | "ot
   ) {
     return "build";
   }
-  if (item.kindLabel === "分支" || kind === "branch.replay" || kind.startsWith("git.")) {
+  if (
+    item.kindLabel === "分支" ||
+    kind === "branch.replay" ||
+    kind.startsWith("git.")
+  ) {
     return "git";
   }
   return "other";
@@ -397,47 +461,6 @@ function actionLabelParams(item: WorkspacePinnedActionItem) {
         (rightIndex === -1 ? ACTION_LABEL_PARAM_ORDER.length : rightIndex)
       );
     });
-}
-
-function projectDirectoryTone(mode: string): "default" | "primary" | "success" {
-  if (mode === "managed") {
-    return "primary";
-  }
-  if (mode === "bound") {
-    return "success";
-  }
-  return "default";
-}
-
-function projectDirectoryLabel(label: string) {
-  if (label.includes("副本")) {
-    return "副本";
-  }
-  if (label.includes("绑定")) {
-    return "绑定";
-  }
-  if (label.includes("全局")) {
-    return "全局";
-  }
-  return label;
-}
-
-function workspaceProjectRuntimeProfileInfo(
-  entry: ProjectRuntimeEntry | undefined,
-  requestedKey: string | undefined,
-) {
-  const selection = resolveProjectRuntimeDebugProfile(entry, requestedKey);
-  const profile = selection.profile;
-  return {
-    debugProfileKey: selection.key,
-    summary: [
-      `档案 ${profile?.label?.trim() || "默认"}`,
-      `端口 ${profile?.expectedPort ?? "自动"}`,
-      `Runtime ${profile?.runtimeProfile?.trim() || "默认"}`,
-      `网络代理 ${profile?.networkProxy?.enabled ? "开" : "关"}`,
-      `本地代理 ${profile?.localProxy?.enabled ? "开" : "关"}`,
-    ].join(" · "),
-  };
 }
 
 async function copyPlainText(value: string) {
@@ -501,7 +524,10 @@ function workspaceSearchText(group: WorkspacePinnedActionsOverview) {
       ...item.params.flatMap((param) => [param.label, param.value]),
     ]),
   ]
-    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .filter(
+      (value): value is string =>
+        typeof value === "string" && value.trim().length > 0,
+    )
     .join("\n")
     .toLowerCase();
 }
@@ -563,11 +589,15 @@ function textIncludes(values: Array<string | null | undefined>, value: string) {
     return true;
   }
   return values.some(
-    (item) => typeof item === "string" && item.trim().toLowerCase().includes(needle),
+    (item) =>
+      typeof item === "string" && item.trim().toLowerCase().includes(needle),
   );
 }
 
-function workspaceSearchValuesForField(group: WorkspacePinnedActionsOverview, field: string) {
+function workspaceSearchValuesForField(
+  group: WorkspacePinnedActionsOverview,
+  field: string,
+) {
   switch (field) {
     case "key":
       return [group.key];
@@ -645,7 +675,10 @@ function workspaceMatchesOverviewQuery(
   const text = workspaceSearchText(group);
   return tokens.every((token) =>
     token.field
-      ? textIncludes(workspaceSearchValuesForField(group, token.field), token.value)
+      ? textIncludes(
+          workspaceSearchValuesForField(group, token.field),
+          token.value,
+        )
       : text.includes(token.value),
   );
 }
@@ -654,12 +687,18 @@ function workspaceStateItems(
   group: WorkspacePinnedActionsOverview,
   active: boolean,
 ): WorkspaceStateItem[] {
-  const missingDirectories = group.projectDirectories.filter((directory) => !directory.path).length;
+  const missingDirectories = group.projectDirectories.filter(
+    (directory) => !directory.path,
+  ).length;
   const items: WorkspaceStateItem[] = [];
   if (active) {
     items.push({ label: "当前", tone: "active" });
   }
-  if (group.entryCount === 0 && group.projectCount === 0 && group.proxyProfileCount === 0) {
+  if (
+    group.entryCount === 0 &&
+    group.projectCount === 0 &&
+    group.proxyProfileCount === 0
+  ) {
     items.push({ label: "空工作区", tone: "warning" });
   } else {
     if (group.projectCount === 0) {
@@ -672,6 +711,14 @@ function workspaceStateItems(
     }
   }
   return items.slice(0, 2);
+}
+
+function workspaceStateItemLabel(item: WorkspaceStateItem, t: (message: string, params?: Record<string, string | number>) => string) {
+  const missingDirectoriesMatch = item.label.match(/^(\d+)\s+目录待配$/);
+  if (missingDirectoriesMatch) {
+    return t("{count} 目录待配", { count: missingDirectoriesMatch[1] });
+  }
+  return t(item.label);
 }
 
 function navigationEntryKindLabel(kind: string) {
@@ -726,36 +773,51 @@ function directoryActionButtonSx(theme: Theme) {
       ? "rgba(255,255,255,0.07)"
       : "color-mix(in srgb, var(--line-soft) 84%, transparent)",
     color: "var(--muted)",
-    bgcolor: isDark ? "rgba(255,255,255,0.018)" : "color-mix(in srgb, var(--side-pane-control) 28%, transparent)",
+    bgcolor: isDark
+      ? "rgba(255,255,255,0.018)"
+      : "color-mix(in srgb, var(--side-pane-control) 28%, transparent)",
     fontWeight: 780,
-    boxShadow: isDark ? "none" : "inset 0 1px 0 color-mix(in srgb, #ffffff 28%, transparent)",
+    boxShadow: isDark
+      ? "none"
+      : "inset 0 1px 0 color-mix(in srgb, #ffffff 28%, transparent)",
     "&:hover": {
       color: "var(--text)",
       borderColor: alpha(theme.palette.primary.main, isDark ? 0.24 : 0.32),
       bgcolor: alpha(theme.palette.primary.main, isDark ? 0.1 : 0.07),
     },
     "&.Mui-disabled": {
-      borderColor: isDark ? "rgba(255,255,255,0.045)" : "color-mix(in srgb, var(--line-soft) 62%, transparent)",
+      borderColor: isDark
+        ? "rgba(255,255,255,0.045)"
+        : "color-mix(in srgb, var(--line-soft) 62%, transparent)",
       color: theme.palette.text.disabled,
-      bgcolor: isDark ? "rgba(255,255,255,0.01)" : "color-mix(in srgb, var(--panel-strong) 40%, transparent)",
+      bgcolor: isDark
+        ? "rgba(255,255,255,0.01)"
+        : "color-mix(in srgb, var(--panel-strong) 40%, transparent)",
     },
   };
 }
 
 export function OverviewPage({
   projectWorkspaces,
+  archivedProjectWorkspaces,
   activeProjectWorkspaceKey,
   onProjectWorkspaceChange,
   onNavigateToPage,
   onProjectManagementViewChange,
   onProjectChange,
+  onOpenProjectManagementTarget,
   onCreateProjectWorkspace,
   onInitDemandWorkspace,
   onProjectConfigSaved,
   workspaceConfigOpenSignal,
+  workspaceConfigFocusRequest,
+  onWorkspaceConfigOpenHandled,
   runtimeEntries,
   selectedDebugProfileKeys,
+  runtimeStartPromptMode,
   projectRuntimePreferencesHydrated,
+  onProjectDebugProfileChange,
+  onRuntimeStartPromptModeChange,
   onStartProjectRuntime,
   onStartProxyProfile,
   onStopProxyProfile,
@@ -763,34 +825,43 @@ export function OverviewPage({
   recordActivity,
   updateActivity,
   onExecutePinnedAction,
+  workflowChains,
+  workflowRunStates,
+  onSaveWorkflowChain,
+  onDeleteWorkflowChain,
+  onWorkflowChainEnabledChange,
+  onRunWorkflowChain,
+  onCancelWorkflowRun,
 }: OverviewPageProps) {
-  const [groups, setGroups] = useState<WorkspacePinnedActionsOverview[]>([]);
-  const [workspaceEditor, setWorkspaceEditor] = useState<ProjectWorkspaceEditorState | null>(null);
-  const [workspaceDraft, setWorkspaceDraft] = useState<ProjectWorkspaceEditorDraft | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [workspaceLoading, setWorkspaceLoading] = useState(true);
+  const { t } = useI18n();
   const [workspaceSaving, setWorkspaceSaving] = useState(false);
   const [workspaceDirectoryBusy, setWorkspaceDirectoryBusy] = useState("");
-  const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<Set<string>>(() =>
-    readCollapsedWorkspaceKeys(),
-  );
+  const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<
+    Set<string>
+  >(() => readCollapsedWorkspaceKeys());
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [expandedWorkspaceScope, setExpandedWorkspaceScope] = useState<
     "projects" | "navigation" | "proxy"
   >("projects");
-  const [createWorkspaceMode, setCreateWorkspaceMode] = useState<"basic" | "demand">("basic");
+  const [createWorkspaceMode, setCreateWorkspaceMode] = useState<
+    "basic" | "demand"
+  >("basic");
   const [newWorkspaceName, setNewWorkspaceName] = useState("");
   const [newWorkspaceKey, setNewWorkspaceKey] = useState("");
   const [newWorkspaceDescription, setNewWorkspaceDescription] = useState("");
-  const [newWorkspaceType, setNewWorkspaceType] = useState(DEFAULT_NEW_WORKSPACE_TYPE);
-  const [newWorkspaceIndependentDir, setNewWorkspaceIndependentDir] = useState(false);
+  const [newWorkspaceType, setNewWorkspaceType] = useState(
+    DEFAULT_NEW_WORKSPACE_TYPE,
+  );
+  const [newWorkspaceIndependentDir, setNewWorkspaceIndependentDir] =
+    useState(false);
   const [newWorkspaceRootDir, setNewWorkspaceRootDir] = useState("");
   const [newWorkspaceResourceDir, setNewWorkspaceResourceDir] = useState("");
   const [createWorkspaceWorklog, setCreateWorkspaceWorklog] = useState(true);
-  const [autoRecordWorkspaceWorklog, setAutoRecordWorkspaceWorklog] = useState(true);
-  const [copyCurrentWorkspace, setCopyCurrentWorkspace] = useState(true);
+  const [autoRecordWorkspaceWorklog, setAutoRecordWorkspaceWorklog] =
+    useState(true);
+  const [copyCurrentWorkspace, setCopyCurrentWorkspace] = useState(false);
   const [demandId, setDemandId] = useState("");
   const [demandRequirementDir, setDemandRequirementDir] = useState("");
   const [demandRepoPath, setDemandRepoPath] = useState("");
@@ -800,21 +871,44 @@ export function OverviewPage({
   const [status, setStatusValue] = useState("");
   const [toastNonce, setToastNonce] = useState(0);
   const [runningKey, setRunningKey] = useState("");
+  const [runningChainId, setRunningChainId] = useState("");
   const [aiContextOpen, setAiContextOpen] = useState(false);
-  const [aiContextGroup, setAiContextGroup] = useState<WorkspacePinnedActionsOverview | null>(null);
-  const [aiContextResponse, setAiContextResponse] = useState<WorkspaceAiContextResponse | null>(null);
+  const [aiContextGroup, setAiContextGroup] =
+    useState<WorkspacePinnedActionsOverview | null>(null);
+  const [aiContextResponse, setAiContextResponse] =
+    useState<WorkspaceAiContextResponse | null>(null);
   const [aiContextLoading, setAiContextLoading] = useState(false);
-  const [linkPlanDialog, setLinkPlanDialog] = useState<LinkPlanDialogState | null>(null);
-  const [aiContextView, setAiContextView] = useState<"markdown" | "json">("markdown");
-  const [aiContextPresets, setAiContextPresets] = useState<WorkspaceAiContextPreset[]>(
-    BUILTIN_AI_CONTEXT_PRESETS,
+  const [linkPlanDialog, setLinkPlanDialog] =
+    useState<LinkPlanDialogState | null>(null);
+  const [aiContextView, setAiContextView] = useState<"markdown" | "json">(
+    "markdown",
   );
-  const [aiContextPresetKey, setAiContextPresetKey] = useState(BUILTIN_AI_CONTEXT_PRESETS[0].key);
+  const [aiContextPresets, setAiContextPresets] = useState<
+    WorkspaceAiContextPreset[]
+  >(BUILTIN_AI_CONTEXT_PRESETS);
+  const [aiContextPresetKey, setAiContextPresetKey] = useState(
+    BUILTIN_AI_CONTEXT_PRESETS[0].key,
+  );
   const [aiContextPresetName, setAiContextPresetName] = useState("");
   const [aiContextOptions, setAiContextOptions] =
     useState<WorkspaceAiContextOptions>(DEFAULT_AI_CONTEXT_OPTIONS);
   const [overviewQuery, setOverviewQuery] = useState("");
   const [workspaceTypeFilter, setWorkspaceTypeFilter] = useState("all");
+  const {
+    groups,
+    loading,
+    loadOverview,
+    workspaceEditor,
+    workspaceDraft,
+    setWorkspaceDraft,
+    workspaceLoading,
+    loadProjectWorkspaceEditor,
+    applyWorkspaceEditorState,
+  } = useWorkspaceOverviewData<WorkspacePinnedActionsOverview>({
+    activeWorkspaceKey: activeProjectWorkspaceKey,
+    editorOpen: manageOpen,
+    onError: setError,
+  });
   const [confirm, confirmDialog] = useAppConfirmDialog();
   const { preferences: confirmationPreferences } = useConfirmationPreferences();
   const {
@@ -822,10 +916,44 @@ export function OverviewPage({
     addWorkspaceType,
     removeWorkspaceType,
   } = useWorkspaceTypeOptions();
+  const workspaceLifecycle = useWorkspaceLifecycle({
+    onChanged: onProjectConfigSaved,
+    setError,
+    setStatus,
+  });
   const runtimeEntryByProjectKey = useMemo(
     () => new Map(runtimeEntries.map((entry) => [entry.key, entry])),
     [runtimeEntries],
   );
+  const runtimeStartLauncher = useProjectRuntimeStartDialog({
+    promptMode: runtimeStartPromptMode,
+    selectedDebugProfileKeys,
+    onSetDefaultProfile: onProjectDebugProfileChange,
+    onPromptModeChange: onRuntimeStartPromptModeChange,
+    onStart: async (
+      projectKey,
+      debugProfileKey,
+      _envOverrides,
+      expectedPort,
+    ) => {
+      const group = groups.find(
+        (item) => item.key === activeProjectWorkspaceKey,
+      );
+      const directory = group?.projectDirectories.find(
+        (item) => item.projectKey === projectKey,
+      );
+      if (!group || !directory) {
+        setError("当前工作区中未找到要启动的项目");
+        return false;
+      }
+      return toggleWorkspaceProject(
+        group,
+        directory,
+        debugProfileKey,
+        expectedPort ?? undefined,
+      );
+    },
+  });
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -896,14 +1024,21 @@ export function OverviewPage({
   }
 
   const activeGroup = useMemo(
-    () => groups.find((group) => group.key === activeProjectWorkspaceKey) ?? groups[0] ?? null,
+    () =>
+      groups.find((group) => group.key === activeProjectWorkspaceKey) ??
+      groups[0] ??
+      null,
     [activeProjectWorkspaceKey, groups],
   );
   const editingWorkspaceKey =
-    workspaceDraft?.key ?? workspaceEditor?.workspace.key ?? activeProjectWorkspaceKey;
+    workspaceDraft?.key ??
+    workspaceEditor?.workspace.key ??
+    activeProjectWorkspaceKey;
   const editingWorkspaceSummary = useMemo(
     () =>
-      projectWorkspaces.find((workspace) => workspace.key === editingWorkspaceKey) ??
+      projectWorkspaces.find(
+        (workspace) => workspace.key === editingWorkspaceKey,
+      ) ??
       projectWorkspaces[0] ??
       null,
     [editingWorkspaceKey, projectWorkspaces],
@@ -949,7 +1084,8 @@ export function OverviewPage({
         groups.filter(
           (group) =>
             (workspaceTypeFilter === "all" ||
-              normalizeWorkspaceType(group.workspaceType) === workspaceTypeFilter) &&
+              normalizeWorkspaceType(group.workspaceType) ===
+                workspaceTypeFilter) &&
             workspaceMatchesOverviewQuery(group, overviewQuery),
         ),
         activeProjectWorkspaceKey,
@@ -957,17 +1093,28 @@ export function OverviewPage({
     [groups, activeProjectWorkspaceKey, workspaceTypeFilter, overviewQuery],
   );
   const orderedProjectWorkspaces = useMemo(
-    () => systemWorkspaceThenCurrent(projectWorkspaces, activeProjectWorkspaceKey),
+    () =>
+      systemWorkspaceThenCurrent(projectWorkspaces, activeProjectWorkspaceKey),
     [activeProjectWorkspaceKey, projectWorkspaces],
+  );
+  const workspaceActionCounts = useMemo(
+    () =>
+      Object.fromEntries(
+        groups.map((group) => [group.key, group.actionCount] as const),
+      ),
+    [groups],
   );
   const overviewFilterActive =
     workspaceTypeFilter !== "all" || overviewQuery.trim().length > 0;
   const aiContextJsonText = useMemo(
-    () => (aiContextResponse ? JSON.stringify(aiContextResponse.json, null, 2) : ""),
+    () =>
+      aiContextResponse ? JSON.stringify(aiContextResponse.json, null, 2) : "",
     [aiContextResponse],
   );
   const aiContextPreviewText =
-    aiContextView === "json" ? aiContextJsonText : aiContextResponse?.markdown ?? "";
+    aiContextView === "json"
+      ? aiContextJsonText
+      : (aiContextResponse?.markdown ?? "");
   const aiContextPreviewLineCount = aiContextPreviewText
     ? aiContextPreviewText.split("\n").length
     : 0;
@@ -984,8 +1131,9 @@ export function OverviewPage({
 
   const workspaceDirty = Boolean(
     workspaceEditor &&
-      workspaceDraft &&
-      JSON.stringify(workspaceDraft) !== JSON.stringify(workspaceEditor.workspace),
+    workspaceDraft &&
+    JSON.stringify(workspaceDraft) !==
+      JSON.stringify(workspaceEditor.workspace),
   );
 
   const projectTotal = workspaceEditor?.projects.length ?? 0;
@@ -994,18 +1142,26 @@ export function OverviewPage({
       (total, category) => total + category.entries.length,
       0,
     ) ?? 0;
-  const navigationTotal = (workspaceEditor?.navigationCategories.length ?? 0) + entryTotal;
+  const navigationTotal =
+    (workspaceEditor?.navigationCategories.length ?? 0) + entryTotal;
   const proxyTotal = workspaceEditor?.proxyProfiles.length ?? 0;
   const selectedProjects = workspaceDraft
     ? workspaceDraft.system
       ? projectTotal
-      : selectedCount(workspaceDraft.projects, projectTotal, workspaceDraft.includeAllProjects)
+      : selectedCount(
+          workspaceDraft.projects,
+          projectTotal,
+          workspaceDraft.includeAllProjects,
+        )
     : 0;
   const selectedNavigation = workspaceDraft
     ? workspaceDraft.system
       ? navigationTotal
       : selectedCount(
-          [...workspaceDraft.navigationCategories, ...workspaceDraft.navigationEntries],
+          [
+            ...workspaceDraft.navigationCategories,
+            ...workspaceDraft.navigationEntries,
+          ],
           navigationTotal,
           workspaceDraft.includeAllNavigation,
         )
@@ -1019,7 +1175,10 @@ export function OverviewPage({
   const workspaceInstanceByProject = useMemo(
     () =>
       new Map(
-        (workspaceDraft?.projectInstances ?? []).map((instance) => [instance.project, instance]),
+        (workspaceDraft?.projectInstances ?? []).map((instance) => [
+          instance.project,
+          instance,
+        ]),
       ),
     [workspaceDraft?.projectInstances],
   );
@@ -1027,64 +1186,37 @@ export function OverviewPage({
     () =>
       (workspaceEditor?.projects ?? []).filter(
         (project) =>
-          workspaceDraft?.includeAllProjects || workspaceDraft?.projects.includes(project.key),
+          workspaceDraft?.includeAllProjects ||
+          workspaceDraft?.projects.includes(project.key),
       ),
-    [workspaceDraft?.includeAllProjects, workspaceDraft?.projects, workspaceEditor?.projects],
+    [
+      workspaceDraft?.includeAllProjects,
+      workspaceDraft?.projects,
+      workspaceEditor?.projects,
+    ],
   );
 
-  const loadOverview = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const next = await invoke<WorkspacePinnedActionsOverview[]>(
-        "get_workspace_pinned_actions_overview",
-      );
-      setGroups(next);
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  const loadProjectWorkspaceEditor = useCallback(async (workspaceKey?: string) => {
-    setWorkspaceLoading(true);
-    setError("");
-    try {
-      const nextState = await invoke<ProjectWorkspaceEditorState>("get_project_workspace_editor", {
-        workspaceKey: workspaceKey || activeProjectWorkspaceKey,
-      });
-      setWorkspaceEditor(nextState);
-      setWorkspaceDraft(nextState.workspace);
-    } catch (reason) {
-      setError(String(reason));
-    } finally {
-      setWorkspaceLoading(false);
-    }
-  }, [activeProjectWorkspaceKey]);
-
-  const refreshWorkbench = useCallback(async () => {
-    await Promise.all([loadOverview(), loadProjectWorkspaceEditor()]);
-  }, [loadOverview, loadProjectWorkspaceEditor]);
-
   useEffect(() => {
-    void refreshWorkbench();
-  }, [refreshWorkbench]);
-
-  useEffect(() => {
-    if ((workspaceConfigOpenSignal ?? 0) > 0) {
-      setManageOpen(true);
-      void loadProjectWorkspaceEditor(activeProjectWorkspaceKey);
+    const signal = workspaceConfigOpenSignal ?? 0;
+    if (signal <= 0) {
+      return;
     }
-  }, [activeProjectWorkspaceKey, loadProjectWorkspaceEditor, workspaceConfigOpenSignal]);
+    setManageOpen(true);
+    onWorkspaceConfigOpenHandled?.(signal);
+  }, [
+    onWorkspaceConfigOpenHandled,
+    workspaceConfigOpenSignal,
+  ]);
 
   async function executeAction(item: WorkspacePinnedActionItem) {
-    const preferenceKey = confirmationPreferenceKeyForTrayAction(item.action.kind);
+    const preferenceKey = confirmationPreferenceKeyForTrayAction(
+      item.action.kind,
+    );
     if (preferenceKey || item.confirmRequired) {
       const confirmed = await confirm({
-        title: "确认运行",
-        description: `确认运行“${item.label}”？`,
-        confirmLabel: "运行",
+        title: t("确认运行"),
+        description: t("确认运行“{label}”？", { label: item.label }),
+        confirmLabel: t("运行"),
         preferenceKey: preferenceKey ?? undefined,
       });
       if (!confirmed) {
@@ -1096,8 +1228,14 @@ export function OverviewPage({
     setError("");
     try {
       await onExecutePinnedAction(item.action);
-      await loadOverview();
-      setStatus(`已运行 ${item.label}`);
+      if (
+        item.action.kind !== "branch.replay" &&
+        item.action.kind !== "build.replay" &&
+        item.action.kind !== "deploy.replay"
+      ) {
+        await loadOverview({ silent: true });
+      }
+      setStatus(t("已运行 {label}", { label: item.label }));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1105,15 +1243,97 @@ export function OverviewPage({
     }
   }
 
-  async function openWorkbenchTarget(kind: string, value: string, label: string) {
+  async function runWorkflowChain(chain: WorkspaceWorkflowChain) {
+    const confirmed = await confirm({
+      title: t("运行“{name}”", { name: chain.name }),
+      description: chain.steps.map((step) => step.label).join(" → "),
+      confirmLabel: t("开始运行"),
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    setRunningChainId(chain.id);
+    setError("");
+    try {
+      await onRunWorkflowChain(chain);
+      setStatus(t("已启动联动操作：{name}", { name: chain.name }));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setRunningChainId("");
+    }
+  }
+
+  async function cancelWorkflowRun(run: WorkspaceWorkflowRunState) {
+    const confirmed = await confirm({
+      title: t("停止后续联动"),
+      description: t("将阻止尚未开始的后续步骤。当前已经启动的任务会继续执行。"),
+      confirmLabel: t("停止后续步骤"),
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+    setError("");
+    try {
+      await onCancelWorkflowRun(run.runId);
+      setStatus(t("已停止后续联动步骤"));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function deleteWorkflowChain(chainId: string) {
+    const chain = workflowChains.find((item) => item.id === chainId);
+    const confirmed = await confirm({
+      title: t("删除联动流程"),
+      description: t("确认删除“{name}”？已标记的原始动作不会被删除。", {
+        name: chain?.name || t("此联动流程"),
+      }),
+      confirmLabel: t("删除"),
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+    setError("");
+    try {
+      await onDeleteWorkflowChain(chainId);
+      setStatus(t("联动流程已删除"));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function setWorkflowChainEnabled(
+    chainId: string,
+    enabled: boolean,
+  ) {
+    setError("");
+    try {
+      await onWorkflowChainEnabledChange(chainId, enabled);
+      setStatus(t(enabled ? "联动流程已启用" : "联动流程已停用"));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function openWorkbenchTarget(
+    kind: string,
+    value: string,
+    label: string,
+  ) {
     if (!kind || !value) {
       return;
     }
     await invoke("open_external_resource", { kind, value });
-    setStatus(`已打开 ${label}`);
+    setStatus(t("已打开 {label}", { label }));
   }
 
-  async function openWorkspaceResource(resource: WorkspaceResourceShortcutItem) {
+  async function openWorkspaceResource(
+    resource: WorkspaceResourceShortcutItem,
+  ) {
     if (!resource.openable || !resource.openKind || !resource.value) {
       return;
     }
@@ -1121,7 +1341,11 @@ export function OverviewPage({
     setRunningKey(key);
     setError("");
     try {
-      await openWorkbenchTarget(resource.openKind, resource.value, resource.label);
+      await openWorkbenchTarget(
+        resource.openKind,
+        resource.value,
+        resource.label,
+      );
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1130,16 +1354,30 @@ export function OverviewPage({
   }
 
   function isLinkToolResource(resource: WorkspaceResourceShortcutItem) {
-    return resource.kind === "tool" && (resource.tool ?? "link").toLowerCase() === "link";
+    return (
+      resource.kind === "tool" &&
+      (resource.tool ?? "link").toLowerCase() === "link"
+    );
   }
 
-  function linkSourceIdForResource(resource?: WorkspaceResourceShortcutItem | null) {
-    return resource?.configSourceId || configSourceIdForWorkspace(activeProjectWorkspaceKey);
+  function linkSourceIdForResource(
+    resource?: WorkspaceResourceShortcutItem | null,
+  ) {
+    return (
+      resource?.toolConfigSourceId ||
+      configSourceIdForWorkspace(
+        resource?.workspaceKey || activeProjectWorkspaceKey,
+      )
+    );
   }
 
-  function linkRuntimeAction(resource: WorkspaceResourceShortcutItem): "run" | "stop" {
+  function linkRuntimeAction(
+    resource: WorkspaceResourceShortcutItem,
+  ): "run" | "stop" {
     const runtime = resource.linkRuntime;
-    return runtime?.canStop && runtime.status !== "stopped" && runtime.status !== "planned"
+    return runtime?.canStop &&
+      runtime.status !== "stopped" &&
+      runtime.status !== "planned"
       ? "stop"
       : "run";
   }
@@ -1155,20 +1393,28 @@ export function OverviewPage({
     return runtime.label;
   }
 
-  async function openWorkspaceLinkPlan(resource: WorkspaceResourceShortcutItem) {
+  async function openWorkspaceLinkPlan(
+    resource: WorkspaceResourceShortcutItem,
+  ) {
     const key = (resource.toolKey || resource.value || "").trim();
     const sourceId = linkSourceIdForResource(resource);
+    const proxySourceId = resource.toolProxySourceId ?? null;
+    const runtimeSourceId = resource.toolRuntimeSourceId ?? null;
+    const workspaceKey = resource.workspaceKey;
     if (!key) {
       setLinkPlanDialog({
         entryName: resource.label,
         key: "",
         sourceId,
+        proxySourceId,
+        runtimeSourceId,
+        workspaceKey,
         plan: null,
         report: null,
         runtime: resource.linkRuntime ?? null,
         loading: false,
         action: null,
-        error: "缺少 Link Key",
+        error: t("缺少 Link Key"),
       });
       return;
     }
@@ -1176,6 +1422,9 @@ export function OverviewPage({
       entryName: resource.label,
       key,
       sourceId,
+      proxySourceId,
+      runtimeSourceId,
+      workspaceKey,
       plan: null,
       report: null,
       runtime: resource.linkRuntime ?? null,
@@ -1184,11 +1433,20 @@ export function OverviewPage({
       error: "",
     });
     try {
-      const plan = await invoke<LinkPlan>("plan_link", { sourceId, key });
+      const plan = await invoke<LinkPlan>("plan_link", {
+        sourceId,
+        proxySourceId,
+        runtimeSourceId,
+        workspaceKey,
+        key,
+      });
       setLinkPlanDialog({
         entryName: resource.label,
         key,
-        sourceId,
+        sourceId: plan.sourceContext?.linkSourceId || sourceId,
+        proxySourceId: plan.sourceContext?.proxySourceId || proxySourceId,
+        runtimeSourceId: plan.sourceContext?.runtimeSourceId || runtimeSourceId,
+        workspaceKey,
         plan,
         report: null,
         runtime: resource.linkRuntime ?? null,
@@ -1201,6 +1459,9 @@ export function OverviewPage({
         entryName: resource.label,
         key,
         sourceId,
+        proxySourceId,
+        runtimeSourceId,
+        workspaceKey,
         plan: null,
         report: null,
         runtime: resource.linkRuntime ?? null,
@@ -1217,13 +1478,25 @@ export function OverviewPage({
       return;
     }
     const command =
-      action === "check" ? "check_link" : action === "run" ? "run_link" : "stop_link";
-    const sourceId = linkPlanDialog?.sourceId ?? configSourceIdForWorkspace(activeProjectWorkspaceKey);
+      action === "check"
+        ? "check_link"
+        : action === "run"
+          ? "run_link"
+          : "stop_link";
+    const sourceId =
+      linkPlanDialog?.sourceId ??
+      configSourceIdForWorkspace(activeProjectWorkspaceKey);
+    const proxySourceId = linkPlanDialog?.proxySourceId ?? null;
+    const runtimeSourceId = linkPlanDialog?.runtimeSourceId ?? null;
+    const workspaceKey =
+      linkPlanDialog?.workspaceKey ?? activeProjectWorkspaceKey;
     const linkName = linkPlanDialog?.entryName.trim() || key;
     const activityId =
       action === "check"
         ? ""
-        : recordActivity?.(linkActivityDraft(key, linkName, action, sourceId)) ?? "";
+        : (recordActivity?.(
+            linkActivityDraft(key, linkName, action, sourceId),
+          ) ?? "");
     setLinkPlanDialog((current) =>
       current
         ? {
@@ -1237,16 +1510,29 @@ export function OverviewPage({
       const report = await invoke<LinkExecutionReport>(
         command,
         action === "check"
-          ? { sourceId, key }
+          ? { sourceId, proxySourceId, runtimeSourceId, workspaceKey, key }
           : {
               sourceId,
+              proxySourceId,
+              runtimeSourceId,
+              workspaceKey,
               key,
               activityId: activityId || null,
               operationOrigin: "app",
             },
       );
       if (activityId && action !== "check") {
-        updateActivity?.(activityId, linkActivityResultPatch(report, action, sourceId));
+        updateActivity?.(
+          activityId,
+          linkActivityResultPatch(
+            report,
+            action,
+            sourceId,
+            workspaceKey,
+            proxySourceId,
+            runtimeSourceId,
+          ),
+        );
       }
       setLinkPlanDialog((current) =>
         current
@@ -1265,7 +1551,16 @@ export function OverviewPage({
       if (activityId && action !== "check") {
         updateActivity?.(
           activityId,
-          linkActivityFailurePatch(key, linkName, action, sourceId, reason),
+          linkActivityFailurePatch(
+            key,
+            linkName,
+            action,
+            sourceId,
+            reason,
+            workspaceKey,
+            proxySourceId,
+            runtimeSourceId,
+          ),
         );
       }
       setLinkPlanDialog((current) =>
@@ -1286,14 +1581,18 @@ export function OverviewPage({
   ) {
     const key = (resource.toolKey || resource.value || "").trim();
     const sourceId = linkSourceIdForResource(resource);
+    const proxySourceId = resource.toolProxySourceId ?? null;
+    const runtimeSourceId = resource.toolRuntimeSourceId ?? null;
     if (!key) {
-      setError("缺少 Link Key");
+      setError(t("缺少 Link Key"));
       return;
     }
-    const actionLabel = action === "stop" ? "停止" : "启动";
+    const actionLabel = t(action === "stop" ? "停止" : "启动");
     const command = action === "stop" ? "stop_link" : "run_link";
     const activityId =
-      recordActivity?.(linkActivityDraft(key, resource.label, action, sourceId)) ?? "";
+      recordActivity?.(
+        linkActivityDraft(key, resource.label, action, sourceId),
+      ) ?? "";
 
     setRunningKey(`tool:${resource.key}`);
     setError("");
@@ -1302,6 +1601,9 @@ export function OverviewPage({
     try {
       const report = await invoke<LinkExecutionReport>(command, {
         sourceId,
+        proxySourceId,
+        runtimeSourceId,
+        workspaceKey: resource.workspaceKey,
         key,
         activityId: activityId || null,
         operationOrigin: "app",
@@ -1309,25 +1611,53 @@ export function OverviewPage({
       if (activityId) {
         updateActivity?.(
           activityId,
-          linkActivityResultPatch(report, action, sourceId),
+          linkActivityResultPatch(
+            report,
+            action,
+            sourceId,
+            resource.workspaceKey,
+            proxySourceId,
+            runtimeSourceId,
+          ),
         );
       }
-      const failedStep = report.steps.find((step) => step.status === "failed");
-      if (failedStep) {
-        setError(`${failedStep.label} ${actionLabel}失败：${failedStep.summary}`);
+      const blockingStep = report.steps.find(linkExecutionStepBlocks);
+      if (blockingStep) {
+        setError(
+          t("{label} {action}失败：{reason}", {
+            label: translateInternalMessage(blockingStep.label, t),
+            action: actionLabel,
+            reason: translateInternalMessage(blockingStep.summary, t),
+          }),
+        );
       } else {
-        setStatus(`已${actionLabel}：${resource.label}`);
+        setStatus(t("已{action}：{label}", {
+          action: actionLabel,
+          label: resource.label,
+        }));
       }
       try {
         await loadOverview();
       } catch (refreshReason) {
-        setError(`已${actionLabel}，但刷新状态失败：${String(refreshReason)}`);
+        setError(t("已{action}，但刷新状态失败：{reason}", {
+          action: actionLabel,
+          reason: String(refreshReason),
+        }));
       }
     } catch (reason) {
       if (activityId) {
         updateActivity?.(
           activityId,
-          linkActivityFailurePatch(key, resource.label, action, sourceId, reason),
+          linkActivityFailurePatch(
+            key,
+            resource.label,
+            action,
+            sourceId,
+            reason,
+            resource.workspaceKey,
+            proxySourceId,
+            runtimeSourceId,
+          ),
         );
       }
       setError(String(reason));
@@ -1336,7 +1666,9 @@ export function OverviewPage({
     }
   }
 
-  async function openWorkspaceRootDirectory(group: WorkspacePinnedActionsOverview) {
+  async function openWorkspaceRootDirectory(
+    group: WorkspacePinnedActionsOverview,
+  ) {
     if (!group.rootDir) {
       return;
     }
@@ -1344,7 +1676,7 @@ export function OverviewPage({
     setRunningKey(key);
     setError("");
     try {
-      await openWorkbenchTarget("localPath", group.rootDir, "工作区目录");
+      await openWorkbenchTarget("localPath", group.rootDir, t("工作区目录"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1355,9 +1687,11 @@ export function OverviewPage({
   async function toggleWorkspaceProject(
     group: WorkspacePinnedActionsOverview,
     directory: WorkspaceProjectDirectoryItem,
+    debugProfileKey?: string,
+    expectedPort?: number,
   ) {
     if (group.key !== activeProjectWorkspaceKey) {
-      setError("请先切换到该工作区再操作项目");
+      setError(t("请先切换到该工作区再操作项目"));
       return;
     }
     const projectKey = directory.projectKey.trim();
@@ -1374,20 +1708,27 @@ export function OverviewPage({
         await invoke("stop_project_runtime", {
           project: projectKey,
         });
-        setStatus(`已停止 ${directory.projectName || projectKey}`);
+        setStatus(t("已停止 {name}", {
+          name: directory.projectName || projectKey,
+        }));
       } else {
-        const profileInfo = workspaceProjectRuntimeProfileInfo(
-          runtimeEntryByProjectKey.get(projectKey),
-          selectedDebugProfileKeys[projectKey],
-        );
-        await onStartProjectRuntime(
+        const started = await onStartProjectRuntime(
           projectKey,
-          profileInfo.debugProfileKey || undefined,
+          debugProfileKey === undefined
+            ? selectedDebugProfileKeys[projectKey] || ""
+            : debugProfileKey,
+          undefined,
+          expectedPort,
         );
+        if (started === false) {
+          return false;
+        }
       }
       await loadOverview();
+      return true;
     } catch (reason) {
       setError(String(reason));
+      return false;
     } finally {
       setRunningKey("");
     }
@@ -1398,7 +1739,7 @@ export function OverviewPage({
     directory: WorkspaceProjectDirectoryItem,
   ) {
     if (group.key !== activeProjectWorkspaceKey) {
-      setError("请先切换到该工作区再打开项目");
+      setError(t("请先切换到该工作区再打开项目"));
       return;
     }
     const projectKey = directory.projectKey.trim();
@@ -1411,7 +1752,9 @@ export function OverviewPage({
     setStatus("");
     try {
       await onFocusProjectRuntime(projectKey);
-      setStatus(`已打开 ${directory.projectName || projectKey}`);
+      setStatus(t("已打开 {label}", {
+        label: directory.projectName || projectKey,
+      }));
       await loadOverview();
     } catch (reason) {
       setError(String(reason));
@@ -1431,10 +1774,10 @@ export function OverviewPage({
     try {
       if (profile.running) {
         await onStopProxyProfile(profile.id);
-        setStatus(`已停止 ${profile.name}`);
+        setStatus(t("已停止 {name}", { name: profile.name }));
       } else {
         await onStartProxyProfile(profile.id);
-        setStatus(`已启动 ${profile.name}`);
+        setStatus(t("已启动 {name}", { name: profile.name }));
       }
       await loadOverview();
     } catch (reason) {
@@ -1451,10 +1794,13 @@ export function OverviewPage({
     setAiContextLoading(true);
     setError("");
     try {
-      const response = await invoke<WorkspaceAiContextResponse>("get_workspace_ai_context", {
-        workspaceKey: group.key,
-        options,
-      });
+      const response = await invoke<WorkspaceAiContextResponse>(
+        "get_workspace_ai_context",
+        {
+          workspaceKey: group.key,
+          options,
+        },
+      );
       setAiContextResponse(response);
       return response;
     } catch (reason) {
@@ -1480,7 +1826,9 @@ export function OverviewPage({
     await loadWorkspaceAiContext(aiContextGroup, aiContextOptions);
   }
 
-  async function updateAiContextOptions(patch: Partial<WorkspaceAiContextOptions>) {
+  async function updateAiContextOptions(
+    patch: Partial<WorkspaceAiContextOptions>,
+  ) {
     const nextOptions = { ...aiContextOptions, ...patch };
     setAiContextOptions(nextOptions);
     if (aiContextOpen && aiContextGroup) {
@@ -1490,7 +1838,8 @@ export function OverviewPage({
 
   async function applyAiContextPreset(presetKey: string) {
     const preset =
-      aiContextPresets.find((item) => item.key === presetKey) ?? BUILTIN_AI_CONTEXT_PRESETS[0];
+      aiContextPresets.find((item) => item.key === presetKey) ??
+      BUILTIN_AI_CONTEXT_PRESETS[0];
     setAiContextPresetKey(preset.key);
     setAiContextPresetName("");
     setAiContextOptions(preset.options);
@@ -1499,7 +1848,9 @@ export function OverviewPage({
     }
   }
 
-  async function persistAiContextCustomPresets(nextPresets: WorkspaceAiContextPreset[]) {
+  async function persistAiContextCustomPresets(
+    nextPresets: WorkspaceAiContextPreset[],
+  ) {
     const merged = await persistAiContextTemplatePresets(nextPresets);
     setAiContextPresets(merged);
     return merged;
@@ -1509,13 +1860,17 @@ export function OverviewPage({
     const currentPreset =
       aiContextPresets.find((preset) => preset.key === aiContextPresetKey) ??
       BUILTIN_AI_CONTEXT_PRESETS[0];
-    const label = aiContextPresetName.trim() || (currentPreset.custom ? currentPreset.label : "");
+    const label =
+      aiContextPresetName.trim() ||
+      (currentPreset.custom ? currentPreset.label : "");
     if (!label) {
-      setError("请填写场景名");
+      setError(t("请填写场景名"));
       return;
     }
     const nextPreset: WorkspaceAiContextPreset = {
-      key: currentPreset.custom ? currentPreset.key : normalizeAiContextPresetKey(label),
+      key: currentPreset.custom
+        ? currentPreset.key
+        : normalizeAiContextPresetKey(label),
       label,
       options: aiContextOptions,
       custom: true,
@@ -1529,11 +1884,13 @@ export function OverviewPage({
     await persistAiContextCustomPresets(nextPresets);
     setAiContextPresetKey(nextPreset.key);
     setAiContextPresetName("");
-    setStatus(`已保存场景 ${nextPreset.label}`);
+    setStatus(t("已保存场景 {name}", { name: nextPreset.label }));
   }
 
   async function deleteAiContextPreset() {
-    const currentPreset = aiContextPresets.find((preset) => preset.key === aiContextPresetKey);
+    const currentPreset = aiContextPresets.find(
+      (preset) => preset.key === aiContextPresetKey,
+    );
     if (!currentPreset?.custom) {
       return;
     }
@@ -1542,7 +1899,7 @@ export function OverviewPage({
     );
     await persistAiContextCustomPresets(nextPresets);
     await applyAiContextPreset(BUILTIN_AI_CONTEXT_PRESETS[0].key);
-    setStatus(`已删除场景 ${currentPreset.label}`);
+    setStatus(t("已删除场景 {name}", { name: currentPreset.label }));
   }
 
   async function copyAiContext(format: "markdown" | "json") {
@@ -1550,11 +1907,14 @@ export function OverviewPage({
       return;
     }
     try {
-      await copyPlainText(format === "json" ? aiContextJsonText : aiContextResponse.markdown);
+      await copyPlainText(
+        format === "json" ? aiContextJsonText : aiContextResponse.markdown,
+      );
       setStatus(
-        `已复制 ${aiContextResponse.workspaceName || aiContextGroup?.name || "工作区"} ${
-          format === "json" ? "JSON" : "Markdown"
-        } 上下文`,
+        t("已复制 {name} {format} 上下文", {
+          name: aiContextResponse.workspaceName || aiContextGroup?.name || t("工作区"),
+          format: format === "json" ? "JSON" : "Markdown",
+        }),
       );
     } catch (reason) {
       setError(String(reason));
@@ -1562,7 +1922,8 @@ export function OverviewPage({
   }
 
   async function selectWorkspaceConfig(workspaceKey: string) {
-    const currentEditingKey = workspaceDraft?.key ?? workspaceEditor?.workspace.key ?? "";
+    const currentEditingKey =
+      workspaceDraft?.key ?? workspaceEditor?.workspace.key ?? "";
     if (!workspaceKey || workspaceKey === currentEditingKey) {
       if (createOpen) {
         setCreateOpen(false);
@@ -1570,12 +1931,15 @@ export function OverviewPage({
       return;
     }
     const workspaceName =
-      projectWorkspaces.find((workspace) => workspace.key === workspaceKey)?.name ?? workspaceKey;
+      projectWorkspaces.find((workspace) => workspace.key === workspaceKey)
+        ?.name ?? workspaceKey;
     if (workspaceDirty) {
       const confirmed = await confirm({
-        title: "切换配置对象",
-        description: `当前配置有未保存修改，查看“${workspaceName}”会丢弃修改。`,
-        confirmLabel: "查看配置",
+        title: t("切换配置对象"),
+        description: t("当前配置有未保存修改，查看“{name}”会丢弃修改。", {
+          name: workspaceName,
+        }),
+        confirmLabel: t("查看配置"),
         tone: "danger",
         preferenceKey: "configuration.discard",
       });
@@ -1593,14 +1957,19 @@ export function OverviewPage({
     }
   }
 
-  async function deleteWorkspaceConfig(workspaceKey: string, workspaceName: string) {
+  async function deleteWorkspaceConfig(
+    workspaceKey: string,
+    workspaceName: string,
+  ) {
     if (!workspaceKey || workspaceKey === "system") {
       return;
     }
     const confirmed = await confirm({
-      title: "删除工作区配置",
-      description: `删除“${workspaceName}”的工作区配置。项目代码目录不会被删除，已绑定到该工作区的代理会解除绑定。`,
-      confirmLabel: "删除",
+      title: t("永久删除已归档工作区"),
+      description: t("永久删除“{name}”的工作区配置。项目代码和资源目录不会被删除，但已绑定代理会解除归属；此操作不能通过“恢复工作区”撤销。", {
+        name: workspaceName,
+      }),
+      confirmLabel: t("永久删除"),
       tone: "danger",
       preferenceKey: "destructive.delete",
     });
@@ -1612,14 +1981,16 @@ export function OverviewPage({
     setError("");
     setStatus("");
     try {
-      await invoke<ProjectWorkspaceState>("delete_project_workspace_config", { workspaceKey });
+      await invoke<ProjectWorkspaceState>("delete_project_workspace_config", {
+        workspaceKey,
+      });
       if (wasEditing) {
         setCreateOpen(false);
         await loadProjectWorkspaceEditor("system");
       }
       await onProjectConfigSaved();
       await loadOverview();
-      setStatus(`已删除工作区配置：${workspaceName}`);
+      setStatus(t("已删除工作区配置：{name}", { name: workspaceName }));
     } catch (reason) {
       setError(String(reason));
     }
@@ -1630,11 +2001,11 @@ export function OverviewPage({
     const key = normalizeWorkspaceKey(newWorkspaceKey || name);
     const description = newWorkspaceDescription.trim();
     if (!name) {
-      setError("请填写工作区名称");
+      setError(t("请填写工作区名称"));
       return;
     }
     if (!key) {
-      setError("请填写工作区 key");
+      setError(t("请填写工作区 key"));
       return;
     }
 
@@ -1647,7 +2018,9 @@ export function OverviewPage({
         name,
         description: description || null,
         workspaceType: newWorkspaceType,
-        rootDir: newWorkspaceIndependentDir ? newWorkspaceRootDir.trim() || null : null,
+        rootDir: newWorkspaceIndependentDir
+          ? newWorkspaceRootDir.trim() || null
+          : null,
         resourceDir: newWorkspaceResourceDir.trim() || null,
         worklogFile: "WORKLOG.md",
         createWorklog: createWorkspaceWorklog,
@@ -1665,11 +2038,11 @@ export function OverviewPage({
       setNewWorkspaceResourceDir("");
       setCreateWorkspaceWorklog(true);
       setAutoRecordWorkspaceWorklog(true);
-      setCopyCurrentWorkspace(true);
+      setCopyCurrentWorkspace(false);
       setCreateOpen(false);
       await loadOverview();
       await loadProjectWorkspaceEditor(key);
-      setStatus(`已创建：${name}`);
+      setStatus(t("已创建：{name}", { name }));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1684,15 +2057,15 @@ export function OverviewPage({
     const requirementDir = demandRequirementDir.trim();
     const repoPath = demandRepoPath.trim();
     if (!name) {
-      setError("请填写工作区名称");
+      setError(t("请填写工作区名称"));
       return;
     }
     if (!requirementDir) {
-      setError("请填写需求目录");
+      setError(t("请填写需求目录"));
       return;
     }
     if (!repoPath) {
-      setError("请填写项目目录");
+      setError(t("请填写项目目录"));
       return;
     }
 
@@ -1710,7 +2083,9 @@ export function OverviewPage({
         repoPath,
         project: demandProjectKey.trim() || null,
         branch: demandBranch.trim() || null,
-        rootDir: newWorkspaceIndependentDir ? newWorkspaceRootDir.trim() || null : null,
+        rootDir: newWorkspaceIndependentDir
+          ? newWorkspaceRootDir.trim() || null
+          : null,
         resourceDir: newWorkspaceResourceDir.trim() || null,
         worklogFile: "WORKLOG.md",
         createWorklog: createWorkspaceWorklog,
@@ -1726,7 +2101,7 @@ export function OverviewPage({
       setNewWorkspaceResourceDir("");
       setCreateWorkspaceWorklog(true);
       setAutoRecordWorkspaceWorklog(true);
-      setCopyCurrentWorkspace(true);
+      setCopyCurrentWorkspace(false);
       setDemandId("");
       setDemandRequirementDir("");
       setDemandRepoPath("");
@@ -1738,9 +2113,17 @@ export function OverviewPage({
       await loadProjectWorkspaceEditor(result.key);
       const branchWarning =
         result.branch.expected && result.branch.matches === false
-          ? `，当前分支 ${result.branch.current || "-"} 与目标分支不一致`
+          ? t("，当前分支 {current} 与目标分支不一致", {
+              current: result.branch.current || "-",
+            })
           : "";
-      setStatus(`已初始化：${result.name} · ${result.project.name}${branchWarning}`);
+      setStatus(
+        t("已初始化：{workspace} · {project}{warning}", {
+          workspace: result.name,
+          project: result.project.name,
+          warning: branchWarning,
+        }),
+      );
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1767,14 +2150,20 @@ export function OverviewPage({
     }
   }
 
-  async function chooseWorkspaceResourceDirectory(target: "create" | "edit" = "create") {
+  async function chooseWorkspaceResourceDirectory(
+    target: "create" | "edit" = "create",
+  ) {
     const currentResourceDir =
-      target === "edit" ? workspaceDraft?.resourceDir ?? "" : newWorkspaceResourceDir;
-    const currentRootDir = target === "edit" ? workspaceDraft?.rootDir ?? "" : newWorkspaceRootDir;
+      target === "edit"
+        ? (workspaceDraft?.resourceDir ?? "")
+        : newWorkspaceResourceDir;
+    const currentRootDir =
+      target === "edit" ? (workspaceDraft?.rootDir ?? "") : newWorkspaceRootDir;
     const selected = await open({
       directory: true,
       multiple: false,
-      defaultPath: currentResourceDir.trim() || currentRootDir.trim() || undefined,
+      defaultPath:
+        currentResourceDir.trim() || currentRootDir.trim() || undefined,
     });
     if (typeof selected === "string" && selected.trim()) {
       if (target === "edit") {
@@ -1799,21 +2188,15 @@ export function OverviewPage({
         "save_project_workspace_editor",
         { draft: workspaceDraft },
       );
-      setWorkspaceEditor(nextState);
-      setWorkspaceDraft(nextState.workspace);
+      applyWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
       await loadOverview();
-      setStatus(`已更新工作区 ${nextState.workspace.name}`);
+      setStatus(t("已更新工作区 {name}", { name: nextState.workspace.name }));
     } catch (reason) {
       setError(String(reason));
     } finally {
       setWorkspaceSaving(false);
     }
-  }
-
-  function applyWorkspaceEditorState(nextState: ProjectWorkspaceEditorState) {
-    setWorkspaceEditor(nextState);
-    setWorkspaceDraft(nextState.workspace);
   }
 
   async function createWorkspaceProjectCopy(projectKey: string) {
@@ -1831,7 +2214,7 @@ export function OverviewPage({
       applyWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
       await loadOverview();
-      setStatus("已创建工作区副本");
+      setStatus(t("已创建工作区副本"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1862,7 +2245,7 @@ export function OverviewPage({
       applyWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
       await loadOverview();
-      setStatus("已绑定已有目录");
+      setStatus(t("已绑定已有目录"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1885,7 +2268,7 @@ export function OverviewPage({
       applyWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
       await loadOverview();
-      setStatus("已恢复使用全局目录");
+      setStatus(t("已恢复使用全局目录"));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1900,20 +2283,70 @@ export function OverviewPage({
     setError("");
     try {
       await invoke("open_local_path", { path });
-      setStatus("已打开项目目录");
+      setStatus(t("已打开项目目录"));
+    } catch (reason) {
+      setError(String(reason));
+    }
+  }
+
+  async function runWorkspaceRuntimePreflightAction(
+    group: WorkspacePinnedActionsOverview,
+    directory: WorkspaceProjectDirectoryItem,
+    action: WorkspaceRuntimePreflightAction,
+  ) {
+    if (action.target === "quickFix") {
+      return;
+    }
+    setError("");
+    setStatus("");
+    try {
+      if (group.key && group.key !== activeProjectWorkspaceKey) {
+        await onProjectWorkspaceChange(group.key);
+      }
+      if (action.target === "projectDirectory") {
+        if (directory.path?.trim()) {
+          await openWorkspaceProjectDirectory(directory.path);
+        } else {
+          onOpenProjectManagementTarget(directory.projectKey, {
+            kind: "projectSettings",
+            section: "projectBasics",
+          });
+        }
+        return;
+      }
+      if (action.target === "proxy") {
+        onNavigateToPage("proxy");
+        setStatus(t("已打开本地代理"));
+        return;
+      }
+      if (action.target === "projectSettings") {
+        onOpenProjectManagementTarget(directory.projectKey, {
+          kind: "projectSettings",
+          section: action.section,
+        });
+        setStatus(t("已打开 {name} 配置", { name: directory.projectName }));
+        return;
+      }
+      onOpenProjectManagementTarget(directory.projectKey, {
+        kind: "runtimePanel",
+        tab: "config",
+      });
+      setStatus(t("已打开 {name} 运行配置", { name: directory.projectName }));
     } catch (reason) {
       setError(String(reason));
     }
   }
 
   function updateDraft(patch: Partial<ProjectWorkspaceEditorDraft>) {
-    setWorkspaceDraft((current) => (current ? { ...current, ...patch } : current));
+    setWorkspaceDraft((current) =>
+      current ? { ...current, ...patch } : current,
+    );
   }
 
   async function handleCreateWorkspaceType(label: string) {
     try {
       const option = await addWorkspaceType(label);
-      setStatus(`已新增类型 ${option.label}`);
+      setStatus(t("已新增类型 {label}", { label: option.label }));
       return option;
     } catch (reason) {
       setError(String(reason));
@@ -1924,7 +2357,10 @@ export function OverviewPage({
   async function handleRemoveWorkspaceType(optionKey: string, label: string) {
     const usedCount = workspaceTypeUsageCounts.get(optionKey) ?? 0;
     if (usedCount > 0) {
-      setError(`已有 ${usedCount} 个工作区使用 ${label}`);
+      setError(t("已有 {count} 个工作区使用 {label}", {
+        count: usedCount,
+        label,
+      }));
       return;
     }
     try {
@@ -1945,7 +2381,7 @@ export function OverviewPage({
             }
           : current,
       );
-      setStatus(`已删除类型 ${label}`);
+      setStatus(t("已删除类型 {label}", { label }));
     } catch (reason) {
       setError(String(reason));
     }
@@ -1957,11 +2393,14 @@ export function OverviewPage({
   }
 
   const featuredGroup = overviewFilterActive
-    ? filteredGroups.find((group) => group.system) ??
+    ? (filteredGroups.find((group) => group.system) ??
       filteredGroups.find((group) => group.key === activeProjectWorkspaceKey) ??
       filteredGroups[0] ??
-      null
-    : filteredGroups.find((group) => group.system) ?? activeGroup ?? filteredGroups[0] ?? null;
+      null)
+    : (filteredGroups.find((group) => group.system) ??
+      activeGroup ??
+      filteredGroups[0] ??
+      null);
   const listedGroups = featuredGroup
     ? filteredGroups.filter((group) => group.key !== featuredGroup.key)
     : filteredGroups;
@@ -1988,7 +2427,7 @@ export function OverviewPage({
         onProjectManagementViewChange(target.projectManagementView);
       }
       onNavigateToPage(target.page);
-      setStatus(`已打开 ${target.label}`);
+      setStatus(t("已打开 {label}", { label: target.label }));
     } catch (reason) {
       setError(String(reason));
     }
@@ -2008,13 +2447,13 @@ export function OverviewPage({
     return [
       {
         key: "projects",
-        label: "项目",
-        title: "打开项目管理",
+        label: t("项目"),
+        title: t("打开项目管理"),
         icon: <AppWindowIcon fontSize="small" />,
         onClick: () =>
           openWorkspaceModule(group, {
             page: "projectManagement",
-            label: "项目管理",
+            label: t("项目管理"),
             projectManagementView: "projects",
             projectKey,
           }),
@@ -2033,7 +2472,7 @@ export function OverviewPage({
       {
         key: page,
         label,
-        title: `打开${label}`,
+        title: t("打开{label}", { label }),
         icon,
         onClick: () =>
           openWorkspaceModule(group, {
@@ -2041,7 +2480,9 @@ export function OverviewPage({
             label,
             projectManagementView,
             projectKey:
-              page === "projectManagement" ? workspaceDefaultProjectKey(group) : null,
+              page === "projectManagement"
+                ? workspaceDefaultProjectKey(group)
+                : null,
           }),
       },
     ];
@@ -2061,7 +2502,10 @@ export function OverviewPage({
           ) : null}
         </div>
         {actions.length > 0 ? (
-          <div className="overview-section-actions" aria-label={`${title}快捷入口`}>
+          <div
+            className="overview-section-actions"
+            aria-label={t("{title}快捷入口", { title })}
+          >
             {actions.map((action) => (
               <Tooltip key={action.key} title={action.title}>
                 <span>
@@ -2099,11 +2543,13 @@ export function OverviewPage({
           {actions.map((item) => {
             const running = runningKey === item.action.dedupeKey;
             const updatedAt = formatUpdatedAt(item.updatedAtMs);
-            const confirmationPreferenceKey = confirmationPreferenceKeyForTrayAction(
-              item.action.kind,
-            );
+            const confirmationPreferenceKey =
+              confirmationPreferenceKeyForTrayAction(item.action.kind);
             const actionNeedsConfirmation = confirmationPreferenceKey
-              ? confirmationEnabled(confirmationPreferences, confirmationPreferenceKey)
+              ? confirmationEnabled(
+                  confirmationPreferences,
+                  confirmationPreferenceKey,
+                )
               : item.confirmRequired;
             const labelParams = actionLabelParams(item);
             const paramTag =
@@ -2112,7 +2558,10 @@ export function OverviewPage({
                   arrow
                   placement="top-start"
                   title={
-                    <Stack className="overview-action-param-tooltip" spacing={0.4}>
+                    <Stack
+                      className="overview-action-param-tooltip"
+                      spacing={0.4}
+                    >
                       {labelParams.map((param) => (
                         <span
                           key={`${item.action.dedupeKey}:${param.label}:${param.value}`}
@@ -2126,7 +2575,7 @@ export function OverviewPage({
                   }
                 >
                   <span className="overview-action-param-label" tabIndex={0}>
-                    参数 {labelParams.length}
+                    {t("参数 {count}", { count: labelParams.length })}
                   </span>
                 </Tooltip>
               ) : null;
@@ -2147,7 +2596,11 @@ export function OverviewPage({
                       label={item.kindLabel}
                     />
                     {paramTag}
-                    <Typography className="overview-action-title" noWrap title={item.label}>
+                    <Typography
+                      className="overview-action-title"
+                      noWrap
+                      title={item.label}
+                    >
                       {item.label}
                     </Typography>
                   </Stack>
@@ -2176,14 +2629,18 @@ export function OverviewPage({
                       {updatedAt}
                     </Typography>
                   ) : null}
-                  <Tooltip title={actionNeedsConfirmation ? "确认后运行" : "运行"}>
+                  <Tooltip
+                    title={
+                      actionNeedsConfirmation ? t("确认后运行") : t("运行")
+                    }
+                  >
                     <span>
                       <IconButton
                         size="small"
                         className="overview-action-run"
                         onClick={() => void executeAction(item)}
                         disabled={Boolean(runningKey)}
-                        aria-label={`运行 ${item.label}`}
+                        aria-label={t("运行 {label}", { label: item.label })}
                       >
                         {running ? (
                           <CircularProgress size={15} thickness={5} />
@@ -2202,44 +2659,92 @@ export function OverviewPage({
     );
   }
 
-  function renderWorkspaceCard(group: WorkspacePinnedActionsOverview, featured = false) {
+  function renderWorkspaceCard(
+    group: WorkspacePinnedActionsOverview,
+    featured = false,
+  ) {
     const active = group.key === activeProjectWorkspaceKey;
     const collapsed = collapsedWorkspaceKeys.has(group.key);
     const stateItems = workspaceStateItems(group, active);
-    const visibleResources = group.resources.filter((resource) => resource.kind !== "tool");
-    const visibleTools = group.resources.filter((resource) => resource.kind === "tool");
+    const visibleResources = group.resources.filter(
+      (resource) => resource.kind !== "tool",
+    );
+    const visibleTools = group.resources.filter(
+      (resource) => resource.kind === "tool",
+    );
     const visibleDirectories = group.projectDirectories;
     const visibleProxyProfiles = group.proxyProfiles;
-    const visibleBuildActions = group.actions.filter((item) => actionGroupKind(item) === "build");
-    const visibleGitActions = group.actions.filter((item) => actionGroupKind(item) === "git");
-    const visibleOtherActions = group.actions.filter((item) => actionGroupKind(item) === "other");
+    const visibleBuildActions = group.actions.filter(
+      (item) => actionGroupKind(item) === "build",
+    );
+    const visibleGitActions = group.actions.filter(
+      (item) => actionGroupKind(item) === "git",
+    );
+    const visibleOtherActions = group.actions.filter(
+      (item) => actionGroupKind(item) === "other",
+    );
+    const groupWorkflowChains = workflowChains.filter(
+      (chain) => chain.workspaceKey === group.key,
+    );
+    const workflowActionOptions: WorkspaceWorkflowActionOption[] = [
+      ...visibleGitActions,
+      ...visibleBuildActions,
+      ...visibleOtherActions,
+    ]
+      .filter((item) => isWorkspaceWorkflowActionSupported(item.action))
+      .map((item) => ({
+        action: item.action,
+        label: item.label,
+        kindLabel: item.kindLabel,
+      }));
+    const showWorkflowPanel =
+      !group.system &&
+      (groupWorkflowChains.length > 0 || workflowActionOptions.length > 0);
     const showDirectoryPanel = visibleDirectories.length > 0;
-    const showProxyPanel = visibleProxyProfiles.length > 0 || (active && !group.system);
+    const showProxyPanel =
+      visibleProxyProfiles.length > 0 || (active && !group.system);
     const showRootDirectoryShortcut = Boolean(
       group.rootDir && !showDirectoryPanel && !group.system,
     );
-    const showShortcutPanel = visibleResources.length > 0 || showRootDirectoryShortcut;
+    const showShortcutPanel =
+      visibleResources.length > 0 || showRootDirectoryShortcut;
     const showToolPanel = visibleTools.length > 0;
     const showContentPanel =
-      showShortcutPanel || showToolPanel || showDirectoryPanel || showProxyPanel;
+      showShortcutPanel ||
+      showToolPanel ||
+      showDirectoryPanel ||
+      showProxyPanel;
     const showBuildActionsPanel = visibleBuildActions.length > 0;
     const showGitActionsPanel = visibleGitActions.length > 0;
     const showOtherActionsPanel = visibleOtherActions.length > 0;
-    const showActionsPanel = showBuildActionsPanel || showGitActionsPanel || showOtherActionsPanel;
-    const showBodyPanel = showContentPanel || showActionsPanel;
+    const showActionsPanel =
+      showBuildActionsPanel || showGitActionsPanel || showOtherActionsPanel;
+    const showBodyPanel =
+      showContentPanel || showWorkflowPanel || showActionsPanel;
     const actionSummaryCount =
-      visibleBuildActions.length + visibleGitActions.length + visibleOtherActions.length;
+      visibleBuildActions.length +
+      visibleGitActions.length +
+      visibleOtherActions.length;
     const typeLabel = workspaceTypeLabel(
       group.workspaceType,
       group.workspaceTypeLabel,
       workspaceTypeOptions,
     );
+    const displayTypeLabel = t(typeLabel);
     const showTypeChip = !group.system && typeLabel.trim().length > 0;
     const summaryItems = [
-      group.entryCount > 0 ? `${group.entryCount} 入口` : "",
-      group.projectCount > 0 ? `${group.projectCount} 项目` : "",
-      group.proxyProfileCount > 0 ? `${group.proxyProfileCount} 代理` : "",
-      actionSummaryCount > 0 ? `${actionSummaryCount} 动作` : "",
+      group.entryCount > 0
+        ? t("{count} 个入口", { count: group.entryCount })
+        : "",
+      group.projectCount > 0
+        ? t("{count} 个项目", { count: group.projectCount })
+        : "",
+      group.proxyProfileCount > 0
+        ? t("{count} 个代理", { count: group.proxyProfileCount })
+        : "",
+      actionSummaryCount > 0
+        ? t("{count} 个动作", { count: actionSummaryCount })
+        : "",
     ].filter(Boolean);
 
     return (
@@ -2251,35 +2756,51 @@ export function OverviewPage({
         <div className="overview-workspace-header">
           <div className="overview-workspace-heading">
             <div className="overview-workspace-title-row">
-              <Typography component={featured ? "h2" : "h3"} className="overview-workspace-title" noWrap>
+              <Typography
+                component={featured ? "h2" : "h3"}
+                className="overview-workspace-title"
+                noWrap
+              >
                 {group.name}
               </Typography>
               {showTypeChip ? (
-                <Chip size="small" className="overview-workspace-type-chip" label={typeLabel} />
+                <Chip
+                  size="small"
+                  className="overview-workspace-type-chip"
+                  label={displayTypeLabel}
+                />
               ) : null}
               {stateItems.map((item) => (
-                <span key={`${item.tone}:${item.label}`} className={`overview-workspace-state-chip is-${item.tone}`}>
-                  {item.label}
+                <span
+                  key={`${item.tone}:${item.label}`}
+                  className={`overview-workspace-state-chip is-${item.tone}`}
+                >
+                  {workspaceStateItemLabel(item, t)}
                 </span>
               ))}
             </div>
           </div>
           <div className="overview-workspace-tools">
             {summaryItems.length > 0 ? (
-              <div className="overview-workspace-summary" aria-label={summaryItems.join("，")}>
+              <div
+                className="overview-workspace-summary"
+                aria-label={summaryItems.join("，")}
+              >
                 {summaryItems.map((item) => (
                   <span key={item}>{item}</span>
                 ))}
               </div>
             ) : null}
-            <Tooltip title="提取 AI 上下文">
+            <Tooltip title={t("提取 AI 上下文")}>
               <span>
                 <IconButton
                   size="small"
                   className="overview-context-button"
                   onClick={() => void openWorkspaceAiContext(group)}
                   disabled={aiContextLoading}
-                  aria-label={`提取 ${group.name} 的 AI 上下文`}
+                  aria-label={t("提取 {name} 的 AI 上下文", {
+                    name: group.name,
+                  })}
                 >
                   {aiContextLoading && aiContextGroup?.key === group.key ? (
                     <CircularProgress size={15} thickness={5} />
@@ -2289,15 +2810,22 @@ export function OverviewPage({
                 </IconButton>
               </span>
             </Tooltip>
-            <Tooltip title={collapsed ? "展开" : "收起"}>
+            <Tooltip title={collapsed ? t("展开") : t("收起")}>
               <IconButton
                 size="small"
                 className="overview-collapse-toggle"
                 onClick={() => toggleWorkspaceCollapsed(group.key)}
-                aria-label={`${collapsed ? "展开" : "收起"} ${group.name}`}
+                aria-label={t(
+                  collapsed ? "展开 {name}" : "收起 {name}",
+                  { name: group.name },
+                )}
                 aria-expanded={!collapsed}
               >
-                {collapsed ? <ExpandIcon fontSize="small" /> : <CollapseIcon fontSize="small" />}
+                {collapsed ? (
+                  <ExpandIcon fontSize="small" />
+                ) : (
+                  <CollapseIcon fontSize="small" />
+                )}
               </IconButton>
             </Tooltip>
           </div>
@@ -2310,19 +2838,23 @@ export function OverviewPage({
                 {showShortcutPanel ? (
                   <div className="overview-shortcut-panel">
                     {renderSectionHeading(
-                      "入口",
+                      t("入口"),
                       moduleQuickActions(
                         group,
                         "resources",
-                        "资源入口",
+                        t("资源入口"),
                         <WebsiteIcon fontSize="small" />,
                       ),
                     )}
-                    <div className={`overview-shortcut-grid${group.system ? " is-system" : ""}`}>
+                    <div
+                      className={`overview-shortcut-grid${group.system ? " is-system" : ""}`}
+                    >
                       {visibleResources.map((resource) => {
-                        const running = runningKey === `resource:${resource.key}`;
+                        const running =
+                          runningKey === `resource:${resource.key}`;
                         const shortcutDetail =
-                          resource.category && resource.category !== resource.label
+                          resource.category &&
+                          resource.category !== resource.label
                             ? resource.category
                             : resource.kindLabel;
                         return (
@@ -2334,14 +2866,24 @@ export function OverviewPage({
                             disabled={Boolean(runningKey) || !resource.openable}
                             title={resource.value ?? resource.label}
                           >
-                            <span className="overview-shortcut-icon" aria-hidden="true">
-                              {running ? <CircularProgress size={14} /> : shortcutIcon(resource.kind)}
+                            <span
+                              className="overview-shortcut-icon"
+                              aria-hidden="true"
+                            >
+                              {running ? (
+                                <CircularProgress size={14} />
+                              ) : (
+                                shortcutIcon(resource.kind)
+                              )}
                             </span>
                             <span className="overview-shortcut-copy">
                               <strong>{resource.label}</strong>
                               <small>{shortcutDetail}</small>
                             </span>
-                            <span className="overview-shortcut-chevron" aria-hidden="true">
+                            <span
+                              className="overview-shortcut-chevron"
+                              aria-hidden="true"
+                            >
                               ›
                             </span>
                           </button>
@@ -2356,14 +2898,20 @@ export function OverviewPage({
                           disabled={Boolean(runningKey)}
                           title={group.rootDir ?? undefined}
                         >
-                          <span className="overview-shortcut-icon" aria-hidden="true">
+                          <span
+                            className="overview-shortcut-icon"
+                            aria-hidden="true"
+                          >
                             <FolderIcon fontSize="small" />
                           </span>
                           <span className="overview-shortcut-copy">
-                            <strong>工作目录</strong>
+                            <strong>{t("工作目录")}</strong>
                             <small>{group.rootDir}</small>
                           </span>
-                          <span className="overview-shortcut-chevron" aria-hidden="true">
+                          <span
+                            className="overview-shortcut-chevron"
+                            aria-hidden="true"
+                          >
                             ›
                           </span>
                         </button>
@@ -2375,24 +2923,30 @@ export function OverviewPage({
                 {showToolPanel ? (
                   <div className="overview-shortcut-panel">
                     {renderSectionHeading(
-                      "工具",
+                      t("工具"),
                       moduleQuickActions(
                         group,
                         "resources",
-                        "资源入口",
+                        t("资源入口"),
                         <WorkflowIcon fontSize="small" />,
                       ),
                     )}
-                    <div className={`overview-shortcut-grid${group.system ? " is-system" : ""}`}>
+                    <div
+                      className={`overview-shortcut-grid${group.system ? " is-system" : ""}`}
+                    >
                       {visibleTools.map((resource) => {
                         const running = runningKey === `tool:${resource.key}`;
                         const canPlan = isLinkToolResource(resource);
-                        const disabled = Boolean(runningKey) || (!canPlan && !resource.openable);
+                        const disabled =
+                          Boolean(runningKey) ||
+                          (!canPlan && !resource.openable);
                         if (canPlan) {
                           const runtimeAction = linkRuntimeAction(resource);
                           const runtimeStatus = linkRuntimeLabel(resource);
                           const actionTitle =
-                            runtimeAction === "stop" ? "一键停止" : "一键启动";
+                            runtimeAction === "stop"
+                              ? t("一键停止")
+                              : t("一键启动");
                           const actionDisabled =
                             Boolean(runningKey) ||
                             (runtimeAction === "stop"
@@ -2404,15 +2958,24 @@ export function OverviewPage({
                             <div
                               key={resource.key}
                               className={`overview-shortcut overview-shortcut--${resource.kind} overview-shortcut--with-run`}
-                              title={resource.detail ?? resource.value ?? resource.label}
+                              title={
+                                resource.detail ??
+                                resource.value ??
+                                resource.label
+                              }
                             >
                               <button
                                 type="button"
                                 className="overview-shortcut-main"
-                                onClick={() => void openWorkspaceLinkPlan(resource)}
+                                onClick={() =>
+                                  void openWorkspaceLinkPlan(resource)
+                                }
                                 disabled={Boolean(runningKey)}
                               >
-                                <span className="overview-shortcut-icon" aria-hidden="true">
+                                <span
+                                  className="overview-shortcut-icon"
+                                  aria-hidden="true"
+                                >
                                   {running ? (
                                     <CircularProgress size={14} />
                                   ) : (
@@ -2422,7 +2985,12 @@ export function OverviewPage({
                                 <span className="overview-shortcut-copy">
                                   <strong>{resource.label}</strong>
                                   <small>
-                                    {[resource.detail || resource.value || resource.kindLabel, runtimeStatus]
+                                    {[
+                                      resource.detail ||
+                                        resource.value ||
+                                        resource.kindLabel,
+                                      runtimeStatus,
+                                    ]
                                       .filter(Boolean)
                                       .join(" · ")}
                                   </small>
@@ -2434,13 +3002,24 @@ export function OverviewPage({
                                     size="small"
                                     className="overview-shortcut-run-button"
                                     onClick={() =>
-                                      void executeWorkspaceLinkAction(resource, runtimeAction)
+                                      void executeWorkspaceLinkAction(
+                                        resource,
+                                        runtimeAction,
+                                      )
                                     }
                                     disabled={actionDisabled}
-                                    aria-label={`${runtimeAction === "stop" ? "停止" : "启动"} ${resource.label}`}
+                                    aria-label={t(
+                                      runtimeAction === "stop"
+                                        ? "停止 {name}"
+                                        : "启动 {name}",
+                                      { name: resource.label },
+                                    )}
                                   >
                                     {running ? (
-                                      <CircularProgress size={14} thickness={5} />
+                                      <CircularProgress
+                                        size={14}
+                                        thickness={5}
+                                      />
                                     ) : runtimeAction === "stop" ? (
                                       <StopIcon fontSize="small" />
                                     ) : (
@@ -2457,20 +3036,36 @@ export function OverviewPage({
                             key={resource.key}
                             type="button"
                             className={`overview-shortcut overview-shortcut--${resource.kind}`}
-                            onClick={() =>
-                              void openWorkspaceResource(resource)
-                            }
+                            onClick={() => void openWorkspaceResource(resource)}
                             disabled={disabled}
-                            title={resource.detail ?? resource.value ?? resource.label}
+                            title={
+                              resource.detail ??
+                              resource.value ??
+                              resource.label
+                            }
                           >
-                            <span className="overview-shortcut-icon" aria-hidden="true">
-                              {running ? <CircularProgress size={14} /> : shortcutIcon(resource.kind)}
+                            <span
+                              className="overview-shortcut-icon"
+                              aria-hidden="true"
+                            >
+                              {running ? (
+                                <CircularProgress size={14} />
+                              ) : (
+                                shortcutIcon(resource.kind)
+                              )}
                             </span>
                             <span className="overview-shortcut-copy">
                               <strong>{resource.label}</strong>
-                              <small>{resource.detail || resource.value || resource.kindLabel}</small>
+                              <small>
+                                {resource.detail ||
+                                  resource.value ||
+                                  resource.kindLabel}
+                              </small>
                             </span>
-                            <span className="overview-shortcut-chevron" aria-hidden="true">
+                            <span
+                              className="overview-shortcut-chevron"
+                              aria-hidden="true"
+                            >
                               ›
                             </span>
                           </button>
@@ -2482,130 +3077,83 @@ export function OverviewPage({
 
                 {showDirectoryPanel ? (
                   <div className="overview-directory-panel">
-                    {renderSectionHeading("项目", projectSectionQuickActions(group))}
+                    {renderSectionHeading(
+                      t("项目"),
+                      projectSectionQuickActions(group),
+                    )}
                     <div className="overview-directory-list">
                       {visibleDirectories.map((directory) => {
-                        const projectRunning = directory.running || directory.canStop;
-                        const profileInfo = workspaceProjectRuntimeProfileInfo(
-                          runtimeEntryByProjectKey.get(directory.projectKey),
-                          selectedDebugProfileKeys[directory.projectKey],
-                        );
-                        const profileSummary = projectRuntimePreferencesHydrated
-                          ? profileInfo.summary
-                          : "正在读取启动档案";
+                        const projectRunning =
+                          directory.running || directory.canStop;
                         const projectAction = projectRunning ? "stop" : "start";
                         const actionRunning =
                           runningKey ===
                           `project:${group.key}:${directory.projectKey}:${projectAction}`;
                         const focusRunning =
-                          runningKey === `project:${group.key}:${directory.projectKey}:focus`;
-                        const canToggleProject =
-                          active &&
-                          Boolean(directory.projectKey) &&
-                          (projectRunning ||
-                            (projectRuntimePreferencesHydrated && directory.canStart));
-                        const canFocusProject =
-                          active &&
-                          Boolean(directory.projectKey) &&
-                          projectRunning &&
-                          directory.canFocusRuntime;
-                        const projectToggleTitle = projectRunning
-                          ? "停止项目"
-                          : canToggleProject
-                            ? "启动项目"
-                            : !projectRuntimePreferencesHydrated
-                              ? "正在读取启动档案"
-                              : active
-                                ? "项目暂不可启动"
-                                : "设为当前工作区后启动";
-                        const projectOpenTitle = canFocusProject
-                          ? "打开运行中的项目"
-                          : active
-                            ? "未配置打开地址，且未识别到启动 URL"
-                            : "设为当前工作区后打开";
+                          runningKey ===
+                          `project:${group.key}:${directory.projectKey}:focus`;
+                        const runtimeEntry = runtimeEntryByProjectKey.get(
+                          directory.projectKey,
+                        );
                         return (
-                          <div
+                          <WorkspaceProjectRuntimeRow
                             key={directory.projectKey}
-                            className={`overview-directory-row${
-                              projectRunning ? " is-running" : ""
-                            }`}
-                            title={[profileSummary, directory.path].filter(Boolean).join(" · ")}
-                          >
-                            <button
-                              type="button"
-                              className="overview-directory-main"
-                              onClick={() => void openWorkspaceProjectDirectory(directory.path ?? "")}
-                              disabled={!directory.path || Boolean(runningKey)}
-                            >
-                              <span className="overview-shortcut-icon" aria-hidden="true">
-                                <FolderIcon fontSize="small" />
-                              </span>
-                              <span className="overview-shortcut-copy">
-                                <span className="overview-directory-name-row">
-                                  <strong>{directory.projectName}</strong>
-                                  <span
-                                    className={`overview-directory-chip is-${projectDirectoryTone(directory.mode)}`}
-                                  >
-                                    {projectDirectoryLabel(directory.modeLabel)}
-                                  </span>
-                                  {projectRunning ? (
-                                    <span className="overview-directory-chip is-success">
-                                      {directory.statusLabel || "运行中"}
-                                    </span>
-                                  ) : null}
-                                </span>
-                                <small>
-                                  {[profileSummary, directory.path || "目录未配置"].join(" · ")}
-                                </small>
-                              </span>
-                            </button>
-                            <span className="overview-directory-actions">
-                              {projectRunning ? (
-                                <Tooltip title={projectOpenTitle}>
-                                  <span>
-                                    <IconButton
-                                      size="small"
-                                      className="overview-project-start overview-project-open"
-                                      onClick={() =>
-                                        void focusWorkspaceProjectRuntime(group, directory)
-                                      }
-                                      disabled={!canFocusProject || Boolean(runningKey)}
-                                      aria-label={`打开 ${directory.projectName}`}
-                                    >
-                                      {focusRunning ? (
-                                        <CircularProgress size={15} thickness={5} />
-                                      ) : (
-                                        <OpenExternalIcon fontSize="small" />
-                                      )}
-                                    </IconButton>
-                                  </span>
-                                </Tooltip>
-                              ) : null}
-                              <Tooltip title={projectToggleTitle}>
-                                <span>
-                                  <IconButton
-                                    size="small"
-                                    className={`overview-project-start overview-project-toggle${
-                                      projectRunning ? " is-running" : ""
-                                    }`}
-                                    onClick={() => void toggleWorkspaceProject(group, directory)}
-                                    disabled={!canToggleProject || Boolean(runningKey)}
-                                    aria-label={`${projectRunning ? "停止" : "启动"} ${
-                                      directory.projectName
-                                    }`}
-                                  >
-                                    {actionRunning ? (
-                                      <CircularProgress size={15} thickness={5} />
-                                    ) : projectRunning ? (
-                                      <StopIcon fontSize="small" />
-                                    ) : (
-                                      <PlayIcon fontSize="small" />
-                                    )}
-                                  </IconButton>
-                                </span>
-                              </Tooltip>
-                            </span>
-                          </div>
+                            workspace={group}
+                            directory={directory}
+                            runtimeEntry={runtimeEntry}
+                            selectedDebugProfileKey={
+                              selectedDebugProfileKeys[directory.projectKey]
+                            }
+                            active={active}
+                            preferencesHydrated={
+                              projectRuntimePreferencesHydrated
+                            }
+                            actionRunning={actionRunning}
+                            focusRunning={focusRunning}
+                            anyActionRunning={Boolean(runningKey)}
+                            onOpenDirectory={openWorkspaceProjectDirectory}
+                            onStart={(debugProfileKey, expectedPort) =>
+                              toggleWorkspaceProject(
+                                group,
+                                directory,
+                                debugProfileKey,
+                                expectedPort,
+                              )
+                            }
+                            onRequestStart={(forceConfirm = false) => {
+                              if (!runtimeEntry) {
+                                return toggleWorkspaceProject(group, directory);
+                              }
+                              return runtimeStartLauncher.requestStart(
+                                runtimeEntry,
+                                { forceConfirm },
+                              );
+                            }}
+                            onStop={() => {
+                              void toggleWorkspaceProject(group, directory);
+                            }}
+                            onFocus={() =>
+                              focusWorkspaceProjectRuntime(group, directory)
+                            }
+                            onPreflightAction={(action) =>
+                              runWorkspaceRuntimePreflightAction(
+                                group,
+                                directory,
+                                action,
+                              )
+                            }
+                            onStartProxy={async (profileId, sourceId) => {
+                              await onStartProxyProfile(profileId, sourceId);
+                              await loadOverview();
+                            }}
+                            onProjectConfigSaved={onProjectConfigSaved}
+                            onSelectDebugProfile={(profileKey) =>
+                              onProjectDebugProfileChange(
+                                directory.projectKey,
+                                profileKey,
+                              )
+                            }
+                          />
                         );
                       })}
                     </div>
@@ -2615,11 +3163,11 @@ export function OverviewPage({
                 {showProxyPanel ? (
                   <div className="overview-directory-panel overview-proxy-panel">
                     {renderSectionHeading(
-                      "本地代理",
+                      t("本地代理"),
                       moduleQuickActions(
                         group,
                         "proxy",
-                        "本地代理",
+                        t("本地代理"),
                         <TerminalIcon fontSize="small" />,
                       ),
                     )}
@@ -2635,9 +3183,9 @@ export function OverviewPage({
                             </span>
                             <span className="overview-shortcut-copy">
                               <span className="overview-directory-name-row">
-                                <strong>暂无绑定代理</strong>
+                                <strong>{t("暂无绑定代理")}</strong>
                               </span>
-                              <small>当前工作区未绑定代理</small>
+                              <small>{t("当前工作区未绑定代理")}</small>
                             </span>
                           </div>
                         </div>
@@ -2646,8 +3194,12 @@ export function OverviewPage({
                         const running =
                           runningKey ===
                           `proxy:${group.key}:${profile.id}:${profile.running ? "stop" : "start"}`;
-                        const statusLabel = profile.running ? "运行中" : "未启动";
-                        const ruleLabel = `${profile.ruleCount} 条规则`;
+                        const statusLabel = profile.running
+                          ? t("运行中")
+                          : t("未启动");
+                        const ruleLabel = t("{count} 条规则", {
+                          count: profile.ruleCount,
+                        });
                         return (
                           <div
                             key={profile.id}
@@ -2679,16 +3231,32 @@ export function OverviewPage({
                                 </small>
                               </span>
                             </div>
-                            <Tooltip title={profile.running ? "停止代理服务" : "启动代理服务"}>
+                            <Tooltip
+                              title={
+                                profile.running
+                                  ? t("停止代理服务")
+                                  : t("启动代理服务")
+                              }
+                            >
                               <span>
                                 <IconButton
                                   size="small"
                                   className={`overview-project-start overview-proxy-toggle${
                                     profile.running ? " is-running" : ""
                                   }`}
-                                  onClick={() => void toggleWorkspaceProxyProfile(group, profile)}
+                                  onClick={() =>
+                                    void toggleWorkspaceProxyProfile(
+                                      group,
+                                      profile,
+                                    )
+                                  }
                                   disabled={Boolean(runningKey)}
-                                  aria-label={`${profile.running ? "停止" : "启动"} ${profile.name}`}
+                                  aria-label={t(
+                                    profile.running
+                                      ? "停止 {name}"
+                                      : "启动 {name}",
+                                    { name: profile.name },
+                                  )}
                                 >
                                   {running ? (
                                     <CircularProgress size={15} thickness={5} />
@@ -2709,16 +3277,31 @@ export function OverviewPage({
               </div>
             ) : null}
 
+            {showWorkflowPanel ? (
+              <WorkspaceWorkflowPanel
+                workspaceKey={group.key}
+                chains={groupWorkflowChains}
+                actions={workflowActionOptions}
+                runStates={workflowRunStates}
+                runningChainId={runningChainId}
+                onSave={onSaveWorkflowChain}
+                onDelete={deleteWorkflowChain}
+                onEnabledChange={setWorkflowChainEnabled}
+                onRun={runWorkflowChain}
+                onCancelRun={cancelWorkflowRun}
+              />
+            ) : null}
+
             {showActionsPanel ? (
               <>
                 {renderActionPanel(
-                  "构建",
+                  t("构建"),
                   visibleBuildActions,
                   "overview-build-actions-panel",
                   moduleQuickActions(
                     group,
                     "projectManagement",
-                    "构建",
+                    t("构建"),
                     <PackageIcon fontSize="small" />,
                     "build",
                   ),
@@ -2735,7 +3318,7 @@ export function OverviewPage({
                     "git",
                   ),
                 )}
-                {renderActionPanel("其他动作", visibleOtherActions)}
+                {renderActionPanel(t("其他动作"), visibleOtherActions)}
               </>
             ) : null}
           </div>
@@ -2755,6 +3338,8 @@ export function OverviewPage({
         />
 
         {confirmDialog}
+        {runtimeStartLauncher.dialog}
+        {workspaceLifecycle.confirmDialog}
 
         <LinkPlanDialog
           state={linkPlanDialog}
@@ -2763,18 +3348,18 @@ export function OverviewPage({
         />
 
         <WorkspacePageToolbar
-          ariaLabel="工作区概览与配置"
+          ariaLabel={t("工作区概览与配置")}
           metrics={[
             {
               key: "workspaces",
-              label: "工作区",
+              label: t("工作区"),
               value: groups.length,
               icon: <PackageIcon fontSize="small" />,
               tone: "blue" as const,
             },
             ...workspaceToolbarTypeTags.map((option, index) => ({
               key: option.key,
-              label: option.label,
+              label: t(option.label),
               value: option.count,
               tone: (["cyan", "violet", "green"] as const)[index % 3],
             })),
@@ -2784,7 +3369,7 @@ export function OverviewPage({
               startIcon={<SettingsIcon fontSize="small" />}
               onClick={() => setManageOpen(true)}
             >
-              工作区配置
+              {t("工作区配置")}
             </WorkspacePageToolbarAction>
           }
         />
@@ -2795,22 +3380,25 @@ export function OverviewPage({
             size="small"
             value={overviewQuery}
             onChange={(event) => setOverviewQuery(event.target.value)}
-            placeholder="搜索工作区、项目、入口、代理或动作"
-            inputProps={{ "aria-label": "搜索工作区" }}
+            placeholder={t("搜索工作区、项目、入口、代理或动作")}
+            inputProps={{ "aria-label": t("搜索工作区") }}
             InputProps={{
               startAdornment: (
-                <InputAdornment position="start" className="overview-search-adornment">
+                <InputAdornment
+                  position="start"
+                  className="overview-search-adornment"
+                >
                   <SearchIcon fontSize="small" />
                 </InputAdornment>
               ),
               endAdornment: overviewQuery.trim() ? (
                 <InputAdornment position="end">
-                  <Tooltip title="清空搜索">
+                  <Tooltip title={t("清空搜索")}>
                     <IconButton
                       size="small"
                       className="overview-search-clear"
                       onClick={() => setOverviewQuery("")}
-                      aria-label="清空工作区搜索"
+                      aria-label={t("清空工作区搜索")}
                     >
                       <ClearIcon fontSize="small" />
                     </IconButton>
@@ -2825,13 +3413,18 @@ export function OverviewPage({
             className="overview-type-select"
             value={workspaceTypeFilter}
             onChange={(event) => setWorkspaceTypeFilter(event.target.value)}
-            aria-label="按工作区类型筛选"
+            aria-label={t("按工作区类型筛选")}
             SelectProps={{ MenuProps: workspaceTypeSelectMenuProps }}
           >
-            <MenuItem value="all">全部类型 {groups.length}</MenuItem>
+            <MenuItem value="all">
+              {t("全部类型 {count}", { count: groups.length })}
+            </MenuItem>
             {workspaceTypeFilterOptions.map((option) => (
               <MenuItem key={option.key} value={option.key}>
-                {option.label} {option.count}
+                {t("{label} {count}", {
+                  label: t(option.label),
+                  count: option.count,
+                })}
               </MenuItem>
             ))}
           </TextField>
@@ -2849,7 +3442,7 @@ export function OverviewPage({
           {!loading && groups.length === 0 ? (
             <Box className="overview-empty-state">
               <Typography variant="body2" color="text.secondary">
-                还没有工作区
+                {t("还没有工作区")}
               </Typography>
             </Box>
           ) : null}
@@ -2858,8 +3451,8 @@ export function OverviewPage({
             <AppEmptyState
               className="overview-filter-empty-state"
               compact
-              title="没有匹配工作区"
-              description="换个关键词或筛选项。"
+              title={t("没有匹配工作区")}
+              description={t("换个关键词或筛选项。")}
             />
           ) : null}
 
@@ -2873,34 +3466,70 @@ export function OverviewPage({
           PaperProps={{ className: "overview-ai-context-paper" }}
         >
           <DialogTitle className="overview-ai-context-title">
-            <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-              <Stack direction="row" alignItems="center" spacing={0.75} minWidth={0}>
+            <Stack
+              direction="row"
+              alignItems="center"
+              justifyContent="space-between"
+              spacing={1}
+            >
+              <Stack
+                direction="row"
+                alignItems="center"
+                spacing={0.75}
+                minWidth={0}
+              >
                 <Box className="overview-ai-context-icon">
                   <CopyIcon fontSize="small" />
                 </Box>
                 <Stack spacing={0.12} minWidth={0}>
-                  <Typography variant="subtitle1" className="overview-ai-context-heading" noWrap>
-                    AI 上下文
+                  <Typography
+                    variant="subtitle1"
+                    className="overview-ai-context-heading"
+                    noWrap
+                  >
+                    {t("AI 上下文")}
                   </Typography>
                   <Typography variant="caption" color="text.secondary" noWrap>
-                    {aiContextResponse?.workspaceName || aiContextGroup?.name || "工作区"}
+                    {aiContextResponse?.workspaceName ||
+                      aiContextGroup?.name ||
+                      t("工作区")}
                   </Typography>
                 </Stack>
               </Stack>
               <Stack direction="row" alignItems="center" spacing={0.5}>
                 {aiContextGroup ? (
                   <>
-                    <Chip size="small" label={`${aiContextGroup.projectCount} 项目`} />
-                    <Chip size="small" label={`${aiContextGroup.entryCount} 入口`} />
-                    <Chip size="small" label={`${aiContextGroup.proxyProfileCount} 代理`} />
-                    <Chip size="small" label={`${aiContextGroup.actionCount} 动作`} />
+                    <Chip
+                      size="small"
+                      label={t("{count} 个项目", {
+                        count: aiContextGroup.projectCount,
+                      })}
+                    />
+                    <Chip
+                      size="small"
+                      label={t("{count} 个入口", {
+                        count: aiContextGroup.entryCount,
+                      })}
+                    />
+                    <Chip
+                      size="small"
+                      label={t("{count} 个代理", {
+                        count: aiContextGroup.proxyProfileCount,
+                      })}
+                    />
+                    <Chip
+                      size="small"
+                      label={t("{count} 个动作", {
+                        count: aiContextGroup.actionCount,
+                      })}
+                    />
                   </>
                 ) : null}
-                <Tooltip title="关闭">
+                <Tooltip title={t("关闭")}>
                   <IconButton
                     size="small"
                     onClick={() => setAiContextOpen(false)}
-                    aria-label="关闭 AI 上下文"
+                    aria-label={t("关闭 AI 上下文")}
                   >
                     <ClearIcon fontSize="small" />
                   </IconButton>
@@ -2910,7 +3539,11 @@ export function OverviewPage({
           </DialogTitle>
           <DialogContent className="overview-ai-context-content">
             <div className="overview-ai-context-toolbar">
-              <div className="overview-ai-context-tabs" role="tablist" aria-label="AI 上下文格式">
+              <div
+                className="overview-ai-context-tabs"
+                role="tablist"
+                aria-label={t("AI 上下文格式")}
+              >
                 <button
                   type="button"
                   className={aiContextView === "markdown" ? "is-active" : ""}
@@ -2928,16 +3561,24 @@ export function OverviewPage({
               </div>
               <Stack direction="row" alignItems="center" spacing={0.5}>
                 <Typography className="overview-ai-context-meta" noWrap>
-                  {aiContextPreviewLineCount ? `${aiContextPreviewLineCount} 行` : "生成中"}
+                  {aiContextPreviewLineCount
+                    ? t("{count} 行", { count: aiContextPreviewLineCount })
+                    : t("生成中")}
                 </Typography>
                 <Button
                   size="small"
                   variant="outlined"
-                  startIcon={aiContextLoading ? <CircularProgress size={13} /> : <ReplayIcon fontSize="small" />}
+                  startIcon={
+                    aiContextLoading ? (
+                      <CircularProgress size={13} />
+                    ) : (
+                      <ReplayIcon fontSize="small" />
+                    )
+                  }
                   onClick={() => void refreshWorkspaceAiContext()}
                   disabled={aiContextLoading || !aiContextGroup}
                 >
-                  刷新
+                  {t("刷新")}
                 </Button>
                 <Button
                   size="small"
@@ -2946,7 +3587,7 @@ export function OverviewPage({
                   onClick={() => void copyAiContext(aiContextView)}
                   disabled={!aiContextResponse || aiContextLoading}
                 >
-                  复制
+                  {t("复制")}
                 </Button>
               </Stack>
             </div>
@@ -2958,27 +3599,37 @@ export function OverviewPage({
                     select
                     size="small"
                     className="overview-ai-context-preset-select"
-                    label="场景"
+                    label={t("场景")}
                     value={aiContextPresetKey}
-                    onChange={(event) => void applyAiContextPreset(event.target.value)}
+                    onChange={(event) =>
+                      void applyAiContextPreset(event.target.value)
+                    }
                     disabled={aiContextLoading}
                   >
                     {aiContextPresets.map((preset) => (
                       <MenuItem key={preset.key} value={preset.key}>
-                        {preset.label}
+                        {t(preset.label)}
                       </MenuItem>
                     ))}
                   </TextField>
                   <TextField
                     size="small"
                     className="overview-ai-context-preset-name"
-                    label="场景名"
+                    label={t("场景名")}
                     value={aiContextPresetName}
-                    placeholder={selectedAiContextPreset.custom ? selectedAiContextPreset.label : "保存为自定义"}
-                    onChange={(event) => setAiContextPresetName(event.target.value)}
+                    placeholder={
+                      selectedAiContextPreset.custom
+                        ? selectedAiContextPreset.label
+                        : t("保存为自定义")
+                    }
+                    onChange={(event) =>
+                      setAiContextPresetName(event.target.value)
+                    }
                     disabled={aiContextLoading}
                   />
-                  {aiContextPresetDirty ? <Chip size="small" label="已调整" /> : null}
+                  {aiContextPresetDirty ? (
+                    <Chip size="small" label={t("已调整")} />
+                  ) : null}
                   <Button
                     size="small"
                     variant={aiContextPresetDirty ? "contained" : "outlined"}
@@ -2986,10 +3637,11 @@ export function OverviewPage({
                     onClick={() => void saveAiContextPreset()}
                     disabled={
                       aiContextLoading ||
-                      (!aiContextPresetName.trim() && !selectedAiContextPreset.custom)
+                      (!aiContextPresetName.trim() &&
+                        !selectedAiContextPreset.custom)
                     }
                   >
-                    保存
+                    {t("保存")}
                   </Button>
                   {selectedAiContextPreset.custom ? (
                     <Button
@@ -2998,20 +3650,22 @@ export function OverviewPage({
                       onClick={() => void deleteAiContextPreset()}
                       disabled={aiContextLoading}
                     >
-                      删除
+                      {t("删除")}
                     </Button>
                   ) : null}
                 </div>
                 <div className="overview-ai-context-limit-row">
-                  <Tooltip title="项目、入口、目录、动作这些内容每类最多输出多少条">
+                  <Tooltip title={t("项目、入口、目录、动作这些内容每类最多输出多少条")}>
                     <TextField
                       select
                       size="small"
                       className="overview-ai-context-limit-select"
-                      label="内容上限"
+                      label={t("内容上限")}
                       value={aiContextOptions.itemLimit}
                       onChange={(event) =>
-                        void updateAiContextOptions({ itemLimit: Number(event.target.value) })
+                        void updateAiContextOptions({
+                          itemLimit: Number(event.target.value),
+                        })
                       }
                       disabled={aiContextLoading}
                     >
@@ -3022,15 +3676,17 @@ export function OverviewPage({
                       ))}
                     </TextField>
                   </Tooltip>
-                  <Tooltip title="构建、合并、可回放动作这些历史记录最多输出多少条">
+                  <Tooltip title={t("构建、合并、可回放动作这些历史记录最多输出多少条")}>
                     <TextField
                       select
                       size="small"
                       className="overview-ai-context-limit-select"
-                      label="历史上限"
+                      label={t("历史上限")}
                       value={aiContextOptions.historyLimit}
                       onChange={(event) =>
-                        void updateAiContextOptions({ historyLimit: Number(event.target.value) })
+                        void updateAiContextOptions({
+                          historyLimit: Number(event.target.value),
+                        })
                       }
                       disabled={aiContextLoading}
                     >
@@ -3045,7 +3701,7 @@ export function OverviewPage({
               </div>
 
               <div className="overview-ai-context-scope-row">
-                <span className="overview-ai-context-section-label">范围</span>
+                <span className="overview-ai-context-section-label">{t("范围")}</span>
                 <div className="overview-ai-context-checks">
                   {AI_CONTEXT_SCOPE_OPTIONS.map((option) => (
                     <FormControlLabel
@@ -3056,12 +3712,14 @@ export function OverviewPage({
                           size="small"
                           checked={Boolean(aiContextOptions[option.key])}
                           onChange={(event) =>
-                            void updateAiContextOptions({ [option.key]: event.target.checked })
+                            void updateAiContextOptions({
+                              [option.key]: event.target.checked,
+                            })
                           }
                           disabled={aiContextLoading}
                         />
                       }
-                      label={option.label}
+                      label={t(option.label)}
                     />
                   ))}
                 </div>
@@ -3076,7 +3734,11 @@ export function OverviewPage({
               ) : aiContextPreviewText ? (
                 <pre>{aiContextPreviewText}</pre>
               ) : (
-                <AppEmptyState compact title="暂无上下文" description="刷新后可复制给 AI 使用。" />
+                <AppEmptyState
+                  compact
+                  title={t("暂无上下文")}
+                  description={t("刷新后可复制给 AI 使用。")}
+                />
               )}
             </div>
           </DialogContent>
@@ -3093,7 +3755,12 @@ export function OverviewPage({
           }}
         >
           <DialogTitle className="overview-workspace-config-title">
-            <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+            <Stack
+              direction="row"
+              alignItems="center"
+              justifyContent="space-between"
+              spacing={1}
+            >
               <Stack
                 className="overview-workspace-config-title-copy"
                 direction="row"
@@ -3110,28 +3777,43 @@ export function OverviewPage({
                     placeItems: "center",
                     borderRadius: "9px",
                     color: theme.palette.primary.main,
-                    bgcolor: alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.12 : 0.08),
+                    bgcolor: alpha(
+                      theme.palette.primary.main,
+                      theme.palette.mode === "dark" ? 0.12 : 0.08,
+                    ),
                   })}
                 >
                   <SettingsIcon fontSize="small" />
                 </Box>
-                <Stack className="overview-workspace-config-title-text" spacing={0.1} minWidth={0}>
-                  <Typography variant="subtitle1" sx={{ fontWeight: 860, lineHeight: 1.2 }}>
-                    工作区配置
+                <Stack
+                  className="overview-workspace-config-title-text"
+                  spacing={0.1}
+                  minWidth={0}
+                >
+                  <Typography
+                    variant="subtitle1"
+                    sx={{ fontWeight: 860, lineHeight: 1.2 }}
+                  >
+                    {t("工作区配置")}
                   </Typography>
                   <Typography variant="caption" color="text.secondary" noWrap>
-                    {workspaceDraft?.name ?? editingWorkspaceSummary?.name ?? activeGroup?.name ?? activeProjectWorkspaceKey}
+                    {workspaceDraft?.name ??
+                      editingWorkspaceSummary?.name ??
+                      activeGroup?.name ??
+                      activeProjectWorkspaceKey}
                   </Typography>
                 </Stack>
-                {workspaceDirty ? <Chip size="small" color="primary" label="未保存" /> : null}
+                {workspaceDirty ? (
+                  <Chip size="small" color="primary" label={t("未保存")} />
+                ) : null}
               </Stack>
               <Stack direction="row" alignItems="center" spacing={0.25}>
-                <Tooltip title="关闭">
+                <Tooltip title={t("关闭")}>
                   <IconButton
                     className="overview-workspace-config-close"
                     size="small"
                     onClick={closeManageDialog}
-                    aria-label="关闭工作区配置"
+                    aria-label={t("关闭工作区配置")}
                     sx={(theme) => ({
                       width: 32,
                       height: 32,
@@ -3139,7 +3821,10 @@ export function OverviewPage({
                       color: theme.palette.text.secondary,
                       "&:hover": {
                         color: theme.palette.text.primary,
-                        bgcolor: alpha(theme.palette.text.primary, theme.palette.mode === "dark" ? 0.08 : 0.06),
+                        bgcolor: alpha(
+                          theme.palette.text.primary,
+                          theme.palette.mode === "dark" ? 0.08 : 0.06,
+                        ),
                       },
                     })}
                   >
@@ -3155,174 +3840,38 @@ export function OverviewPage({
               sx={{
                 display: "grid",
                 gridTemplateColumns: { xs: "1fr", md: "280px minmax(0, 1fr)" },
-                gridTemplateRows: { xs: "auto minmax(0, 1fr)", md: "minmax(0, 1fr)" },
+                gridTemplateRows: {
+                  xs: "auto minmax(0, 1fr)",
+                  md: "minmax(0, 1fr)",
+                },
                 width: "100%",
                 height: "100%",
                 minHeight: 0,
                 overflow: "hidden",
               }}
             >
-              <Stack
-                className="overview-workspace-config-sidebar"
-                spacing={0.8}
-                sx={{
-                  minHeight: 0,
-                  overflow: "hidden",
-                  p: 1,
-                }}
-              >
-                <Stack
-                  className="overview-workspace-config-menu-head"
-                  direction="row"
-                  alignItems="center"
-                  justifyContent="space-between"
-                  spacing={1}
-                >
-                  <Stack className="overview-workspace-config-menu-copy" spacing={0.05}>
-                    <Typography className="overview-workspace-config-menu-title" variant="caption">
-                      工作区
-                    </Typography>
-                    <Typography className="overview-workspace-config-menu-count" variant="caption">
-                      {projectWorkspaces.length} 个
-                    </Typography>
-                  </Stack>
-                  <Tooltip title="新建工作区">
-                    <IconButton
-                      size="small"
-                      color={createOpen ? "primary" : "default"}
-                      onClick={() => setCreateOpen(true)}
-                      aria-label="新建工作区"
-                      aria-pressed={createOpen}
-                      sx={(theme) => ({
-                        width: 32,
-                        height: 32,
-                        border: "1px solid",
-                        borderColor: createOpen
-                          ? alpha(theme.palette.primary.main, 0.32)
-                          : theme.palette.divider,
-                        borderRadius: "10px",
-                        bgcolor: createOpen
-                          ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.12 : 0.08)
-                          : "transparent",
-                      })}
-                    >
-                      <PlusIcon fontSize="small" />
-                    </IconButton>
-                  </Tooltip>
-                </Stack>
-
-                <Stack
-                  className="overview-workspace-config-menu-list"
-                  spacing={0.25}
-                  sx={{ overflow: "auto", minHeight: 0, flex: 1 }}
-                >
-                  {orderedProjectWorkspaces.map((workspace) => {
-                    const group = groups.find((item) => item.key === workspace.key);
-                    const isEditing = workspace.key === editingWorkspaceKey;
-                    return (
-                      <Box
-                        key={workspace.key}
-                        className={`overview-workspace-config-item${isEditing ? " is-editing" : ""}`}
-                        role="button"
-                        tabIndex={0}
-                        aria-pressed={isEditing}
-                        onClick={() => void selectWorkspaceConfig(workspace.key)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter" || event.key === " ") {
-                            event.preventDefault();
-                            void selectWorkspaceConfig(workspace.key);
-                          }
-                        }}
-                      >
-                        <Stack
-                          className="overview-workspace-config-item-row"
-                          direction="row"
-                          alignItems="center"
-                          justifyContent="space-between"
-                          spacing={1}
-                        >
-                          <Stack direction="row" alignItems="center" spacing={0.85} minWidth={0} flex={1}>
-                            <span
-                              className={`overview-workspace-config-item-icon${
-                                isEditing ? " is-active" : ""
-                              }`}
-                              aria-hidden="true"
-                            >
-                              {workspace.system ? (
-                                <WebsiteIcon fontSize="small" />
-                              ) : (
-                                <FolderIcon fontSize="small" />
-                              )}
-                            </span>
-                            <Stack
-                              className="overview-workspace-config-item-copy"
-                              spacing={0.18}
-                              minWidth={0}
-                            >
-                              <Stack
-                                className="overview-workspace-config-item-name-row"
-                                direction="row"
-                                spacing={0.45}
-                                alignItems="center"
-                                minWidth={0}
-                              >
-                                <Typography
-                                  className="overview-workspace-config-item-title"
-                                  variant="body2"
-                                  noWrap
-                                  title={workspace.name}
-                                >
-                                  {workspace.name}
-                                </Typography>
-                              </Stack>
-                              <Typography
-                                className="overview-workspace-config-item-meta"
-                                variant="caption"
-                                noWrap
-                                title={
-                                  workspace.system
-                                    ? "全部项目"
-                                    : `${workspace.projectScopeLabel} · ${workspace.navigationScopeLabel}`
-                                }
-                              >
-                                {workspace.system
-                                  ? "全部项目"
-                                  : `${workspace.projectScopeLabel} · ${workspace.navigationScopeLabel}`}
-                              </Typography>
-                            </Stack>
-                          </Stack>
-                          <Stack direction="row" spacing={0.45} alignItems="center" flex="0 0 auto">
-                            <Chip
-                              className="overview-workspace-config-count-chip"
-                              size="small"
-                              label={group?.actionCount ?? 0}
-                            />
-                            {!workspace.system ? (
-                              <Tooltip title="删除工作区配置">
-                                <IconButton
-                                  className="overview-workspace-config-delete"
-                                  size="small"
-                                  aria-label={`删除工作区配置 ${workspace.name}`}
-                                  onClick={(event) => {
-                                    event.stopPropagation();
-                                    void deleteWorkspaceConfig(workspace.key, workspace.name);
-                                  }}
-                                  onKeyDown={(event) => {
-                                    event.stopPropagation();
-                                  }}
-                                >
-                                  <TrashIcon fontSize="small" />
-                                </IconButton>
-                              </Tooltip>
-                            ) : null}
-                          </Stack>
-                        </Stack>
-                      </Box>
-                    );
-                  })}
-                  <AppListEndState className="overview-workspace-config-list-end" />
-                </Stack>
-              </Stack>
+              <WorkspaceConfigSidebar
+                workspaces={orderedProjectWorkspaces}
+                archivedWorkspaces={archivedProjectWorkspaces}
+                editingWorkspaceKey={editingWorkspaceKey}
+                actionCounts={workspaceActionCounts}
+                createOpen={createOpen}
+                busyKey={workspaceLifecycle.busyKey}
+                focusRequest={workspaceConfigFocusRequest}
+                onCreate={() => setCreateOpen(true)}
+                onSelect={(workspaceKey) =>
+                  void selectWorkspaceConfig(workspaceKey)
+                }
+                onArchive={(workspace) =>
+                  void workspaceLifecycle.archiveWorkspace(workspace)
+                }
+                onRestore={(workspace) =>
+                  void workspaceLifecycle.restoreWorkspace(workspace)
+                }
+                onDelete={(workspace) =>
+                  void deleteWorkspaceConfig(workspace.key, workspace.name)
+                }
+              />
 
               <Stack
                 className="overview-workspace-config-main"
@@ -3336,17 +3885,30 @@ export function OverviewPage({
                     sx={panelSx}
                   >
                     <Stack spacing={0.85} sx={{ p: 0.9 }}>
-                      <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        justifyContent="space-between"
+                        spacing={1}
+                      >
                         <Stack spacing={0.05}>
-                          <Typography variant="caption" sx={{ fontWeight: 850 }}>
-                            新建工作区
+                          <Typography
+                            variant="caption"
+                            sx={{ fontWeight: 850 }}
+                          >
+                            {t("新建工作区")}
                           </Typography>
                           <Typography variant="caption" color="text.secondary">
-                            {createWorkspaceMode === "demand" ? "需求初始化" : "名称与目录"}
+                            {createWorkspaceMode === "demand"
+                              ? t("需求初始化")
+                              : t("名称与目录")}
                           </Typography>
                         </Stack>
-                        <Tooltip title="收起">
-                          <IconButton onClick={() => setCreateOpen(false)} aria-label="收起新建工作区">
+                        <Tooltip title={t("收起")}>
+                          <IconButton
+                            onClick={() => setCreateOpen(false)}
+                            aria-label={t("收起新建工作区")}
+                          >
                             <ClearIcon fontSize="small" />
                           </IconButton>
                         </Tooltip>
@@ -3357,32 +3919,44 @@ export function OverviewPage({
                         sx={{
                           p: 0.35,
                           borderRadius: 2,
-                          border: (theme) => `1px solid ${theme.palette.divider}`,
-                          bgcolor: (theme) => alpha(theme.palette.background.paper, 0.64),
+                          border: (theme) =>
+                            `1px solid ${theme.palette.divider}`,
+                          bgcolor: (theme) =>
+                            alpha(theme.palette.background.paper, 0.64),
                         }}
                       >
                         <Button
                           size="small"
-                          variant={createWorkspaceMode === "basic" ? "contained" : "text"}
+                          variant={
+                            createWorkspaceMode === "basic"
+                              ? "contained"
+                              : "text"
+                          }
                           onClick={() => setCreateWorkspaceMode("basic")}
                           disabled={creatingWorkspace}
                           sx={{ flex: 1 }}
                         >
-                          普通
+                          {t("普通")}
                         </Button>
                         <Button
                           size="small"
-                          variant={createWorkspaceMode === "demand" ? "contained" : "text"}
+                          variant={
+                            createWorkspaceMode === "demand"
+                              ? "contained"
+                              : "text"
+                          }
                           onClick={() => {
                             setCreateWorkspaceMode("demand");
-                            if (newWorkspaceType === DEFAULT_NEW_WORKSPACE_TYPE) {
+                            if (
+                              newWorkspaceType === DEFAULT_NEW_WORKSPACE_TYPE
+                            ) {
                               setNewWorkspaceType("business");
                             }
                           }}
                           disabled={creatingWorkspace}
                           sx={{ flex: 1 }}
                         >
-                          需求
+                          {t("需求")}
                         </Button>
                       </Stack>
                       <Box
@@ -3394,24 +3968,33 @@ export function OverviewPage({
                       >
                         <TextField
                           size="small"
-                          label="名称"
+                          label={t("名称")}
                           value={newWorkspaceName}
-                          onChange={(event) => setNewWorkspaceName(event.target.value)}
+                          onChange={(event) =>
+                            setNewWorkspaceName(event.target.value)
+                          }
                           disabled={creatingWorkspace}
                         />
                         <TextField
                           size="small"
                           label="key"
                           value={newWorkspaceKey}
-                          placeholder={normalizeWorkspaceKey(newWorkspaceName) || "r-series"}
-                          onChange={(event) => setNewWorkspaceKey(event.target.value)}
+                          placeholder={
+                            normalizeWorkspaceKey(newWorkspaceName) ||
+                            "r-series"
+                          }
+                          onChange={(event) =>
+                            setNewWorkspaceKey(event.target.value)
+                          }
                           disabled={creatingWorkspace}
                         />
                         <TextField
                           size="small"
-                          label="备注"
+                          label={t("备注")}
                           value={newWorkspaceDescription}
-                          onChange={(event) => setNewWorkspaceDescription(event.target.value)}
+                          onChange={(event) =>
+                            setNewWorkspaceDescription(event.target.value)
+                          }
                           disabled={creatingWorkspace}
                         />
                         <WorkspaceTypeSelect
@@ -3427,25 +4010,31 @@ export function OverviewPage({
                           <>
                             <TextField
                               size="small"
-                              label="需求号"
+                              label={t("需求号")}
                               value={demandId}
-                              placeholder="可选，如 CR2606150041"
-                              onChange={(event) => setDemandId(event.target.value)}
+                              placeholder={t("可选，如 CR2606150041")}
+                              onChange={(event) =>
+                                setDemandId(event.target.value)
+                              }
                               disabled={creatingWorkspace}
                             />
                             <TextField
                               size="small"
-                              label="分支"
+                              label={t("分支")}
                               value={demandBranch}
                               placeholder="feature-CR..."
-                              onChange={(event) => setDemandBranch(event.target.value)}
+                              onChange={(event) =>
+                                setDemandBranch(event.target.value)
+                              }
                               disabled={creatingWorkspace}
                             />
                             <TextField
                               size="small"
-                              label="需求目录"
+                              label={t("需求目录")}
                               value={demandRequirementDir}
-                              onChange={(event) => setDemandRequirementDir(event.target.value)}
+                              onChange={(event) =>
+                                setDemandRequirementDir(event.target.value)
+                              }
                               disabled={creatingWorkspace}
                               sx={{ gridColumn: { xs: "auto", md: "1 / -1" } }}
                               InputProps={{
@@ -3453,10 +4042,14 @@ export function OverviewPage({
                                   <InputAdornment position="end">
                                     <Button
                                       size="small"
-                                      onClick={() => void chooseDemandDirectory("requirement")}
+                                      onClick={() =>
+                                        void chooseDemandDirectory(
+                                          "requirement",
+                                        )
+                                      }
                                       disabled={creatingWorkspace}
                                     >
-                                      选择
+                                      {t("选择")}
                                     </Button>
                                   </InputAdornment>
                                 ),
@@ -3464,9 +4057,11 @@ export function OverviewPage({
                             />
                             <TextField
                               size="small"
-                              label="项目目录"
+                              label={t("项目目录")}
                               value={demandRepoPath}
-                              onChange={(event) => setDemandRepoPath(event.target.value)}
+                              onChange={(event) =>
+                                setDemandRepoPath(event.target.value)
+                              }
                               disabled={creatingWorkspace}
                               sx={{ gridColumn: { xs: "auto", md: "1 / -1" } }}
                               InputProps={{
@@ -3474,10 +4069,12 @@ export function OverviewPage({
                                   <InputAdornment position="end">
                                     <Button
                                       size="small"
-                                      onClick={() => void chooseDemandDirectory("repo")}
+                                      onClick={() =>
+                                        void chooseDemandDirectory("repo")
+                                      }
                                       disabled={creatingWorkspace}
                                     >
-                                      选择
+                                      {t("选择")}
                                     </Button>
                                   </InputAdornment>
                                 ),
@@ -3485,10 +4082,12 @@ export function OverviewPage({
                             />
                             <TextField
                               size="small"
-                              label="项目 key"
+                              label={t("项目 key")}
                               value={demandProjectKey}
-                              placeholder="可选，自动匹配失败时填写"
-                              onChange={(event) => setDemandProjectKey(event.target.value)}
+                              placeholder={t("可选，自动匹配失败时填写")}
+                              onChange={(event) =>
+                                setDemandProjectKey(event.target.value)
+                              }
                               disabled={creatingWorkspace}
                               sx={{ gridColumn: { xs: "auto", md: "1 / -1" } }}
                             />
@@ -3501,30 +4100,38 @@ export function OverviewPage({
                               size="small"
                               checked={newWorkspaceIndependentDir}
                               onChange={(event) =>
-                                setNewWorkspaceIndependentDir(event.target.checked)
+                                setNewWorkspaceIndependentDir(
+                                  event.target.checked,
+                                )
                               }
                               disabled={creatingWorkspace}
                             />
                           }
-                          label="独立目录"
+                          label={t("独立目录")}
                         />
                         {newWorkspaceIndependentDir ? (
                           <TextField
                             size="small"
-                            label="工作区目录"
+                            label={t("工作区目录")}
                             value={newWorkspaceRootDir}
-                            placeholder="默认：~/Documents/rdevtool-workspaces/<key>"
-                            onChange={(event) => setNewWorkspaceRootDir(event.target.value)}
+                            placeholder={t(
+                              "默认：~/Documents/rdevtool-workspaces/<key>",
+                            )}
+                            onChange={(event) =>
+                              setNewWorkspaceRootDir(event.target.value)
+                            }
                             disabled={creatingWorkspace}
                             sx={{ gridColumn: { xs: "auto", md: "1 / -1" } }}
                           />
                         ) : null}
                         <TextField
                           size="small"
-                          label="资料目录"
+                          label={t("资料目录")}
                           value={newWorkspaceResourceDir}
-                          placeholder="默认：工作区目录/resources"
-                          onChange={(event) => setNewWorkspaceResourceDir(event.target.value)}
+                          placeholder={t("默认：工作区目录/resources")}
+                          onChange={(event) =>
+                            setNewWorkspaceResourceDir(event.target.value)
+                          }
                           disabled={creatingWorkspace}
                           sx={{ gridColumn: { xs: "auto", md: "1 / -1" } }}
                           InputProps={{
@@ -3532,18 +4139,29 @@ export function OverviewPage({
                               <InputAdornment position="end">
                                 <Button
                                   size="small"
-                                  onClick={() => void chooseWorkspaceResourceDirectory()}
+                                  onClick={() =>
+                                    void chooseWorkspaceResourceDirectory()
+                                  }
                                   disabled={creatingWorkspace}
                                 >
-                                  选择
+                                  {t("选择")}
                                 </Button>
                               </InputAdornment>
                             ),
                           }}
                         />
                       </Box>
-                      <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
-                        <Stack direction="row" alignItems="center" spacing={0.8}>
+                      <Stack
+                        direction="row"
+                        alignItems="center"
+                        justifyContent="space-between"
+                        spacing={1}
+                      >
+                        <Stack
+                          direction="row"
+                          alignItems="center"
+                          spacing={0.8}
+                        >
                           {createWorkspaceMode === "basic" ? (
                             <FormControlLabel
                               sx={{ m: 0, whiteSpace: "nowrap" }}
@@ -3551,11 +4169,15 @@ export function OverviewPage({
                                 <Checkbox
                                   size="small"
                                   checked={copyCurrentWorkspace}
-                                  onChange={(event) => setCopyCurrentWorkspace(event.target.checked)}
+                                  onChange={(event) =>
+                                    setCopyCurrentWorkspace(
+                                      event.target.checked,
+                                    )
+                                  }
                                   disabled={creatingWorkspace}
                                 />
                               }
-                              label="复制当前配置"
+                              label={t("复制当前配置")}
                             />
                           ) : null}
                           <FormControlLabel
@@ -3564,11 +4186,15 @@ export function OverviewPage({
                               <Checkbox
                                 size="small"
                                 checked={createWorkspaceWorklog}
-                                onChange={(event) => setCreateWorkspaceWorklog(event.target.checked)}
+                                onChange={(event) =>
+                                  setCreateWorkspaceWorklog(
+                                    event.target.checked,
+                                  )
+                                }
                                 disabled={creatingWorkspace}
                               />
                             }
-                            label="初始化工作日志"
+                            label={t("初始化工作日志")}
                           />
                           <FormControlLabel
                             sx={{ m: 0, whiteSpace: "nowrap" }}
@@ -3577,12 +4203,16 @@ export function OverviewPage({
                                 size="small"
                                 checked={autoRecordWorkspaceWorklog}
                                 onChange={(event) =>
-                                  setAutoRecordWorkspaceWorklog(event.target.checked)
+                                  setAutoRecordWorkspaceWorklog(
+                                    event.target.checked,
+                                  )
                                 }
-                                disabled={creatingWorkspace || !createWorkspaceWorklog}
+                                disabled={
+                                  creatingWorkspace || !createWorkspaceWorklog
+                                }
                               />
                             }
-                            label="自动记录关键操作"
+                            label={t("自动记录关键操作")}
                           />
                         </Stack>
                         <Button
@@ -3604,10 +4234,11 @@ export function OverviewPage({
                             creatingWorkspace ||
                             !newWorkspaceName.trim() ||
                             (createWorkspaceMode === "demand" &&
-                              (!demandRequirementDir.trim() || !demandRepoPath.trim()))
+                              (!demandRequirementDir.trim() ||
+                                !demandRepoPath.trim()))
                           }
                         >
-                          {createWorkspaceMode === "demand" ? "初始化" : "创建"}
+                          {t(createWorkspaceMode === "demand" ? "初始化" : "创建")}
                         </Button>
                       </Stack>
                     </Stack>
@@ -3615,492 +4246,694 @@ export function OverviewPage({
                 ) : null}
 
                 {!createOpen ? (
-                <Box
-                  component="section"
-                  className="overview-workspace-config-card overview-workspace-config-detail-card"
-                  sx={panelSx}
-                >
-                  <Stack spacing={0.95} sx={{ p: 1 }}>
-                    <Stack
-                      direction="row"
-                      justifyContent="flex-end"
-                      alignItems="center"
-                      spacing={0.75}
-                    >
-                      <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
-                        <Chip size="small" label={`${selectedProjects}/${projectTotal} 项目`} />
-                        <Chip size="small" label={`${selectedNavigation}/${navigationTotal} 入口`} />
-                        <Chip size="small" label={`${selectedProxyProfiles}/${proxyTotal} 代理`} />
-                        {workspaceDraft && workspaceDraft.projectInstances.length > 0 ? (
-                          <Chip size="small" label={`${workspaceDraft.projectInstances.length} 实例`} />
-                        ) : null}
-                      </Stack>
-                    </Stack>
-
-                    {workspaceLoading && !workspaceDraft ? (
-                      <Box sx={{ minHeight: 160, display: "grid", placeItems: "center" }}>
-                        <CircularProgress size={20} thickness={5} />
-                      </Box>
-                    ) : null}
-
-                    {workspaceDraft?.system ? (
-                      <Stack spacing={0.9}>
-                        <Alert severity="info" variant="outlined" sx={{ borderRadius: "12px" }}>
-                          全局工作区始终包含全部项目、入口和代理，以下内容仅供查看。
-                        </Alert>
-                        <Stack direction="row" spacing={0.8} flexWrap="wrap" useFlexGap>
-                          <Button
+                  <Box
+                    component="section"
+                    className="overview-workspace-config-card overview-workspace-config-detail-card"
+                    sx={panelSx}
+                  >
+                    <Stack spacing={0.95} sx={{ p: 1 }}>
+                      <Stack
+                        direction="row"
+                        justifyContent="flex-end"
+                        alignItems="center"
+                        spacing={0.75}
+                      >
+                        <Stack
+                          direction="row"
+                          spacing={0.5}
+                          flexWrap="wrap"
+                          useFlexGap
+                        >
+                          <Chip
                             size="small"
-                            variant="outlined"
-                            color="inherit"
-                            startIcon={<PlusIcon fontSize="small" />}
-                            onClick={() => setCreateOpen(true)}
-                          >
-                            新建可配置工作区
-                          </Button>
-                          <Typography variant="caption" color="text.secondary" sx={{ alignSelf: "center" }}>
-                            或从左侧选择非全局工作区来配置项目、入口和代理范围。
-                          </Typography>
+                            label={t("{selected}/{total} 个项目", {
+                              selected: selectedProjects,
+                              total: projectTotal,
+                            })}
+                          />
+                          <Chip
+                            size="small"
+                            label={t("{selected}/{total} 个入口", {
+                              selected: selectedNavigation,
+                              total: navigationTotal,
+                            })}
+                          />
+                          <Chip
+                            size="small"
+                            label={t("{selected}/{total} 个代理", {
+                              selected: selectedProxyProfiles,
+                              total: proxyTotal,
+                            })}
+                          />
+                          {workspaceDraft &&
+                          workspaceDraft.projectInstances.length > 0 ? (
+                            <Chip
+                              size="small"
+                              label={t("{count} 个实例", {
+                                count: workspaceDraft.projectInstances.length,
+                              })}
+                            />
+                          ) : null}
                         </Stack>
                       </Stack>
-                    ) : null}
 
-                    {workspaceDraft ? (
-                      <>
-                        {!workspaceScopeReadOnly ? (
-                          <>
-                            <Stack direction={{ xs: "column", md: "row" }} spacing={0.75}>
-                              <TextField
-                                size="small"
-                                label="名称"
-                                value={workspaceDraft.name}
-                                onChange={(event) => updateDraft({ name: event.target.value })}
-                                disabled={workspaceSaving}
-                                sx={{ flex: 1 }}
-                              />
-                              <Box sx={{ flex: 0.8, minWidth: 0 }}>
-                                <WorkspaceTypeSelect
-                                  value={workspaceDraft.workspaceType}
-                                  options={workspaceTypeSelectOptions}
-                                  usageCounts={workspaceTypeUsageCounts}
+                      {workspaceLoading && !workspaceDraft ? (
+                        <Box
+                          sx={{
+                            minHeight: 160,
+                            display: "grid",
+                            placeItems: "center",
+                          }}
+                        >
+                          <CircularProgress size={20} thickness={5} />
+                        </Box>
+                      ) : null}
+
+                      {workspaceDraft?.system ? (
+                        <Stack spacing={0.9}>
+                          <Alert
+                            severity="info"
+                            variant="outlined"
+                            sx={{ borderRadius: "12px" }}
+                          >
+                            {t("全局工作区始终包含全部项目、入口和代理，以下内容仅供查看。")}
+                          </Alert>
+                          <Stack
+                            direction="row"
+                            spacing={0.8}
+                            flexWrap="wrap"
+                            useFlexGap
+                          >
+                            <Button
+                              size="small"
+                              variant="outlined"
+                              color="inherit"
+                              startIcon={<PlusIcon fontSize="small" />}
+                              onClick={() => setCreateOpen(true)}
+                            >
+                              {t("新建可配置工作区")}
+                            </Button>
+                            <Typography
+                              variant="caption"
+                              color="text.secondary"
+                              sx={{ alignSelf: "center" }}
+                            >
+                              {t("或从左侧选择非全局工作区来配置项目、入口和代理范围。")}
+                            </Typography>
+                          </Stack>
+                        </Stack>
+                      ) : null}
+
+                      {workspaceDraft ? (
+                        <>
+                          {!workspaceScopeReadOnly ? (
+                            <>
+                              <Stack
+                                direction={{ xs: "column", md: "row" }}
+                                spacing={0.75}
+                              >
+                                <TextField
+                                  size="small"
+                                  label={t("名称")}
+                                  value={workspaceDraft.name}
+                                  onChange={(event) =>
+                                    updateDraft({ name: event.target.value })
+                                  }
                                   disabled={workspaceSaving}
-                                  onChange={(key, nextLabel) =>
+                                  sx={{ flex: 1 }}
+                                />
+                                <Box sx={{ flex: 0.8, minWidth: 0 }}>
+                                  <WorkspaceTypeSelect
+                                    value={workspaceDraft.workspaceType}
+                                    options={workspaceTypeSelectOptions}
+                                    usageCounts={workspaceTypeUsageCounts}
+                                    disabled={workspaceSaving}
+                                    onChange={(key, nextLabel) =>
+                                      updateDraft({
+                                        workspaceType: key,
+                                        workspaceTypeLabel: nextLabel,
+                                      })
+                                    }
+                                    onCreate={handleCreateWorkspaceType}
+                                    onDelete={handleRemoveWorkspaceType}
+                                  />
+                                </Box>
+                                <TextField
+                                  size="small"
+                                  label={t("备注")}
+                                  value={workspaceDraft.description ?? ""}
+                                  onChange={(event) =>
                                     updateDraft({
-                                      workspaceType: key,
-                                      workspaceTypeLabel: nextLabel,
+                                      description: event.target.value,
                                     })
                                   }
-                                  onCreate={handleCreateWorkspaceType}
-                                  onDelete={handleRemoveWorkspaceType}
+                                  disabled={workspaceSaving}
+                                  sx={{ flex: 1.4 }}
                                 />
-                              </Box>
+                              </Stack>
                               <TextField
+                                className="overview-workspace-root-field"
                                 size="small"
-                                label="备注"
-                                value={workspaceDraft.description ?? ""}
-                                onChange={(event) => updateDraft({ description: event.target.value })}
+                                label={t("工作区目录")}
+                                value={workspaceDraft.rootDir ?? ""}
+                                placeholder={t("可选：独立工作目录")}
+                                onChange={(event) =>
+                                  updateDraft({ rootDir: event.target.value })
+                                }
                                 disabled={workspaceSaving}
-                                sx={{ flex: 1.4 }}
-                              />
-                            </Stack>
-                            <TextField
-                              className="overview-workspace-root-field"
-                              size="small"
-                              label="工作区目录"
-                              value={workspaceDraft.rootDir ?? ""}
-                              placeholder="可选：独立工作目录"
-                              onChange={(event) => updateDraft({ rootDir: event.target.value })}
-                              disabled={workspaceSaving}
-                              InputProps={{
-                                startAdornment: (
-                                  <InputAdornment position="start">
-                                    <FolderIcon fontSize="small" />
-                                  </InputAdornment>
-                                ),
-                                endAdornment: workspaceDraft.rootDir ? (
-                                  <InputAdornment position="end">
-                                    <Tooltip title="复制工作区目录">
-                                      <IconButton
-                                        size="small"
-                                        aria-label="复制工作区目录"
-                                        onClick={() =>
-                                          void copyPlainText(workspaceDraft.rootDir ?? "")
-                                        }
-                                        disabled={workspaceSaving}
-                                      >
-                                        <CopyIcon fontSize="small" />
-                                      </IconButton>
-                                    </Tooltip>
-                                  </InputAdornment>
-                                ) : undefined,
-                              }}
-                            />
-                            <Stack direction={{ xs: "column", md: "row" }} spacing={0.75}>
-                              <TextField
-                                size="small"
-                                label="资料目录"
-                                value={workspaceDraft.resourceDir ?? ""}
-                                placeholder="默认：工作区目录/resources"
-                                onChange={(event) => updateDraft({ resourceDir: event.target.value })}
-                                disabled={workspaceSaving}
-                                sx={{ flex: 1.5 }}
                                 InputProps={{
-                                  endAdornment: (
+                                  startAdornment: (
+                                    <InputAdornment position="start">
+                                      <FolderIcon fontSize="small" />
+                                    </InputAdornment>
+                                  ),
+                                  endAdornment: workspaceDraft.rootDir ? (
                                     <InputAdornment position="end">
-                                      <Tooltip title="选择资料目录">
+                                      <Tooltip title={t("复制工作区目录")}>
                                         <IconButton
                                           size="small"
-                                          aria-label="选择资料目录"
+                                          aria-label={t("复制工作区目录")}
                                           onClick={() =>
-                                            void chooseWorkspaceResourceDirectory("edit")
+                                            void copyPlainText(
+                                              workspaceDraft.rootDir ?? "",
+                                            )
                                           }
                                           disabled={workspaceSaving}
                                         >
-                                          <FolderIcon fontSize="small" />
+                                          <CopyIcon fontSize="small" />
                                         </IconButton>
                                       </Tooltip>
                                     </InputAdornment>
-                                  ),
+                                  ) : undefined,
                                 }}
                               />
-                              <TextField
-                                size="small"
-                                label="工作日志文件"
-                                value={workspaceDraft.worklogFile ?? "WORKLOG.md"}
-                                onChange={(event) => updateDraft({ worklogFile: event.target.value })}
-                                disabled={workspaceSaving}
-                                sx={{ flex: 0.7 }}
-                              />
-                              <FormControlLabel
-                                sx={{ m: 0, minWidth: 176 }}
-                                control={
-                                  <Checkbox
-                                    size="small"
-                                    checked={workspaceDraft.worklogAutoRecord}
-                                    onChange={(event) =>
-                                      updateDraft({ worklogAutoRecord: event.target.checked })
-                                    }
-                                    disabled={workspaceSaving || !workspaceDraft.resourceDir}
-                                  />
-                                }
-                                label="自动记录关键操作"
-                              />
+                              <Stack
+                                direction={{ xs: "column", md: "row" }}
+                                spacing={0.75}
+                              >
+                                <TextField
+                                  size="small"
+                                  label={t("资料目录")}
+                                  value={workspaceDraft.resourceDir ?? ""}
+                                  placeholder={t("默认：工作区目录/resources")}
+                                  onChange={(event) =>
+                                    updateDraft({
+                                      resourceDir: event.target.value,
+                                    })
+                                  }
+                                  disabled={workspaceSaving}
+                                  sx={{ flex: 1.5 }}
+                                  InputProps={{
+                                    endAdornment: (
+                                      <InputAdornment position="end">
+                                        <Tooltip title={t("选择资料目录")}>
+                                          <IconButton
+                                            size="small"
+                                            aria-label={t("选择资料目录")}
+                                            onClick={() =>
+                                              void chooseWorkspaceResourceDirectory(
+                                                "edit",
+                                              )
+                                            }
+                                            disabled={workspaceSaving}
+                                          >
+                                            <FolderIcon fontSize="small" />
+                                          </IconButton>
+                                        </Tooltip>
+                                      </InputAdornment>
+                                    ),
+                                  }}
+                                />
+                                <TextField
+                                  size="small"
+                                  label={t("工作日志文件")}
+                                  value={
+                                    workspaceDraft.worklogFile ?? "WORKLOG.md"
+                                  }
+                                  onChange={(event) =>
+                                    updateDraft({
+                                      worklogFile: event.target.value,
+                                    })
+                                  }
+                                  disabled={workspaceSaving}
+                                  sx={{ flex: 0.7 }}
+                                />
+                                <FormControlLabel
+                                  sx={{ m: 0, minWidth: 176 }}
+                                  control={
+                                    <Checkbox
+                                      size="small"
+                                      checked={workspaceDraft.worklogAutoRecord}
+                                      onChange={(event) =>
+                                        updateDraft({
+                                          worklogAutoRecord:
+                                            event.target.checked,
+                                        })
+                                      }
+                                      disabled={
+                                        workspaceSaving ||
+                                        !workspaceDraft.resourceDir
+                                      }
+                                    />
+                                  }
+                                  label={t("自动记录关键操作")}
+                                />
+                              </Stack>
+                            </>
+                          ) : null}
+                          <Stack
+                            className="overview-workspace-project-dir-list"
+                            spacing={0.65}
+                          >
+                            <Stack
+                              direction="row"
+                              spacing={0.5}
+                              alignItems="baseline"
+                            >
+                              <Typography
+                                variant="caption"
+                                color="text.secondary"
+                              >
+                                {t("项目目录")}
+                              </Typography>
+                              <Typography
+                                variant="caption"
+                                color="text.secondary"
+                              >
+                                {t("全局目录 / 工作区副本 / 绑定目录")}
+                              </Typography>
                             </Stack>
-                          </>
-                        ) : null}
-                        <Stack className="overview-workspace-project-dir-list" spacing={0.65}>
-                          <Stack direction="row" spacing={0.5} alignItems="baseline">
-                            <Typography variant="caption" color="text.secondary">
-                              项目目录
-                            </Typography>
-                            <Typography variant="caption" color="text.secondary">
-                              全局目录 / 工作区副本 / 绑定目录
-                            </Typography>
-                          </Stack>
-                          {scopedWorkspaceProjects.length > 0 ? (
-                            scopedWorkspaceProjects.map((project) => {
-                              const instance = workspaceInstanceByProject.get(project.key);
-                              const modeLabel = instance
-                                ? instance.managed
-                                  ? "工作区副本"
-                                  : "绑定目录"
-                                : "使用全局目录";
-                              const path = instance?.path || project.repoPath || "未配置目录";
-                              const busy = workspaceDirectoryBusy === project.key;
-                              return (
-                                <Box
-                                  key={project.key}
-                                  className="overview-workspace-project-dir-row"
-                                  sx={(theme) => ({
-                                    display: "grid",
-                                    gridTemplateColumns: { xs: "1fr", md: "minmax(0, 1fr) auto" },
-                                    gap: 0.75,
-                                    alignItems: "center",
-                                    border: "1px solid",
-                                    borderColor:
-                                      theme.palette.mode === "dark"
-                                        ? "rgba(143,184,234,0.09)"
-                                        : "rgba(15,23,42,0.09)",
-                                    borderRadius: "12px",
-                                    px: 1,
-                                    py: 0.72,
-                                    bgcolor:
-                                      theme.palette.mode === "dark"
-                                        ? "rgba(255,255,255,0.016)"
-                                        : "rgba(255,255,255,0.62)",
-                                    boxShadow:
-                                      theme.palette.mode === "dark"
-                                        ? "inset 0 1px 0 rgba(255,255,255,0.018)"
-                                        : "inset 0 1px 0 rgba(255,255,255,0.7)",
-                                  })}
-                                >
-                                  <Stack spacing={0.15} minWidth={0}>
-                                    <Stack direction="row" spacing={0.5} alignItems="center" flexWrap="wrap">
-                                      <Typography variant="subtitle2" noWrap>
-                                        {project.name || project.key}
-                                      </Typography>
-                                      <Chip size="small" label={modeLabel} variant="outlined" />
-                                      {instance?.managed ? (
-                                        <Chip size="small" label="托管" variant="outlined" />
-                                      ) : null}
-                                    </Stack>
-                                    <Typography variant="caption" color="text.secondary" noWrap>
-                                      {path}
-                                    </Typography>
-                                  </Stack>
-                                  {!workspaceScopeReadOnly ? (
-                                    <Stack direction="row" spacing={0.5} justifyContent="flex-end">
-                                      {instance ? (
-                                        <Button
+                            {scopedWorkspaceProjects.length > 0 ? (
+                              scopedWorkspaceProjects.map((project) => {
+                                const instance = workspaceInstanceByProject.get(
+                                  project.key,
+                                );
+                                const modeLabel = instance
+                                  ? instance.managed
+                                    ? t("工作区副本")
+                                    : t("绑定目录")
+                                  : t("使用全局目录");
+                                const path =
+                                  instance?.path ||
+                                  project.repoPath ||
+                                  t("未配置目录");
+                                const busy =
+                                  workspaceDirectoryBusy === project.key;
+                                return (
+                                  <Box
+                                    key={project.key}
+                                    className="overview-workspace-project-dir-row"
+                                    sx={(theme) => ({
+                                      display: "grid",
+                                      gridTemplateColumns: {
+                                        xs: "1fr",
+                                        md: "minmax(0, 1fr) auto",
+                                      },
+                                      gap: 0.75,
+                                      alignItems: "center",
+                                      border: "1px solid",
+                                      borderColor:
+                                        theme.palette.mode === "dark"
+                                          ? "rgba(143,184,234,0.09)"
+                                          : "rgba(15,23,42,0.09)",
+                                      borderRadius: "12px",
+                                      px: 1,
+                                      py: 0.72,
+                                      bgcolor:
+                                        theme.palette.mode === "dark"
+                                          ? "rgba(255,255,255,0.016)"
+                                          : "rgba(255,255,255,0.62)",
+                                      boxShadow:
+                                        theme.palette.mode === "dark"
+                                          ? "inset 0 1px 0 rgba(255,255,255,0.018)"
+                                          : "inset 0 1px 0 rgba(255,255,255,0.7)",
+                                    })}
+                                  >
+                                    <Stack spacing={0.15} minWidth={0}>
+                                      <Stack
+                                        direction="row"
+                                        spacing={0.5}
+                                        alignItems="center"
+                                        flexWrap="wrap"
+                                      >
+                                        <Typography variant="subtitle2" noWrap>
+                                          {project.name || project.key}
+                                        </Typography>
+                                        <Chip
                                           size="small"
+                                          label={modeLabel}
                                           variant="outlined"
-                                          sx={directoryActionButtonSx}
-                                          onClick={() => void unbindWorkspaceProjectDirectory(project.key)}
-                                          disabled={workspaceSaving || Boolean(workspaceDirectoryBusy)}
-                                        >
-                                          {busy ? "处理中" : "解绑"}
-                                        </Button>
-                                      ) : (
-                                        <>
+                                        />
+                                        {instance?.managed ? (
+                                          <Chip
+                                            size="small"
+                                            label={t("托管")}
+                                            variant="outlined"
+                                          />
+                                        ) : null}
+                                      </Stack>
+                                      <Typography
+                                        variant="caption"
+                                        color="text.secondary"
+                                        noWrap
+                                      >
+                                        {path}
+                                      </Typography>
+                                    </Stack>
+                                    {!workspaceScopeReadOnly ? (
+                                      <Stack
+                                        direction="row"
+                                        spacing={0.5}
+                                        justifyContent="flex-end"
+                                      >
+                                        {instance ? (
                                           <Button
                                             size="small"
                                             variant="outlined"
                                             sx={directoryActionButtonSx}
-                                            onClick={() => void createWorkspaceProjectCopy(project.key)}
+                                            onClick={() =>
+                                              void unbindWorkspaceProjectDirectory(
+                                                project.key,
+                                              )
+                                            }
                                             disabled={
                                               workspaceSaving ||
-                                              Boolean(workspaceDirectoryBusy) ||
-                                              !workspaceDraft.rootDir ||
-                                              !project.repoPath
+                                              Boolean(workspaceDirectoryBusy)
                                             }
                                           >
-                                            {busy ? "创建中" : "创建副本"}
+                                            {t(busy ? "处理中" : "解绑")}
                                           </Button>
-                                          <Button
-                                            size="small"
-                                            variant="outlined"
-                                            sx={directoryActionButtonSx}
-                                            onClick={() => void bindWorkspaceProjectDirectory(project.key)}
-                                            disabled={workspaceSaving || Boolean(workspaceDirectoryBusy)}
-                                          >
-                                            绑定目录
-                                          </Button>
-                                        </>
-                                      )}
-                                    </Stack>
-                                  ) : null}
-                                </Box>
-                              );
-                            })
-                          ) : (
-                            <AppEmptyState
-                              compact
-                              title="暂无项目目录"
-                              description="先选择项目，再配置目录。"
-                            />
-                          )}
-                        </Stack>
-
-                        <Stack spacing={0.8}>
-                          <ScopePane
-                            title="项目"
-                            hint={`${selectedProjects}/${projectTotal}`}
-                            expanded={expandedWorkspaceScope === "projects"}
-                            onToggle={() =>
-                              setExpandedWorkspaceScope((current) =>
-                                current === "projects" ? "navigation" : "projects",
-                              )
-                            }
-                            checked={workspaceScopeReadOnly ? true : workspaceDraft.includeAllProjects}
-                            onCheckedChange={(checked) =>
-                              updateDraft({
-                                includeAllProjects: checked,
-                                projects: checked ? [] : workspaceDraft.projects,
+                                        ) : (
+                                          <>
+                                            <Button
+                                              size="small"
+                                              variant="outlined"
+                                              sx={directoryActionButtonSx}
+                                              onClick={() =>
+                                                void createWorkspaceProjectCopy(
+                                                  project.key,
+                                                )
+                                              }
+                                              disabled={
+                                                workspaceSaving ||
+                                                Boolean(
+                                                  workspaceDirectoryBusy,
+                                                ) ||
+                                                !workspaceDraft.rootDir ||
+                                                !project.repoPath
+                                              }
+                                            >
+                                              {t(busy ? "创建中" : "创建副本")}
+                                            </Button>
+                                            <Button
+                                              size="small"
+                                              variant="outlined"
+                                              sx={directoryActionButtonSx}
+                                              onClick={() =>
+                                                void bindWorkspaceProjectDirectory(
+                                                  project.key,
+                                                )
+                                              }
+                                              disabled={
+                                                workspaceSaving ||
+                                                Boolean(workspaceDirectoryBusy)
+                                              }
+                                            >
+                                              {t("绑定目录")}
+                                            </Button>
+                                          </>
+                                        )}
+                                      </Stack>
+                                    ) : null}
+                                  </Box>
+                                );
                               })
-                            }
-                            disabled={workspaceSaving || workspaceScopeReadOnly}
-                          >
-                            {expandedWorkspaceScope === "projects" &&
-                            (workspaceScopeReadOnly || !workspaceDraft.includeAllProjects) ? (
-                              <CheckList>
-                                {workspaceEditor?.projects.map((project) => {
-                                  const checked =
-                                    workspaceScopeReadOnly ||
-                                    workspaceDraft.projects.includes(project.key);
-                                  return (
-                                    <FormControlLabel
-                                      key={project.key}
-                                      control={
-                                        <Checkbox
-                                          size="small"
-                                          checked={checked}
-                                          onChange={(event) =>
-                                            updateDraft({
-                                              projects: toggleStringValue(
-                                                workspaceDraft.projects,
-                                                project.key,
-                                                event.target.checked,
-                                              ),
-                                            })
-                                          }
-                                          disabled={workspaceSaving || workspaceScopeReadOnly}
-                                        />
-                                      }
-                                      label={`${project.name || project.key} · ${project.category}`}
-                                    />
-                                  );
-                                })}
-                              </CheckList>
-                            ) : null}
-                          </ScopePane>
+                            ) : (
+                              <AppEmptyState
+                                compact
+                                title={t("暂无项目目录")}
+                                description={t("先选择项目，再配置目录。")}
+                              />
+                            )}
+                          </Stack>
 
-                          <ScopePane
-                            title="入口"
-                            hint={`${selectedNavigation}/${navigationTotal}`}
-                            expanded={expandedWorkspaceScope === "navigation"}
-                            onToggle={() =>
-                              setExpandedWorkspaceScope((current) =>
-                                current === "navigation" ? "projects" : "navigation",
-                              )
-                            }
-                            checked={workspaceScopeReadOnly ? true : workspaceDraft.includeAllNavigation}
-                            onCheckedChange={(checked) =>
-                              updateDraft({
-                                includeAllNavigation: checked,
-                                navigationCategories: checked ? [] : workspaceDraft.navigationCategories,
-                                navigationEntries: checked ? [] : workspaceDraft.navigationEntries,
-                              })
-                            }
-                            disabled={workspaceSaving || workspaceScopeReadOnly}
-                          >
-                            {expandedWorkspaceScope === "navigation" &&
-                            (workspaceScopeReadOnly || !workspaceDraft.includeAllNavigation) ? (
-                              <CheckList>
-                                {workspaceEditor?.navigationCategories.map((category) => {
-                                  const categoryChecked =
-                                    workspaceScopeReadOnly ||
-                                    workspaceDraft.navigationCategories.includes(category.title);
-                                  return (
-                                    <Box key={category.title}>
-                                      <FormControlLabel
-                                        control={
-                                          <Checkbox
-                                            size="small"
-                                            checked={categoryChecked}
-                                            onChange={(event) =>
-                                              updateDraft({
-                                                navigationCategories: toggleStringValue(
-                                                  workspaceDraft.navigationCategories,
-                                                  category.title,
-                                                  event.target.checked,
-                                                ),
-                                              })
-                                            }
-                                            disabled={workspaceSaving || workspaceScopeReadOnly}
-                                          />
-                                        }
-                                        label={category.title}
-                                      />
-                                      {workspaceScopeReadOnly || !categoryChecked
-                                        ? category.entries.map((entry) => {
-                                            const checked =
-                                              workspaceScopeReadOnly ||
-                                              workspaceDraft.navigationEntries.includes(
-                                                entry.scopedName,
-                                              ) ||
-                                              workspaceDraft.navigationEntries.includes(entry.name);
-                                            return (
-                                              <FormControlLabel
-                                                key={entry.scopedName}
-                                                sx={{ pl: 2 }}
-                                                control={
-                                                  <Checkbox
-                                                    size="small"
-                                                    checked={checked}
-                                                    onChange={(event) =>
-                                                      updateDraft({
-                                                        navigationEntries: toggleStringValue(
-                                                          workspaceDraft.navigationEntries.filter(
-                                                            (value) => value !== entry.name,
-                                                          ),
-                                                          entry.scopedName,
-                                                          event.target.checked,
-                                                        ),
-                                                      })
-                                                    }
-                                                    disabled={workspaceSaving || workspaceScopeReadOnly}
-                                                  />
-                                                }
-                                                label={`${entry.name} · ${navigationEntryKindLabel(
-                                                  entry.kind,
-                                                )}`}
-                                              />
-                                            );
-                                          })
-                                        : null}
-                                    </Box>
-                                  );
-                                })}
-                              </CheckList>
-                            ) : null}
-                          </ScopePane>
-
-                          <ScopePane
-                            title="代理"
-                            hint={`${selectedProxyProfiles}/${proxyTotal}`}
-                            expanded={expandedWorkspaceScope === "proxy"}
-                            onToggle={() =>
-                              setExpandedWorkspaceScope((current) =>
-                                current === "proxy" ? "projects" : "proxy",
-                              )
-                            }
-                          >
-                            {expandedWorkspaceScope === "proxy" ? (
-                              <CheckList maxHeight={150}>
-                                {workspaceEditor?.proxyProfiles.length ? (
-                                  workspaceEditor.proxyProfiles.map((profile) => {
+                          <Stack spacing={0.8}>
+                            <ScopePane
+                              title={t("项目")}
+                              hint={`${selectedProjects}/${projectTotal}`}
+                              expanded={expandedWorkspaceScope === "projects"}
+                              onToggle={() =>
+                                setExpandedWorkspaceScope((current) =>
+                                  current === "projects"
+                                    ? "navigation"
+                                    : "projects",
+                                )
+                              }
+                              checked={
+                                workspaceScopeReadOnly
+                                  ? true
+                                  : workspaceDraft.includeAllProjects
+                              }
+                              onCheckedChange={(checked) =>
+                                updateDraft({
+                                  includeAllProjects: checked,
+                                  projects: checked
+                                    ? []
+                                    : workspaceDraft.projects,
+                                })
+                              }
+                              disabled={
+                                workspaceSaving || workspaceScopeReadOnly
+                              }
+                            >
+                              {expandedWorkspaceScope === "projects" &&
+                              (workspaceScopeReadOnly ||
+                                !workspaceDraft.includeAllProjects) ? (
+                                <CheckList>
+                                  {workspaceEditor?.projects.map((project) => {
                                     const checked =
                                       workspaceScopeReadOnly ||
-                                      workspaceDraft.proxyProfiles.includes(profile.id);
-                                    const endpoint = `${profile.listenHost}:${profile.listenPort}`;
+                                      workspaceDraft.projects.includes(
+                                        project.key,
+                                      );
                                     return (
                                       <FormControlLabel
-                                        key={profile.id}
+                                        key={project.key}
                                         control={
                                           <Checkbox
                                             size="small"
                                             checked={checked}
                                             onChange={(event) =>
                                               updateDraft({
-                                                proxyProfiles: toggleStringValue(
-                                                  workspaceDraft.proxyProfiles,
-                                                  profile.id,
+                                                projects: toggleStringValue(
+                                                  workspaceDraft.projects,
+                                                  project.key,
                                                   event.target.checked,
                                                 ),
                                               })
                                             }
-                                            disabled={workspaceSaving || workspaceScopeReadOnly}
+                                            disabled={
+                                              workspaceSaving ||
+                                              workspaceScopeReadOnly
+                                            }
                                           />
                                         }
-                                        label={`${profile.name} · ${endpoint}`}
+                                        label={`${project.name || project.key} · ${project.category}`}
                                       />
                                     );
-                                  })
-                                ) : (
-                                  <AppEmptyState
-                                    compact
-                                    title="暂无代理配置"
-                                    description="添加代理后可纳入工作区。"
-                                  />
-                                )}
-                              </CheckList>
-                            ) : null}
-                          </ScopePane>
-                        </Stack>
-                      </>
-                    ) : null}
-                  </Stack>
-                </Box>
+                                  })}
+                                </CheckList>
+                              ) : null}
+                            </ScopePane>
+
+                            <ScopePane
+                              title={t("入口")}
+                              hint={`${selectedNavigation}/${navigationTotal}`}
+                              expanded={expandedWorkspaceScope === "navigation"}
+                              onToggle={() =>
+                                setExpandedWorkspaceScope((current) =>
+                                  current === "navigation"
+                                    ? "projects"
+                                    : "navigation",
+                                )
+                              }
+                              checked={
+                                workspaceScopeReadOnly
+                                  ? true
+                                  : workspaceDraft.includeAllNavigation
+                              }
+                              onCheckedChange={(checked) =>
+                                updateDraft({
+                                  includeAllNavigation: checked,
+                                  navigationCategories: checked
+                                    ? []
+                                    : workspaceDraft.navigationCategories,
+                                  navigationEntries: checked
+                                    ? []
+                                    : workspaceDraft.navigationEntries,
+                                })
+                              }
+                              disabled={
+                                workspaceSaving || workspaceScopeReadOnly
+                              }
+                            >
+                              {expandedWorkspaceScope === "navigation" &&
+                              (workspaceScopeReadOnly ||
+                                !workspaceDraft.includeAllNavigation) ? (
+                                <CheckList>
+                                  {workspaceEditor?.navigationCategories.map(
+                                    (category) => {
+                                      const categoryChecked =
+                                        workspaceScopeReadOnly ||
+                                        workspaceDraft.navigationCategories.includes(
+                                          category.title,
+                                        );
+                                      return (
+                                        <Box key={category.title}>
+                                          <FormControlLabel
+                                            control={
+                                              <Checkbox
+                                                size="small"
+                                                checked={categoryChecked}
+                                                onChange={(event) =>
+                                                  updateDraft({
+                                                    navigationCategories:
+                                                      toggleStringValue(
+                                                        workspaceDraft.navigationCategories,
+                                                        category.title,
+                                                        event.target.checked,
+                                                      ),
+                                                  })
+                                                }
+                                                disabled={
+                                                  workspaceSaving ||
+                                                  workspaceScopeReadOnly
+                                                }
+                                              />
+                                            }
+                                            label={category.title}
+                                          />
+                                          {workspaceScopeReadOnly ||
+                                          !categoryChecked
+                                            ? category.entries.map((entry) => {
+                                                const checked =
+                                                  workspaceScopeReadOnly ||
+                                                  workspaceDraft.navigationEntries.includes(
+                                                    entry.scopedName,
+                                                  ) ||
+                                                  workspaceDraft.navigationEntries.includes(
+                                                    entry.name,
+                                                  );
+                                                return (
+                                                  <FormControlLabel
+                                                    key={entry.scopedName}
+                                                    sx={{ pl: 2 }}
+                                                    control={
+                                                      <Checkbox
+                                                        size="small"
+                                                        checked={checked}
+                                                        onChange={(event) =>
+                                                          updateDraft({
+                                                            navigationEntries:
+                                                              toggleStringValue(
+                                                                workspaceDraft.navigationEntries.filter(
+                                                                  (value) =>
+                                                                    value !==
+                                                                    entry.name,
+                                                                ),
+                                                                entry.scopedName,
+                                                                event.target
+                                                                  .checked,
+                                                              ),
+                                                          })
+                                                        }
+                                                        disabled={
+                                                          workspaceSaving ||
+                                                          workspaceScopeReadOnly
+                                                        }
+                                                      />
+                                                    }
+                                                    label={`${entry.name} · ${t(
+                                                      navigationEntryKindLabel(
+                                                        entry.kind,
+                                                      ),
+                                                    )}`}
+                                                  />
+                                                );
+                                              })
+                                            : null}
+                                        </Box>
+                                      );
+                                    },
+                                  )}
+                                </CheckList>
+                              ) : null}
+                            </ScopePane>
+
+                            <ScopePane
+                              title={t("代理")}
+                              hint={`${selectedProxyProfiles}/${proxyTotal}`}
+                              expanded={expandedWorkspaceScope === "proxy"}
+                              onToggle={() =>
+                                setExpandedWorkspaceScope((current) =>
+                                  current === "proxy" ? "projects" : "proxy",
+                                )
+                              }
+                            >
+                              {expandedWorkspaceScope === "proxy" ? (
+                                <CheckList maxHeight={150}>
+                                  {workspaceEditor?.proxyProfiles.length ? (
+                                    workspaceEditor.proxyProfiles.map(
+                                      (profile) => {
+                                        const checked =
+                                          workspaceScopeReadOnly ||
+                                          workspaceDraft.proxyProfiles.includes(
+                                            profile.id,
+                                          );
+                                        const endpoint = `${profile.listenHost}:${profile.listenPort}`;
+                                        return (
+                                          <FormControlLabel
+                                            key={profile.id}
+                                            control={
+                                              <Checkbox
+                                                size="small"
+                                                checked={checked}
+                                                onChange={(event) =>
+                                                  updateDraft({
+                                                    proxyProfiles:
+                                                      toggleStringValue(
+                                                        workspaceDraft.proxyProfiles,
+                                                        profile.id,
+                                                        event.target.checked,
+                                                      ),
+                                                  })
+                                                }
+                                                disabled={
+                                                  workspaceSaving ||
+                                                  workspaceScopeReadOnly
+                                                }
+                                              />
+                                            }
+                                            label={`${profile.name} · ${endpoint}`}
+                                          />
+                                        );
+                                      },
+                                    )
+                                  ) : (
+                                    <AppEmptyState
+                                      compact
+                                      title={t("暂无代理配置")}
+                                      description={t("添加代理后可纳入工作区。")}
+                                    />
+                                  )}
+                                </CheckList>
+                              ) : null}
+                            </ScopePane>
+                          </Stack>
+                        </>
+                      ) : null}
+                    </Stack>
+                  </Box>
                 ) : null}
               </Stack>
             </Box>
@@ -4108,14 +4941,25 @@ export function OverviewPage({
 
           <DialogActions className="overview-workspace-config-actions">
             <Box sx={{ flex: 1 }} />
-            <Button onClick={closeManageDialog}>取消</Button>
+            <Button onClick={closeManageDialog}>{t("取消")}</Button>
             <Button
               variant="contained"
-              startIcon={workspaceSaving ? <CircularProgress size={14} /> : <CheckIcon fontSize="small" />}
+              startIcon={
+                workspaceSaving ? (
+                  <CircularProgress size={14} />
+                ) : (
+                  <CheckIcon fontSize="small" />
+                )
+              }
               onClick={() => void saveWorkspaceEditor()}
-              disabled={!workspaceDraft || workspaceDraft.system || workspaceSaving || !workspaceDirty}
+              disabled={
+                !workspaceDraft ||
+                workspaceDraft.system ||
+                workspaceSaving ||
+                !workspaceDirty
+              }
             >
-              保存
+              {t("保存")}
             </Button>
           </DialogActions>
         </Dialog>
@@ -4143,17 +4987,25 @@ function ScopePane({
   disabled?: boolean;
   children?: ReactNode;
 }) {
+  const { t } = useI18n();
+  const translatedTitle = t(title);
+  const toggleLabel = t(expanded ? "收起" : "展开");
+
   return (
     <Box
       className="overview-workspace-scope-pane"
       sx={(theme) => ({
         border: "1px solid",
         borderColor:
-          theme.palette.mode === "dark" ? "rgba(143,184,234,0.1)" : "rgba(15,23,42,0.09)",
+          theme.palette.mode === "dark"
+            ? "rgba(143,184,234,0.1)"
+            : "rgba(15,23,42,0.09)",
         borderRadius: "12px",
         overflow: "hidden",
         bgcolor:
-          theme.palette.mode === "dark" ? "rgba(255,255,255,0.018)" : "rgba(255,255,255,0.66)",
+          theme.palette.mode === "dark"
+            ? "rgba(255,255,255,0.018)"
+            : "rgba(255,255,255,0.66)",
       })}
     >
       <Stack
@@ -4162,13 +5014,22 @@ function ScopePane({
         alignItems="center"
         justifyContent="space-between"
         spacing={1}
-        sx={{ px: 0.85, py: 0.62, borderBottom: children ? "1px solid" : 0, borderColor: "divider" }}
+        sx={{
+          px: 0.85,
+          py: 0.62,
+          borderBottom: children ? "1px solid" : 0,
+          borderColor: "divider",
+        }}
       >
         <Stack direction="row" alignItems="center" spacing={0.55}>
           <Typography variant="caption" sx={{ fontWeight: 820 }}>
-            {title}
+            {translatedTitle}
           </Typography>
-          <Typography className="overview-workspace-scope-hint" variant="caption" color="text.secondary">
+          <Typography
+            className="overview-workspace-scope-hint"
+            variant="caption"
+            color="text.secondary"
+          >
             {hint}
           </Typography>
         </Stack>
@@ -4185,30 +5046,38 @@ function ScopePane({
                   disabled={disabled}
                 />
               }
-              label="全部"
+              label={t("全部")}
             />
-            <Tooltip title={expanded ? "收起" : "展开"}>
+            <Tooltip title={toggleLabel}>
               <IconButton
                 className="overview-workspace-scope-toggle"
                 size="small"
-                aria-label={`${expanded ? "收起" : "展开"}${title}`}
+                aria-label={`${toggleLabel}${translatedTitle}`}
                 aria-expanded={expanded}
                 onClick={onToggle}
               >
-                {expanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
+                {expanded ? (
+                  <CollapseIcon fontSize="small" />
+                ) : (
+                  <ExpandIcon fontSize="small" />
+                )}
               </IconButton>
             </Tooltip>
           </Stack>
         ) : (
-          <Tooltip title={expanded ? "收起" : "展开"}>
+          <Tooltip title={toggleLabel}>
             <IconButton
               className="overview-workspace-scope-toggle"
               size="small"
-              aria-label={`${expanded ? "收起" : "展开"}${title}`}
+              aria-label={`${toggleLabel}${translatedTitle}`}
               aria-expanded={expanded}
               onClick={onToggle}
             >
-              {expanded ? <CollapseIcon fontSize="small" /> : <ExpandIcon fontSize="small" />}
+              {expanded ? (
+                <CollapseIcon fontSize="small" />
+              ) : (
+                <ExpandIcon fontSize="small" />
+              )}
             </IconButton>
           </Tooltip>
         )}

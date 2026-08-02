@@ -8,11 +8,13 @@ import type {
   ProjectWorkspaceSummary,
 } from "../app-types";
 import type { ActivityEntry } from "../lib/activityCenter";
+import { useI18n } from "../i18n";
 import type { AppStyleMode } from "../theme";
 import {
   CollapseIcon,
   ExpandIcon,
   FolderIcon,
+  KnowledgeIcon,
   AppWindowIcon,
   PackageIcon,
   PanelSideIcon,
@@ -67,9 +69,9 @@ type AppShellLayoutProps = {
   onOpenActivityResource: (entry: ActivityEntry) => void;
   onRunActivityAction: (entry: ActivityEntry) => Promise<void> | void;
   onRefreshActivities: (options?: { force?: boolean }) => Promise<void> | void;
-  onAcknowledgeActivityEntry: (entry: ActivityEntry) => void;
-  onAcknowledgeActivityEntries: (entries: ActivityEntry[]) => void;
-  onClearActivities: () => void;
+  onResolveActivityEntry: (entry: ActivityEntry) => void;
+  onResolveActivityEntries: (entries: ActivityEntry[]) => void;
+  onClearHandledActivities: () => void;
   busy: string;
   error: string;
   children: ReactNode;
@@ -91,6 +93,8 @@ function navIconForPage(key: PageKey) {
   switch (key) {
     case "overview":
       return <AppWindowIcon className="nav-item-icon" fontSize="small" />;
+    case "knowledge":
+      return <KnowledgeIcon className="nav-item-icon" fontSize="small" />;
     case "projectManagement":
       return <PackageIcon className="nav-item-icon" fontSize="small" />;
     case "resources":
@@ -138,13 +142,14 @@ export function AppShellLayout({
   onOpenActivityResource,
   onRunActivityAction,
   onRefreshActivities,
-  onAcknowledgeActivityEntry,
-  onAcknowledgeActivityEntries,
-  onClearActivities,
+  onResolveActivityEntry,
+  onResolveActivityEntries,
+  onClearHandledActivities,
   busy,
   error,
   children,
 }: AppShellLayoutProps) {
+  const { t } = useI18n();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] =
     useState<SettingsSection | undefined>();
@@ -185,9 +190,6 @@ export function AppShellLayout({
     if (section === "finder") {
       onOpenResourceConfig();
       return;
-    }
-    if (document.activeElement instanceof HTMLElement) {
-      document.activeElement.blur();
     }
     setWorkspaceMenuAnchor(null);
     setActivityOpen(false);
@@ -307,20 +309,20 @@ export function AppShellLayout({
         <button
           type="button"
           className="sidebar-icon-toggle sidebar-icon-toggle--leading"
-          aria-label={desktopSidebarCollapsed ? "展开导航栏" : "收起导航栏"}
-          title={desktopSidebarCollapsed ? "展开导航栏" : "收起导航栏"}
+          aria-label={t(desktopSidebarCollapsed ? "展开导航栏" : "收起导航栏")}
+          title={t(desktopSidebarCollapsed ? "展开导航栏" : "收起导航栏")}
           onClick={() => setSidebarCollapsed((current) => !current)}
           aria-expanded={!desktopSidebarCollapsed}
         >
           <PanelSideIcon fontSize="small" />
         </button>
       ) : null}
-      <div className="window-toolbar" aria-label="窗口工具">
+      <div className="window-toolbar" aria-label={t("窗口工具")}>
         <button
           type="button"
           className="activity-icon-toggle"
-          aria-label={activityOpen ? "关闭活动中心" : "打开活动中心"}
-          title="活动"
+          aria-label={t(activityOpen ? "关闭活动中心" : "打开活动中心")}
+          title={t("活动")}
           onClick={() => setActivityOpen((current) => !current)}
           aria-expanded={activityOpen}
         >
@@ -334,8 +336,8 @@ export function AppShellLayout({
         <button
           type="button"
           className="settings-icon-toggle"
-          aria-label="打开设置"
-          title="设置"
+          aria-label={t("打开设置")}
+          title={t("设置")}
           onClick={() => openSettings()}
           aria-expanded={settingsOpen}
         >
@@ -344,13 +346,20 @@ export function AppShellLayout({
       </div>
       <aside className={`sidebar${desktopSidebarCollapsed ? " sidebar--collapsed" : ""}`}>
         <div className="shell-brand">
-          <div className="shell-brand-wordmark" aria-label="rDevTool">
-            <span className="shell-brand-wordmark-accent">r</span>
-            <span>DevTool</span>
+          <span className="shell-brand-mark" aria-hidden="true">
+            <img src="/rdevtool.png" alt="" />
+          </span>
+          <div className="shell-brand-copy">
+            <div className="shell-brand-wordmark" aria-label="rDevTool">
+              <span className="shell-brand-wordmark-accent">r</span>
+              <span>DevTool</span>
+            </div>
+            <span className="shell-brand-subtitle">{t("开发工作台")}</span>
           </div>
         </div>
 
-        <nav className="nav-stack" aria-label="主菜单">
+        <nav className="nav-stack" aria-label={t("主菜单")}>
+          <span className="nav-section-label">{t("工作台")}</span>
           {primaryNavItems.map((item) =>
             item.key === "projectManagement" ? (
               <div
@@ -366,13 +375,15 @@ export function AppShellLayout({
                     item.key === activePage ? " is-active" : ""
                   }`}
                   onClick={toggleProjectManagement}
-                  title={item.label}
+                  title={t(item.label)}
                   aria-current={item.key === activePage ? "page" : undefined}
                   aria-expanded={projectManagementExpanded}
                   aria-controls="project-management-sidebar-nav"
                 >
-                  {navIconForPage(item.key)}
-                  <span className="nav-item-label">{item.shortLabel}</span>
+                  <span className="nav-item-icon-wrap" aria-hidden="true">
+                    {navIconForPage(item.key)}
+                  </span>
+                  <span className="nav-item-label">{t(item.shortLabel)}</span>
                   {projectManagementExpanded ? (
                     <CollapseIcon className="nav-item-chevron" fontSize="small" />
                   ) : (
@@ -383,7 +394,7 @@ export function AppShellLayout({
                   <div
                     className="project-management-sidebar-nav"
                     id="project-management-sidebar-nav"
-                    aria-label="项目管理二级菜单"
+                    aria-label={t("项目管理二级菜单")}
                   >
                     {projectManagementItems.map((viewItem) => (
                       <button
@@ -407,7 +418,7 @@ export function AppShellLayout({
                           {viewItem.icon}
                         </span>
                         <span className="project-management-sidebar-label">
-                          {viewItem.label}
+                          {t(viewItem.label)}
                         </span>
                       </button>
                     ))}
@@ -421,11 +432,13 @@ export function AppShellLayout({
                 color="inherit"
                 className={`nav-item${item.key === activePage ? " is-active" : ""}`}
                 onClick={() => onPageChange(item.key)}
-                title={item.label}
+                title={t(item.label)}
                 aria-current={item.key === activePage ? "page" : undefined}
               >
-                {navIconForPage(item.key)}
-                <span className="nav-item-label">{item.shortLabel}</span>
+                <span className="nav-item-icon-wrap" aria-hidden="true">
+                  {navIconForPage(item.key)}
+                </span>
+                <span className="nav-item-label">{t(item.shortLabel)}</span>
               </Button>
             ),
           )}
@@ -435,21 +448,30 @@ export function AppShellLayout({
             <button
               type="button"
               className={`workspace-switcher${workspaceMenuOpen ? " is-open" : ""}`}
-              aria-label="切换工作区"
+              aria-label={t("切换工作区")}
               aria-haspopup="menu"
               aria-expanded={workspaceMenuOpen}
               onClick={openWorkspaceMenu}
               title={
                 activeProjectWorkspace
-                  ? `${workspaceDisplayName(activeProjectWorkspace)} · 切换工作区`
-                  : "切换工作区"
+                  ? `${
+                      activeProjectWorkspace.system
+                        ? t("全局")
+                        : activeProjectWorkspace.name
+                    } · ${t("切换工作区")}`
+                  : t("切换工作区")
               }
             >
               <span className="workspace-switcher-icon" aria-hidden="true">
                 <AppWindowIcon fontSize="small" />
               </span>
-              <span className="workspace-switcher-name">
-                {workspaceDisplayName(activeProjectWorkspace)}
+              <span className="workspace-switcher-copy">
+                <span className="workspace-switcher-label">{t("当前工作区")}</span>
+                <span className="workspace-switcher-name">
+                  {activeProjectWorkspace?.system
+                    ? t("全局")
+                    : workspaceDisplayName(activeProjectWorkspace)}
+                </span>
               </span>
               <ExpandIcon className="workspace-switcher-chevron" fontSize="small" />
             </button>
@@ -496,7 +518,7 @@ export function AppShellLayout({
           open={activityOpen}
           items={activityItems}
           onClose={() => setActivityOpen(false)}
-          onClear={onClearActivities}
+          onClear={onClearHandledActivities}
           onOpenResource={onOpenActivityResource}
           onRunAction={async (entry) => {
             if (entry.action?.kind === "compareConfigSource") {
@@ -505,8 +527,8 @@ export function AppShellLayout({
             await onRunActivityAction(entry);
           }}
           onRefresh={onRefreshActivities}
-          onAcknowledgeEntry={onAcknowledgeActivityEntry}
-          onAcknowledgeEntries={onAcknowledgeActivityEntries}
+          onResolveEntry={onResolveActivityEntry}
+          onResolveEntries={onResolveActivityEntries}
           onOpenEntry={(entry) => {
             onOpenActivityEntry(entry);
             setActivityOpen(false);
@@ -532,7 +554,7 @@ export function AppShellLayout({
             open={activityOpen}
             items={activityItems}
             onClose={() => setActivityOpen(false)}
-            onClear={onClearActivities}
+            onClear={onClearHandledActivities}
             onOpenResource={onOpenActivityResource}
             onRunAction={async (entry) => {
               if (entry.action?.kind === "compareConfigSource") {
@@ -541,8 +563,8 @@ export function AppShellLayout({
               await onRunActivityAction(entry);
             }}
             onRefresh={onRefreshActivities}
-            onAcknowledgeEntry={onAcknowledgeActivityEntry}
-            onAcknowledgeEntries={onAcknowledgeActivityEntries}
+            onResolveEntry={onResolveActivityEntry}
+            onResolveEntries={onResolveActivityEntries}
             onOpenEntry={(entry) => {
               onOpenActivityEntry(entry);
             }}

@@ -4,6 +4,25 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/smoke.html");
 });
 
+test("sidebar keeps its width and exposes the refined shell hierarchy", async ({ page }) => {
+  const sidebar = page.locator("aside.sidebar");
+
+  await expect(sidebar).toHaveCSS("width", "204px");
+  await expect(sidebar.getByLabel("rDevTool")).toBeVisible();
+  await expect(sidebar.getByText("开发工作台", { exact: true })).toBeVisible();
+  await expect(sidebar.getByText("工作台", { exact: true })).toBeVisible();
+  await expect(sidebar.getByText("当前工作区", { exact: true })).toBeVisible();
+
+  const switcher = sidebar.getByRole("button", { name: "切换工作区", exact: true });
+  await switcher.click();
+  const menu = page.getByRole("menu", { name: "切换工作区" });
+  await expect(menu.getByText("切换工作区", { exact: true })).toBeVisible();
+  const workspaceOptions = menu.getByRole("menuitemradio");
+  await expect(menu.locator(".workspace-menu-count")).toHaveText(
+    String(await workspaceOptions.count()),
+  );
+});
+
 test("project management submenu drives active state and content", async ({
   page,
 }) => {
@@ -106,4 +125,20 @@ test("workbench fits the compact desktop window boundary", async ({ page }) => {
 
   expect(viewport.scrollWidth).toBe(viewport.clientWidth);
   expect(viewport.scrollHeight).toBe(viewport.clientHeight);
+});
+
+test("sidebar collapse control preserves the workspace and restores navigation", async ({
+  page,
+}) => {
+  const sidebar = page.locator("aside.sidebar");
+  const collapse = page.getByRole("button", { name: "收起导航栏" });
+
+  await collapse.click();
+  await expect(sidebar).toBeHidden();
+  await expect(page.getByRole("heading", { name: "总览内容" })).toBeVisible();
+
+  const expand = page.getByRole("button", { name: "展开导航栏" });
+  await expand.click();
+  await expect(sidebar).toBeVisible();
+  await expect(sidebar).toHaveCSS("width", "204px");
 });

@@ -99,4 +99,28 @@ describe("executeTrayPinnedActionWorkflow", () => {
     expect(nextHandlers.activateWorkspace).not.toHaveBeenCalled();
     expect(nextHandlers.recordDomainExecution).not.toHaveBeenCalled();
   });
+
+  it("passes transient workflow context to a backend domain action", async () => {
+    const nextAction = action("proxy.start", {
+      profileId: "local-debug",
+    });
+    const nextHandlers = handlers();
+
+    await executeTrayPinnedActionWorkflow(nextAction, nextHandlers, {
+      origin: "app",
+      chainId: "workspace-chain:local-debug:1",
+      stepLabel: "启动代理",
+      chainLabel: "本地联调",
+    });
+
+    expect(nextHandlers.executeFallback).toHaveBeenCalledWith({
+      ...nextAction,
+      executionContext: {
+        chainId: "workspace-chain:local-debug:1",
+        parentId: null,
+        stepLabel: "启动代理",
+        chainLabel: "本地联调",
+      },
+    });
+  });
 });
