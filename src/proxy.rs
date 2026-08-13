@@ -16,6 +16,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
+use crate::app_message::AppMessage;
 use crate::config::default_config_dir;
 use crate::config_store::write_config_text_atomic;
 
@@ -258,8 +259,13 @@ impl ProxyRuleAction {
 pub struct ProxyProfileRuntimeStatus {
     pub profile_id: String,
     pub running: bool,
+    pub managed: bool,
+    pub version_compatible: bool,
     pub listen_url: String,
+    pub pid: Option<u32>,
     pub started_at: Option<String>,
+    pub owner: Option<String>,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -304,7 +310,9 @@ pub struct ProxyRequestDiagnosis {
     pub request: ProxyRequestDiagnosisRequest,
     pub status_key: String,
     pub status_label: String,
+    pub status_message: AppMessage,
     pub summary: String,
+    pub summary_message: AppMessage,
     pub matched_rule: Option<ProxyRuleDiagnosisSummary>,
     pub decisions: Vec<ProxyRuleDiagnosisDecision>,
     pub warnings: Vec<ProxyRequestDiagnosisWarning>,
@@ -356,6 +364,7 @@ pub struct ProxyRuleDiagnosisReason {
     pub key: String,
     pub matched: bool,
     pub detail: String,
+    pub detail_message: AppMessage,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -363,7 +372,10 @@ pub struct ProxyRuleDiagnosisReason {
 pub struct ProxyRequestDiagnosisWarning {
     pub key: String,
     pub detail: String,
+    pub detail_message: AppMessage,
     pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_message: Option<AppMessage>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -649,6 +661,14 @@ pub fn diagnose_proxy_request(
         Some(rule) => format!("请求会命中规则 {}，但代理端口当前未监听", rule.name),
         None => "没有启用规则会处理这个请求".to_string(),
     };
+    let summary_message = match matched_rule {
+        Some(rule) if listening => {
+            AppMessage::new("proxy.diagnosis.summary.matched").with_param("name", rule.name.clone())
+        }
+        Some(rule) => AppMessage::new("proxy.diagnosis.summary.matched_not_listening")
+            .with_param("name", rule.name.clone()),
+        None => AppMessage::new("proxy.diagnosis.summary.not_matched"),
+    };
     let path = target_url.path().to_string()
         + target_url
             .query()
@@ -671,7 +691,9 @@ pub fn diagnose_proxy_request(
         },
         status_key: status_key.to_string(),
         status_label,
+        status_message: AppMessage::new(format!("proxy.diagnosis.status.{status_key}")),
         summary,
+        summary_message,
         matched_rule: matched_rule.map(proxy_rule_diagnosis_summary),
         decisions,
         warnings,
@@ -914,8 +936,16 @@ impl ProxyRuntimeState {
         Ok(ProxyProfileRuntimeStatus {
             profile_id: profile.id,
             running: true,
+            managed: true,
+            version_compatible: true,
             listen_url,
+            pid: Some(std::process::id()),
             started_at: Some(started_at),
+            owner: Some(format!(
+                "rDevTool in-process proxy (PID {})",
+                std::process::id()
+            )),
+            detail: "proxy runtime is listening".to_string(),
         })
     }
 
@@ -937,8 +967,16 @@ impl ProxyRuntimeState {
                 return Ok(ProxyProfileRuntimeStatus {
                     profile_id: profile.id,
                     running: true,
+                    managed: true,
+                    version_compatible: true,
                     listen_url: handle.listen_url.clone(),
+                    pid: Some(std::process::id()),
                     started_at: Some(handle.started_at.clone()),
+                    owner: Some(format!(
+                        "rDevTool in-process proxy (PID {})",
+                        std::process::id()
+                    )),
+                    detail: "proxy runtime is listening".to_string(),
                 });
             }
         }
@@ -971,15 +1009,28 @@ impl ProxyRuntimeState {
                     ProxyProfileRuntimeStatus {
                         profile_id: profile.id.clone(),
                         running: true,
+                        managed: true,
+                        version_compatible: true,
                         listen_url: handle.listen_url.clone(),
+                        pid: Some(std::process::id()),
                         started_at: Some(handle.started_at.clone()),
+                        owner: Some(format!(
+                            "rDevTool in-process proxy (PID {})",
+                            std::process::id()
+                        )),
+                        detail: "proxy runtime is listening".to_string(),
                     }
                 } else {
                     ProxyProfileRuntimeStatus {
                         profile_id: profile.id.clone(),
                         running: false,
+                        managed: false,
+                        version_compatible: true,
                         listen_url: profile.listen_url(),
+                        pid: None,
                         started_at: None,
+                        owner: None,
+                        detail: "proxy runtime is stopped".to_string(),
                     }
                 }
             })
@@ -1925,6 +1976,7 @@ fn diagnose_rule_match(
             key: "enabled".to_string(),
             matched: false,
             detail: "规则已停用".to_string(),
+            detail_message: AppMessage::new("proxy.diagnosis.reason.rule_disabled"),
         });
     }
     reasons.push(match_rule_reason(
@@ -1935,6 +1987,13 @@ fn diagnose_rule_match(
         } else {
             format!("需要 {}，当前 {}", rule.method, method)
         },
+        if rule.method.is_empty() {
+            AppMessage::new("proxy.diagnosis.reason.method_any")
+        } else {
+            AppMessage::new("proxy.diagnosis.reason.method_required")
+                .with_param("required", rule.method.clone())
+                .with_param("current", method.to_string())
+        },
     ));
     reasons.push(match_rule_reason(
         "urlContains",
@@ -1943,6 +2002,12 @@ fn diagnose_rule_match(
             "未限制 URL 包含内容".to_string()
         } else {
             format!("需要 URL 包含 {}", rule.url_contains)
+        },
+        if rule.url_contains.is_empty() {
+            AppMessage::new("proxy.diagnosis.reason.url_any")
+        } else {
+            AppMessage::new("proxy.diagnosis.reason.url_contains")
+                .with_param("value", rule.url_contains.clone())
         },
     ));
     reasons.push(match_rule_reason(
@@ -1953,31 +2018,49 @@ fn diagnose_rule_match(
         } else {
             format!("需要路径以 {} 开头，当前 {}", rule.path_prefix, url.path())
         },
+        if rule.path_prefix.is_empty() {
+            AppMessage::new("proxy.diagnosis.reason.path_any")
+        } else {
+            AppMessage::new("proxy.diagnosis.reason.path_prefix")
+                .with_param("required", rule.path_prefix.clone())
+                .with_param("current", url.path().to_string())
+        },
     ));
     if !rule.header_name.is_empty() {
         let value = header_value(headers, &rule.header_name);
         let matched = value.as_ref().is_some_and(|value| {
             rule.header_contains.is_empty() || value.contains(&rule.header_contains)
         });
-        reasons.push(match_rule_reason(
-            "header",
-            matched,
-            match value {
-                Some(value) if rule.header_contains.is_empty() => {
-                    format!("找到请求头 {}={}", rule.header_name, value)
-                }
-                Some(value) => format!(
+        let (detail, detail_message) = match value {
+            Some(value) if rule.header_contains.is_empty() => (
+                format!("找到请求头 {}={}", rule.header_name, value),
+                AppMessage::new("proxy.diagnosis.reason.header_found")
+                    .with_param("name", rule.header_name.clone())
+                    .with_param("value", value),
+            ),
+            Some(value) => (
+                format!(
                     "请求头 {} 需要包含 {}，当前 {}",
                     rule.header_name, rule.header_contains, value
                 ),
-                None => format!("缺少请求头 {}", rule.header_name),
-            },
-        ));
+                AppMessage::new("proxy.diagnosis.reason.header_contains")
+                    .with_param("name", rule.header_name.clone())
+                    .with_param("required", rule.header_contains.clone())
+                    .with_param("current", value),
+            ),
+            None => (
+                format!("缺少请求头 {}", rule.header_name),
+                AppMessage::new("proxy.diagnosis.reason.header_missing")
+                    .with_param("name", rule.header_name.clone()),
+            ),
+        };
+        reasons.push(match_rule_reason("header", matched, detail, detail_message));
     } else {
         reasons.push(match_rule_reason(
             "header",
             true,
             "未限制请求头".to_string(),
+            AppMessage::new("proxy.diagnosis.reason.header_any"),
         ));
     }
     let matched = rule.enabled && reasons.iter().all(|reason| reason.matched);
@@ -1992,11 +2075,17 @@ fn diagnose_rule_match(
     }
 }
 
-fn match_rule_reason(key: &str, matched: bool, detail: String) -> ProxyRuleDiagnosisReason {
+fn match_rule_reason(
+    key: &str,
+    matched: bool,
+    detail: String,
+    detail_message: AppMessage,
+) -> ProxyRuleDiagnosisReason {
     ProxyRuleDiagnosisReason {
         key: key.to_string(),
         matched,
         detail,
+        detail_message,
     }
 }
 
@@ -2022,21 +2111,34 @@ fn proxy_diagnosis_warnings(
         warnings.push(ProxyRequestDiagnosisWarning {
             key: "profileNotListening".to_string(),
             detail: format!("{} 当前没有监听", profile.listen_url()),
+            detail_message: AppMessage::new("proxy.diagnosis.warning.profile_not_listening")
+                .with_param("url", profile.listen_url()),
             action: Some("先启动该代理 profile，再验证请求是否进入代理。".to_string()),
+            action_message: Some(AppMessage::new(
+                "proxy.diagnosis.action.start_profile_first",
+            )),
         });
     }
     if rules.iter().all(|rule| !rule.enabled) {
         warnings.push(ProxyRequestDiagnosisWarning {
             key: "noEnabledRules".to_string(),
             detail: "该 profile 没有启用中的规则".to_string(),
+            detail_message: AppMessage::new("proxy.diagnosis.warning.no_enabled_rules"),
             action: Some("启用至少一条规则，或创建新的转发/Mock/阻断规则。".to_string()),
+            action_message: Some(AppMessage::new(
+                "proxy.diagnosis.action.enable_or_create_rule",
+            )),
         });
     }
     if matched_index.is_none() && rules.iter().any(|rule| rule.enabled) {
         warnings.push(ProxyRequestDiagnosisWarning {
             key: "noRuleMatched".to_string(),
             detail: "请求进入该 profile 后会走默认转发，不会命中规则动作".to_string(),
+            detail_message: AppMessage::new("proxy.diagnosis.warning.no_rule_matched"),
             action: Some("检查 pathPrefix、method、urlContains 和 header 条件。".to_string()),
+            action_message: Some(AppMessage::new(
+                "proxy.diagnosis.action.check_rule_conditions",
+            )),
         });
     }
     if let Some(index) = matched_index {
@@ -2062,7 +2164,15 @@ fn proxy_diagnosis_warnings(
                         selected.name,
                         shadowed.join(", ")
                     ),
+                    detail_message: AppMessage::new(
+                        "proxy.diagnosis.warning.specific_rule_shadowed",
+                    )
+                    .with_param("selected", selected.name.clone())
+                    .with_param("shadowed", shadowed.join(", ")),
                     action: Some("把更具体的 pathPrefix 规则设置为更小的 priority。".to_string()),
+                    action_message: Some(AppMessage::new(
+                        "proxy.diagnosis.action.raise_specific_rule_priority",
+                    )),
                 });
             }
         }
@@ -2476,13 +2586,62 @@ mod tests {
     use super::*;
 
     #[test]
+    fn diagnosis_exposes_stable_messages_without_replacing_legacy_text() {
+        let profile = ProxyProfile {
+            id: "diagnosis".to_string(),
+            name: "Local API".to_string(),
+            listen_port: 0,
+            ..ProxyProfile::default()
+        };
+        let config = ProxyConfig {
+            profiles: vec![profile.clone()],
+            rules: vec![ProxyRule {
+                id: "api-rule".to_string(),
+                profile_id: profile.id.clone(),
+                enabled: true,
+                name: "API Rule".to_string(),
+                priority: 10,
+                method: "GET".to_string(),
+                url_contains: String::new(),
+                path_prefix: "/api".to_string(),
+                header_name: String::new(),
+                header_contains: String::new(),
+                action: ProxyRuleAction::default(),
+            }],
+        };
+
+        let diagnosis =
+            diagnose_proxy_request(&config, &profile.id, "GET", "/api/users", &BTreeMap::new())
+                .expect("diagnose proxy request");
+
+        assert_eq!(diagnosis.status_key, "matchedNotListening");
+        assert_eq!(
+            diagnosis.status_message.key,
+            "proxy.diagnosis.status.matchedNotListening"
+        );
+        assert_eq!(
+            diagnosis.summary_message.key,
+            "proxy.diagnosis.summary.matched_not_listening"
+        );
+        assert!(diagnosis.summary.contains("API Rule"));
+        assert_eq!(
+            diagnosis.warnings[0].detail_message.key,
+            "proxy.diagnosis.warning.profile_not_listening"
+        );
+        assert_eq!(
+            diagnosis.decisions[0].reasons[2].detail_message.key,
+            "proxy.diagnosis.reason.path_prefix"
+        );
+    }
+
+    #[test]
     fn joins_relative_proxy_target_without_encoding_its_query() {
         let base = Url::parse("http://nginx.example.test/").unwrap();
-        let target = "/imop/auth-admin-dc2-vke/login/path?redirectUri=http://localhost:8080/";
+        let target = "/demo/auth-env-demo/login/path?redirectUri=http://localhost:8080/";
 
         let resolved = join_base_url(base, target).unwrap();
 
-        assert_eq!(resolved.path(), "/imop/auth-admin-dc2-vke/login/path");
+        assert_eq!(resolved.path(), "/demo/auth-env-demo/login/path");
         assert_eq!(resolved.query(), Some("redirectUri=http://localhost:8080/"));
         assert!(!resolved.as_str().contains("%3F"));
     }

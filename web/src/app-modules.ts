@@ -73,7 +73,9 @@ function buildBuildPageProps({
     onSyncBranches: () => void branchContext.handleSyncBranches(),
     sourceBranchEntries: mergeSelection.sourceBranchEntries,
     sourceBranchOptions: mergeSelection.sourceBranchOptions,
-    branchSyncText: branchContext.branchSyncText,
+    branchSyncText: appShell.selectedProjectInfo?.supportsBranch
+      ? branchContext.branchSyncText
+      : "当前项目未配置 Git 分支来源。",
     busy,
     onTriggerBuild: buildModule.handleTriggerBuild,
     plan: buildModule.plan,

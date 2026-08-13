@@ -16,6 +16,7 @@ import {
 } from "../lib/workspaceRuntimePreflightActions";
 import { OpenExternalIcon, PlayIcon, RefreshIcon } from "./AppIcons";
 import { useI18n } from "../i18n";
+import { translateAppMessage } from "../i18n/appMessages";
 import { translateInternalMessage } from "../i18n/internalMessages";
 
 export type WorkspaceRuntimePreflightStatusProps = {
@@ -70,7 +71,8 @@ export function WorkspaceRuntimePreflightStatus({
   return (
     <>
       <Tooltip
-        title={translateInternalMessage(
+        title={translateAppMessage(
+          preflight.summaryMessage ?? preflight.statusMessage,
           preflight.summary || preflight.statusLabel,
           t,
         )}
@@ -134,7 +136,8 @@ export function WorkspaceRuntimePreflightStatus({
           <div className="overview-runtime-preflight-summary">
             <span className={`is-${tone}`}>{label}</span>
             <p>
-              {translateInternalMessage(
+              {translateAppMessage(
+                preflight.summaryMessage ?? preflight.statusMessage,
                 preflight.summary || preflight.statusLabel,
                 t,
               )}
@@ -150,15 +153,24 @@ export function WorkspaceRuntimePreflightStatus({
                 >
                   <i aria-hidden="true" />
                   <span>
-                    <strong>{translateInternalMessage(check.title, t)}</strong>
+                    <strong>
+                      {translateAppMessage(check.titleMessage, check.title, t)}
+                    </strong>
                     <small>
-                      {translateInternalMessage(
+                      {translateAppMessage(
+                        check.detailMessage ?? check.statusMessage,
                         check.detail || check.statusLabel,
                         t,
                       )}
                     </small>
                     {check.action ? (
-                      <em>{translateInternalMessage(check.action, t)}</em>
+                      <em>
+                        {translateAppMessage(
+                          check.actionMessage,
+                          check.action,
+                          t,
+                        )}
+                      </em>
                     ) : null}
                     {action ? (
                       <button

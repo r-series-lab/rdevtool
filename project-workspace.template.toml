@@ -16,7 +16,7 @@ include_all_navigation = true
 # worklog_auto_record = true
 # include_all_projects = false
 # include_all_navigation = false
-# projects = ["imop-admin", "marketing-admin"]
+# projects = ["demo-console", "marketing-admin"]
 # navigation_categories = ["营销后台", "常用环境"]
 # navigation_entries = ["禅道需求", "Jenkins 营销"]
 #

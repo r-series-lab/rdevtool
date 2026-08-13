@@ -27,6 +27,10 @@ import {
 import { useI18n, type Translate } from "../i18n";
 import { translateInternalMessage } from "../i18n/internalMessages";
 import {
+  translateBuildDetail,
+  translateBuildParameterLabel,
+} from "../lib/buildPresentation";
+import {
   ActivityIcon,
   AppWindowIcon,
   CheckIcon,
@@ -38,6 +42,7 @@ import {
   PackageIcon,
   PanelSideIcon,
   PlayIcon,
+  PowerIcon,
   RefreshIcon,
   ReplayIcon,
   SearchIcon,
@@ -55,6 +60,12 @@ import {
 } from "./activityCenterQueue";
 import { activityCanBeCleared } from "../lib/activityResolution";
 import type { Theme } from "@mui/material/styles";
+import type {
+  ActiveSession,
+  ActiveSessionAction,
+  ActiveSessionActionResult,
+} from "../lib/activeSessions";
+import { ActiveSessionsPanel } from "./ActiveSessionsPanel";
 
 type ActivityFilter =
   | "attention"
@@ -62,6 +73,7 @@ type ActivityFilter =
   | "success"
   | "failed";
 type ActivityOriginFilter = "all" | ActivityOrigin;
+type ActivityCenterView = "active" | "activity";
 
 type ActivityChainGroup = {
   id: string;
@@ -107,9 +119,18 @@ type ActivityCenterProps = {
   onRefresh: (options?: { force?: boolean }) => Promise<void> | void;
   onResolveEntry: (entry: ActivityEntry) => void;
   onResolveEntries: (entries: ActivityEntry[]) => void;
+  activeSessions: ActiveSession[];
+  activeSessionsLoading: boolean;
+  activeSessionsError: string;
+  onRefreshActiveSessions: (options?: { silent?: boolean }) => Promise<void> | void;
+  onRunActiveSessionAction: (
+    session: ActiveSession,
+    action: ActiveSessionAction,
+  ) => Promise<ActiveSessionActionResult> | ActiveSessionActionResult;
 };
 
 const ACTIVITY_REFRESH_INTERVAL_MS = 10000;
+const ACTIVE_SESSIONS_FALLBACK_INTERVAL_MS = 30_000;
 const ACTIVITY_LIST_PAGE_SIZE = 5;
 const ACTIVITY_EXECUTION_PREVIEW_LIMIT = 3;
 
@@ -502,7 +523,17 @@ function displayActivitySummary(item: ActivityEntry, t: Translate) {
   ) {
     return "";
   }
-  return translateInternalMessage(item.summary, t);
+  return translateActivityMessage(item, item.summary, t);
+}
+
+function translateActivityMessage(
+  item: Pick<ActivityEntry, "kind">,
+  value: string,
+  t: Translate,
+) {
+  return isBuildActivityKind(item.kind)
+    ? translateBuildDetail(value, t)
+    : translateInternalMessage(value, t);
 }
 
 function ActivityParameterSummary({ item }: { item: ActivityEntry }) {
@@ -517,7 +548,7 @@ function ActivityParameterSummary({ item }: { item: ActivityEntry }) {
         {t("参数")}
       </Typography>
       {parameters.map((parameter) => {
-        const label = translateInternalMessage(parameter.label, t);
+        const label = translateBuildParameterLabel(parameter, t);
         return (
           <Typography
             component="span"
@@ -554,7 +585,7 @@ function ActivityTimelineDetail({ item }: { item: ActivityEntry }) {
   if (!item.detail) {
     return null;
   }
-  const detail = translateInternalMessage(item.detail, t);
+  const detail = translateActivityMessage(item, item.detail, t);
   return (
     <Box className={`activity-timeline-detail${item.status === "failed" ? " is-failure" : ""}`}>
       {item.status === "failed" ? (
@@ -937,8 +968,14 @@ export function ActivityCenter({
   onRefresh,
   onResolveEntry,
   onResolveEntries,
+  activeSessions,
+  activeSessionsLoading,
+  activeSessionsError,
+  onRefreshActiveSessions,
+  onRunActiveSessionAction,
 }: ActivityCenterProps) {
   const { t } = useI18n();
+  const [centerView, setCenterView] = useState<ActivityCenterView>("activity");
   const [filter, setFilter] = useState<ActivityFilter>("all");
   const [originFilter, setOriginFilter] = useState<ActivityOriginFilter>("all");
   const [listPage, setListPage] = useState(1);
@@ -952,6 +989,8 @@ export function ActivityCenter({
   const [actionRunningId, setActionRunningId] = useState("");
   const refreshingRef = useRef(false);
   const onRefreshRef = useRef(onRefresh);
+  const onRefreshActiveSessionsRef = useRef(onRefreshActiveSessions);
+  const wasOpenRef = useRef(false);
   const autoRefreshableRef = useRef(false);
   const manualRefreshableRef = useRef(false);
   const hasAutoRefreshableBuildActivity = useMemo(
@@ -966,6 +1005,37 @@ export function ActivityCenter({
   useEffect(() => {
     onRefreshRef.current = onRefresh;
   }, [onRefresh]);
+
+  useEffect(() => {
+    onRefreshActiveSessionsRef.current = onRefreshActiveSessions;
+  }, [onRefreshActiveSessions]);
+
+  useEffect(() => {
+    if (open && !wasOpenRef.current) {
+      const hasAttention = items.some(activityRequiresAttention);
+      setCenterView(
+        !hasAttention && activeSessions.length > 0 ? "active" : "activity",
+      );
+    }
+    wasOpenRef.current = open;
+  }, [activeSessions.length, items, open]);
+
+  useEffect(() => {
+    if (!open || centerView !== "active") {
+      return;
+    }
+    const refreshIfVisible = () => {
+      if (document.visibilityState !== "hidden") {
+        void onRefreshActiveSessionsRef.current({ silent: true });
+      }
+    };
+    refreshIfVisible();
+    const timer = window.setInterval(
+      refreshIfVisible,
+      ACTIVE_SESSIONS_FALLBACK_INTERVAL_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [centerView, open]);
 
   useEffect(() => {
     autoRefreshableRef.current = hasAutoRefreshableBuildActivity;
@@ -1290,7 +1360,7 @@ export function ActivityCenter({
               </Box>
               <Box className="activity-header-text" minWidth={0}>
                 <Typography className="activity-header-title" variant="subtitle1">
-                  {t("活动")}
+                  {t("运行与活动")}
                 </Typography>
                 <Typography
                   className="activity-header-subtitle"
@@ -1298,7 +1368,7 @@ export function ActivityCenter({
                   color="text.secondary"
                   noWrap
                 >
-                  {t("管理和跟踪所有活动")}
+                  {t("管理当前会话与操作记录")}
                 </Typography>
               </Box>
             </Stack>
@@ -1308,49 +1378,72 @@ export function ActivityCenter({
               spacing={0}
               sx={{ pt: variant === "panel" ? 0.1 : 0 }}
             >
-              <Tooltip title={t("标记全部失败已处理")}>
-                <span>
-                  <IconButton
-                    className="activity-header-action activity-header-action--primary"
-                    size="small"
-                    onClick={handleAcknowledgeAllFailed}
-                    disabled={unhandledFailedItems.length === 0}
-                    aria-label={t("标记全部失败已处理")}
-                    sx={activityHeaderIconSx}
-                  >
-                    <CheckIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-              <Tooltip title={t("刷新活动状态")}>
-                <span>
-                  <IconButton
-                    className="activity-header-action"
-                    size="small"
-                    onClick={() => void runRefresh({ force: true })}
-                    disabled={!hasManualRefreshableBuildActivity || manualRefreshing}
-                    aria-label={t("刷新活动状态")}
-                    sx={activityHeaderIconSx}
-                  >
-                    <RefreshIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-              <Tooltip title={t("清理已处理记录")}>
-                <span>
-                  <IconButton
-                    className="activity-header-action"
-                    size="small"
-                    onClick={() => setClearConfirmOpen(true)}
-                    disabled={clearableItems.length === 0}
-                    aria-label={t("清理已处理记录")}
-                    sx={activityHeaderIconSx}
-                  >
-                    <TrashIcon fontSize="small" />
-                  </IconButton>
-                </span>
-              </Tooltip>
-              <Tooltip title={t("收起活动中心")}>
+              {centerView === "activity" ? (
+                <Tooltip title={t("标记全部失败已处理")}>
+                  <span>
+                    <IconButton
+                      className="activity-header-action activity-header-action--primary"
+                      size="small"
+                      onClick={handleAcknowledgeAllFailed}
+                      disabled={unhandledFailedItems.length === 0}
+                      aria-label={t("标记全部失败已处理")}
+                      sx={activityHeaderIconSx}
+                    >
+                      <CheckIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              ) : null}
+              {centerView === "activity" ? (
+                <Tooltip title={t("刷新活动状态")}>
+                  <span>
+                    <IconButton
+                      className="activity-header-action"
+                      size="small"
+                      onClick={() => void runRefresh({ force: true })}
+                      disabled={!hasManualRefreshableBuildActivity || manualRefreshing}
+                      aria-label={t("刷新活动状态")}
+                      sx={activityHeaderIconSx}
+                    >
+                      <RefreshIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              ) : (
+                <Tooltip title={t("刷新运行状态")}>
+                  <span>
+                    <IconButton
+                      className="activity-header-action activity-header-action--primary"
+                      size="small"
+                      onClick={() =>
+                        void onRefreshActiveSessions({ silent: false })
+                      }
+                      disabled={activeSessionsLoading}
+                      aria-label={t("刷新运行状态")}
+                      sx={activityHeaderIconSx}
+                    >
+                      <RefreshIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              )}
+              {centerView === "activity" ? (
+                <Tooltip title={t("清理已处理记录")}>
+                  <span>
+                    <IconButton
+                      className="activity-header-action"
+                      size="small"
+                      onClick={() => setClearConfirmOpen(true)}
+                      disabled={clearableItems.length === 0}
+                      aria-label={t("清理已处理记录")}
+                      sx={activityHeaderIconSx}
+                    >
+                      <TrashIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              ) : null}
+              <Tooltip title={t("收起运行与活动中心")}>
                 <IconButton
                   className="activity-header-action"
                   size="small"
@@ -1365,73 +1458,110 @@ export function ActivityCenter({
           </Stack>
 
           <Tabs
-            className="runtime-panel-tabs activity-filter-strip"
-            value={filter}
-            onChange={(_, value) => setFilter(value as ActivityFilter)}
+            className="activity-mode-tabs"
+            value={centerView}
+            onChange={(_, value) => setCenterView(value as ActivityCenterView)}
             variant="fullWidth"
-            aria-label={t("活动筛选")}
+            aria-label={t("运行与活动视图")}
           >
-            {filterOptions.map((item) => (
-              <Tab
-                key={item.key}
-                value={item.key}
-                icon={item.icon}
-                iconPosition="start"
-                label={(
-                  <Box component="span" className="activity-filter-label">
-                    <Box component="span">{t(item.label)}</Box>
-                    <Box component="span" className="activity-filter-count">
-                      {item.count}
+            <Tab
+              value="active"
+              icon={<PowerIcon fontSize="small" />}
+              iconPosition="start"
+              label={t("运行中 {count}", { count: activeSessions.length })}
+            />
+            <Tab
+              value="activity"
+              icon={<ActivityIcon fontSize="small" />}
+              iconPosition="start"
+              label={t("活动记录 {count}", { count: items.length })}
+            />
+          </Tabs>
+
+          {centerView === "activity" ? (
+            <Tabs
+              className="runtime-panel-tabs activity-filter-strip"
+              value={filter}
+              onChange={(_, value) => setFilter(value as ActivityFilter)}
+              variant="fullWidth"
+              aria-label={t("活动筛选")}
+            >
+              {filterOptions.map((item) => (
+                <Tab
+                  key={item.key}
+                  value={item.key}
+                  icon={item.icon}
+                  iconPosition="start"
+                  label={(
+                    <Box component="span" className="activity-filter-label">
+                      <Box component="span">{t(item.label)}</Box>
+                      <Box component="span" className="activity-filter-count">
+                        {item.count}
+                      </Box>
                     </Box>
-                  </Box>
-                )}
-                aria-label={`${t(item.label)} ${item.count}`}
-              />
-            ))}
-          </Tabs>
-          <Tabs
-            value={originFilter}
-            onChange={(_, value) => setOriginFilter(value as ActivityOriginFilter)}
-            variant="scrollable"
-            scrollButtons={false}
-            aria-label={t("活动来源筛选")}
-            sx={{
-              mt: 0.58,
-              minHeight: 28,
-              "& .MuiTabs-indicator": {
-                height: 2,
-                borderRadius: "2px",
-              },
-              "& .MuiTab-root": {
+                  )}
+                  aria-label={`${t(item.label)} ${item.count}`}
+                />
+              ))}
+            </Tabs>
+          ) : null}
+          {centerView === "activity" ? (
+            <Tabs
+              value={originFilter}
+              onChange={(_, value) =>
+                setOriginFilter(value as ActivityOriginFilter)
+              }
+              variant="scrollable"
+              scrollButtons={false}
+              aria-label={t("活动来源筛选")}
+              sx={{
+                mt: 0.58,
                 minHeight: 28,
-                minWidth: 0,
-                px: 0.9,
-                py: 0.25,
-                mr: 0.25,
-                borderRadius: "6px",
-                color: "var(--muted)",
-                fontSize: "0.62rem",
-                fontWeight: 720,
-                textTransform: "none",
-                letterSpacing: 0,
-              },
-              "& .Mui-selected": {
-                color: "var(--text)",
-                bgcolor: "color-mix(in srgb, var(--accent) 8%, var(--glass))",
-              },
-            }}
-          >
-            {originOptions.map((item) => (
-              <Tab
-                key={item.key}
-                value={item.key}
-                label={`${t(item.label)} ${item.count}`}
-                aria-label={`${t(item.label)} ${item.count}`}
-              />
-            ))}
-          </Tabs>
+                "& .MuiTabs-indicator": {
+                  height: 2,
+                  borderRadius: "2px",
+                },
+                "& .MuiTab-root": {
+                  minHeight: 28,
+                  minWidth: 0,
+                  px: 0.9,
+                  py: 0.25,
+                  mr: 0.25,
+                  borderRadius: "6px",
+                  color: "var(--muted)",
+                  fontSize: "0.62rem",
+                  fontWeight: 720,
+                  textTransform: "none",
+                  letterSpacing: 0,
+                },
+                "& .Mui-selected": {
+                  color: "var(--text)",
+                  bgcolor:
+                    "color-mix(in srgb, var(--accent) 8%, var(--glass))",
+                },
+              }}
+            >
+              {originOptions.map((item) => (
+                <Tab
+                  key={item.key}
+                  value={item.key}
+                  label={`${t(item.label)} ${item.count}`}
+                  aria-label={`${t(item.label)} ${item.count}`}
+                />
+              ))}
+            </Tabs>
+          ) : null}
         </Box>
 
+        {centerView === "active" ? (
+          <ActiveSessionsPanel
+            sessions={activeSessions}
+            loading={activeSessionsLoading}
+            error={activeSessionsError}
+            onAction={onRunActiveSessionAction}
+          />
+        ) : (
+          <>
         {showQueue ? (
           <ActivityAttentionQueue
             groups={queueGroups}
@@ -1694,7 +1824,8 @@ export function ActivityCenter({
                   unhandledGroupFailures.length === 0
                     ? group.failedItems[0].acknowledgedAt ?? null
                     : null;
-                const collapsedFailureReason = translateInternalMessage(
+                const collapsedFailureReason = translateActivityMessage(
+                  group.latest,
                   activityFailureReason(group.latest),
                   t,
                 );
@@ -1807,7 +1938,11 @@ export function ActivityCenter({
                             </Typography>
                             <Typography variant="caption" className="activity-collapsed-copy">
                               {displayActivitySummary(group.latest, t) ||
-                                translateInternalMessage(group.latest.detail ?? "", t) ||
+                                translateActivityMessage(
+                                  group.latest,
+                                  group.latest.detail ?? "",
+                                  t,
+                                ) ||
                                 t("执行详情已收起")}
                             </Typography>
                             {collapsedFailureReason ? (
@@ -1902,7 +2037,11 @@ export function ActivityCenter({
                 );
               }
               const item = unit.item;
-              const itemDetail = translateInternalMessage(item.detail ?? "", t);
+              const itemDetail = translateActivityMessage(
+                item,
+                item.detail ?? "",
+                t,
+              );
               return (
                 <Box
                   className={`activity-record-card activity-record-card--${item.status}`}
@@ -2071,6 +2210,8 @@ export function ActivityCenter({
             )}
           </Stack>
         ) : null}
+          </>
+        )}
       </Box>
       <AppActionDialog
         open={Boolean(detailEntry)}
@@ -2114,7 +2255,7 @@ export function ActivityCenter({
               <Typography
                 sx={{ fontSize: 13, fontWeight: 760, overflowWrap: "anywhere" }}
               >
-                {translateInternalMessage(detailEntry.summary, t)}
+                {translateActivityMessage(detailEntry, detailEntry.summary, t)}
               </Typography>
               {detailEntry.detail ? (
                 <Typography
@@ -2128,7 +2269,11 @@ export function ActivityCenter({
                     whiteSpace: "pre-line",
                   }}
                 >
-                  {translateInternalMessage(detailEntry.detail, t)}
+                  {translateActivityMessage(
+                    detailEntry,
+                    detailEntry.detail,
+                    t,
+                  )}
                 </Typography>
               ) : null}
             </Box>

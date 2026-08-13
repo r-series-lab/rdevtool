@@ -129,12 +129,17 @@ impl ProxyDaemonRuntime {
             .iter()
             .map(|profile| {
                 proxy_daemon_status_for_profile(path, profile)
-                    .and_then(daemon_status_to_runtime)
+                    .map(daemon_status_to_runtime_observation)
                     .unwrap_or_else(|_| ProxyProfileRuntimeStatus {
                         profile_id: profile.id.clone(),
                         running: false,
+                        managed: false,
+                        version_compatible: true,
                         listen_url: profile.listen_url(),
+                        pid: None,
                         started_at: None,
+                        owner: None,
+                        detail: "proxy daemon status is unavailable".to_string(),
                     })
             })
             .collect()
@@ -355,12 +360,28 @@ fn daemon_status_to_runtime(status: ProxyDaemonStatus) -> Result<ProxyProfileRun
     if !status.running || !status.managed {
         bail!("proxy daemon is not running: {}", status.detail);
     }
-    Ok(ProxyProfileRuntimeStatus {
+    Ok(daemon_status_to_runtime_observation(status))
+}
+
+fn daemon_status_to_runtime_observation(status: ProxyDaemonStatus) -> ProxyProfileRuntimeStatus {
+    let owner = if status.managed {
+        status
+            .pid
+            .map(|pid| format!("rDevTool proxy daemon (PID {pid})"))
+    } else {
+        status.owner
+    };
+    ProxyProfileRuntimeStatus {
         profile_id: status.profile_id,
-        running: true,
+        running: status.running,
+        managed: status.managed,
+        version_compatible: status.version_compatible,
         listen_url: status.listen_url,
+        pid: status.pid,
         started_at: status.started_at,
-    })
+        owner,
+        detail: status.detail,
+    }
 }
 
 fn run_proxy_daemon_serve(
@@ -818,9 +839,10 @@ impl Drop for DaemonOperationLock {
 #[cfg(test)]
 mod tests {
     use super::{
-        APP_VERSION, DAEMON_PROTOCOL_VERSION, ProxyDaemonState, daemon_state_version_compatible,
-        normalized_config_path, parse_proxy_daemon_args, proxy_daemon_state_path,
-        proxy_daemon_status, proxy_daemon_stop, runtime_key_hash, write_state,
+        APP_VERSION, DAEMON_PROTOCOL_VERSION, ProxyDaemonRuntime, ProxyDaemonState,
+        daemon_state_version_compatible, normalized_config_path, parse_proxy_daemon_args,
+        proxy_daemon_state_path, proxy_daemon_status, proxy_daemon_stop, runtime_key_hash,
+        write_state,
     };
     use crate::proxy::{ProxyConfig, ProxyProfile, save_proxy_config};
     use chrono::Utc;
@@ -909,6 +931,14 @@ mod tests {
         assert!(status.running);
         assert!(!status.managed);
         assert!(!status.version_compatible);
+        let dashboard_status = ProxyDaemonRuntime
+            .statuses_for_profiles(&config_path, std::slice::from_ref(&profile))
+            .into_iter()
+            .next()
+            .unwrap();
+        assert!(dashboard_status.running);
+        assert!(!dashboard_status.managed);
+        assert!(dashboard_status.owner.is_some());
         let error = proxy_daemon_stop(&config_path, &profile.id).unwrap_err();
         assert!(
             error

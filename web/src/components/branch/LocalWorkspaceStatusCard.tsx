@@ -9,6 +9,7 @@ import { alpha } from "@mui/material/styles";
 import type { BranchPushStatus } from "../../app-types";
 import { useI18n } from "../../i18n";
 import { BranchChangedFilesList } from "./BranchChangedFilesList";
+import { BranchRevisionSummary } from "./BranchRevisionSummary";
 
 type LocalWorkspaceStatusCardProps = {
   status: BranchPushStatus;
@@ -69,49 +70,10 @@ export function LocalWorkspaceStatusCard({
         </Stack>
 
         {status.latestCommit ? (
-          <Box
-            sx={{
-              display: "grid",
-              gridTemplateColumns: "auto minmax(0, 1fr)",
-              alignItems: "baseline",
-              columnGap: 0.5,
-              minWidth: 0,
-            }}
-          >
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              sx={{ flexShrink: 0, fontSize: "0.7rem", fontWeight: 680, lineHeight: 1.35 }}
-            >
-              {t("最近提交")}
-            </Typography>
-            <Typography
-              variant="caption"
-              color="text.secondary"
-              title={`${status.latestCommit.shortHash} · ${status.latestCommit.subject}`}
-              sx={{
-                minWidth: 0,
-                overflow: "hidden",
-                textOverflow: "ellipsis",
-                whiteSpace: "nowrap",
-                fontSize: "0.72rem",
-                lineHeight: 1.35,
-              }}
-            >
-              <Box
-                component="span"
-                sx={{
-                  fontFamily:
-                    '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                  fontWeight: 720,
-                }}
-              >
-                {status.latestCommit.shortHash}
-              </Box>
-              {" · "}
-              {status.latestCommit.subject}
-            </Typography>
-          </Box>
+          <BranchRevisionSummary
+            label={t("最近提交")}
+            commit={status.latestCommit}
+          />
         ) : null}
 
         {blocked ? (

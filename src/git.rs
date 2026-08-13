@@ -43,11 +43,18 @@ pub struct BuildChangeSnapshot {
     pub committed_source: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionDiffCheck {
+    pub success: bool,
+    pub output: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct BranchActivity {
     pub name: String,
     pub updated_at: String,
     pub updated_ts: i64,
+    pub commit: Option<BranchCommitSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,6 +120,16 @@ pub struct WorkingTreeStatus {
     pub conflicted_count: usize,
     pub files: Vec<WorkingTreeFileStatus>,
     pub clean: bool,
+}
+
+pub fn local_exclude_path(repo_path: &Path) -> Result<PathBuf> {
+    let value = run_git_capture(repo_path, &["rev-parse", "--git-path", "info/exclude"])?;
+    let path = PathBuf::from(value.trim());
+    if path.is_absolute() {
+        Ok(path)
+    } else {
+        Ok(repo_path.join(path))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -219,6 +236,74 @@ pub fn working_tree_status(repo_path: &Path) -> Result<WorkingTreeStatus> {
         ],
     )?;
     parse_working_tree_status(&output)
+}
+
+pub fn revision_commit(repo_path: &Path, revision: &str) -> Result<String> {
+    let revision = sanitize_revision(revision)?;
+    let commit = format!("{revision}^{{commit}}");
+    Ok(
+        run_git_capture(repo_path, &["rev-parse", "--verify", &commit])?
+            .trim()
+            .to_string(),
+    )
+}
+
+pub fn revision_ahead_behind(
+    repo_path: &Path,
+    base_revision: &str,
+    target_revision: &str,
+) -> Result<(usize, usize)> {
+    let base_revision = sanitize_revision(base_revision)?;
+    let target_revision = sanitize_revision(target_revision)?;
+    let range = format!("{base_revision}...{target_revision}");
+    let output = run_git_capture(repo_path, &["rev-list", "--left-right", "--count", &range])?;
+    let mut counts = output.split_whitespace();
+    let behind = counts
+        .next()
+        .unwrap_or("0")
+        .parse::<usize>()
+        .context("invalid behind count returned by git rev-list")?;
+    let ahead = counts
+        .next()
+        .unwrap_or("0")
+        .parse::<usize>()
+        .context("invalid ahead count returned by git rev-list")?;
+    Ok((ahead, behind))
+}
+
+pub fn revision_changed_paths(repo_path: &Path, base_revision: &str) -> Result<Vec<String>> {
+    let base_revision = sanitize_revision(base_revision)?;
+    let output = run_git_capture(repo_path, &["diff", "--name-only", base_revision, "--"])?;
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+
+pub fn revision_diff_check(repo_path: &Path, base_revision: &str) -> Result<RevisionDiffCheck> {
+    let base_revision = sanitize_revision(base_revision)?;
+    let output = git_command()
+        .args(["-C"])
+        .arg(repo_path)
+        .args(["diff", "--check", base_revision, "--"])
+        .output()
+        .with_context(|| format!("failed to run git diff --check in {}", repo_path.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let detail = match (stdout.trim(), stderr.trim()) {
+        ("", "") => String::new(),
+        (stdout, "") => stdout.to_string(),
+        ("", stderr) => stderr.to_string(),
+        (stdout, stderr) => format!("{stdout}\n{stderr}"),
+    };
+    Ok(RevisionDiffCheck {
+        success: output.status.success(),
+        output: detail,
+    })
 }
 
 pub fn changed_file_diff(
@@ -583,7 +668,7 @@ fn local_branch_activity(repo_path: &Path) -> Result<Vec<BranchActivity>> {
         .args([
             "for-each-ref",
             "--sort=-committerdate",
-            "--format=%(refname:short)|%(committerdate:unix)|%(committerdate:iso8601-strict)",
+            "--format=%(refname:short)|%(committerdate:unix)|%(committerdate:iso8601-strict)|%(objectname:short)|%(subject)",
             "refs/heads",
             "refs/remotes",
         ])
@@ -606,10 +691,12 @@ fn local_branch_activity(repo_path: &Path) -> Result<Vec<BranchActivity>> {
 
     let mut branches = BTreeMap::<String, BranchActivity>::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let mut parts = line.splitn(3, '|');
+        let mut parts = line.splitn(5, '|');
         let raw_name = parts.next().unwrap_or_default().trim();
         let raw_ts = parts.next().unwrap_or_default().trim();
         let raw_date = parts.next().unwrap_or_default().trim();
+        let short_hash = parts.next().unwrap_or_default().trim();
+        let subject = parts.next().unwrap_or_default().trim();
 
         let normalized = trim_remote_prefix(raw_name).to_string();
         if normalized.is_empty() || normalized == "HEAD" || is_ephemeral_branch(&normalized) {
@@ -621,12 +708,25 @@ fn local_branch_activity(repo_path: &Path) -> Result<Vec<BranchActivity>> {
             name: normalized.clone(),
             updated_at: format_branch_activity_date(raw_date, updated_ts),
             updated_ts,
+            commit: if short_hash.is_empty() {
+                None
+            } else {
+                Some(BranchCommitSummary {
+                    short_hash: short_hash.to_string(),
+                    subject: subject.to_string(),
+                    committed_at: format_branch_commit_date(raw_date, updated_ts),
+                })
+            },
         };
 
         branches
             .entry(normalized)
             .and_modify(|current| {
-                if candidate.updated_ts > current.updated_ts {
+                if candidate.updated_ts > current.updated_ts
+                    || (candidate.updated_ts == current.updated_ts
+                        && current.commit.is_none()
+                        && candidate.commit.is_some())
+                {
                     *current = candidate.clone();
                 }
             })
@@ -1148,6 +1248,26 @@ fn format_branch_activity_date(raw_date: &str, updated_ts: i64) -> String {
             return parsed
                 .with_timezone(&Local)
                 .format("%Y-%m-%d %H:%M")
+                .to_string();
+        }
+    }
+
+    String::new()
+}
+
+fn format_branch_commit_date(raw_date: &str, updated_ts: i64) -> String {
+    if let Ok(parsed) = DateTime::parse_from_rfc3339(raw_date) {
+        return parsed
+            .with_timezone(&Local)
+            .format("%Y-%m-%d %H:%M:%S %:z")
+            .to_string();
+    }
+
+    if updated_ts > 0 {
+        if let Some(parsed) = DateTime::<Utc>::from_timestamp(updated_ts, 0) {
+            return parsed
+                .with_timezone(&Local)
+                .format("%Y-%m-%d %H:%M:%S %:z")
                 .to_string();
         }
     }
@@ -2146,6 +2266,17 @@ fn sanitize_branch_name(value: &str) -> String {
     out.trim_matches('-').to_string()
 }
 
+fn sanitize_revision(value: &str) -> Result<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        anyhow::bail!("revision is required");
+    }
+    if value.starts_with('-') || value.chars().any(char::is_whitespace) {
+        anyhow::bail!("invalid revision: {value}");
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod worktree_recovery_tests {
     use super::*;
@@ -2321,6 +2452,42 @@ mod worktree_recovery_tests {
     }
 
     #[test]
+    fn local_branch_activity_includes_visible_commit_metadata() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rdevtool-branch-activity-commit-{}-{suffix}",
+            std::process::id()
+        ));
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("create repository directory");
+        run(&repo, &["init"]);
+        run(
+            &repo,
+            &["config", "user.email", "rdevtool-test@example.com"],
+        );
+        run(&repo, &["config", "user.name", "rDevTool Test"]);
+        fs::write(repo.join("README.md"), "branch activity\n").expect("write test file");
+        run(&repo, &["add", "README.md"]);
+        run(&repo, &["commit", "-m", "fix: visible | revision summary"]);
+        run(&repo, &["branch", "-M", "main"]);
+
+        let branches = local_branch_activity(&repo).expect("read branch activity");
+        let main = branches
+            .iter()
+            .find(|branch| branch.name == "main")
+            .expect("find main branch");
+        let commit = main.commit.as_ref().expect("read commit metadata");
+
+        assert!(!commit.short_hash.is_empty());
+        assert_eq!(commit.subject, "fix: visible | revision summary");
+        assert!(!commit.committed_at.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn cached_branch_tip_changed_paths_uses_first_parent_and_handles_root() {
         let suffix = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2364,20 +2531,20 @@ mod worktree_recovery_tests {
             &repo,
             &[
                 "update-ref",
-                "refs/remotes/origin/env-dc2-vke",
+                "refs/remotes/origin/env-demo-vke",
                 "refs/heads/deploy",
             ],
         );
 
-        run(&repo, &["checkout", "-b", "env-dc2-vke"]);
-        fs::create_dir_all(repo.join("imop-admin/src")).expect("create admin directory");
-        fs::write(repo.join("imop-admin/src/later.ts"), "export {};\n")
+        run(&repo, &["checkout", "-b", "env-demo-vke"]);
+        fs::create_dir_all(repo.join("example-console/src")).expect("create admin directory");
+        fs::write(repo.join("example-console/src/later.ts"), "export {};\n")
             .expect("write later local file");
-        run(&repo, &["add", "imop-admin/src/later.ts"]);
+        run(&repo, &["add", "example-console/src/later.ts"]);
         run(&repo, &["commit", "-m", "later local commit"]);
 
         assert_eq!(
-            cached_branch_tip_changed_paths(&repo, "env-dc2-vke").expect("read merge tip paths"),
+            cached_branch_tip_changed_paths(&repo, "env-demo-vke").expect("read merge tip paths"),
             vec!["mobile/src/page.ts".to_string()]
         );
         assert_eq!(
@@ -2425,8 +2592,8 @@ mod worktree_recovery_tests {
         run(&repo, &["add", "mobile/src/page.ts"]);
         run(&repo, &["commit", "-m", "mobile change"]);
 
-        fs::create_dir_all(repo.join("imop-admin/src")).expect("create admin directory");
-        fs::write(repo.join("imop-admin/src/local.ts"), "export {};\n")
+        fs::create_dir_all(repo.join("example-console/src")).expect("create admin directory");
+        fs::write(repo.join("example-console/src/local.ts"), "export {};\n")
             .expect("write untracked admin file");
         fs::create_dir_all(repo.join("docs")).expect("create docs directory");
         fs::write(repo.join("docs/staged.md"), "staged\n").expect("write staged file");
@@ -2438,7 +2605,7 @@ mod worktree_recovery_tests {
             snapshot.paths,
             vec![
                 "docs/staged.md".to_string(),
-                "imop-admin/src/local.ts".to_string(),
+                "example-console/src/local.ts".to_string(),
                 "mobile/src/page.ts".to_string(),
             ]
         );
@@ -2453,7 +2620,7 @@ mod worktree_recovery_tests {
             snapshot.working_tree_paths,
             vec![
                 "docs/staged.md".to_string(),
-                "imop-admin/src/local.ts".to_string(),
+                "example-console/src/local.ts".to_string(),
             ]
         );
         assert_eq!(

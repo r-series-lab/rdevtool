@@ -26,6 +26,8 @@ export const EN_WORKFLOW_MESSAGES: Record<string, string> = {
   "Receive 和 Broadcast 包含同名 Signal，可能形成循环。":
     "Receive and Broadcast contain the same Signal and may create a loop.",
   "联动操作": "Workflow Actions",
+  "工作区联动": "Workspace Workflow",
+  "推送、合并并构建": "Push, Merge, and Build",
   "操作": "Action",
   "新建联动流程": "New Workflow",
   "至少标记两个可执行动作后才能创建":

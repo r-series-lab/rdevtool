@@ -10,6 +10,7 @@ import {
   createActivityEntry,
   type ActivityBuildReplayRequest,
   type ActivityDiagnosticStep,
+  type ActivityParameter,
 } from "./activityCenter";
 import {
   branchTaskDiagnosticSteps,
@@ -93,6 +94,103 @@ function stringList(value: unknown) {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && Boolean(item.trim()))
     : [];
+}
+
+function resourceActionParameterValue(value: unknown) {
+  if (Array.isArray(value)) {
+    return value.map((item) => String(item)).join("、");
+  }
+  if (typeof value === "boolean") {
+    return value ? "是" : "否";
+  }
+  if (value && typeof value === "object") {
+    return JSON.stringify(value);
+  }
+  return value == null ? "" : String(value);
+}
+
+function resourceActionParameters(payload: Record<string, unknown>): ActivityParameter[] {
+  const params = objectValue(payload.params);
+  const visible = params
+    ? Object.entries(params).map(([key, value]) => ({
+        key,
+        label: key,
+        value: resourceActionParameterValue(value),
+        masked: false,
+      }))
+    : [];
+  const secrets = stringList(payload.providedSecretParams).map((key) => ({
+    key,
+    label: key,
+    value: "已提供",
+    masked: true,
+  }));
+  return [...visible, ...secrets];
+}
+
+function resourceActionDiagnosticSteps(value: unknown): ActivityDiagnosticStep[] {
+  const structured = objectValue(objectValue(value)?.structuredResult);
+  const items = Array.isArray(structured?.items) ? structured.items : [];
+  return items.flatMap((item) => {
+    const candidate = objectValue(item);
+    if (!candidate) return [];
+    const id = optionalString(candidate.key)?.trim() || "";
+    const label = optionalString(candidate.label)?.trim() || id;
+    const status = optionalString(candidate.status)?.trim() || "failed";
+    const summary = optionalString(candidate.summary)?.trim() || label;
+    const detail = optionalString(candidate.detail)?.trim() || "";
+    if (!id || !label) return [];
+    return [{
+      id: `action:${id}`,
+      type: "action.result",
+      label,
+      status,
+      summary,
+      risks: detail ? [detail] : [],
+    }];
+  });
+}
+
+export function activityFromResourceActionOperationEvent(
+  event: OperationEventEntry,
+) {
+  if (event.domain !== "action") return null;
+  const payload = objectValue(event.payload) ?? {};
+  const configPath = optionalString(payload.configPath)?.trim() || "";
+  const effect = optionalString(payload.effect)?.trim() || "";
+  const sideEffectOccurred = payload.sideEffectOccurred;
+  const warnings = [
+    payload.paramsTruncated === true ? "参数内容过大，历史记录仅保留了参数元数据。" : "",
+    event.state === "failed" &&
+    (effect === "remote_write" || effect === "destructive") &&
+    sideEffectOccurred == null
+      ? "远程写入结果不明确，请先检查目标系统和运行日志，不要直接重试。"
+      : "",
+  ].filter(Boolean);
+  return createActivityEntry({
+    id: event.id,
+    kind: "shortcut",
+    origin: event.origin,
+    status: event.state,
+    title: event.title,
+    summary: event.summary,
+    detail: event.detail || null,
+    executionKey: event.id,
+    ...operationChainFields(event),
+    parameters: resourceActionParameters(payload),
+    diagnostics: resourceActionDiagnosticSteps(payload.result),
+    warnings,
+    target: { page: "resources" },
+    resource: configPath
+      ? {
+          kind: "localPath",
+          label: "打开 Action 配置",
+          value: configPath,
+        }
+      : null,
+    createdAt: event.createdAt,
+    updatedAt: event.updatedAt,
+  });
 }
 
 function linkDiagnosticSteps(value: unknown): ActivityDiagnosticStep[] {

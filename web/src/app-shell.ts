@@ -4,20 +4,20 @@ export type PageKey = AppModuleKey;
 
 export const ALL_PAGE_KEYS: PageKey[] = [
   "overview",
-  "knowledge",
   "projectManagement",
   "resources",
   "proxy",
   "build",
   "merge",
+  "knowledge",
 ];
 
 export const DEFAULT_VISIBLE_PAGE_KEYS: PageKey[] = [
   "overview",
-  "knowledge",
   "projectManagement",
   "resources",
   "proxy",
+  "knowledge",
 ];
 
 export const NAV_ITEMS: Array<{ key: PageKey; label: string; shortLabel: string }> =

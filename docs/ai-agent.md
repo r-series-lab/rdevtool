@@ -23,19 +23,33 @@ rDevTool 给 AI 的定位是本地开发工作台的稳定入口。AI 应通过 
 先按任务选择最小上下文，不再固定运行全量检查：
 
 ```bash
+rdevtool --json info
+rdevtool --json agent compatibility
 rdevtool --json agent capabilities
 rdevtool --json workspace show
+rdevtool --workspace <key> --json workspace review --base <project>=origin/master
 rdevtool --json agent context --project <project> --for runtime --compact
 rdevtool --json agent context --project <project> --for runtime --compact --debug-profile <profile>
 rdevtool --json agent context --project <project> --for runtime --compact --include proxy
 rdevtool --json agent context --for artifacts --compact
 ```
 
-只读问答使用对应的 `show`、`inspect` 或源码；跨模块总览才使用 `info`；故障跨越多个配置域或配置写入后再运行 `doctor`。`info.identity` 用于确认当前执行文件、构建 commit 与本地源码是否一致；指定 `--workspace` 的 `doctor` 会使用该命令作用域，而不是 App 持久化的活动工作区。
+首次使用、CLI/源码版本不一致、Skill 更新后或命令不可用时，先运行
+`agent compatibility`。它从真实 Clap 命令树读取结构化命令能力，并与
+`~/.codex/skills/rdevtool/manifest.json` 声明的必需命令和 feature 比较。
+顶层 `ok=true` 只表示检查完成；是否兼容读取 `data.status.success`。缺失
+manifest 时保持只读并返回 warning，不能据此假定 Skill 中的命令可用。
+
+只读问答使用对应的 `show`、`inspect` 或源码；跨模块总览才使用 `info`；故障跨越多个配置域或配置写入后再运行 `doctor`。`info.identity` 用于确认当前执行文件、构建 commit 与本地源码是否一致；优先使用 `recommendedInvocation`，旧版本缺少该字段时回退到 `canonicalExecutablePath` 或 `executablePath`，只有显式验证当前源码改动时才使用 `sourceInvocation`。指定 `--workspace` 的 `doctor` 会使用该命令作用域，而不是 App 持久化的活动工作区。
 
 `--include` 支持 `history,notes,navigation,proxy,projects,worklog`，其中 proxy 只表示配置绑定，`observed=false` 时不能当作监听或请求证据。Agent context schema v2 的 `fileNotes` 只注入最多 4 条非 README Markdown 摘要和路径；需要完整步骤时再读取命中文件。runtime 预设需要 `--project` 才会生成 `runtime.targets`：默认一次返回项目默认目标和各 Debug Profile；使用 `--debug-profile` / `--runtime-profile` 可只读取指定组合。
 
-开发态可替换为：
+`agent capabilities` 保留兼容字段 `features` 和 `commands`，并提供
+`schemaVersion`、`buildCommit` 与 `commandSpecs`。`commandSpecs` 逐个声明命令
+路径、风险、JSON/follow 支持、确认要求和替代入口；Agent 应优先读取这些
+结构化字段，不再解析帮助文本推断能力。
+
+显式验证当前源码改动时，可从 `info.identity.sourceInvocation` 取得对应命令，例如：
 
 ```bash
 cd /Users/ikiru/Documents/r-series-public/rdevtool
@@ -67,7 +81,8 @@ cargo run --quiet -- --json agent context --project <project> --for runtime --co
 - 切换后重新运行对应任务预设的 `agent context`。
 - 创建需求工作区副本时，先执行 `workspace init-demand ... --copy-mode worktree|clone --dry-run`，核对 `effective.instanceDir`、`plannedActions` 和风险后再移除 `--dry-run`。
 - `existing` 实例不属于 rDevTool；只有成功创建的 worktree/clone 才能以 `managed=true` 和 `managedArtifacts` 报告为托管产物。
-- `agent context` 返回 `resourceDir`、`worklogAutoRecord`、工作日志路径和最近日志内容；优先使用这些稳定字段，不要猜测目录。
+- `agent context` 返回 `resourceDir`、`worklogPath`、`worklogAutoRecord` 和按需加载的最近日志内容；`workspace.projectInstances[]` 明确区分 `configuredRepoPath` 与 `effectiveRepoPath`，文件操作必须使用有效路径，不要猜测目录。
+- 需求代码审查优先使用 `workspace review`，显式传入各项目基线；该命令返回工作区有效副本路径并执行只读的范围、冲突和差异检查，但不会刷新远端引用。读取 `repositoryObserved`、`detached` 和 `pathAllowlistApplied`，不要把未配置白名单误报为已通过路径范围检查。
 - rDevTool 会自动记录构建、Git、Runtime 和关键配置操作的最终结果；AI 仍应在完成有意义的优化、修复、决策或验证后，用 `workspace worklog-append` 补充人工语义记录。
 
 ```bash

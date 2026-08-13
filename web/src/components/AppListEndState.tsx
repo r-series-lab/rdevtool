@@ -1,4 +1,5 @@
 import { Box, Typography } from "@mui/material";
+import { useI18n } from "../i18n";
 
 export type AppListEndStateProps = {
   label?: string;
@@ -6,14 +7,17 @@ export type AppListEndStateProps = {
 };
 
 export function AppListEndState({
-  label = "没有更多了",
+  label,
   className = "",
 }: AppListEndStateProps) {
+  const { t } = useI18n();
+  const resolvedLabel = t(label ?? "没有更多了");
+
   return (
     <Box
       className={`app-list-end-state${className ? ` ${className}` : ""}`}
       role="status"
-      aria-label={label}
+      aria-label={resolvedLabel}
     >
       <span className="app-list-end-visual" aria-hidden="true">
         <span className="app-list-end-spark is-left" />
@@ -21,7 +25,7 @@ export function AppListEndState({
         <span className="app-list-end-spark is-right" />
       </span>
       <Typography variant="caption" className="app-list-end-text">
-        <span>{label}</span>
+        <span>{resolvedLabel}</span>
       </Typography>
     </Box>
   );

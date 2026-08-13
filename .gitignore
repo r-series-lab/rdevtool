@@ -2,6 +2,7 @@
 /web/dist
 /web/node_modules
 /src-tauri/target
+/src-tauri/binaries
 node_modules
 dist
 .env

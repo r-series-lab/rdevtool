@@ -17,8 +17,16 @@ export type BuildParamKind = "select" | "boolean" | "branch" | "text" | "hidden"
 export type BuildParamMeta = {
   key: string;
   label: string;
+  labelKey?: string | null;
   kind: BuildParamKind;
   defaultValue: string;
+  configuredDefault: string | null;
+  defaultSource:
+    | "projectDefault"
+    | "currentBranch"
+    | "booleanFalseValue"
+    | "firstOption"
+    | "none";
   options: string[];
   required: boolean;
   trueValue: string;
@@ -105,6 +113,28 @@ type UseBuildContextOptions = {
   branchOptions: string[];
   setError: (value: string) => void;
 };
+
+type BuildContextInvoke = (
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<unknown>;
+
+export async function loadBuildTargetContext(
+  project: string,
+  target: string | null,
+  invokeCommand: BuildContextInvoke = invoke,
+) {
+  const meta = (await invokeCommand("get_build_target_meta", {
+    project,
+    target,
+  })) as BuildTargetMeta;
+  const needsBranch = meta.params.some((param) => param.kind === "branch");
+  const defaultBranch = needsBranch
+    ? ((await invokeCommand("get_default_branch", { project })) as string)
+    : "";
+
+  return { meta, defaultBranch };
+}
 
 export function useBuildContext({
   enabled,
@@ -227,14 +257,8 @@ export function useBuildContext({
   async function loadBuildContext(project: string, nextTarget: string | null) {
     const requestId = ++buildContextRequestRef.current;
     try {
-      const [defaultBranch, meta] = await withTimeout(
-        Promise.all([
-          invoke<string>("get_default_branch", { project }),
-          invoke<BuildTargetMeta>("get_build_target_meta", {
-            project,
-            target: nextTarget,
-          }),
-        ]),
+      const { defaultBranch, meta } = await withTimeout(
+        loadBuildTargetContext(project, nextTarget),
         BUILD_CONTEXT_TIMEOUT_MS,
         "加载构建配置超时，请重试",
       );

@@ -15,6 +15,8 @@ use crate::config_store::write_config_text_atomic;
 use crate::navigation::{NavigationEntry, runtime_profile_browser_args};
 
 const DEFAULT_CDP_PORT: u16 = 9223;
+const BROWSER_INSPECTION_TIMEOUT: Duration = Duration::from_millis(300);
+const MAX_INSPECTED_BROWSER_PAGES: usize = 12;
 const DEFAULT_WEB_ACTIONS_TEMPLATE: &str = r#"[browser]
 port = 9223
 
@@ -316,6 +318,102 @@ pub struct WebActionTarget {
     pub target_type: String,
     #[serde(default)]
     pub web_socket_debugger_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledBrowserPage {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ControlledBrowserObservation {
+    pub port: u16,
+    pub endpoint: String,
+    pub browser_name: String,
+    pub browser_version: Option<String>,
+    pub protocol_version: Option<String>,
+    pub page_count: usize,
+    pub pages: Vec<ControlledBrowserPage>,
+}
+
+pub fn configured_web_actions_browser_port() -> Result<u16> {
+    let path = default_web_actions_path();
+    if !path.exists() {
+        return Ok(DEFAULT_CDP_PORT);
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("failed to read web actions config: {}", path.display()))?;
+    let config: WebActionsFileConfig = toml::from_str(&content)
+        .with_context(|| format!("failed to parse web actions config: {}", path.display()))?;
+    if config.browser.port == 0 {
+        bail!("web actions browser port must be between 1 and 65535");
+    }
+    Ok(config.browser.port)
+}
+
+pub fn inspect_controlled_browser(port: u16) -> Result<Option<ControlledBrowserObservation>> {
+    if port == 0 {
+        bail!("controlled browser port must be between 1 and 65535");
+    }
+    let client = cdp_http_client_with_timeout(BROWSER_INSPECTION_TIMEOUT)?;
+    let version = match client
+        .get(format!("{}/json/version", cdp_base_url(port)))
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .and_then(reqwest::blocking::Response::json::<Value>)
+    {
+        Ok(version) => version,
+        Err(_) => return Ok(None),
+    };
+    let targets = client
+        .get(format!("{}/json/list", cdp_base_url(port)))
+        .send()
+        .and_then(reqwest::blocking::Response::error_for_status)
+        .and_then(reqwest::blocking::Response::json::<Vec<WebActionTarget>>)
+        .unwrap_or_default();
+    let (browser_name, browser_version) = parse_browser_product(
+        version
+            .get("Browser")
+            .and_then(Value::as_str)
+            .unwrap_or("Chrome"),
+    );
+    let mut page_targets = targets
+        .into_iter()
+        .filter(|target| target.target_type == "page")
+        .collect::<Vec<_>>();
+    page_targets.sort_by(|left, right| {
+        left.title
+            .to_lowercase()
+            .cmp(&right.title.to_lowercase())
+            .then_with(|| left.url.cmp(&right.url))
+    });
+    let page_count = page_targets.len();
+    let pages = page_targets
+        .into_iter()
+        .take(MAX_INSPECTED_BROWSER_PAGES)
+        .map(|target| ControlledBrowserPage {
+            id: target.id,
+            title: truncate_text(&target.title, 120),
+            url: sanitize_observed_page_url(&target.url),
+        })
+        .collect();
+
+    Ok(Some(ControlledBrowserObservation {
+        port,
+        endpoint: cdp_base_url(port),
+        browser_name,
+        browser_version,
+        protocol_version: version
+            .get("Protocol-Version")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        page_count,
+        pages,
+    }))
 }
 
 pub fn list_web_actions(scope: Option<&str>, url: Option<&str>) -> Result<WebActionListResponse> {
@@ -1058,10 +1156,51 @@ fn create_cdp_target(port: u16, url: &str) -> Result<WebActionTarget> {
 }
 
 fn cdp_http_client() -> Result<reqwest::blocking::Client> {
+    cdp_http_client_with_timeout(Duration::from_secs(3))
+}
+
+fn cdp_http_client_with_timeout(timeout: Duration) -> Result<reqwest::blocking::Client> {
     reqwest::blocking::Client::builder()
-        .timeout(Duration::from_secs(3))
+        .timeout(timeout)
         .build()
         .context("failed to build CDP HTTP client")
+}
+
+fn parse_browser_product(product: &str) -> (String, Option<String>) {
+    let trimmed = product.trim();
+    match trimmed.split_once('/') {
+        Some((name, version)) if !name.is_empty() && !version.is_empty() => {
+            (name.to_string(), Some(version.to_string()))
+        }
+        _ => (trimmed.to_string(), None),
+    }
+}
+
+fn sanitize_observed_page_url(value: &str) -> String {
+    let Ok(mut url) = reqwest::Url::parse(value) else {
+        return String::new();
+    };
+    if !matches!(
+        url.scheme(),
+        "http" | "https" | "file" | "chrome" | "chrome-extension" | "about"
+    ) {
+        return String::new();
+    }
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string()
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let truncated = chars.by_ref().take(max_chars).collect::<String>();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
 }
 
 fn launch_chrome(browser: &EffectiveWebActionsBrowserConfig, url: Option<&str>) -> Result<()> {
@@ -1374,6 +1513,36 @@ mod tests {
     }
 
     #[test]
+    fn parses_browser_product_name_and_version() {
+        assert_eq!(
+            parse_browser_product("Chrome/139.0.7258.67"),
+            ("Chrome".to_string(), Some("139.0.7258.67".to_string()))
+        );
+        assert_eq!(
+            parse_browser_product("Chromium"),
+            ("Chromium".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn sanitizes_observed_page_urls() {
+        assert_eq!(
+            sanitize_observed_page_url(
+                "https://demo:secret@example.com/path?token=private#account"
+            ),
+            "https://example.com/path"
+        );
+        assert_eq!(sanitize_observed_page_url("data:text/plain,secret"), "");
+        assert_eq!(sanitize_observed_page_url("not a url"), "");
+    }
+
+    #[test]
+    fn truncates_browser_page_titles_by_character_count() {
+        assert_eq!(truncate_text("abcd", 4), "abcd");
+        assert_eq!(truncate_text("浏览器页面标题", 4), "浏览器页...");
+    }
+
+    #[test]
     fn matches_scope_and_url_patterns() {
         let action = WebActionConfig {
             key: "baidu-search".to_string(),
@@ -1454,7 +1623,7 @@ mod tests {
         let mut request_params = BTreeMap::new();
         request_params.insert("env".to_string(), "pre".to_string());
         let mut context_params = BTreeMap::new();
-        context_params.insert("project.name".to_string(), "智能营销".to_string());
+        context_params.insert("project.name".to_string(), "示例控制台".to_string());
         context_params.insert("debugProfile.env.APP_ENV".to_string(), "uat3".to_string());
 
         let resolved = resolve_action_params(
@@ -1471,7 +1640,7 @@ mod tests {
 
         assert_eq!(
             resolved.get("projectName").map(String::as_str),
-            Some("智能营销")
+            Some("示例控制台")
         );
         assert_eq!(resolved.get("env").map(String::as_str), Some("pre"));
     }

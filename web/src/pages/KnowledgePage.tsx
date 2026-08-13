@@ -30,6 +30,7 @@ import {
   Typography,
 } from "@mui/material";
 import { AppEmptyState } from "../components/AppEmptyState";
+import { AppListEndState } from "../components/AppListEndState";
 import {
   CopyIcon,
   EditIcon,
@@ -570,13 +571,18 @@ export function KnowledgePage({
   return (
     <div className="knowledge-page" data-knowledge-library="markdown">
       <header className="knowledge-page-head">
-        <div>
-          <Typography component="h1" variant="h6">
-            {t("知识库")}
-          </Typography>
-          <Typography variant="caption">
-            {t("面向项目与自动化工具的 Markdown 长期知识")}
-          </Typography>
+        <div className="knowledge-title-group">
+          <span className="knowledge-brand-icon" aria-hidden="true">
+            <KnowledgeIcon fontSize="small" />
+          </span>
+          <div className="knowledge-title-copy">
+            <Typography component="h1" variant="h6">
+              {t("知识库")}
+            </Typography>
+            <Typography variant="caption">
+              {t("面向项目与自动化工具的 Markdown 长期知识")}
+            </Typography>
+          </div>
         </div>
         <div className="knowledge-page-actions">
           <Tooltip title={t("刷新知识库")}>
@@ -615,79 +621,87 @@ export function KnowledgePage({
       </header>
 
       <form className="knowledge-toolbar" onSubmit={handleSearch}>
-        <ToggleButtonGroup
-          className="knowledge-scope-control"
-          size="small"
-          exclusive
-          value={scope}
-          onChange={(_event, value: KnowledgeScope | null) =>
-            handleScopeChange(value)
-          }
-          aria-label={t("知识范围")}
-        >
-          {PRIMARY_SCOPE_OPTIONS.map((option) => (
-            <ToggleButton key={option.value} value={option.value}>
-              {t(option.label)}
-            </ToggleButton>
-          ))}
-        </ToggleButtonGroup>
-        <Tooltip
-          title={secondaryScopeTooltip}
-        >
-          <Button
-            type="button"
+        <div className="knowledge-scope-tools">
+          <ToggleButtonGroup
+            className="knowledge-scope-control"
             size="small"
-            color="inherit"
-            aria-label={t("更多知识范围")}
-            aria-haspopup="menu"
-            aria-expanded={Boolean(scopeMenuAnchor)}
-            className={`knowledge-scope-more${
-              scope === "all" || scope === "inbox" ? " is-active" : ""
-            }`}
-            onClick={(event) => setScopeMenuAnchor(event.currentTarget)}
+            exclusive
+            value={scope}
+            onChange={(_event, value: KnowledgeScope | null) =>
+              handleScopeChange(value)
+            }
+            aria-label={t("知识范围")}
           >
-            {activeSecondaryScope ? (
-              t(activeSecondaryScope.label)
-            ) : (
-              <MoreIcon fontSize="small" />
-            )}
+            {PRIMARY_SCOPE_OPTIONS.map((option) => (
+              <ToggleButton key={option.value} value={option.value}>
+                {t(option.label)}
+              </ToggleButton>
+            ))}
+          </ToggleButtonGroup>
+          <Tooltip title={secondaryScopeTooltip}>
+            <Button
+              type="button"
+              size="small"
+              color="inherit"
+              aria-label={t("更多知识范围")}
+              aria-haspopup="menu"
+              aria-expanded={Boolean(scopeMenuAnchor)}
+              className={`knowledge-scope-more${
+                scope === "all" || scope === "inbox" ? " is-active" : ""
+              }`}
+              onClick={(event) => setScopeMenuAnchor(event.currentTarget)}
+            >
+              {activeSecondaryScope ? (
+                t(activeSecondaryScope.label)
+              ) : (
+                <MoreIcon fontSize="small" />
+              )}
+            </Button>
+          </Tooltip>
+        </div>
+        <div className="knowledge-filter-tools">
+          <TextField
+            select
+            size="small"
+            value={notesProject}
+            disabled={scope !== "all" && scope !== "project"}
+            onChange={(event) => setNotesProject(event.target.value)}
+            inputProps={{ "aria-label": t("项目范围") }}
+            className="knowledge-project-select"
+          >
+            <MenuItem value="">{t("所有项目")}</MenuItem>
+            {projects.map((project) => (
+              <MenuItem key={project.key} value={project.key}>
+                {project.name || project.key}
+              </MenuItem>
+            ))}
+          </TextField>
+          <TextField
+            size="small"
+            value={queryDraft}
+            onChange={(event) => setQueryDraft(event.target.value)}
+            placeholder={t("搜索标题、正文或路径")}
+            className="knowledge-search"
+            slotProps={{
+              input: {
+                startAdornment: (
+                  <InputAdornment position="start">
+                    <SearchIcon fontSize="small" />
+                  </InputAdornment>
+                ),
+              },
+            }}
+          />
+          <Button
+            className="knowledge-search-submit"
+            type="submit"
+            size="small"
+            variant="outlined"
+            color="inherit"
+          >
+            {t("搜索")}
           </Button>
-        </Tooltip>
-        <TextField
-          select
-          size="small"
-          value={notesProject}
-          disabled={scope !== "all" && scope !== "project"}
-          onChange={(event) => setNotesProject(event.target.value)}
-          inputProps={{ "aria-label": t("项目范围") }}
-          className="knowledge-project-select"
-        >
-          <MenuItem value="">{t("所有项目")}</MenuItem>
-          {projects.map((project) => (
-            <MenuItem key={project.key} value={project.key}>
-              {project.name || project.key}
-            </MenuItem>
-          ))}
-        </TextField>
-        <TextField
-          size="small"
-          value={queryDraft}
-          onChange={(event) => setQueryDraft(event.target.value)}
-          placeholder={t("搜索标题、正文或路径")}
-          className="knowledge-search"
-          slotProps={{
-            input: {
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon fontSize="small" />
-                </InputAdornment>
-              ),
-            },
-          }}
-        />
-        <Button type="submit" size="small" variant="outlined" color="inherit">
-          {t("搜索")}
-        </Button>
+        </div>
       </form>
 
       {error ? <Alert severity="error">{error}</Alert> : null}
@@ -760,6 +774,11 @@ export function KnowledgePage({
                 </span>
               </button>
             ))}
+            {!indexLoading &&
+            !index?.truncated &&
+            (index?.documents.length ?? 0) > 0 ? (
+              <AppListEndState className="knowledge-document-list-end" />
+            ) : null}
           </div>
         </aside>
 

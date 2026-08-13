@@ -254,6 +254,17 @@ export function EditIcon(props: SvgIconProps) {
   );
 }
 
+export function ActionIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M13.2 2.8 5.4 13h5.2l-.9 8.2L18.6 10h-5.4V2.8Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
 export function StarIcon(props: SvgIconProps) {
   return (
     <SvgIcon viewBox="0 0 24 24" {...props}>

@@ -21,10 +21,12 @@ import {
 import {
   activityFromLifecycleOperationEvent,
   activityFromOperationEvent as activityFromGitOperationEvent,
+  activityFromResourceActionOperationEvent,
   buildHistoryFromOperationEvent,
   buildReplayRequestFromOperationEvent,
   isOperationEventEntry,
 } from "./operationEvents";
+import { resolveBuildParameterLabelKey } from "./buildPresentation";
 
 const BUILD_ACTIVITY_PARAMETER_LIMIT = 8;
 const BUILD_ENV_PARAM_KEYS = new Set(["ENV_PROFILE", "projectEnv", "env"]);
@@ -39,6 +41,7 @@ type BuildActivityParameterSource = Pick<
 export type BuildActivityParameterMeta = {
   key: string;
   label: string;
+  labelKey?: string | null;
   kind?: string | null;
 };
 
@@ -143,18 +146,37 @@ export function buildActivityParameters(
   const metaByKey = new Map(paramMeta.map((param) => [param.key, param]));
   const parameters: ActivityParameter[] = [];
   const seenKeys = new Set<string>();
-  const push = (key: string, label: string, value: string, masked = false) => {
+  const push = (
+    key: string,
+    label: string,
+    value: string,
+    masked = false,
+    labelKey?: string | null,
+  ) => {
     const normalizedValue = value.trim();
     if (!normalizedValue || seenKeys.has(key)) {
       return;
     }
     seenKeys.add(key);
-    parameters.push({ key, label, value: normalizedValue, masked });
+    const resolvedLabelKey = resolveBuildParameterLabelKey(key, label, labelKey);
+    parameters.push({
+      key,
+      label,
+      ...(resolvedLabelKey ? { labelKey: resolvedLabelKey } : {}),
+      value: normalizedValue,
+      masked,
+    });
   };
 
-  push("target", "目标", item.mode);
-  push("environment", "环境", item.env);
-  push("branch", "分支", item.branch);
+  push("target", "目标", item.mode, false, "build.param.target.label");
+  push(
+    "environment",
+    "环境",
+    item.env,
+    false,
+    "build.param.environment.label",
+  );
+  push("branch", "分支", item.branch, false, "build.param.branch.label");
 
   for (const [key, rawValue] of Object.entries(normalizedBuildParams(item.params))) {
     if (BUILD_ENV_PARAM_KEYS.has(key) || BUILD_BRANCH_PARAM_KEYS.has(key)) {
@@ -168,6 +190,7 @@ export function buildActivityParameters(
       meta?.label.trim() || key,
       masked ? (value ? "已配置" : "未配置") : value || "-",
       masked,
+      meta?.labelKey,
     );
   }
 
@@ -180,6 +203,7 @@ export function buildActivityParameters(
     {
       key: "more",
       label: "其他",
+      labelKey: "build.param.more.label",
       value: `另有 ${hiddenCount} 项`,
     },
   ];
@@ -275,6 +299,9 @@ function activityFromPersistedOperationEvent(event: OperationEventEntry) {
   }
   if (event.domain === "runtime" || event.domain === "proxy" || event.domain === "link") {
     return activityFromLifecycleOperationEvent(event);
+  }
+  if (event.domain === "action") {
+    return activityFromResourceActionOperationEvent(event);
   }
   if (event.domain !== "build") {
     return null;
@@ -523,7 +550,10 @@ function mergeExistingOperationActivity(
   existing: ActivityEntry[],
 ) {
   const matchIndex = existing.findIndex(
-    (activity) => activity.id === historyActivity.id,
+    (activity) =>
+      activity.id === historyActivity.id ||
+      (Boolean(activity.executionKey) &&
+        activity.executionKey === historyActivity.executionKey),
   );
   if (matchIndex < 0) {
     return historyActivity;
@@ -570,7 +600,7 @@ export function reconcileHistoryActivities(
   );
   const importedOperations = operationEvents
     .filter((event) =>
-      ["git", "build", "runtime", "proxy", "link"].includes(event.domain),
+      ["git", "build", "runtime", "proxy", "link", "action"].includes(event.domain),
     )
     .flatMap((event) => {
       let activity = activityFromPersistedOperationEvent(event);

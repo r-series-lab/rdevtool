@@ -35,6 +35,7 @@ import type {
   DeployParamConfigKind,
   DeployParamConfigSummary,
   DeployTargetConfigSummary,
+  ManagedArtifactFocusRequest,
   NavigationEditorCategory,
   NavigationEditorEntry,
   NavigationEditorEntryKind,
@@ -81,6 +82,7 @@ import { AppEmptyState } from "./AppEmptyState";
 import { AppToast } from "./AppToast";
 import { ConfigSourceBar } from "./ConfigSourceBar";
 import { ConfigSourceManagerDialog } from "./ConfigSourceManagerDialog";
+import { ConfigPackPanel } from "./ConfigPackPanel";
 import { ManagedArtifactsPanel } from "./ManagedArtifactsPanel";
 import { SystemDiagnosticsPanel } from "./SystemDiagnosticsPanel";
 import { WorkspaceTypeSelect } from "./WorkspaceTypeSelect";
@@ -92,6 +94,7 @@ export type SettingsSection =
   | "appearance"
   | "access"
   | "artifacts"
+  | "portability"
   | "diagnostics"
   | "workspace"
   | "projects"
@@ -114,10 +117,10 @@ type PageKey =
 
 const SETTINGS_ALL_PAGE_KEYS: PageKey[] = [
   "overview",
-  "knowledge",
   "projectManagement",
   "resources",
   "proxy",
+  "knowledge",
 ];
 
 const SETTINGS_NAV_ITEM_MAP: Record<PageKey, { label: string; shortLabel: string }> = {
@@ -145,6 +148,7 @@ export type SettingsPanelProps = {
   projectWorkspaces: ProjectWorkspaceSummary[];
   activeProjectWorkspaceKey: string;
   initialSection?: SettingsSection;
+  initialArtifactFocus?: ManagedArtifactFocusRequest | null;
   activePage: PageKey;
   enabledPages: PageKey[];
   onEnabledPagesChange: (pages: PageKey[]) => void;
@@ -167,6 +171,7 @@ const SECTION_ITEMS: Array<{ key: SettingsSection; label: string }> = [
   { key: "menu", label: "通用" },
   { key: "confirmation", label: "操作确认" },
   { key: "access", label: "快捷入口" },
+  { key: "portability", label: "配置迁移" },
   { key: "artifacts", label: "受管产物" },
   { key: "diagnostics", label: "系统诊断" },
 ];
@@ -232,6 +237,7 @@ const R_SERIES_PACKAGE_PARAM_PRESETS: DeployParamConfigSummary[] = [
   {
     key: "platform",
     label: "系统",
+    labelKey: "build.param.platform.label",
     kind: "select",
     defaultValue: "macos",
     options: ["macos", "windows", "linux"],
@@ -243,6 +249,7 @@ const R_SERIES_PACKAGE_PARAM_PRESETS: DeployParamConfigSummary[] = [
   {
     key: "profile",
     label: "配置",
+    labelKey: "build.param.profile.label",
     kind: "select",
     defaultValue: "release",
     options: ["release", "debug"],
@@ -254,6 +261,7 @@ const R_SERIES_PACKAGE_PARAM_PRESETS: DeployParamConfigSummary[] = [
   {
     key: "channel",
     label: "渠道",
+    labelKey: "build.param.channel.label",
     kind: "select",
     defaultValue: "stable",
     options: ["stable", "beta"],
@@ -614,6 +622,7 @@ export function SettingsPanel({
   projectWorkspaces,
   activeProjectWorkspaceKey,
   initialSection,
+  initialArtifactFocus = null,
   activePage,
   enabledPages,
   onEnabledPagesChange,
@@ -650,6 +659,7 @@ export function SettingsPanel({
       case "menu":
       case "confirmation":
       case "access":
+      case "portability":
       case "artifacts":
       case "diagnostics":
         return section;
@@ -663,6 +673,10 @@ export function SettingsPanel({
       ? normalizeProjectManagementSection(initialSection)
       : normalizeSettingsSection(initialSection ?? sectionForPage(activePage)),
   );
+  const [artifactFocusKind, setArtifactFocusKind] = useState<string | null>(null);
+  const [artifactFocusAllWorkspaces, setArtifactFocusAllWorkspaces] = useState(false);
+  const [artifactFocus, setArtifactFocus] =
+    useState<ManagedArtifactFocusRequest | null>(initialArtifactFocus);
   const panelRef = useRef<HTMLDivElement | null>(null);
   const openerRef = useRef<HTMLElement | null>(
     typeof document === "undefined" || !(document.activeElement instanceof HTMLElement)
@@ -1227,6 +1241,10 @@ export function SettingsPanel({
       );
     }
   }, [initialSection, surface]);
+
+  useEffect(() => {
+    setArtifactFocus(initialArtifactFocus);
+  }, [initialArtifactFocus?.requestId]);
 
   useEffect(() => {
     document.documentElement.classList.add("settings-scroll-lock");
@@ -3570,10 +3588,30 @@ export function SettingsPanel({
         return renderConfirmationSettingsSection();
       case "access":
         return renderAccessSettingsSection();
+      case "portability":
+        return <ConfigPackPanel onApplied={onProjectConfigSaved} />;
       case "artifacts":
-        return <ManagedArtifactsPanel activeWorkspaceKey={activeProjectWorkspaceKey} />;
+        return (
+          <ManagedArtifactsPanel
+            key={artifactFocus?.requestId ?? "managed-artifacts"}
+            activeWorkspaceKey={activeProjectWorkspaceKey}
+            initialKind={artifactFocusKind}
+            initialAllWorkspaces={artifactFocusAllWorkspaces}
+            initialFocus={artifactFocus}
+          />
+        );
       case "diagnostics":
-        return <SystemDiagnosticsPanel />;
+        return (
+          <SystemDiagnosticsPanel
+            activeWorkspaceKey={activeProjectWorkspaceKey}
+            onOpenArtifacts={(kind) => {
+              setArtifactFocus(null);
+              setArtifactFocusKind(kind);
+              setArtifactFocusAllWorkspaces(true);
+              setActiveSection("artifacts");
+            }}
+          />
+        );
       case "menu":
       default:
         return renderMenuSettingsSection();
@@ -5106,6 +5144,7 @@ export function SettingsPanel({
     }
 
     if (entry.kind === "tool") {
+      const actionTool = entry.tool === "action";
       return (
         <>
           <TextField
@@ -5116,15 +5155,16 @@ export function SettingsPanel({
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
                 tool: event.target.value,
-                toolAction: event.target.value === "link" ? "plan" : entry.toolAction,
+                toolAction: event.target.value === "action" ? "run" : "plan",
               })
             }
           >
             <MenuItem value="link">Link</MenuItem>
+            <MenuItem value="action">{t("参数化 Action")}</MenuItem>
           </TextField>
           <TextField
             size="small"
-            label="Link Key"
+            label={actionTool ? "Action Key" : "Link Key"}
             value={entry.toolKey ?? ""}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
@@ -5136,14 +5176,21 @@ export function SettingsPanel({
             select
             size="small"
             label={t("动作")}
-            value={entry.toolAction ?? "plan"}
+            value={entry.toolAction ?? (actionTool ? "run" : "plan")}
             onChange={(event) =>
               updateNavigationEntryAt(categoryIndex, entryIndex, {
                 toolAction: event.target.value,
               })
             }
           >
-            <MenuItem value="plan">{t("查看计划")}</MenuItem>
+            {actionTool ? (
+              [
+                <MenuItem key="run" value="run">{t("执行动作")}</MenuItem>,
+                <MenuItem key="inspect" value="inspect">{t("检查配置")}</MenuItem>,
+              ]
+            ) : (
+              <MenuItem value="plan">{t("查看计划")}</MenuItem>
+            )}
           </TextField>
         </>
       );
@@ -6388,7 +6435,14 @@ export function SettingsPanel({
                 aria-selected={activeSection === item.key}
                 aria-controls={`settings-${item.key}-panel`}
                 className={activeSection === item.key ? "is-active" : ""}
-                onClick={() => setActiveSection(item.key)}
+                onClick={() => {
+                  if (item.key === "artifacts") {
+                    setArtifactFocus(null);
+                    setArtifactFocusKind(null);
+                    setArtifactFocusAllWorkspaces(false);
+                  }
+                  setActiveSection(item.key);
+                }}
               >
                 {t(item.label)}
               </button>

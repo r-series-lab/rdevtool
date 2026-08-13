@@ -6,12 +6,12 @@ test("runtime panel traces workspace sources and saves one-off overrides", async
   await page.goto("/smoke.html?style=mono");
   await page.getByRole("button", { name: "打开运行配置来源测试" }).click();
 
-  await page.getByLabel("智能营销 更多操作").click();
+  await page.getByLabel("示例控制台 更多操作").click();
   await page.getByRole("menuitem", { name: "运行面板" }).click();
 
   const runtimePanel = page
     .getByRole("dialog")
-    .filter({ hasText: "智能营销" });
+    .filter({ hasText: "示例控制台" });
   await expect(runtimePanel).toBeVisible();
   await expect(
     runtimePanel.locator(".runtime-preflight-check-icon"),
@@ -52,7 +52,7 @@ test("runtime panel traces workspace sources and saves one-off overrides", async
   await expect(runtimePanel.getByText("解析链", { exact: true })).toBeVisible();
   await expect(
     runtimePanel.getByText(
-      "工作区 · CR2606150041 优客贷车后消费场景引流",
+      "工作区 · 示例需求工作区",
       { exact: true },
     ),
   ).toBeVisible();
@@ -92,7 +92,7 @@ test("runtime panel traces workspace sources and saves one-off overrides", async
     name: "筛选受控页面",
   });
   const selectedTarget = webActionsBody.getByRole("option", {
-    name: /智能营销.*127\.0\.0\.1:5173/,
+    name: /示例控制台.*127\.0\.0\.1:5173/,
   });
   await expect(targetFilter).toBeVisible();
   await expect(selectedTarget).toBeVisible();
@@ -223,12 +223,12 @@ test("runtime panel follows the light application settings surface", async ({
 }, testInfo) => {
   await page.goto("/smoke.html");
   await page.getByRole("button", { name: "打开运行配置来源测试" }).click();
-  await page.getByLabel("智能营销 更多操作").click();
+  await page.getByLabel("示例控制台 更多操作").click();
   await page.getByRole("menuitem", { name: "运行面板" }).click();
 
   const runtimePanel = page
     .getByRole("dialog")
-    .filter({ hasText: "智能营销" });
+    .filter({ hasText: "示例控制台" });
   await expect(runtimePanel).toBeVisible();
   await expect(
     runtimePanel.locator(".runtime-preflight-check-icon"),

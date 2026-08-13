@@ -192,8 +192,8 @@ describe("config change activities", () => {
       action: {
         kind: "linkRecover",
         label: "检查并重新启动",
-        linkKey: "cooperation-debug",
-        linkName: "合作渠道联调",
+        linkKey: "demo-debug",
+        linkName: "示例联调",
         sourceId: "workspace-links",
         proxySourceId: "workspace-proxy",
         runtimeSourceId: "workspace-runtime",

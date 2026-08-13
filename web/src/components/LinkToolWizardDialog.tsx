@@ -49,6 +49,7 @@ import { ConfigSourceManagerDialog } from "./ConfigSourceManagerDialog";
 import { useConfigSource } from "../hooks/useConfigSource";
 import { useI18n, type Translate } from "../i18n";
 import { configSourceSupports } from "../lib/configSources";
+import { translateInternalMessage } from "../i18n/internalMessages";
 
 export type LinkToolWizardSaveResult = {
   link: LinkConfig;
@@ -649,16 +650,18 @@ export function LinkToolWizardDialog({
                     <Stack direction="row" spacing={0.7} alignItems="center" minWidth={0}>
                       <Chip size="small" label={index + 1} />
                       <Typography variant="subtitle2" noWrap>
-                        {step.label}
+                        {translateInternalMessage(step.label, t)}
                       </Typography>
                       <Chip size="small" variant="outlined" label={step.type} />
                     </Stack>
-                    <Typography variant="caption">{step.summary}</Typography>
+                    <Typography variant="caption">
+                      {translateInternalMessage(step.summary, t)}
+                    </Typography>
                     {step.risks.length > 0 ? (
                       <Stack spacing={0.25}>
                         {step.risks.map((risk) => (
                           <Typography key={risk} variant="caption" color="warning.main">
-                            {risk}
+                            {translateInternalMessage(risk, t)}
                           </Typography>
                         ))}
                       </Stack>

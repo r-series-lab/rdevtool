@@ -19,6 +19,8 @@ import type {
   ProjectConfigDraft,
   ProjectConfigEditorState,
   ProjectWorkspaceSummary,
+  ResourceActionCatalog,
+  ResourceActionSummary,
   RuntimeProfileDraft,
   WebActionListResponse,
   WebActionSummary,
@@ -67,7 +69,7 @@ const NAVIGATION_BROWSER_OPTIONS = [
 
 const CUSTOM_NAVIGATION_BROWSER_VALUE = "__custom__";
 
-type NavigationToolType = "link" | "workflow" | "webAction" | "runtime";
+type NavigationToolType = "link" | "action" | "workflow" | "webAction" | "runtime";
 
 type NavigationToolConfig = {
   value: NavigationToolType;
@@ -77,7 +79,7 @@ type NavigationToolConfig = {
   description: string;
   defaultAction: string;
   actions: Array<{ value: string; label: string }>;
-  keySource: "text" | "webAction" | "project";
+  keySource: "text" | "action" | "webAction" | "project";
   showRuntimeProfile?: boolean;
 };
 
@@ -91,6 +93,19 @@ const NAVIGATION_TOOL_OPTIONS: NavigationToolConfig[] = [
     defaultAction: "plan",
     actions: [{ value: "plan", label: "查看计划" }],
     keySource: "text",
+  },
+  {
+    value: "action",
+    label: "参数化 Action",
+    keyLabel: "Action Key",
+    keyPlaceholder: "选择 actions.toml 中的 Action",
+    description: "根据 Action Schema 生成参数表单，并通过受控执行器运行。",
+    defaultAction: "run",
+    actions: [
+      { value: "run", label: "执行动作" },
+      { value: "inspect", label: "检查配置" },
+    ],
+    keySource: "action",
   },
   {
     value: "workflow",
@@ -291,6 +306,8 @@ export function ResourceConfigDialog({
   const [projects, setProjects] = useState<ProjectConfigDraft[]>([]);
   const [runtimeProfiles, setRuntimeProfiles] = useState<RuntimeProfileDraft[]>([]);
   const [webActions, setWebActions] = useState<WebActionSummary[]>([]);
+  const [resourceActions, setResourceActions] = useState<ResourceActionSummary[]>([]);
+  const [resourceActionConfigPath, setResourceActionConfigPath] = useState("");
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
@@ -361,9 +378,10 @@ export function ResourceConfigDialog({
   async function loadToolLookups(sourceId = selectedSourceId) {
     const requestId = lookupLoadIdRef.current + 1;
     lookupLoadIdRef.current = requestId;
-    const [projectResult, webActionResult] = await Promise.allSettled([
+    const [projectResult, webActionResult, resourceActionResult] = await Promise.allSettled([
       invoke<ProjectConfigEditorState>("get_project_config_editor", { sourceId }),
       invoke<WebActionListResponse>("list_web_actions", { scope: null, url: null }),
+      invoke<ResourceActionCatalog>("list_resource_actions", { sourceId }),
     ]);
     if (lookupLoadIdRef.current !== requestId) return;
     if (projectResult.status === "fulfilled") {
@@ -378,6 +396,13 @@ export function ResourceConfigDialog({
       setWebActions(webActionResult.value.actions ?? []);
     } else {
       setWebActions([]);
+    }
+    if (resourceActionResult.status === "fulfilled") {
+      setResourceActions(resourceActionResult.value.actions ?? []);
+      setResourceActionConfigPath(resourceActionResult.value.configPath);
+    } else {
+      setResourceActions([]);
+      setResourceActionConfigPath("");
     }
   }
 
@@ -827,6 +852,10 @@ export function ResourceConfigDialog({
         toolConfig.value === "webAction" && toolKey
           ? webActions.find((item) => item.key === toolKey) ?? null
           : null;
+      const selectedResourceAction =
+        toolConfig.value === "action" && toolKey
+          ? resourceActions.find((item) => item.key === toolKey) ?? null
+          : null;
       const selectedProject =
         toolConfig.value === "runtime" && toolKey
           ? projects.find((item) => item.key === toolKey) ?? null
@@ -839,7 +868,21 @@ export function ResourceConfigDialog({
       ];
       const toolWarnings: string[] = [];
 
-      if (toolConfig.value === "webAction") {
+      if (toolConfig.value === "action") {
+        if (selectedResourceAction) {
+          toolMetaItems.push(
+            { label: t("引用"), value: selectedResourceAction.name || selectedResourceAction.key },
+            { label: t("参数"), value: t("{count} 个", { count: selectedResourceAction.paramCount }) },
+            { label: t("影响"), value: selectedResourceAction.effect },
+          );
+        } else if (toolKey) {
+          toolWarnings.push(t("引用的 Action 不存在：{key}", { key: toolKey }));
+        } else if (resourceActions.length > 0) {
+          toolWarnings.push(t("请选择一个已有 Action。"));
+        } else {
+          toolWarnings.push(t("暂无可引用 Action，请先在 actions.toml 中创建。"));
+        }
+      } else if (toolConfig.value === "webAction") {
         if (selectedWebAction) {
           toolMetaItems.push(
             { label: t("引用"), value: selectedWebAction.name || selectedWebAction.key },
@@ -893,6 +936,34 @@ export function ResourceConfigDialog({
       }
 
       const renderToolKeyField = () => {
+        if (toolConfig.keySource === "action") {
+          const hasCurrent = resourceActions.some((item) => item.key === entry.toolKey);
+          return (
+            <TextField
+              select
+              size="small"
+              label={t(toolConfig.keyLabel)}
+              value={entry.toolKey ?? ""}
+              helperText={t("Action 定义集中保存在当前配置源的 actions.toml。")}
+              onChange={(event) =>
+                updateEntryAt(categoryIndex, entryIndex, { toolKey: event.target.value })
+              }
+            >
+              <MenuItem value="">{t("未选择")}</MenuItem>
+              {!hasCurrent && entry.toolKey?.trim() ? (
+                <MenuItem value={entry.toolKey}>
+                  {t("自定义：{value}", { value: entry.toolKey })}
+                </MenuItem>
+              ) : null}
+              {resourceActions.map((action) => (
+                <MenuItem key={action.key} value={action.key}>
+                  {action.name || action.key} · {t("{count} 个参数", { count: action.paramCount })}
+                </MenuItem>
+              ))}
+            </TextField>
+          );
+        }
+
         if (toolConfig.keySource === "webAction") {
           const hasCurrent = webActions.some((item) => item.key === entry.toolKey);
           return (
@@ -1064,6 +1135,20 @@ export function ResourceConfigDialog({
                 disabled={saving || !sourceAllowsLink}
               >
                 {t(toolKey ? "编辑链路" : "新建链路")}
+              </Button>
+            ) : null}
+            {currentTool === "action" && resourceActionConfigPath ? (
+              <Button
+                size="small"
+                variant="outlined"
+                color="inherit"
+                startIcon={<OpenExternalIcon fontSize="small" />}
+                onClick={() =>
+                  void invoke("open_local_path", { path: resourceActionConfigPath })
+                }
+                disabled={saving}
+              >
+                {t("打开 Action 配置")}
               </Button>
             ) : null}
           </div>

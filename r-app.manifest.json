@@ -15,8 +15,8 @@
   "product": {
     "architecture": "modular-workbench",
     "category": "本地开发工作台",
-    "tagline": "把多项目开发上下文收进一个可执行、可复核的本地工作台。",
-    "description": "围绕工作区、项目、资源入口、Git、构建、本地代理、运行时和活动记录，统一组织开发动作，并向 CLI 与 AI Agent 暴露稳定的机器接口。",
+    "tagline": "把多项目开发、构建与联调集中到一个本地工作台。",
+    "description": "在一个界面里管理工作区、项目、分支、构建、资源入口、本地代理和执行记录，让常用开发操作更集中，状态与失败原因更容易核对。",
     "stage": "开发预览",
     "localFirst": true,
     "nonGoals": [
@@ -30,143 +30,187 @@
     "index": "04",
     "accent": "#4f6fa6",
     "accentSoft": "#e2e9f3",
-    "platforms": ["macOS", "Windows", "CLI"],
-    "formats": ["Tauri", "Rust", "JSON CLI", "TOML"],
+    "platforms": ["macOS", "Windows"],
+    "formats": ["桌面应用", "本地优先"],
     "facts": [
-      { "label": "核心对象", "value": "Workspace / Project" },
-      { "label": "动作模型", "value": "Plan / Check / Execute / Replay" },
-      { "label": "数据边界", "value": "本地配置与 SQLite 状态" }
+      { "label": "适用方式", "value": "多项目日常开发" },
+      { "label": "常用范围", "value": "工作区 / 项目" },
+      { "label": "执行保障", "value": "计划 / 确认 / 记录" }
     ],
     "capabilities": [
       {
         "icon": "Layers3",
-        "title": "工作区上下文",
-        "body": "以 system 全局视图和需求工作区组织项目、入口、代理、实例目录与当前开发范围。"
+        "title": "工作区与项目",
+        "body": "在全局视图和需求工作区之间切换，集中查看当前范围内的项目、实例目录、分支与常用入口。"
       },
       {
         "icon": "ScanSearch",
-        "title": "资源与项目入口",
-        "body": "集中搜索项目、网站、目录、应用和脚本，并保留收藏、最近使用和工作区过滤。"
+        "title": "资源与通用 Action",
+        "body": "集中打开网站、目录、应用和脚本；运行 Action 前查看固定上下文与参数，执行中可看日志、取消任务或重试失败项目。"
       },
       {
         "icon": "Waypoints",
-        "title": "Git 工作流",
-        "body": "覆盖分支同步、创建、检出、切换、合并预览、推送检查和多项目任务。"
+        "title": "分支与 Git 操作",
+        "body": "检查分支状态，完成同步、创建、切换、合并和推送；批量记录按项目展示，并直接说明权限不足或合并冲突。"
       },
       {
         "icon": "PackageOpen",
-        "title": "构建与运行时",
-        "body": "统一规划 Jenkins、本地命令和 R 系列打包任务，并监督项目运行时、日志与产物。"
+        "title": "构建与部署",
+        "body": "选择项目和构建目标，确认分支与环境参数后触发任务；构建记录保留参数、进度、结果链接和失败原因。"
       },
       {
         "icon": "TerminalSquare",
-        "title": "代理与联调链",
-        "body": "组合本地代理、Mock、转发、Runtime 生命周期和页面聚焦，形成可检查的 Link。"
+        "title": "代理与本地联调",
+        "body": "管理本地代理、Mock、转发与运行服务，通过 Link 组合常用联调步骤，并随时核对进程和端口状态。"
       },
       {
         "icon": "History",
-        "title": "活动与 Agent 接口",
-        "body": "把 App、CLI 和托盘动作汇总为统一台账，保留状态、证据、风险和安全重放入口。"
+        "title": "记录、知识与诊断",
+        "body": "在 Record 中查找历史动作、展开项目详情并重试可恢复任务；知识库保存项目经验，诊断页检查环境与配置问题。"
+      },
+      {
+        "icon": "Layers3",
+        "title": "配置迁移与回滚",
+        "body": "按项目、工作区和资源配置源导出可移植配置包；导入前检查路径与冲突计划，执行时保留整批事务备份。"
       }
     ],
     "workflow": [
       {
         "label": "进入",
         "title": "选择当前工作区",
-        "body": "先确定需求或系统上下文，只加载当前范围内的项目、入口、代理和实例。"
+        "body": "先选择系统全局视图或当前需求工作区，确认需要操作的项目范围。"
       },
       {
         "label": "检查",
-        "title": "读取事实与运行状态",
-        "body": "查看分支、构建目标、Runtime 观测、配置来源和受管产物，再决定下一步动作。"
+        "title": "检查项目与运行状态",
+        "body": "查看分支、构建目标、代理、运行服务和最近记录，确认当前状态是否适合继续。"
       },
       {
         "label": "执行",
         "title": "先计划，再运行",
-        "body": "构建、Git、Link 与高风险操作先生成计划和风险说明，通过确认后再执行。"
+        "body": "构建、Git、Link 与远程写入 Action 会先展示范围、参数和风险，通过确认后再执行。"
       },
       {
         "label": "复盘",
-        "title": "记录结果并安全重放",
-        "body": "活动中心统一保留执行来源、状态、详情、历史关联和可重放动作。"
+        "title": "查看结果并处理失败",
+        "body": "在 Record 中查看每个项目的结果、明确错误和结果链接，并对支持的任务重新执行。"
       }
     ],
     "boundary": {
-      "title": "开发事实留在本机，外部系统保持原有职责",
-      "body": "rDevTool 只保存本地配置、工作区引用和机器状态，不替代 GitLab、Jenkins 或 CI/CD。凭据通过环境变量或私有配置提供，写入、推送、构建和发布动作保持可见并优先预检。"
+      "title": "配置与记录留在本机，远程动作始终可见",
+      "body": "rDevTool 不替代 GitLab、Jenkins 或现有 CI/CD。连接信息来自本地环境或私有配置，推送、合并、构建和部署前会展示操作范围，并在完成后保留结果。"
     },
-    "releaseSummary": "当前预览版本已覆盖工作区、资源入口、Git、构建、代理、Link、Runtime、受管产物、统一活动台账、托盘和 AI 友好 CLI。",
-    "screenshots": []
+    "releaseSummary": "当前预览版已覆盖工作区与项目管理、分支和构建、通用 Action、代理与本地联调、知识库、诊断和统一 Record，并支持明确错误、执行取消与失败任务重试。",
+    "screenshots": [
+      {
+        "id": "workspace-overview",
+        "source": "docs/assets/screenshots/workspace-overview.png",
+        "alt": "暗色模式下的 R系列 Workspace 首页",
+        "caption": "按应用默认窗口比例展示当前工作区的资源、Action、项目和运行状态。",
+        "title": "工作区总览",
+        "description": "开始需求前先确认当前工作区、项目范围、资源入口和最近活动。",
+        "highlights": ["切换 system 或需求工作区", "查看项目、资源、代理和 Action 数量", "从常用卡片进入联调链路"],
+        "documentId": "interface-guide"
+      },
+      {
+        "id": "projects-list",
+        "source": "docs/assets/screenshots/projects-list.png",
+        "alt": "项目管理项目列表页面",
+        "caption": "项目列表展示仓库路径、启动命令、运行状态、启动档案和快捷操作。",
+        "title": "项目列表",
+        "description": "用搜索、分类、收藏和最近使用定位项目，并从同一行启动、聚焦、打开目录或进入更多操作。",
+        "highlights": ["运行中、外部占用、待配置等状态同屏可见", "启动前核对启动档案和命令", "项目配置入口保持在页面右上角"],
+        "documentId": "interface-guide"
+      },
+      {
+        "id": "action-batch-deploy-pre",
+        "source": "docs/assets/screenshots/action-batch-deploy-pre.png",
+        "alt": "批量部署 Pre 的通用 Action 弹窗",
+        "caption": "固定工作区与部署上下文，完整显示多选项目，并在远程写入前检查计划。",
+        "title": "通用 Action",
+        "description": "适合带参数、计划检查、运行日志和结构化结果的脚本或远程动作。",
+        "highlights": ["固定上下文不可临时改写", "项目多选完整换行展示", "支持先计划再执行"],
+        "documentId": "interface-guide"
+      },
+      {
+        "id": "build-record-details",
+        "source": "docs/assets/screenshots/build-record-details.png",
+        "alt": "项目管理构建页面的参数区与 Build Record",
+        "caption": "左侧定位项目管理的构建功能，右侧先核对项目、目标和实际参数，再在同页 Record 查看结果。",
+        "title": "构建与 Build Record",
+        "description": "统一管理 Jenkins、本地构建和打包目标，执行后保留参数、构建链接和失败原因。",
+        "highlights": ["先选项目和构建目标", "参数默认值与本次值分开显示", "Record 追踪最终状态"],
+        "documentId": "interface-guide"
+      },
+      {
+        "id": "branch-record-summary",
+        "source": "docs/assets/screenshots/branch-record-summary.png",
+        "alt": "项目管理 Git 页面操作区与 Branch Record",
+        "caption": "左侧定位 Git，右侧保留完整分支参数和操作模式，下方按项目展示结果与明确错误。",
+        "title": "Git 与 Branch Record",
+        "description": "同步、创建、提交推送、合并和副本管理都先核对分支事实，再保留逐项目结果。",
+        "highlights": ["源分支和目标分支持续可见", "批量结果按项目拆分", "403、冲突和工作树阻断有明确说明"],
+        "documentId": "interface-guide"
+      },
+      {
+        "id": "resources-actions",
+        "source": "docs/assets/screenshots/resources-actions.png",
+        "alt": "资源入口页面展示工具、Action 和 Link",
+        "caption": "资源入口按网站、目录和工具组织常用入口，Action 与 Link 可进入结构化执行流程。",
+        "title": "资源入口",
+        "description": "把环境网址、资料目录、脚本、Action 和联调 Link 放到当前工作区里，减少反复查路径和命令。",
+        "highlights": ["按类型和分类过滤", "Action 使用闪电按钮进入确认", "Link 显示步骤数、代理和运行项目"],
+        "documentId": "interface-guide"
+      },
+      {
+        "id": "local-proxy-rules",
+        "source": "docs/assets/screenshots/local-proxy-rules.png",
+        "alt": "本地代理服务与规则页面",
+        "caption": "本地代理页面展示 profile、监听地址、外部占用、规则开关和请求记录入口。",
+        "title": "本地代理",
+        "description": "用 profile 管理监听端口和转发、Mock、阻断规则，并把代理绑定到项目启动档案或联调 Link。",
+        "highlights": ["识别 rDevTool 管理进程和外部端口占用", "逐条启停 Mock/Forward/Block 规则", "请求记录和诊断入口在同页"],
+        "documentId": "interface-guide"
+      },
+      {
+        "id": "knowledge-base-notes",
+        "source": "docs/assets/screenshots/knowledge-base-notes.png",
+        "alt": "知识库 Markdown 笔记页面",
+        "caption": "知识库按项目、手册、环境和收件箱组织 Markdown，左侧检索，右侧预览和编辑。",
+        "title": "知识库",
+        "description": "把已验证的启动方式、环境约定和故障处理沉淀成长期可读的项目知识。",
+        "highlights": ["按项目或知识范围过滤", "正文支持 Markdown 预览与链接跳转", "适合保存排障步骤，不保存凭据"],
+        "documentId": "interface-guide"
+      }
+    ]
   },
   "documentation": [
     {
+      "id": "interface-guide",
+      "label": "完整使用手册",
+      "description": "首次配置、各页面功能、工作区与项目、构建、分支、Action、代理、知识库、诊断、Record 和失败排查。",
+      "group": "使用指南",
+      "source": "docs/interface-guide.md"
+    },
+    {
       "id": "overview",
-      "label": "产品与使用概览",
-      "description": "定位、主要工作区、快速开始、数据边界和开发命令。",
+      "label": "产品概览与快速开始",
+      "description": "了解适用场景、主要工作区、安装方式、数据边界和常用入口。",
       "group": "开始使用",
       "source": "README.md"
     },
     {
-      "id": "cli",
-      "label": "CLI 完整参考",
-      "description": "JSON 契约、工作区、项目、构建、Git、Link、代理、Runtime、产物和 Web Actions 命令。",
-      "group": "自动化",
-      "source": "docs/cli.md"
-    },
-    {
-      "id": "ai-agent",
-      "label": "AI Agent 使用规范",
-      "description": "上下文读取、安全动作顺序、证据要求和结果汇报规则。",
-      "group": "自动化",
-      "source": "docs/ai-agent.md"
-    },
-    {
-      "id": "config",
-      "label": "配置与数据模型",
-      "description": "项目、工作区、配置源、入口、Link、代理和运行时文件说明。",
-      "group": "配置",
-      "source": "docs/config.md"
-    },
-    {
-      "id": "r-series-integration",
-      "label": "R 系列应用接入",
-      "description": "R 系列项目、构建目标、工作区和资源入口的配置范式。",
-      "group": "开发",
-      "source": "docs/r-series-apps.md"
-    },
-    {
-      "id": "architecture",
-      "label": "架构与演进",
-      "description": "共享 Core、Adapter、操作契约、领域边界和渐进拆分顺序。",
-      "group": "架构",
-      "source": "docs/architecture.md"
-    },
-    {
-      "id": "security",
-      "label": "安全与数据边界",
-      "description": "WebView、Tauri 权限、凭据、本地状态、外部动作与预览制品边界。",
-      "group": "开发",
-      "source": "docs/security.md"
-    },
-    {
-      "id": "maintenance",
-      "label": "文档与官网维护",
-      "description": "功能、Manifest、文档、版本和官网内容的单一来源更新流程。",
-      "group": "开发",
-      "source": "docs/maintenance.md"
-    },
-    {
-      "id": "release",
-      "label": "发布与打包",
-      "description": "桌面构建目标、预览发布流程以及签名状态。",
-      "group": "版本",
-      "source": "RELEASE.md"
+      "id": "configuration-packs",
+      "label": "配置导入与导出",
+      "description": "使用 .rdtpack 迁移项目、工作区和资源配置，并通过计划、校验与事务备份安全执行。",
+      "group": "使用指南",
+      "source": "docs/configuration-packs.md"
     },
     {
       "id": "changelog",
       "label": "更新日志",
-      "description": "按版本记录功能、修复、安全与文档变化。",
-      "group": "版本",
+      "description": "查看每个版本的重要功能、修复和使用变化。",
+      "group": "了解更新",
       "source": "CHANGELOG.md"
     }
   ],
@@ -176,8 +220,8 @@
       "en": {
         "product": {
           "category": "Local development workbench",
-          "tagline": "Bring multi-project development context into one executable, reviewable local workbench.",
-          "description": "Organize workspaces, projects, resources, Git, builds, local proxies, runtimes, and activity history in one place, with stable machine interfaces for the CLI and AI agents.",
+          "tagline": "Bring multi-project development, builds, and local debugging into one workbench.",
+          "description": "Manage workspaces, projects, branches, builds, resources, local proxies, and execution records in one interface, with states and failure reasons that are easy to review.",
           "stage": "Development preview",
           "nonGoals": [
             "Replace GitLab, Jenkins, or an existing CI/CD platform",
@@ -187,92 +231,187 @@
         },
         "website": {
           "facts": [
-            { "label": "Core objects", "value": "Workspace / Project" },
-            { "label": "Action model", "value": "Plan / Check / Execute / Replay" },
-            { "label": "Data boundary", "value": "Local configuration and SQLite state" }
+            { "label": "Best for", "value": "Daily multi-project development" },
+            { "label": "Main scope", "value": "Workspace / Project" },
+            { "label": "Execution safety", "value": "Plan / Confirm / Record" }
           ],
           "capabilities": [
             {
               "icon": "Layers3",
-              "title": "Workspace context",
-              "body": "Use the global system view or a scoped requirement workspace to organize projects, resources, proxies, managed instances, and the current development boundary."
+              "title": "Workspaces and projects",
+              "body": "Switch between the global view and requirement workspaces to see the projects, instance folders, branches, and resources in your current scope."
             },
             {
               "icon": "ScanSearch",
-              "title": "Resources and project entry points",
-              "body": "Search projects, websites, directories, apps, and scripts while preserving favorites, recents, and workspace filtering."
+              "title": "Resources and reusable Actions",
+              "body": "Open websites, folders, apps, and scripts from one place. Review context and parameters before an Action, then watch logs, cancel, or retry failed items."
             },
             {
               "icon": "Waypoints",
-              "title": "Git workflows",
-              "body": "Inspect branch state, sync targets, create or switch branches, preview merges, check push status, and run multi-project tasks."
+              "title": "Branches and Git operations",
+              "body": "Inspect branch state, sync, create, switch, merge, and push. Batch records show one row per project with clear permission or merge-conflict errors."
             },
             {
               "icon": "PackageOpen",
-              "title": "Builds and runtimes",
-              "body": "Plan Jenkins, local-command, and R Series package builds while supervising project runtimes, logs, readiness, and managed artifacts."
+              "title": "Builds and deployments",
+              "body": "Choose projects and build targets, confirm branch and environment parameters, then trigger the job. Build records keep progress, links, parameters, and failure reasons."
             },
             {
               "icon": "TerminalSquare",
-              "title": "Proxy and debugging chains",
-              "body": "Compose local proxies, mocks, forwarding rules, runtime lifecycles, and page focus into inspectable Link workflows."
+              "title": "Proxies and local debugging",
+              "body": "Manage local proxies, mocks, forwarding rules, and running services. Use Links for repeatable debugging steps and verify process and port status at any time."
             },
             {
               "icon": "History",
-              "title": "Activity and agent interfaces",
-              "body": "Unify desktop, CLI, and tray activity with status, evidence, risk details, and guarded replay through deterministic JSON commands."
+              "title": "Records, knowledge, and diagnostics",
+              "body": "Search past work in Record, expand project details, and retry recoverable tasks. Keep project notes in the knowledge library and check setup issues in Diagnostics."
+            },
+            {
+              "icon": "Layers3",
+              "title": "Configuration transfer and rollback",
+              "body": "Export portable packs by project, workspace, and resource source. Review path mappings and conflict plans before applying with a complete transaction backup."
             }
           ],
           "workflow": [
             {
               "label": "Enter",
               "title": "Choose the current workspace",
-              "body": "Start with the requirement or system context and load only the projects, resources, proxies, and instances relevant to that scope."
+              "body": "Choose the global system view or the requirement workspace you are working in, then confirm the project scope."
             },
             {
               "label": "Inspect",
-              "title": "Read facts and runtime state",
-              "body": "Review branches, build targets, runtime observations, configuration sources, and managed artifacts before choosing an action."
+              "title": "Check projects and running state",
+              "body": "Review branches, build targets, proxies, running services, and recent records before choosing the next action."
             },
             {
               "label": "Execute",
               "title": "Plan first, then run",
-              "body": "Build, Git, Link, and other consequential operations expose a plan and risk summary before execution."
+              "body": "Build, Git, Link, and remote-write Actions show their scope, parameters, and risks before execution."
             },
             {
               "label": "Review",
-              "title": "Record results and replay safely",
-              "body": "The activity center keeps origin, status, details, history relationships, and only the actions that can be replayed safely."
+              "title": "Review results and resolve failures",
+              "body": "Use Record to inspect per-project results, clear errors, and result links, then rerun tasks that support retry."
             }
           ],
           "boundary": {
-            "title": "Development facts stay local while external systems keep their responsibilities",
-            "body": "rDevTool stores local configuration, workspace references, and machine state. It does not replace GitLab, Jenkins, or CI/CD. Credentials come from environment variables or private local configuration, and writes, pushes, builds, and releases remain visible and previewable."
+            "title": "Configuration and records stay local, and remote actions stay visible",
+            "body": "rDevTool does not replace GitLab, Jenkins, or your CI/CD. Connection details come from local environment or private configuration, and push, merge, build, and deployment actions show their scope before running and keep the result afterward."
           },
-          "releaseSummary": "The current preview covers workspaces, resource entry points, Git, builds, proxies, Links, runtimes, managed artifacts, unified activity history, the system tray, and an agent-friendly CLI."
+          "releaseSummary": "The current preview covers workspace and project management, branches and builds, reusable Actions, proxies and local debugging, the knowledge library, diagnostics, and unified Records, with clear errors, cancellation, and failed-task retry.",
+          "screenshots": [
+            {
+              "id": "workspace-overview",
+              "source": "docs/assets/screenshots/workspace-overview.png",
+              "alt": "The R Series Workspace home in dark mode",
+              "caption": "The current workspace, resources, Actions, projects, and runtime state at the app's default window ratio.",
+              "title": "Workspace overview",
+              "description": "Start from the active workspace and verify project scope, resources, and recent activity before running a task.",
+              "highlights": ["Switch between system and requirement workspaces", "Review project, resource, proxy, and Action counts", "Open repeatable debugging chains from pinned cards"],
+              "documentId": "interface-guide"
+            },
+            {
+              "id": "projects-list",
+              "source": "docs/assets/screenshots/projects-list.png",
+              "alt": "The Project Management Projects list",
+              "caption": "The Projects list shows repository paths, start commands, runtime state, launch profiles, and row actions.",
+              "title": "Projects list",
+              "description": "Use search, categories, favorites, and recents to find a project, then start, focus, open, or inspect it from the same row.",
+              "highlights": ["Running, externally occupied, and unconfigured states are visible together", "Check the launch profile and command before starting", "Project configuration stays one click away"],
+              "documentId": "interface-guide"
+            },
+            {
+              "id": "action-batch-deploy-pre",
+              "source": "docs/assets/screenshots/action-batch-deploy-pre.png",
+              "alt": "The generic Batch Deploy Pre Action dialog",
+              "caption": "Fixed workspace and deployment context, fully visible project selection, and plan review before a remote write.",
+              "title": "Reusable Action",
+              "description": "Use Actions for parameterized scripts or remote writes that need planning, live logs, and structured results.",
+              "highlights": ["Fixed context cannot be edited in-place", "Project multi-select remains fully visible", "Plan first, then execute"],
+              "documentId": "interface-guide"
+            },
+            {
+              "id": "build-record-details",
+              "source": "docs/assets/screenshots/build-record-details.png",
+              "alt": "Project Management Build controls and Build Record",
+              "caption": "Project Management stays selected while project, target, and effective parameters remain above the Build Record.",
+              "title": "Build and Build Record",
+              "description": "Manage Jenkins, local builds, and packaging targets in one flow, then keep parameters, result links, and failures in Record.",
+              "highlights": ["Choose project and build target first", "Effective values and defaults are visible separately", "Record tracks the final state"],
+              "documentId": "interface-guide"
+            },
+            {
+              "id": "branch-record-summary",
+              "source": "docs/assets/screenshots/branch-record-summary.png",
+              "alt": "Project Management Git controls and Branch Record",
+              "caption": "Git stays selected while operation modes and branch inputs remain above per-project results and explicit errors.",
+              "title": "Git and Branch Record",
+              "description": "Sync, create, push, merge, and manage worktrees after checking branch facts, with per-project evidence after execution.",
+              "highlights": ["Source and target branches stay visible", "Batch results are split by project", "403, conflicts, and worktree blockers are explicit"],
+              "documentId": "interface-guide"
+            },
+            {
+              "id": "resources-actions",
+              "source": "docs/assets/screenshots/resources-actions.png",
+              "alt": "Resources page showing tools, Actions, and Links",
+              "caption": "Resources organizes websites, folders, and tools; Actions and Links enter structured execution flows.",
+              "title": "Resources",
+              "description": "Keep environment URLs, resource folders, scripts, Actions, and debugging Links inside the active workspace.",
+              "highlights": ["Filter by type and category", "Use the lightning action for Action confirmation", "Links show steps, proxies, and target project"],
+              "documentId": "interface-guide"
+            },
+            {
+              "id": "local-proxy-rules",
+              "source": "docs/assets/screenshots/local-proxy-rules.png",
+              "alt": "Local Proxy services and rules",
+              "caption": "Local Proxy shows profiles, listen URLs, external port ownership, rule switches, and request-history entry points.",
+              "title": "Local Proxy",
+              "description": "Manage listen ports and forward, mock, or block rules, then bind a proxy to project launch profiles or Links.",
+              "highlights": ["Distinguish rDevTool-managed services from external listeners", "Enable or disable Mock, Forward, and Block rules", "Request history and diagnosis live on the same page"],
+              "documentId": "interface-guide"
+            },
+            {
+              "id": "knowledge-base-notes",
+              "source": "docs/assets/screenshots/knowledge-base-notes.png",
+              "alt": "Knowledge Base Markdown notes",
+              "caption": "Knowledge organizes Markdown by project, playbook, environment, and inbox, with search on the left and preview on the right.",
+              "title": "Knowledge Base",
+              "description": "Store verified launch instructions, environment conventions, and troubleshooting notes as long-lived project knowledge.",
+              "highlights": ["Filter by project or knowledge scope", "Preview Markdown and follow note links", "Keep troubleshooting steps here, not credentials"],
+              "documentId": "interface-guide"
+            }
+          ]
         },
         "documentation": [
           {
+            "id": "interface-guide",
+            "label": "Complete user guide",
+            "description": "First-time setup, every main page, workspaces and projects, builds, branches, Actions, proxies, knowledge, diagnostics, Records, and troubleshooting.",
+            "group": "User guide",
+            "source": "docs/interface-guide_EN.md",
+            "reviewedForVersion": "0.1.0"
+          },
+          {
             "id": "overview",
-            "label": "Product and usage overview",
-            "description": "Purpose, main work areas, quick start, CLI, local data, privacy, and development commands.",
+            "label": "Product overview and quick start",
+            "description": "Understand where rDevTool fits, its main work areas, installation, data boundaries, and common entry points.",
             "group": "Getting started",
             "source": "README_EN.md",
             "reviewedForVersion": "0.1.0"
           },
           {
-            "id": "release",
-            "label": "Release and packaging",
-            "description": "Desktop build targets, preview release workflow, artifact evidence, and signing status.",
-            "group": "Releases",
-            "source": "RELEASE_EN.md",
+            "id": "configuration-packs",
+            "label": "Configuration import and export",
+            "description": "Move project, workspace, and resource configuration with .rdtpack planning, validation, transaction backups, and rollback.",
+            "group": "User guide",
+            "source": "docs/configuration-packs_EN.md",
             "reviewedForVersion": "0.1.0"
           },
           {
             "id": "changelog",
             "label": "Changelog",
-            "description": "Features, fixes, security, and documentation changes by version.",
-            "group": "Releases",
+            "description": "See important features, fixes, and usage changes in each version.",
+            "group": "What's new",
             "source": "CHANGELOG_EN.md",
             "reviewedForVersion": "0.1.0"
           }
@@ -288,6 +427,7 @@
     "doctorCommand": ["--json", "doctor"],
     "domains": [
       "agent",
+      "action",
       "app",
       "artifacts",
       "build",
@@ -298,13 +438,15 @@
       "link",
       "navigation",
       "notes",
+      "pack",
       "projects",
       "proxy",
       "runtime",
       "web-actions",
+      "workflow",
       "workspace"
     ],
-    "highRiskPolicy": "构建、部署、合并、推送、工作区复制和配置写入优先执行 plan、overview、status 或 dry-run，再由用户确认。"
+    "highRiskPolicy": "构建、部署、远程写入 Action、合并、推送、工作区复制、配置导入和配置写入优先执行 plan、overview、status 或 dry-run，再由用户确认。"
   },
   "runtime": {
     "configKind": "toml",

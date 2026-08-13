@@ -1,4 +1,9 @@
 export const EN_PROJECTS_MESSAGES: Record<string, string> = {
+  "启动依赖": "Launch Dependencies",
+  "启动入口不存在: {paths}": "Launch entry does not exist: {paths}",
+  "依赖目录不存在: {path}": "Dependency directory does not exist: {path}",
+  "先安装依赖，或为工作区安全复用锁文件一致的源项目 node_modules。":
+    "Install dependencies first, or safely reuse source node_modules when lockfiles match.",
   " · {count} 变量": " · {count} variables",
   " · {count} 文件": " · {count} files",
   "... 仅显示最近日志\n": "... Showing recent logs only\n",

@@ -507,11 +507,11 @@ mod tests {
             "effective": {
                 "branch": null,
                 "params": {
-                    "BRANCH": "env-dc2-vke"
+                    "BRANCH": "env_demo_pre"
                 }
             }
         });
-        assert_eq!(deploy_preview_branch(&preview), Some("env-dc2-vke"));
+        assert_eq!(deploy_preview_branch(&preview), Some("env_demo_pre"));
     }
 
     #[test]

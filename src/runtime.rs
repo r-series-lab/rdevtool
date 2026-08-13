@@ -1,3 +1,4 @@
+use crate::app_message::AppMessage;
 use crate::config::{
     AppConfig, ProjectCommandConfig, ProjectConfig, ProjectDebugLocalFileConfig,
     ProjectDebugProfileConfig, ProjectDebugReadyProbeConfig, ProjectNetworkProxyConfig,
@@ -295,7 +296,9 @@ pub struct ProjectRuntimePreflightResponse {
     pub runtime_profile_label: Option<String>,
     pub status_key: String,
     pub status_label: String,
+    pub status_message: AppMessage,
     pub summary: String,
+    pub summary_message: AppMessage,
     pub target: Option<ProjectRuntimeTargetSummary>,
     pub checks: Vec<ProjectRuntimePreflightCheck>,
 }
@@ -401,8 +404,15 @@ pub struct ProjectRuntimePreflightCheck {
     pub category: String,
     pub status_key: String,
     pub status_label: String,
+    pub status_message: AppMessage,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title_message: Option<AppMessage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_message: Option<AppMessage>,
     pub action: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_message: Option<AppMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fix: Option<ProjectRuntimePreflightFix>,
 }
@@ -471,7 +481,9 @@ pub struct ProjectRuntimeInspectResponse {
     pub runtime_profile_label: Option<String>,
     pub status_key: String,
     pub status_label: String,
+    pub status_message: AppMessage,
     pub summary: String,
+    pub summary_message: AppMessage,
     pub target: Option<ProjectRuntimeTargetSummary>,
     pub environment: ProjectRuntimeEnvironmentInspect,
     pub env_preview: Vec<ProjectRuntimeEnvPreview>,
@@ -1193,14 +1205,21 @@ pub fn project_runtime_preflight_for_project_with_options(
 
     if let Some(key) = requested_debug_profile_key {
         if let Some(profile) = debug_profile.as_ref() {
-            checks.push(preflight_check(
-                "debugProfile",
-                "启动档案",
-                "context",
-                "ok",
-                format!("使用 {} ({})", profile.label, profile.key),
-                None,
-            ));
+            checks.push(
+                preflight_check(
+                    "debugProfile",
+                    "启动档案",
+                    "context",
+                    "ok",
+                    format!("使用 {} ({})", profile.label, profile.key),
+                    None,
+                )
+                .with_detail_message(
+                    AppMessage::new("runtime.preflight.detail.debug_profile.selected")
+                        .with_param("label", profile.label.clone())
+                        .with_param("key", profile.key.clone()),
+                ),
+            );
         } else {
             let mut check = preflight_check(
                 "debugProfile",
@@ -1209,7 +1228,14 @@ pub fn project_runtime_preflight_for_project_with_options(
                 "error",
                 format!("启动档案不存在: {}", key),
                 Some("重新选择一个可用启动档案，或在运行环境里创建。"),
-            );
+            )
+            .with_detail_message(
+                AppMessage::new("runtime.preflight.detail.debug_profile.missing")
+                    .with_param("key", key),
+            )
+            .with_action_message(AppMessage::new(
+                "runtime.preflight.action.debug_profile.select_or_create",
+            ));
             check.fix = Some(ProjectRuntimePreflightFix::new(
                 "resetProfile",
                 "使用基础配置",
@@ -1225,7 +1251,13 @@ pub fn project_runtime_preflight_for_project_with_options(
             "info",
             "使用项目默认启动配置",
             Some("需要 Node 版本、代理或受控浏览器时，建议选择启动档案。"),
-        );
+        )
+        .with_detail_message(AppMessage::new(
+            "runtime.preflight.detail.debug_profile.default",
+        ))
+        .with_action_message(AppMessage::new(
+            "runtime.preflight.action.debug_profile.choose_for_capabilities",
+        ));
         check.fix = suggested_project_launch_profile_fix(project, options);
         checks.push(check);
     }
@@ -1239,6 +1271,8 @@ pub fn project_runtime_preflight_for_project_with_options(
     preflight_focus_checks(project, debug_profile.as_ref(), &mut checks);
 
     let (status_key, status_label, summary) = summarize_preflight(&checks);
+    let status_message = preflight_response_status_message(&status_key);
+    let summary_message = preflight_summary_message(&checks);
     let target = resolve_runtime_target_summary(project, debug_profile.as_ref(), options).ok();
     ProjectRuntimePreflightResponse {
         project_key: project.key.clone(),
@@ -1249,7 +1283,9 @@ pub fn project_runtime_preflight_for_project_with_options(
         runtime_profile_label: runtime_profile.map(|profile| profile.label.clone()),
         status_key,
         status_label,
+        status_message,
         summary,
+        summary_message,
         target,
         checks,
     }
@@ -1323,6 +1359,8 @@ pub fn inspect_project_runtime_with_options(
         &mut checks,
     );
     let (status_key, status_label, summary) = summarize_preflight(&checks);
+    let status_message = preflight_response_status_message(&status_key);
+    let summary_message = preflight_summary_message(&checks);
     let handoff = build_runtime_handoff(
         project,
         debug_profile.as_ref(),
@@ -1347,7 +1385,9 @@ pub fn inspect_project_runtime_with_options(
             .map(|profile| profile.label.clone()),
         status_key,
         status_label,
+        status_message,
         summary,
+        summary_message,
         target,
         environment,
         env_preview,
@@ -4040,22 +4080,38 @@ fn preflight_command_checks(
     checks: &mut Vec<ProjectRuntimePreflightCheck>,
 ) {
     let Some(command_config) = project_command_config(project, RuntimeTaskKind::Dev) else {
-        checks.push(preflight_check(
-            "devCommand",
-            "启动命令",
-            "runtime",
-            "error",
-            "未配置 dev 命令",
-            Some("在项目配置里补充 dev.command。"),
-        ));
-        checks.push(preflight_check(
-            "devCwd",
-            "工作目录",
-            "runtime",
-            "error",
-            "无法确定 dev 工作目录",
-            Some("配置 repo_path，或为 dev.cwd 指定绝对路径。"),
-        ));
+        checks.push(
+            preflight_check(
+                "devCommand",
+                "启动命令",
+                "runtime",
+                "error",
+                "未配置 dev 命令",
+                Some("在项目配置里补充 dev.command。"),
+            )
+            .with_detail_message(AppMessage::new(
+                "runtime.preflight.detail.dev_command.missing",
+            ))
+            .with_action_message(AppMessage::new(
+                "runtime.preflight.action.dev_command.configure",
+            )),
+        );
+        checks.push(
+            preflight_check(
+                "devCwd",
+                "工作目录",
+                "runtime",
+                "error",
+                "无法确定 dev 工作目录",
+                Some("配置 repo_path，或为 dev.cwd 指定绝对路径。"),
+            )
+            .with_detail_message(AppMessage::new(
+                "runtime.preflight.detail.dev_cwd.unresolved",
+            ))
+            .with_action_message(AppMessage::new(
+                "runtime.preflight.action.dev_cwd.configure",
+            )),
+        );
         return;
     };
 
@@ -4063,14 +4119,22 @@ fn preflight_command_checks(
         .or_else(|| debug_profile.and_then(|profile| optional_trimmed(profile.command.as_deref())))
         .unwrap_or_else(|| command_config.command.trim());
     if command.is_empty() {
-        checks.push(preflight_check(
-            "devCommand",
-            "启动命令",
-            "runtime",
-            "error",
-            "dev.command 为空",
-            Some("补充可执行启动命令，例如 npm run serve。"),
-        ));
+        checks.push(
+            preflight_check(
+                "devCommand",
+                "启动命令",
+                "runtime",
+                "error",
+                "dev.command 为空",
+                Some("补充可执行启动命令，例如 npm run serve。"),
+            )
+            .with_detail_message(AppMessage::new(
+                "runtime.preflight.detail.dev_command.empty",
+            ))
+            .with_action_message(AppMessage::new(
+                "runtime.preflight.action.dev_command.add_executable",
+            )),
+        );
     } else {
         checks.push(preflight_check(
             "devCommand",
@@ -4100,23 +4164,41 @@ fn preflight_command_checks(
                     None,
                 ));
             } else if path.exists() {
-                checks.push(preflight_check(
-                    "devCwd",
-                    "工作目录",
-                    "runtime",
-                    "error",
-                    format!("不是目录: {}", path.display()),
-                    Some("修正 dev.cwd 或项目 repo_path。"),
-                ));
+                checks.push(
+                    preflight_check(
+                        "devCwd",
+                        "工作目录",
+                        "runtime",
+                        "error",
+                        format!("不是目录: {}", path.display()),
+                        Some("修正 dev.cwd 或项目 repo_path。"),
+                    )
+                    .with_detail_message(
+                        AppMessage::new("runtime.preflight.detail.dev_cwd.not_directory")
+                            .with_param("path", path.display().to_string()),
+                    )
+                    .with_action_message(AppMessage::new(
+                        "runtime.preflight.action.dev_cwd.fix_path",
+                    )),
+                );
             } else {
-                checks.push(preflight_check(
-                    "devCwd",
-                    "工作目录",
-                    "runtime",
-                    "error",
-                    format!("目录不存在: {}", path.display()),
-                    Some("修正 dev.cwd，或先拉取/创建项目目录。"),
-                ));
+                checks.push(
+                    preflight_check(
+                        "devCwd",
+                        "工作目录",
+                        "runtime",
+                        "error",
+                        format!("目录不存在: {}", path.display()),
+                        Some("修正 dev.cwd，或先拉取/创建项目目录。"),
+                    )
+                    .with_detail_message(
+                        AppMessage::new("runtime.preflight.detail.dev_cwd.missing")
+                            .with_param("path", path.display().to_string()),
+                    )
+                    .with_action_message(AppMessage::new(
+                        "runtime.preflight.action.dev_cwd.create_or_fix",
+                    )),
+                );
             }
             Some(path)
         }
@@ -4132,6 +4214,10 @@ fn preflight_command_checks(
             None
         }
     };
+
+    if let Some(cwd) = cwd.as_deref().filter(|path| path.is_dir()) {
+        preflight_dev_dependency_check(command, cwd, checks);
+    }
 
     if command_uses_node_tool(command) {
         let mut env = command_config.env.clone();
@@ -4149,14 +4235,22 @@ fn preflight_command_checks(
                 None,
             ));
         } else {
-            checks.push(preflight_check(
-                "nodeVersion",
-                "Node 版本",
-                "runtime",
-                "warning",
-                "启动命令使用 Node 工具，但没有发现明确版本线索",
-                Some("建议在命令中使用 nvm use，或在项目目录放置 .nvmrc。"),
-            ));
+            checks.push(
+                preflight_check(
+                    "nodeVersion",
+                    "Node 版本",
+                    "runtime",
+                    "warning",
+                    "启动命令使用 Node 工具，但没有发现明确版本线索",
+                    Some("建议在命令中使用 nvm use，或在项目目录放置 .nvmrc。"),
+                )
+                .with_detail_message(AppMessage::new(
+                    "runtime.preflight.detail.node_version.missing",
+                ))
+                .with_action_message(AppMessage::new(
+                    "runtime.preflight.action.node_version.add_hint",
+                )),
+            );
         }
     }
 }
@@ -4174,39 +4268,67 @@ fn preflight_expected_port_check(
         return;
     };
     if port == 0 {
-        checks.push(preflight_check(
-            "devPort",
-            "预期端口",
-            "runtime",
-            "error",
-            "预期端口必须在 1-65535 之间",
-            Some("修正启动档案或本次启动参数中的预期端口。"),
-        ));
+        checks.push(
+            preflight_check(
+                "devPort",
+                "预期端口",
+                "runtime",
+                "error",
+                "预期端口必须在 1-65535 之间",
+                Some("修正启动档案或本次启动参数中的预期端口。"),
+            )
+            .with_detail_message(AppMessage::new("runtime.preflight.detail.dev_port.invalid"))
+            .with_action_message(AppMessage::new("runtime.preflight.action.dev_port.fix")),
+        );
         return;
     }
     match TcpListener::bind(("127.0.0.1", port)) {
         Ok(listener) => {
             drop(listener);
-            checks.push(preflight_check(
-                "devPort",
-                "预期端口",
-                "runtime",
-                "ok",
-                format!("端口 {} 可用", port),
-                None,
-            ));
+            checks.push(
+                preflight_check(
+                    "devPort",
+                    "预期端口",
+                    "runtime",
+                    "ok",
+                    format!("端口 {} 可用", port),
+                    None,
+                )
+                .with_detail_message(
+                    AppMessage::new("runtime.preflight.detail.dev_port.available")
+                        .with_param("port", port),
+                ),
+            );
         }
         Err(_) => {
+            let owner = port_owner_detail(port);
+            let detail = owner
+                .as_ref()
+                .map(|owner| format!("端口 {} 已被 {} 占用", port, owner))
+                .unwrap_or_else(|| format!("端口 {} 已被占用", port));
+            let detail_message = owner.map_or_else(
+                || {
+                    AppMessage::new("runtime.preflight.detail.dev_port.occupied")
+                        .with_param("port", port)
+                },
+                |owner| {
+                    AppMessage::new("runtime.preflight.detail.dev_port.occupied_by")
+                        .with_param("port", port)
+                        .with_param("owner", owner)
+                },
+            );
             let mut check = preflight_check(
                 "devPort",
                 "预期端口",
                 "runtime",
                 "error",
-                port_owner_detail(port)
-                    .map(|owner| format!("端口 {} 已被 {} 占用", port, owner))
-                    .unwrap_or_else(|| format!("端口 {} 已被占用", port)),
+                detail,
                 Some("停止占用进程，或为本次启动选择其他预期端口。"),
-            );
+            )
+            .with_detail_message(detail_message)
+            .with_action_message(AppMessage::new(
+                "runtime.preflight.action.dev_port.stop_or_change",
+            ));
             let (vite_command, _) = resolved_vite_command_info(&resolved.command, &resolved.cwd);
             if vite_command && let Some(suggested_port) = suggest_available_local_port(port) {
                 let mut fix = ProjectRuntimePreflightFix::new(
@@ -4340,25 +4462,41 @@ fn preflight_proxy_checks(
     if let Some(proxy) = active_proxy {
         let proxy_url = proxy.proxy_url.trim();
         if proxy_url.is_empty() {
-            checks.push(preflight_check(
-                "networkProxy",
-                "Node 网络代理",
-                "network",
-                "error",
-                "代理已启用，但 proxy_url 为空",
-                Some("补充 proxy_url，或关闭网络代理。"),
-            ));
+            checks.push(
+                preflight_check(
+                    "networkProxy",
+                    "Node 网络代理",
+                    "network",
+                    "error",
+                    "代理已启用，但 proxy_url 为空",
+                    Some("补充 proxy_url，或关闭网络代理。"),
+                )
+                .with_detail_message(AppMessage::new(
+                    "runtime.preflight.detail.network_proxy.missing_url",
+                ))
+                .with_action_message(AppMessage::new(
+                    "runtime.preflight.action.network_proxy.configure_or_disable",
+                )),
+            );
             return;
         }
         if proxy.node_hook && !proxy_url.to_ascii_lowercase().starts_with("http://") {
-            checks.push(preflight_check(
-                "networkProxy",
-                "Node 网络代理",
-                "network",
-                "error",
-                "Node Hook 当前只支持 http:// 代理",
-                Some("改用 http:// 本地代理，或关闭 Node Hook。"),
-            ));
+            checks.push(
+                preflight_check(
+                    "networkProxy",
+                    "Node 网络代理",
+                    "network",
+                    "error",
+                    "Node Hook 当前只支持 http:// 代理",
+                    Some("改用 http:// 本地代理，或关闭 Node Hook。"),
+                )
+                .with_detail_message(AppMessage::new(
+                    "runtime.preflight.detail.network_proxy.unsupported_node_hook",
+                ))
+                .with_action_message(AppMessage::new(
+                    "runtime.preflight.action.network_proxy.use_http_or_disable_hook",
+                )),
+            );
             return;
         }
         let mut modes = Vec::new();
@@ -4373,35 +4511,60 @@ fn preflight_proxy_checks(
         } else {
             modes.join(" + ")
         };
-        checks.push(preflight_check(
-            "networkProxy",
-            "Node 网络代理",
-            "network",
-            "ok",
-            format!("{} · {}", proxy_url, mode_label),
-            None,
-        ));
+        let configured_message_key = match (proxy.inject_env, proxy.node_hook) {
+            (true, true) => "runtime.preflight.detail.network_proxy.configured.env_and_hook",
+            (true, false) => "runtime.preflight.detail.network_proxy.configured.env",
+            (false, true) => "runtime.preflight.detail.network_proxy.configured.node_hook",
+            (false, false) => "runtime.preflight.detail.network_proxy.configured.no_injection",
+        };
+        checks.push(
+            preflight_check(
+                "networkProxy",
+                "Node 网络代理",
+                "network",
+                "ok",
+                format!("{} · {}", proxy_url, mode_label),
+                None,
+            )
+            .with_detail_message(
+                AppMessage::new(configured_message_key).with_param("url", proxy_url),
+            ),
+        );
     } else {
-        checks.push(preflight_check(
-            "networkProxy",
-            "Node 网络代理",
-            "network",
-            "info",
-            "未启用 Node 侧代理注入",
-            Some("如果 dev server 代理接口出现 ENOTFOUND，可在启动档案启用网络代理。"),
-        ));
+        checks.push(
+            preflight_check(
+                "networkProxy",
+                "Node 网络代理",
+                "network",
+                "info",
+                "未启用 Node 侧代理注入",
+                Some("如果 dev server 代理接口出现 ENOTFOUND，可在启动档案启用网络代理。"),
+            )
+            .with_detail_message(AppMessage::new(
+                "runtime.preflight.detail.network_proxy.disabled",
+            ))
+            .with_action_message(AppMessage::new(
+                "runtime.preflight.action.network_proxy.enable_when_needed",
+            )),
+        );
     }
 
     if let Some(profile) = runtime_profile {
         if let Some(proxy_id) = optional_trimmed(profile.rdev_proxy_profile_id.as_deref()) {
-            checks.push(preflight_check(
-                "runtimeProxy",
-                "本地代理服务",
-                "network",
-                "ok",
-                format!("运行环境绑定代理服务 {}", proxy_id),
-                None,
-            ));
+            checks.push(
+                preflight_check(
+                    "runtimeProxy",
+                    "本地代理服务",
+                    "network",
+                    "ok",
+                    format!("运行环境绑定代理服务 {}", proxy_id),
+                    None,
+                )
+                .with_detail_message(
+                    AppMessage::new("runtime.preflight.detail.runtime_proxy.bound")
+                        .with_param("id", proxy_id),
+                ),
+            );
         }
     }
 }
@@ -4832,6 +4995,128 @@ fn command_uses_node_tool(command: &str) -> bool {
     .any(|token| command.contains(token))
 }
 
+fn preflight_dev_dependency_check(
+    command: &str,
+    cwd: &Path,
+    checks: &mut Vec<ProjectRuntimePreflightCheck>,
+) {
+    let explicit_entries = command_dependency_entry_paths(command, cwd);
+    let missing_entries = explicit_entries
+        .iter()
+        .filter(|path| !path.exists())
+        .collect::<Vec<_>>();
+    if !missing_entries.is_empty() {
+        let paths = missing_entries
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        checks.push(
+            preflight_check(
+                "devDependencies",
+                "启动依赖",
+                "runtime",
+                "error",
+                format!("启动入口不存在: {paths}"),
+                Some("先安装依赖，或为工作区安全复用锁文件一致的源项目 node_modules。"),
+            )
+            .with_detail_message(
+                AppMessage::new("runtime.preflight.detail.dev_dependencies.entry_missing")
+                    .with_param("paths", paths),
+            )
+            .with_action_message(AppMessage::new(
+                "runtime.preflight.action.dev_dependencies.install_or_link",
+            )),
+        );
+        return;
+    }
+
+    if command_runs_package_script(command)
+        && cwd.join("package.json").is_file()
+        && !cwd.join("node_modules").is_dir()
+        && !cwd.join(".pnp.cjs").is_file()
+        && !cwd.join(".pnp.js").is_file()
+    {
+        checks.push(
+            preflight_check(
+                "devDependencies",
+                "启动依赖",
+                "runtime",
+                "error",
+                format!("依赖目录不存在: {}", cwd.join("node_modules").display()),
+                Some("先安装依赖，或为工作区安全复用锁文件一致的源项目 node_modules。"),
+            )
+            .with_detail_message(
+                AppMessage::new("runtime.preflight.detail.dev_dependencies.directory_missing")
+                    .with_param("path", cwd.join("node_modules").display().to_string()),
+            )
+            .with_action_message(AppMessage::new(
+                "runtime.preflight.action.dev_dependencies.install_or_link",
+            )),
+        );
+        return;
+    }
+
+    if !explicit_entries.is_empty() || command_runs_package_script(command) {
+        checks.push(preflight_check(
+            "devDependencies",
+            "启动依赖",
+            "runtime",
+            "ok",
+            "启动依赖入口可用",
+            None,
+        ));
+    }
+}
+
+fn command_dependency_entry_paths(command: &str, cwd: &Path) -> Vec<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for token in command.split_whitespace() {
+        let token = token.trim_matches(|character: char| {
+            matches!(character, '\'' | '"' | ';' | '(' | ')' | '{' | '}')
+        });
+        let Some(index) = token.find("node_modules/") else {
+            continue;
+        };
+        let candidate = token[..index]
+            .chars()
+            .rev()
+            .take_while(|character| !matches!(character, '=' | ':' | ','))
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>()
+            + &token[index..];
+        let candidate = candidate.trim_matches(|character: char| {
+            matches!(character, '\'' | '"' | ';' | '&' | '|' | ')' | '}')
+        });
+        if candidate.contains(['$', '`', '*', '?']) || candidate.is_empty() {
+            continue;
+        }
+        let path = PathBuf::from(candidate);
+        paths.insert(if path.is_absolute() {
+            path
+        } else {
+            cwd.join(path)
+        });
+    }
+    paths.into_iter().collect()
+}
+
+fn command_runs_package_script(command: &str) -> bool {
+    let normalized = command.to_ascii_lowercase();
+    normalized.contains("npm run ")
+        || normalized.contains("npm start")
+        || normalized.contains("npm test")
+        || normalized.contains("pnpm run ")
+        || normalized.contains("pnpm dev")
+        || normalized.contains("pnpm start")
+        || normalized.contains("yarn run ")
+        || normalized.contains("yarn dev")
+        || normalized.contains("yarn start")
+        || normalized.contains("yarn serve")
+}
+
 fn node_version_hint(
     cwd: Option<&Path>,
     command: &str,
@@ -4932,16 +5217,64 @@ fn preflight_check(
     detail: impl Into<String>,
     action: Option<&str>,
 ) -> ProjectRuntimePreflightCheck {
+    let key = key.into();
+    let title = title.into();
     ProjectRuntimePreflightCheck {
-        key: key.into(),
-        title: title.into(),
+        key,
+        title_message: preflight_title_message(&title),
+        title,
         category: category.into(),
         status_key: status_key.to_string(),
         status_label: preflight_status_label(status_key).to_string(),
+        status_message: AppMessage::new(format!("runtime.preflight.check.status.{status_key}")),
         detail: detail.into(),
+        detail_message: None,
         action: action.map(ToString::to_string),
+        action_message: None,
         fix: None,
     }
+}
+
+impl ProjectRuntimePreflightCheck {
+    fn with_detail_message(mut self, message: AppMessage) -> Self {
+        self.detail_message = Some(message);
+        self
+    }
+
+    fn with_action_message(mut self, message: AppMessage) -> Self {
+        self.action_message = Some(message);
+        self
+    }
+}
+
+fn preflight_title_message(title: &str) -> Option<AppMessage> {
+    let key = match title {
+        "启动档案" => "debug_profile",
+        "启动命令" => "dev_command",
+        "工作目录" => "dev_cwd",
+        "Node 版本" => "node_version",
+        "预期端口" => "dev_port",
+        "本地文件" => "local_files",
+        "本地覆盖文件" => "local_file",
+        "Node 网络代理" => "network_proxy",
+        "Node 出网代理" => "node_outbound_proxy",
+        "本地代理服务" => "runtime_proxy",
+        "本地 API 代理" => "local_api_proxy",
+        "启动档案本地 API 代理" => "debug_local_proxy",
+        "浏览器代理" => "browser_proxy",
+        "本地代理拓扑" => "local_proxy_topology",
+        "代理拓扑" => "proxy_topology",
+        "代理分层" => "proxy_layers",
+        "网页动作受控浏览器" => "web_actions_browser",
+        "启动页面" => "focus_url",
+        "HTTP Ready 探测" => "http_ready_probe",
+        "Ready 检测" => "ready_detection",
+        "启动后动作" => "after_ready_actions",
+        _ => return None,
+    };
+    Some(AppMessage::new(format!(
+        "runtime.preflight.check.title.{key}"
+    )))
 }
 
 fn preflight_status_label(status_key: &str) -> &'static str {
@@ -4983,8 +5316,35 @@ fn summarize_preflight(checks: &[ProjectRuntimePreflightCheck]) -> (String, Stri
     )
 }
 
+fn preflight_response_status_message(status_key: &str) -> AppMessage {
+    AppMessage::new(format!("runtime.preflight.status.{status_key}"))
+}
+
+fn preflight_summary_message(checks: &[ProjectRuntimePreflightCheck]) -> AppMessage {
+    let errors = checks
+        .iter()
+        .filter(|check| check.status_key == "error")
+        .count();
+    let warnings = checks
+        .iter()
+        .filter(|check| check.status_key == "warning")
+        .count();
+    if errors > 0 {
+        return AppMessage::new("runtime.preflight.summary.errors")
+            .with_param("errors", errors)
+            .with_param("warnings", warnings);
+    }
+    if warnings > 0 {
+        return AppMessage::new("runtime.preflight.summary.warnings")
+            .with_param("warnings", warnings);
+    }
+    AppMessage::new("runtime.preflight.summary.ok")
+}
+
 pub fn refresh_project_runtime_preflight_summary(response: &mut ProjectRuntimePreflightResponse) {
     let (status_key, status_label, summary) = summarize_preflight(&response.checks);
+    response.status_message = preflight_response_status_message(&status_key);
+    response.summary_message = preflight_summary_message(&response.checks);
     response.status_key = status_key;
     response.status_label = status_label;
     response.summary = summary;
@@ -5521,6 +5881,66 @@ mod tests {
     }
 
     #[test]
+    fn runtime_preflight_blocks_missing_node_modules_entrypoint() {
+        let cwd = std::env::temp_dir().join(format!(
+            "rdevtool-runtime-missing-dependencies-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join(".nvmrc"), "16\n").unwrap();
+        let project: ProjectConfig = serde_json::from_value(json!({
+            "key": "legacy-vue",
+            "name": "Legacy Vue",
+            "repo_path": cwd,
+            "dev": {
+                "command": "node --max_old_space_size=4096 node_modules/@vue/cli-service/bin/vue-cli-service.js serve"
+            }
+        }))
+        .unwrap();
+        let config: AppConfig = serde_json::from_value(json!({
+            "defaults": {},
+            "projects": []
+        }))
+        .unwrap();
+
+        let missing = project_runtime_preflight_for_project_with_options(
+            &config,
+            &project,
+            &ProjectRuntimeLaunchOptions::default(),
+        );
+        let dependency_check = missing
+            .checks
+            .iter()
+            .find(|check| check.key == "devDependencies")
+            .expect("dependency preflight check");
+        assert_eq!(dependency_check.status_key, "error");
+        assert!(dependency_check.detail.contains("vue-cli-service.js"));
+
+        let entry = project
+            .repo_path
+            .as_ref()
+            .unwrap()
+            .join("node_modules/@vue/cli-service/bin/vue-cli-service.js");
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "module.exports = {};").unwrap();
+        let ready = project_runtime_preflight_for_project_with_options(
+            &config,
+            &project,
+            &ProjectRuntimeLaunchOptions::default(),
+        );
+        assert_eq!(
+            ready
+                .checks
+                .iter()
+                .find(|check| check.key == "devDependencies")
+                .map(|check| check.status_key.as_str()),
+            Some("ok")
+        );
+
+        std::fs::remove_dir_all(project.repo_path.unwrap()).unwrap();
+    }
+
+    #[test]
     fn occupied_vite_port_offers_a_structured_port_fix() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let occupied_port = listener.local_addr().unwrap().port();
@@ -5637,6 +6057,39 @@ mod tests {
             .find(|check| check.key == "debugProfile")
             .expect("profile preflight check");
         assert_eq!(profile_check.status_key, "error");
+        assert_eq!(
+            response.status_message.key,
+            "runtime.preflight.status.error"
+        );
+        assert_eq!(
+            response.summary_message.key,
+            "runtime.preflight.summary.errors"
+        );
+        assert_eq!(
+            profile_check
+                .title_message
+                .as_ref()
+                .map(|message| message.key.as_str()),
+            Some("runtime.preflight.check.title.debug_profile")
+        );
+        assert_eq!(
+            profile_check.status_message.key,
+            "runtime.preflight.check.status.error"
+        );
+        assert_eq!(
+            profile_check
+                .detail_message
+                .as_ref()
+                .map(|message| message.key.as_str()),
+            Some("runtime.preflight.detail.debug_profile.missing")
+        );
+        assert_eq!(
+            profile_check
+                .action_message
+                .as_ref()
+                .map(|message| message.key.as_str()),
+            Some("runtime.preflight.action.debug_profile.select_or_create")
+        );
         assert_eq!(
             profile_check.fix.as_ref().map(|fix| fix.kind.as_str()),
             Some("resetProfile")

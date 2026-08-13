@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
 use crate::config::{
@@ -51,6 +53,22 @@ impl InitDemandWorkspaceCopyMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum InitDemandWorkspaceDependencyMode {
+    None,
+    AutoLink,
+}
+
+impl InitDemandWorkspaceDependencyMode {
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::AutoLink => "auto-link",
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct InitDemandWorkspaceRequest {
     pub key: Option<String>,
@@ -65,6 +83,7 @@ pub struct InitDemandWorkspaceRequest {
     pub root_dir: Option<PathBuf>,
     pub instance_dir: Option<PathBuf>,
     pub copy_mode: InitDemandWorkspaceCopyMode,
+    pub dependency_mode: InitDemandWorkspaceDependencyMode,
     pub resource_dir: Option<PathBuf>,
     pub worklog_file: Option<PathBuf>,
     pub create_worklog: bool,
@@ -83,6 +102,7 @@ pub struct InitDemandWorkspaceResult {
     pub schema_version: u32,
     pub dry_run: bool,
     pub copy_mode: InitDemandWorkspaceCopyMode,
+    pub dependency_mode: InitDemandWorkspaceDependencyMode,
     pub requested: InitDemandWorkspaceRequested,
     pub effective: InitDemandWorkspaceEffective,
     pub observed: InitDemandWorkspaceObserved,
@@ -104,12 +124,14 @@ pub struct InitDemandWorkspaceResult {
     pub warnings: Vec<String>,
     pub source_repository_validation: Option<WorkspaceProjectInstanceValidation>,
     pub project_instance_validation: Option<WorkspaceProjectInstanceValidation>,
+    pub dependency_links: Vec<InitDemandWorkspaceDependencyLink>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InitDemandWorkspaceRequested {
     pub copy_mode: String,
+    pub dependency_mode: String,
     pub source_repo_path: Option<String>,
     pub instance_dir: Option<String>,
     pub branch: Option<String>,
@@ -123,6 +145,7 @@ pub struct InitDemandWorkspaceEffective {
     pub workspace_key: String,
     pub project_key: String,
     pub copy_mode: String,
+    pub dependency_mode: String,
     pub root_dir: String,
     pub source_repo_path: Option<String>,
     pub instance_dir: String,
@@ -152,6 +175,15 @@ pub struct InitDemandWorkspaceAction {
     pub label: String,
     pub target: String,
     pub mutates: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitDemandWorkspaceDependencyLink {
+    pub relative_dir: String,
+    pub lock_file: String,
+    pub source: String,
+    pub target: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -242,6 +274,11 @@ pub fn init_demand_workspace(
         &instance_dir,
         source_repo_path.as_deref(),
     )?;
+    let effective_dependency_mode = if request.copy_mode.managed() {
+        request.dependency_mode
+    } else {
+        InitDemandWorkspaceDependencyMode::None
+    };
     let workspace_type = request
         .workspace_type
         .as_deref()
@@ -342,6 +379,10 @@ pub fn init_demand_workspace(
     metadata.insert("primaryProject".to_string(), project.key.clone());
     metadata.insert("copyMode".to_string(), request.copy_mode.key().to_string());
     metadata.insert(
+        "dependencyMode".to_string(),
+        effective_dependency_mode.key().to_string(),
+    );
+    metadata.insert(
         "requirementDir".to_string(),
         requirement_dir.display().to_string(),
     );
@@ -416,6 +457,7 @@ pub fn init_demand_workspace(
     let resource_dir_existed = resource_dir.exists();
     let requested = InitDemandWorkspaceRequested {
         copy_mode: request.copy_mode.key().to_string(),
+        dependency_mode: request.dependency_mode.key().to_string(),
         source_repo_path: requested_repo_path
             .as_ref()
             .map(|path| path.display().to_string()),
@@ -430,6 +472,7 @@ pub fn init_demand_workspace(
         workspace_key: workspace.key.clone(),
         project_key: project.key.clone(),
         copy_mode: request.copy_mode.key().to_string(),
+        dependency_mode: effective_dependency_mode.key().to_string(),
         root_dir: root_dir.display().to_string(),
         source_repo_path: source_repo_path
             .as_ref()
@@ -442,6 +485,7 @@ pub fn init_demand_workspace(
     };
     let planned_actions = init_demand_planned_actions(
         request.copy_mode,
+        effective_dependency_mode,
         &workspace_path,
         &root_dir,
         &instance_dir,
@@ -483,9 +527,10 @@ pub fn init_demand_workspace(
     }
     if request.dry_run {
         return Ok(InitDemandWorkspaceResult {
-            schema_version: 1,
+            schema_version: 2,
             dry_run: true,
             copy_mode: request.copy_mode,
+            dependency_mode: effective_dependency_mode,
             requested,
             effective,
             observed: InitDemandWorkspaceObserved {
@@ -539,6 +584,7 @@ pub fn init_demand_workspace(
             warnings,
             source_repository_validation,
             project_instance_validation,
+            dependency_links: Vec::new(),
         });
     }
 
@@ -633,6 +679,22 @@ pub fn init_demand_workspace(
         branch_current.as_deref(),
         branch_matches,
     );
+    let mut dependency_links = Vec::new();
+    if request.copy_mode.managed()
+        && effective_dependency_mode == InitDemandWorkspaceDependencyMode::AutoLink
+    {
+        if let Some(source_repo_path) = source_repo_path.as_deref() {
+            match auto_link_workspace_dependencies(source_repo_path, &instance_dir) {
+                Ok(outcome) => {
+                    dependency_links = outcome.links;
+                    warnings.extend(outcome.warnings);
+                }
+                Err(error) => warnings.push(format!("依赖复用未完成：{error}")),
+            }
+        } else {
+            warnings.push("依赖复用已跳过：未提供可复用依赖的源仓库目录".to_string());
+        }
+    }
     risks = init_demand_risks(&warnings);
     if let Some(validation) = project_instance_validation.as_ref() {
         evidence.push(OperationEvidence {
@@ -679,11 +741,25 @@ pub fn init_demand_workspace(
             lifecycle: "workspace".to_string(),
         });
     }
+    for link in &dependency_links {
+        managed_artifacts.push(ManagedArtifact {
+            kind: "dependency-link".to_string(),
+            path: link.target.clone(),
+            ownership: "rdevtool".to_string(),
+            lifecycle: "workspace".to_string(),
+        });
+        evidence.push(OperationEvidence {
+            kind: "dependency-lock-match".to_string(),
+            source: link.lock_file.clone(),
+            detail: format!("锁文件一致，已安全复用依赖：{}", link.relative_dir),
+        });
+    }
 
     Ok(InitDemandWorkspaceResult {
-        schema_version: 1,
+        schema_version: 2,
         dry_run: false,
         copy_mode: request.copy_mode,
+        dependency_mode: effective_dependency_mode,
         requested,
         effective,
         observed: InitDemandWorkspaceObserved {
@@ -737,6 +813,7 @@ pub fn init_demand_workspace(
         warnings,
         source_repository_validation,
         project_instance_validation,
+        dependency_links,
     })
 }
 
@@ -992,8 +1069,226 @@ fn validate_managed_path_separation(
     Ok(())
 }
 
+const DEPENDENCY_LOCK_FILES: [&str; 6] = [
+    "package-lock.json",
+    "npm-shrinkwrap.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lock",
+    "bun.lockb",
+];
+const DEPENDENCY_SCAN_MAX_DEPTH: usize = 4;
+
+struct DependencyLinkOutcome {
+    links: Vec<InitDemandWorkspaceDependencyLink>,
+    warnings: Vec<String>,
+}
+
+fn auto_link_workspace_dependencies(
+    source_repo: &Path,
+    instance_dir: &Path,
+) -> Result<DependencyLinkOutcome> {
+    let mut candidates = Vec::new();
+    collect_dependency_lock_dirs(instance_dir, instance_dir, 0, &mut candidates)?;
+    let mut outcome = DependencyLinkOutcome {
+        links: Vec::new(),
+        warnings: Vec::new(),
+    };
+
+    for (relative_dir, lock_name) in candidates {
+        let source_dir = source_repo.join(&relative_dir);
+        let target_dir = instance_dir.join(&relative_dir);
+        let source_lock = source_dir.join(&lock_name);
+        let target_lock = target_dir.join(&lock_name);
+        let source_dependencies = source_dir.join("node_modules");
+        let target_dependencies = target_dir.join("node_modules");
+        let display_dir = display_relative_dir(&relative_dir);
+
+        if !source_dependencies.is_dir() {
+            outcome.warnings.push(format!(
+                "依赖复用已跳过（{display_dir}）：源项目没有 node_modules"
+            ));
+            continue;
+        }
+        if !source_lock.is_file() {
+            outcome.warnings.push(format!(
+                "依赖复用已跳过（{display_dir}）：源项目缺少 {lock_name}"
+            ));
+            continue;
+        }
+        let source_lock_content = match fs::read(&source_lock) {
+            Ok(content) => content,
+            Err(error) => {
+                outcome.warnings.push(format!(
+                    "依赖复用已跳过（{display_dir}）：读取源项目 {lock_name} 失败：{error}"
+                ));
+                continue;
+            }
+        };
+        let target_lock_content = match fs::read(&target_lock) {
+            Ok(content) => content,
+            Err(error) => {
+                outcome.warnings.push(format!(
+                    "依赖复用已跳过（{display_dir}）：读取工作区 {lock_name} 失败：{error}"
+                ));
+                continue;
+            }
+        };
+        if source_lock_content != target_lock_content {
+            outcome.warnings.push(format!(
+                "依赖复用已跳过（{display_dir}）：源项目与工作区的 {lock_name} 不一致，请在工作区安装依赖"
+            ));
+            continue;
+        }
+        match fs::symlink_metadata(&target_dependencies) {
+            Ok(_) => {
+                outcome.warnings.push(format!(
+                    "依赖复用已跳过（{display_dir}）：工作区 node_modules 已存在"
+                ));
+                continue;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                outcome.warnings.push(format!(
+                    "依赖复用已跳过（{display_dir}）：无法检查工作区 node_modules：{error}"
+                ));
+                continue;
+            }
+        }
+
+        let canonical_source = match fs::canonicalize(&source_dependencies) {
+            Ok(path) => path,
+            Err(error) => {
+                outcome.warnings.push(format!(
+                    "依赖复用已跳过（{display_dir}）：解析源项目 node_modules 失败：{error}"
+                ));
+                continue;
+            }
+        };
+        if let Err(error) = create_directory_symlink(&canonical_source, &target_dependencies) {
+            outcome.warnings.push(format!(
+                "依赖复用已跳过（{display_dir}）：创建 node_modules 链接失败：{error}"
+            ));
+            continue;
+        }
+        if let Err(error) = append_dependency_to_local_exclude(instance_dir, &relative_dir) {
+            outcome.warnings.push(format!(
+                "依赖已复用，但写入 Git 本地忽略失败（{display_dir}）：{error}"
+            ));
+        }
+        outcome.links.push(InitDemandWorkspaceDependencyLink {
+            relative_dir: display_dir,
+            lock_file: target_lock.display().to_string(),
+            source: canonical_source.display().to_string(),
+            target: target_dependencies.display().to_string(),
+        });
+    }
+
+    if outcome.links.is_empty() && outcome.warnings.is_empty() {
+        outcome
+            .warnings
+            .push("未发现可复用依赖的前端锁文件目录".to_string());
+    }
+    Ok(outcome)
+}
+
+fn collect_dependency_lock_dirs(
+    root: &Path,
+    current: &Path,
+    depth: usize,
+    output: &mut Vec<(PathBuf, String)>,
+) -> Result<()> {
+    if depth > DEPENDENCY_SCAN_MAX_DEPTH {
+        return Ok(());
+    }
+    if let Some(lock_name) = DEPENDENCY_LOCK_FILES
+        .iter()
+        .find(|name| current.join(name).is_file())
+    {
+        output.push((
+            current.strip_prefix(root).unwrap_or(current).to_path_buf(),
+            (*lock_name).to_string(),
+        ));
+    }
+    if depth == DEPENDENCY_SCAN_MAX_DEPTH {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(current)
+        .with_context(|| {
+            format!(
+                "failed to scan dependency directories in {}",
+                current.display()
+            )
+        })?
+        .collect::<std::io::Result<Vec<_>>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        if matches!(name.to_str(), Some(".git" | "node_modules")) {
+            continue;
+        }
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() && !file_type.is_symlink() {
+            collect_dependency_lock_dirs(root, &entry.path(), depth + 1, output)?;
+        }
+    }
+    Ok(())
+}
+
+fn display_relative_dir(path: &Path) -> String {
+    if path.as_os_str().is_empty() {
+        ".".to_string()
+    } else {
+        path.to_string_lossy().replace('\\', "/")
+    }
+}
+
+fn append_dependency_to_local_exclude(repo_path: &Path, relative_dir: &Path) -> Result<()> {
+    let exclude_path = git::local_exclude_path(repo_path)?;
+    let relative = display_relative_dir(relative_dir);
+    let raw_pattern = if relative == "." {
+        "/node_modules".to_string()
+    } else {
+        format!("/{relative}/node_modules")
+    };
+    let pattern = raw_pattern
+        .replace('\\', "\\\\")
+        .replace(' ', "\\ ")
+        .replace('#', "\\#")
+        .replace('!', "\\!");
+    let existing = fs::read_to_string(&exclude_path).unwrap_or_default();
+    if existing.lines().any(|line| line.trim() == pattern) {
+        return Ok(());
+    }
+    if let Some(parent) = exclude_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&exclude_path)?;
+    if !existing.is_empty() && !existing.ends_with('\n') {
+        writeln!(file)?;
+    }
+    writeln!(file, "{pattern}")?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_directory_symlink(source: &Path, target: &Path) -> Result<()> {
+    std::os::unix::fs::symlink(source, target)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn create_directory_symlink(source: &Path, target: &Path) -> Result<()> {
+    std::os::windows::fs::symlink_dir(source, target)?;
+    Ok(())
+}
+
 fn init_demand_planned_actions(
     copy_mode: InitDemandWorkspaceCopyMode,
+    dependency_mode: InitDemandWorkspaceDependencyMode,
     workspace_path: &Path,
     root_dir: &Path,
     instance_dir: &Path,
@@ -1022,6 +1317,14 @@ fn init_demand_planned_actions(
         target: instance_dir.display().to_string(),
         mutates: copy_mode.managed(),
     });
+    if copy_mode.managed() && dependency_mode == InitDemandWorkspaceDependencyMode::AutoLink {
+        actions.push(InitDemandWorkspaceAction {
+            key: "auto-link-dependencies".to_string(),
+            label: "安全复用前端依赖".to_string(),
+            target: instance_dir.display().to_string(),
+            mutates: true,
+        });
+    }
     actions.push(InitDemandWorkspaceAction {
         key: "materialize-resources".to_string(),
         label: "初始化资料目录和工作日志".to_string(),
@@ -1331,6 +1634,7 @@ mod tests {
             root_dir: Some(root_dir),
             instance_dir: None,
             copy_mode,
+            dependency_mode: InitDemandWorkspaceDependencyMode::None,
             resource_dir: None,
             worklog_file: None,
             create_worklog: true,
@@ -1469,6 +1773,104 @@ mod tests {
                     && artifact.path == instance.display().to_string())
         );
         git::remove_managed_worktree(&repo, &instance).expect("remove test worktree");
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn worktree_mode_auto_links_dependencies_when_lock_file_matches() {
+        let temp = std::env::temp_dir().join(format!(
+            "rdevtool-init-demand-dependencies-{}",
+            Uuid::new_v4()
+        ));
+        let repo = temp.join("repo");
+        let requirement_dir = temp.join("requirement");
+        let workspace_root = temp.join("workspace-root");
+        init_test_repo(&repo);
+        fs::create_dir_all(repo.join("web/node_modules/@vue/cli-service"))
+            .expect("create source dependencies");
+        fs::create_dir_all(repo.join("web")).expect("create web directory");
+        fs::write(repo.join("web/package-lock.json"), "lock-content")
+            .expect("write dependency lock");
+        run_git(&repo, &["add", "web/package-lock.json"]);
+        run_git(
+            &repo,
+            &[
+                "-c",
+                "user.name=rDevTool Test",
+                "-c",
+                "user.email=rdevtool@example.invalid",
+                "commit",
+                "-m",
+                "add dependency lock",
+            ],
+        );
+        run_git(&repo, &["branch", "feature-dependencies"]);
+        fs::create_dir_all(&requirement_dir).expect("create requirement dir");
+        let paths = ConfigPaths {
+            dir: temp.clone(),
+            projects: temp.join("projects.toml"),
+            workspace: temp.join("workspace.toml"),
+            project_workspaces: temp.join("workspaces"),
+        };
+        let mut request = demand_request(
+            "feature-dependencies",
+            requirement_dir,
+            workspace_root.clone(),
+            Some(repo.clone()),
+            "feature-dependencies",
+            InitDemandWorkspaceCopyMode::Worktree,
+        );
+        request.dependency_mode = InitDemandWorkspaceDependencyMode::AutoLink;
+
+        let result = init_demand_workspace(&paths, &app_config(project(&repo)), request)
+            .expect("create worktree with dependency reuse");
+        let instance = workspace_root.join("sample");
+        let linked_dependencies = instance.join("web/node_modules");
+
+        assert_eq!(result.dependency_links.len(), 1);
+        assert_eq!(result.dependency_links[0].relative_dir, "web");
+        assert!(
+            fs::symlink_metadata(&linked_dependencies)
+                .expect("dependency link metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            fs::canonicalize(&linked_dependencies).expect("linked dependency target"),
+            fs::canonicalize(repo.join("web/node_modules")).expect("source dependency target")
+        );
+        let exclude = fs::read_to_string(git::local_exclude_path(&instance).expect("exclude path"))
+            .expect("read local exclude");
+        assert!(exclude.lines().any(|line| line == "/web/node_modules"));
+
+        git::remove_managed_worktree(&repo, &instance).expect("remove test worktree");
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn dependency_reuse_never_links_mismatched_lock_files() {
+        let temp = std::env::temp_dir().join(format!(
+            "rdevtool-init-demand-dependency-mismatch-{}",
+            Uuid::new_v4()
+        ));
+        let source = temp.join("source");
+        let target = temp.join("target");
+        fs::create_dir_all(source.join("node_modules")).expect("create source dependencies");
+        fs::create_dir_all(&target).expect("create target");
+        fs::write(source.join("package-lock.json"), "source-lock").expect("write source lock");
+        fs::write(target.join("package-lock.json"), "target-lock").expect("write target lock");
+
+        let outcome =
+            auto_link_workspace_dependencies(&source, &target).expect("evaluate dependency reuse");
+
+        assert!(outcome.links.is_empty());
+        assert!(!target.join("node_modules").exists());
+        assert!(
+            outcome
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("不一致"))
+        );
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -1652,6 +2054,7 @@ mod tests {
                 root_dir: Some(workspace_root.clone()),
                 instance_dir: None,
                 copy_mode: InitDemandWorkspaceCopyMode::Existing,
+                dependency_mode: InitDemandWorkspaceDependencyMode::None,
                 resource_dir: None,
                 worklog_file: None,
                 create_worklog: true,
@@ -1724,6 +2127,7 @@ mod tests {
                 root_dir: Some(workspace_root.clone()),
                 instance_dir: None,
                 copy_mode: InitDemandWorkspaceCopyMode::Existing,
+                dependency_mode: InitDemandWorkspaceDependencyMode::None,
                 resource_dir: None,
                 worklog_file: None,
                 create_worklog: true,

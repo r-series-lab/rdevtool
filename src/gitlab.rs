@@ -5,6 +5,8 @@ use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::Url;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
+use std::error::Error;
+use std::fmt;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -15,6 +17,78 @@ pub struct ApiMergeResult {
     pub merge_commit_sha: String,
     pub created_target_branch: bool,
     pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MergeFailureKind {
+    Conflict,
+    Unauthorized,
+    Forbidden,
+    PipelineBlocked,
+    DiscussionBlocked,
+    ApprovalBlocked,
+    Blocked,
+}
+
+impl MergeFailureKind {
+    pub fn status_key(self) -> &'static str {
+        match self {
+            Self::Conflict => "merge_conflict",
+            Self::Unauthorized => "gitlab_auth_failed",
+            Self::Forbidden => "gitlab_forbidden",
+            Self::PipelineBlocked => "merge_pipeline_blocked",
+            Self::DiscussionBlocked => "merge_discussion_blocked",
+            Self::ApprovalBlocked => "merge_approval_blocked",
+            Self::Blocked => "merge_blocked",
+        }
+    }
+
+    pub fn summary(self) -> &'static str {
+        match self {
+            Self::Conflict => "存在合并冲突",
+            Self::Unauthorized => "GitLab 身份验证失败",
+            Self::Forbidden => "GitLab 权限不足",
+            Self::PipelineBlocked => "流水线阻止合并",
+            Self::DiscussionBlocked => "讨论未解决",
+            Self::ApprovalBlocked => "审批条件未满足",
+            Self::Blocked => "GitLab 暂不可合并",
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct MergeFailure {
+    pub kind: MergeFailureKind,
+    detail: String,
+}
+
+impl MergeFailure {
+    pub(crate) fn new(kind: MergeFailureKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl fmt::Display for MergeFailure {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.detail)
+    }
+}
+
+impl Error for MergeFailure {}
+
+fn merge_failure_kind_from_status(status: &str) -> MergeFailureKind {
+    match status.trim().to_ascii_lowercase().as_str() {
+        "cannot_be_merged" | "conflict" | "has_conflicts" => MergeFailureKind::Conflict,
+        "ci_must_pass" | "ci_still_running" | "pipeline_blocked" => {
+            MergeFailureKind::PipelineBlocked
+        }
+        "discussions_not_resolved" => MergeFailureKind::DiscussionBlocked,
+        "not_approved" | "approval_required" => MergeFailureKind::ApprovalBlocked,
+        _ => MergeFailureKind::Blocked,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,7 +329,7 @@ pub fn branch_commit_summary(
         .context("failed to build GitLab HTTP client")?;
 
     let response = find_branch_response(&client, &api_base, &encoded_project, token, branch)?;
-    Ok(response.map(branch_commit_summary_from_response))
+    Ok(response.map(|item| branch_commit_summary_from_response(&item)))
 }
 
 pub fn available_branch_activity(
@@ -492,11 +566,12 @@ fn accept_merge_request(
                 .as_deref()
                 .map(|url| format!("（MR !{}: {}）", iid, url))
                 .unwrap_or_else(|| format!("（MR !{}）", iid));
-            if snapshot.has_conflicts
-                || merge_status.eq_ignore_ascii_case("cannot_be_merged")
-                || merge_status.eq_ignore_ascii_case("unchecked")
-            {
-                bail!("合并 MR 失败: {merge_status}（存在冲突或暂不可合并）{mr_hint}");
+            if snapshot.has_conflicts || merge_status.eq_ignore_ascii_case("cannot_be_merged") {
+                return Err(MergeFailure::new(
+                    MergeFailureKind::Conflict,
+                    format!("合并 MR 失败: {merge_status}（存在合并冲突）{mr_hint}"),
+                )
+                .into());
             }
 
             if attempt < 7 {
@@ -504,8 +579,24 @@ fn accept_merge_request(
                 continue;
             }
 
-            bail!("合并 MR 失败: {merge_status}{mr_hint}");
+            return Err(MergeFailure::new(
+                merge_failure_kind_from_status(merge_status),
+                format!("合并 MR 失败: {merge_status}{mr_hint}"),
+            )
+            .into());
         } else {
+            let kind = match http_status.as_u16() {
+                401 => Some(MergeFailureKind::Unauthorized),
+                403 => Some(MergeFailureKind::Forbidden),
+                _ => None,
+            };
+            if let Some(kind) = kind {
+                return Err(MergeFailure::new(
+                    kind,
+                    format!("合并 MR 失败: HTTP {http_status} {body}（MR !{iid}）"),
+                )
+                .into());
+            }
             bail!("合并 MR 失败: HTTP {http_status} {body}");
         }
 
@@ -594,7 +685,7 @@ fn has_unmerged_commits(
     Ok(!compare.commits.is_empty())
 }
 
-fn branch_commit_summary_from_response(response: BranchResponse) -> git::BranchCommitSummary {
+fn branch_commit_summary_from_response(response: &BranchResponse) -> git::BranchCommitSummary {
     let subject = response
         .commit
         .title
@@ -637,13 +728,6 @@ fn branch_commit_summary_from_response(response: BranchResponse) -> git::BranchC
 }
 
 fn branch_activity_from_response(response: BranchResponse) -> git::BranchActivity {
-    let committed_at = normalize_gitlab_commit_date(
-        response
-            .commit
-            .committed_date
-            .as_deref()
-            .unwrap_or_default(),
-    );
     let updated_ts = parse_gitlab_commit_timestamp(
         response
             .commit
@@ -651,11 +735,13 @@ fn branch_activity_from_response(response: BranchResponse) -> git::BranchActivit
             .as_deref()
             .unwrap_or_default(),
     );
+    let commit = branch_commit_summary_from_response(&response);
 
     git::BranchActivity {
         name: response.name.trim().to_string(),
-        updated_at: committed_at,
+        updated_at: commit.committed_at.clone(),
         updated_ts,
+        commit: Some(commit),
     }
 }
 
@@ -804,4 +890,58 @@ fn project_path_from_git_url(project_git_url: &str) -> Result<String> {
 
 fn encode_project_path(project_path: &str) -> String {
     utf8_percent_encode(project_path, NON_ALPHANUMERIC).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn branch_activity_reuses_commit_metadata_from_the_catalog_response() {
+        let activity = branch_activity_from_response(BranchResponse {
+            name: "feature/demo".to_string(),
+            commit: BranchCommit {
+                id: "abcdef1234567890".to_string(),
+                short_id: Some("abcdef12".to_string()),
+                title: Some("fix: visible branch revision".to_string()),
+                message: None,
+                committed_date: Some("2026-08-10T11:42:06+08:00".to_string()),
+            },
+        });
+
+        assert_eq!(activity.name, "feature/demo");
+        assert_eq!(activity.updated_at, "2026-08-10 11:42:06+08:00");
+        assert_eq!(
+            activity.commit,
+            Some(git::BranchCommitSummary {
+                short_hash: "abcdef12".to_string(),
+                subject: "fix: visible branch revision".to_string(),
+                committed_at: "2026-08-10 11:42:06+08:00".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn classifies_known_gitlab_merge_statuses() {
+        assert_eq!(
+            merge_failure_kind_from_status("cannot_be_merged"),
+            MergeFailureKind::Conflict
+        );
+        assert_eq!(
+            merge_failure_kind_from_status("ci_must_pass"),
+            MergeFailureKind::PipelineBlocked
+        );
+        assert_eq!(
+            merge_failure_kind_from_status("discussions_not_resolved"),
+            MergeFailureKind::DiscussionBlocked
+        );
+        assert_eq!(
+            merge_failure_kind_from_status("not_approved"),
+            MergeFailureKind::ApprovalBlocked
+        );
+        assert_eq!(
+            merge_failure_kind_from_status("unchecked"),
+            MergeFailureKind::Blocked
+        );
+    }
 }

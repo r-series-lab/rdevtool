@@ -6,6 +6,7 @@ import {
   runtimeValueSourceLabel,
 } from "../lib/runtimeContext";
 import { useI18n, type AppLanguage } from "../i18n";
+import { translateInternalMessage } from "../i18n/internalMessages";
 
 type RuntimeContextCardProps = {
   context?: ProjectRuntimeContextSnapshot | null;
@@ -350,7 +351,7 @@ export function RuntimeContextCard({
                       <Chip
                         size="small"
                         color={session.running ? "success" : "default"}
-                        label={session.phase}
+                        label={translateInternalMessage(session.phase, t)}
                       />
                       <Typography variant="caption" fontWeight={760}>
                         {session.runId || t("无 runId")}
@@ -380,7 +381,7 @@ export function RuntimeContextCard({
 
         {!summary ? (
           <Typography variant="caption" color="text.secondary">
-            {context.status.detail}
+            {translateInternalMessage(context.status.detail, t)}
           </Typography>
         ) : null}
 
@@ -392,7 +393,7 @@ export function RuntimeContextCard({
                 variant="caption"
                 color={risk.severity === "error" ? "error.main" : "warning.main"}
               >
-                {risk.code} · {risk.detail}
+                {risk.code} · {translateInternalMessage(risk.detail, t)}
               </Typography>
             ))}
           </Stack>
@@ -416,7 +417,8 @@ export function RuntimeContextCard({
             <Stack spacing={0.32} sx={{ mt: 0.55 }}>
               {context.evidence.map((evidence, index) => (
                 <Typography key={`${evidence.kind}-${index}`} variant="caption">
-                  {evidence.kind} / {evidence.source} · {evidence.detail}
+                  {evidence.kind} / {evidence.source} ·{" "}
+                  {translateInternalMessage(evidence.detail, t)}
                 </Typography>
               ))}
               {context.recommendedActions.map((action) => (
@@ -425,7 +427,7 @@ export function RuntimeContextCard({
                   variant="caption"
                   sx={{ overflowWrap: "anywhere", fontFamily: "monospace" }}
                 >
-                  {action.command} · {action.reason}
+                  {action.command} · {translateInternalMessage(action.reason, t)}
                 </Typography>
               ))}
             </Stack>

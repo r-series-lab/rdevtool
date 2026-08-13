@@ -40,6 +40,129 @@ test("workspace archive dialog accepts an optional reason", async ({ page }) => 
   await archiveDialog.getByRole("button", { name: "取消", exact: true }).click();
 });
 
+test("workspace project instances show health and explain safe unbinding", async ({
+  page,
+}) => {
+  await page.goto("/smoke.html");
+  await page.getByRole("button", { name: "打开工作区运行来源测试" }).click();
+  await page
+    .getByRole("button", { name: "工作区配置", exact: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+
+  const workspaceDialog = page.getByRole("dialog", { name: "工作区配置" });
+  const instanceRow = workspaceDialog
+    .locator(".overview-workspace-project-dir-row")
+    .filter({ hasText: "示例控制台" });
+  await expect(instanceRow).toContainText("工作区副本");
+  await expect(instanceRow).toContainText("托管");
+  await expect(instanceRow).toContainText("正常");
+  await expect(
+    instanceRow.getByRole("button", { name: "打开项目目录", exact: true }),
+  ).toBeVisible();
+
+  await instanceRow
+    .getByRole("button", { name: "解除关联", exact: true })
+    .click();
+  const confirm = page.getByRole("dialog", {
+    name: "解除 示例控制台 的项目实例关联？",
+  });
+  await expect(confirm).toContainText("不会删除托管目录或其中的代码");
+  await confirm.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(workspaceDialog).toBeVisible();
+});
+
+test("missing managed worktree requires confirmation and repairs in place", async ({
+  page,
+}) => {
+  await page.goto("/smoke.html");
+  await page
+    .getByRole("button", { name: "打开工作区副本修复测试" })
+    .click();
+  await page
+    .getByRole("button", { name: "工作区配置", exact: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+
+  const workspaceDialog = page.getByRole("dialog", { name: "工作区配置" });
+  const instanceRow = workspaceDialog
+    .locator(".overview-workspace-project-dir-row")
+    .filter({ hasText: "示例控制台" });
+  await expect(instanceRow).toContainText("目录缺失");
+  await expect(instanceRow).toContainText("可按原路径和分支修复");
+  await instanceRow
+    .getByRole("button", { name: "修复副本", exact: true })
+    .click();
+
+  const confirm = page.getByRole("dialog", {
+    name: "修复 示例控制台 的工作区副本？",
+  });
+  await expect(confirm).toContainText("/mock/workspaces/feature/demo");
+  await expect(confirm).toContainText("feature/REQ-1234");
+  await expect(confirm).toContainText("不会删除其他目录");
+  await confirm.getByRole("button", { name: "修复", exact: true }).click();
+
+  await expect(instanceRow).toContainText("正常");
+  await expect(instanceRow).not.toContainText("目录缺失");
+});
+
+test("managed workspace copy opens an exact read-only cleanup assessment", async ({
+  page,
+}) => {
+  await page.goto("/smoke.html");
+  await page.getByRole("button", { name: "打开工作区运行来源测试" }).click();
+  await page
+    .getByRole("button", { name: "工作区配置", exact: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+
+  const workspaceDialog = page.getByRole("dialog", { name: "工作区配置" });
+  const instanceRow = workspaceDialog
+    .locator(".overview-workspace-project-dir-row")
+    .filter({ hasText: "示例控制台" });
+  await instanceRow
+    .getByRole("button", { name: "评估托管副本清理", exact: true })
+    .click();
+
+  await expect(workspaceDialog).not.toBeVisible();
+  const settings = page.getByRole("dialog", { name: "设置", exact: true });
+  await expect(settings).toBeVisible();
+  await expect(
+    settings.getByRole("tab", { name: "受管产物", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
+  const focus = settings.locator(".settings-artifacts-focus");
+  await expect(focus).toContainText("feature_demo_checkout");
+  await expect(focus).toContainText("demo");
+  await expect(settings.getByRole("textbox", { name: "搜索受管产物" })).toHaveValue(
+    "/mock/workspaces/feature/demo",
+  );
+  const instanceArtifact = settings
+    .locator(".settings-artifact-record")
+    .filter({ hasText: "/mock/workspaces/feature/demo" });
+  await expect(instanceArtifact).toContainText("工作区副本");
+  await expect(
+    instanceArtifact.getByRole("checkbox", {
+      name: /选择工作区副本：\/mock\/workspaces\/feature\/demo/,
+    }),
+  ).toBeChecked();
+
+  await settings
+    .getByRole("button", { name: "评估选中项（1）", exact: true })
+    .click();
+  const plan = settings.locator(
+    '[data-managed-artifact-cleanup-plan="read-only"]',
+  );
+  await expect(plan).toBeVisible();
+  await expect(plan).toContainText("/mock/workspaces/feature/demo");
+  await expect(plan).toContainText("Git 工作树干净");
+  await expect(
+    plan.getByRole("button", { name: /确认清理|立即清理|执行清理/ }),
+  ).toHaveCount(0);
+
+  await focus.getByRole("button", { name: "清除定位", exact: true }).click();
+  await expect(focus).toHaveCount(0);
+  await expect(settings.getByRole("textbox", { name: "搜索受管产物" })).toHaveValue("");
+  await expect(settings.locator(".settings-artifacts-scope input")).toBeEnabled();
+  await expect(plan).toHaveCount(0);
+});
+
 test("workspace quick launch card exposes its effective configuration sources", async ({
   page,
 }) => {
@@ -47,20 +170,20 @@ test("workspace quick launch card exposes its effective configuration sources", 
   await page.getByRole("button", { name: "打开工作区运行来源测试" }).click();
 
   const project = page
-    .getByRole("button", { name: /智能营销/ })
+    .getByRole("button", { name: /示例控制台/ })
     .filter({ has: page.getByText("档案 UAT3 VKE") });
   await expect(project).toBeVisible();
-  const sources = page.getByLabel("智能营销 运行配置来源");
+  const sources = page.getByLabel("示例控制台 运行配置来源");
   await expect(sources).toContainText("档案 · 工作区默认");
   await expect(sources).toContainText("命令/端口 · 项目启动档案");
   await expect(sources).toContainText("环境 · 工作区运行环境");
   const preflightButton = page.getByRole("button", {
-    name: "智能营销 启动预检：需留意",
+    name: "示例控制台 启动预检：需留意",
   });
   await expect(preflightButton).toBeVisible();
   await preflightButton.click();
   const preflightDialog = page.getByRole("dialog", {
-    name: "智能营销 启动预检详情",
+    name: "示例控制台 启动预检详情",
   });
   const lightPreflightSurface = await preflightDialog.evaluate((element) => {
     const paper = element.closest<HTMLElement>(
@@ -99,17 +222,17 @@ test("workspace quick launch card exposes its effective configuration sources", 
   );
   await expect(
     page.getByRole("button", {
-      name: "智能营销 启动预检：可启动",
+      name: "示例控制台 启动预检：可启动",
     }),
   ).toBeVisible();
   await page
     .getByRole("button", {
-      name: "智能营销 启动预检：可启动",
+      name: "示例控制台 启动预检：可启动",
     })
     .click();
   await expect(preflightDialog).toContainText("第 2 次检查");
   await preflightDialog
-    .getByRole("button", { name: "刷新 智能营销 启动预检" })
+    .getByRole("button", { name: "刷新 示例控制台 启动预检" })
     .click();
   await expect(preflightDialog).toContainText("第 3 次检查");
   await preflightDialog.getByRole("button", { name: "查看运行配置" }).click();
@@ -118,21 +241,21 @@ test("workspace quick launch card exposes its effective configuration sources", 
   );
   await expect(preflightDialog).toHaveCount(0);
 
-  await page.getByRole("button", { name: "选择 智能营销 启动档案" }).click();
+  await page.getByRole("button", { name: "选择 示例控制台 启动档案" }).click();
   const startDialog = page.getByRole("dialog", {
-    name: /启动 智能营销/,
+    name: /启动 示例控制台/,
   });
   await expect(startDialog).toBeVisible();
   await expect(
     startDialog.getByRole("combobox", {
-      name: /智能营销 启动档案/,
+      name: /示例控制台 启动档案/,
     }),
   ).toHaveText(/UAT3 VKE/);
   await startDialog
-    .getByRole("combobox", { name: /智能营销 启动档案/ })
+    .getByRole("combobox", { name: /示例控制台 启动档案/ })
     .click();
   await page.getByRole("option", { name: /DC2 VKE/ }).click();
-  await expect(startDialog).toContainText("npm run dev -- --mode dc2-vke");
+  await expect(startDialog).toContainText("npm run dev -- --mode env_demo_pre");
   await expect(startDialog).toContainText("5174");
   await expect(
     startDialog.getByRole("combobox", { name: "快捷启动" }),
@@ -145,7 +268,7 @@ test("workspace quick launch card exposes its effective configuration sources", 
   ).toBeEnabled();
   await startDialog.getByRole("button", { name: "启动项目" }).click();
   await expect(page.getByTestId("workspace-runtime-start-state")).toHaveText(
-    "demo:dc2-vke",
+    "demo:env_demo_pre",
   );
 
   const metrics = await project.evaluate((element) => ({
@@ -164,12 +287,12 @@ test("workspace quick launch card exposes its effective configuration sources", 
 
   await page.goto("/smoke.html?style=mono");
   await page.getByRole("button", { name: "打开工作区运行来源测试" }).click();
-  await expect(page.getByLabel("智能营销 运行配置来源")).toContainText(
+  await expect(page.getByLabel("示例控制台 运行配置来源")).toContainText(
     "环境 · 工作区运行环境",
   );
-  await page.getByRole("button", { name: "智能营销 启动预检：需留意" }).click();
+  await page.getByRole("button", { name: "示例控制台 启动预检：需留意" }).click();
   const darkPreflightDialog = page.getByRole("dialog", {
-    name: "智能营销 启动预检详情",
+    name: "示例控制台 启动预检详情",
   });
   await expect(darkPreflightDialog).toBeVisible();
   const darkPreflightSurface = await darkPreflightDialog.evaluate((element) => {
@@ -209,10 +332,10 @@ test("workspace preflight can change a conflicting Vite port and save the profil
   await page.getByRole("button", { name: "打开端口冲突修复测试" }).click();
 
   await page
-    .getByRole("button", { name: "智能营销 启动预检：不可启动" })
+    .getByRole("button", { name: "示例控制台 启动预检：不可启动" })
     .click();
   const preflightDialog = page.getByRole("dialog", {
-    name: "智能营销 启动预检详情",
+    name: "示例控制台 启动预检详情",
   });
   await expect(preflightDialog).toContainText(
     "端口 5173 已被 node (PID 1420) 占用",
@@ -242,10 +365,10 @@ test("workspace preflight can change a conflicting Vite port and save the profil
   await page.goto("/smoke.html?style=mono");
   await page.getByRole("button", { name: "打开端口冲突修复测试" }).click();
   await page
-    .getByRole("button", { name: "智能营销 启动预检：不可启动" })
+    .getByRole("button", { name: "示例控制台 启动预检：不可启动" })
     .click();
   await page
-    .getByRole("dialog", { name: "智能营销 启动预检详情" })
+    .getByRole("dialog", { name: "示例控制台 启动预检详情" })
     .getByRole("button", { name: "换用 5175" })
     .click();
   const darkFixDialog = page.getByRole("dialog", { name: /快速修复/ });
@@ -263,9 +386,9 @@ test("workspace preflight can create a detected profile and repair a stale selec
   await page.goto("/smoke.html");
   await page.getByRole("button", { name: "打开启动档案生成测试" }).click();
 
-  await page.getByRole("button", { name: "智能营销 启动预检：需留意" }).click();
+  await page.getByRole("button", { name: "示例控制台 启动预检：需留意" }).click();
   const preflightDialog = page.getByRole("dialog", {
-    name: "智能营销 启动预检详情",
+    name: "示例控制台 启动预检详情",
   });
   await expect(preflightDialog).toContainText("使用项目默认启动配置");
   await preflightDialog.getByRole("button", { name: "生成启动档案" }).click();
@@ -275,9 +398,9 @@ test("workspace preflight can create a detected profile and repair a stale selec
   await expect(createDialog).toContainText("/mock/projects/demo");
   await expect(createDialog).toContainText("npm · Node 20 · 端口 5173");
   await expect(createDialog.getByLabel("启动档案名称")).toHaveValue(
-    "智能营销 本地启动",
+    "示例控制台 本地启动",
   );
-  await createDialog.getByLabel("启动档案名称").fill("智能营销 本地档案");
+  await createDialog.getByLabel("启动档案名称").fill("示例控制台 本地档案");
   await createDialog.screenshot({
     path: "node_modules/.cache/playwright-results/workspace-runtime-profile-create.png",
   });
@@ -294,10 +417,10 @@ test("workspace preflight can create a detected profile and repair a stale selec
     .click();
   await page.getByRole("button", { name: "打开失效档案修复测试" }).click();
   await page
-    .getByRole("button", { name: "智能营销 启动预检：不可启动" })
+    .getByRole("button", { name: "示例控制台 启动预检：不可启动" })
     .click();
   const stalePreflightDialog = page.getByRole("dialog", {
-    name: "智能营销 启动预检详情",
+    name: "示例控制台 启动预检详情",
   });
   await expect(stalePreflightDialog).toContainText("启动档案不存在: removed");
   await stalePreflightDialog

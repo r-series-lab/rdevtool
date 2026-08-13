@@ -1,0 +1,343 @@
+.config-pack-panel {
+  width: 100%;
+  min-width: 0;
+}
+
+.config-pack-section {
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: var(--panel);
+  overflow: hidden;
+}
+
+.config-pack-section-head,
+.config-pack-action-row,
+.config-pack-file-summary,
+.config-pack-plan-controls,
+.config-pack-mapping-list,
+.config-pack-plan-summary {
+  padding: 14px 16px;
+}
+
+.config-pack-section-head,
+.config-pack-action-row,
+.config-pack-file-summary,
+.config-pack-plan-controls,
+.config-pack-action-row--apply {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.config-pack-section-head {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.config-pack-section-head > div,
+.config-pack-file-summary > div {
+  min-width: 0;
+}
+
+.config-pack-section-head .MuiTypography-caption,
+.config-pack-file-summary .MuiTypography-caption {
+  display: block;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-pack-export-grid {
+  display: grid;
+  grid-template-columns: minmax(210px, 0.9fr) minmax(190px, 1fr) minmax(190px, 1fr);
+  min-height: 238px;
+}
+
+.config-pack-module-column,
+.config-pack-scope-column {
+  min-width: 0;
+  padding: 14px 16px;
+}
+
+.config-pack-module-column,
+.config-pack-scope-column + .config-pack-scope-column {
+  border-left: 1px solid var(--line-soft);
+}
+
+.config-pack-module-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-pack-module-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.config-pack-module-list .MuiFormControlLabel-root {
+  min-height: 32px;
+  margin: 0;
+}
+
+.config-pack-module-list .MuiFormControlLabel-label {
+  font-size: 13px;
+}
+
+.config-pack-scope-head {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.config-pack-scope-head button {
+  border: 0;
+  padding: 3px 5px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.config-pack-scope-list {
+  display: flex;
+  max-height: 190px;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.config-pack-scope-item {
+  min-height: 38px;
+  margin: 0;
+}
+
+.config-pack-scope-item .MuiFormControlLabel-label,
+.config-pack-scope-item .MuiFormControlLabel-label > span {
+  display: block;
+  min-width: 0;
+}
+
+.config-pack-scope-item strong,
+.config-pack-scope-item small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-pack-scope-item strong {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.config-pack-scope-item small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.config-pack-action-row {
+  border-top: 1px solid var(--line-soft);
+}
+
+.config-pack-action-row .MuiTextField-root {
+  width: min(260px, 34%);
+  flex: 0 0 auto;
+}
+
+.config-pack-action-row > .MuiTypography-caption {
+  min-width: 0;
+  flex: 1;
+  color: var(--muted);
+}
+
+.config-pack-file-summary,
+.config-pack-plan-controls,
+.config-pack-mapping-list,
+.config-pack-plan-summary,
+.config-pack-inspection-issues {
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.config-pack-plan-controls {
+  justify-content: flex-start;
+  flex-wrap: wrap;
+}
+
+.config-pack-plan-controls .MuiTextField-root {
+  width: min(230px, 100%);
+}
+
+.config-pack-source-mappings {
+  display: contents;
+}
+
+.config-pack-inspection-issues {
+  padding: 10px 16px;
+}
+
+.config-pack-mapping-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.config-pack-mapping-head {
+  display: flex;
+  grid-column: 1 / -1;
+  align-items: flex-start;
+  gap: 9px;
+}
+
+.config-pack-mapping-head .MuiTypography-caption {
+  display: block;
+  color: var(--muted);
+}
+
+.config-pack-plan-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.config-pack-plan-metrics {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 16px;
+}
+
+.config-pack-plan-metrics span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.config-pack-plan-metrics strong {
+  color: var(--text);
+  font-size: 18px;
+}
+
+.config-pack-plan-metrics .is-blocked strong {
+  color: var(--danger);
+}
+
+.config-pack-plan-metrics code {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.config-pack-issues {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.config-pack-issues .MuiAlert-root {
+  padding-block: 2px;
+}
+
+.config-pack-operation-list {
+  border: 1px solid var(--line-soft);
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.config-pack-operation-list > div {
+  display: grid;
+  grid-template-columns: 72px 112px minmax(110px, 0.8fr) minmax(160px, 1.4fr);
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.config-pack-operation-list > div:last-child {
+  border-bottom: 0;
+}
+
+.config-pack-operation-list span,
+.config-pack-operation-list strong,
+.config-pack-operation-list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-pack-operation-list span,
+.config-pack-operation-list small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.config-pack-action-row--apply {
+  margin: 0 -16px -14px;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 0;
+}
+
+.config-pack-empty {
+  display: flex;
+  min-height: 180px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 5px;
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.config-pack-empty > svg {
+  font-size: 30px;
+}
+
+@media (max-width: 900px) {
+  .config-pack-export-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .config-pack-module-column,
+  .config-pack-scope-column + .config-pack-scope-column {
+    border-left: 0;
+  }
+
+  .config-pack-scope-column,
+  .config-pack-action-row,
+  .config-pack-file-summary {
+    border-top: 1px solid var(--line-soft);
+  }
+
+  .config-pack-action-row,
+  .config-pack-file-summary,
+  .config-pack-action-row--apply {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .config-pack-action-row .MuiTextField-root,
+  .config-pack-plan-controls .MuiTextField-root {
+    width: 100%;
+  }
+
+  .config-pack-mapping-list {
+    grid-template-columns: 1fr;
+  }
+
+  .config-pack-operation-list > div {
+    grid-template-columns: 68px minmax(90px, 1fr) minmax(120px, 1.3fr);
+  }
+
+  .config-pack-operation-list small {
+    display: none;
+  }
+}

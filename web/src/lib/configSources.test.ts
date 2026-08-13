@@ -8,10 +8,13 @@ import {
   ConfigSourceRequestTracker,
   configSourceSupports,
   findConfigSource,
+  managesConfigSourcePreference,
   mergeConfigSourcesChangedPayload,
   normalizeConfigSourceId,
+  readConfigSourcePreferenceCache,
   resolveConfigSource,
   visibleConfigSources,
+  writeConfigSourcePreferenceCache,
 } from "./configSources";
 
 function source(
@@ -26,6 +29,7 @@ function source(
     baseDir: `/tmp/${id}`,
     files: {
       navigation: `/tmp/${id}/navigation.toml`,
+      actions: `/tmp/${id}/actions.toml`,
       links: `/tmp/${id}/links.toml`,
       proxy: `/tmp/${id}/proxy.toml`,
       runtimeOverrides: `/tmp/${id}/runtime_overrides.toml`,
@@ -37,33 +41,59 @@ function source(
 }
 
 describe("config source selection", () => {
+  function memoryStorage(initial: Record<string, string> = {}) {
+    const values = new Map(Object.entries(initial));
+    return {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    };
+  }
+
   it("normalizes workspace keys into stable source ids", () => {
-    expect(normalizeConfigSourceId(" Feature_CR260 / YKD Car ")).toBe(
-      "feature_cr260-ykd-car",
+    expect(normalizeConfigSourceId(" Feature Demo / Checkout ")).toBe(
+      "feature-demo-checkout",
     );
-    expect(configSourceIdForWorkspace("feature_cr260_ykd_car")).toBe(
-      "workspace-feature_cr260_ykd_car",
+    expect(configSourceIdForWorkspace("feature_demo_checkout")).toBe(
+      "workspace-feature_demo_checkout",
     );
     expect(configSourceIdForWorkspace("system")).toBe("default");
   });
 
   it("matches legacy underscore and dash variants", () => {
-    const sources = [source("workspace-feature_cr260", ["resource"])];
-    expect(findConfigSource(sources, "workspace-feature-cr260")?.id).toBe(
-      "workspace-feature_cr260",
+    const sources = [source("workspace-feature_demo", ["resource"])];
+    expect(findConfigSource(sources, "workspace-feature-demo")?.id).toBe(
+      "workspace-feature_demo",
     );
   });
 
   it("scopes remembered selections by workspace and capability", () => {
-    expect(configSourcePreferenceKey("feature_cr260", "proxy")).toBe(
-      "rdevtool.config-source.proxy.feature_cr260",
+    expect(configSourcePreferenceKey("feature_demo", "proxy")).toBe(
+      "rdevtool.config-source.proxy.feature_demo",
     );
-    expect(configSourcePreferenceKey("feature_cr260", "resource")).not.toBe(
-      configSourcePreferenceKey("feature_cr260", "proxy"),
+    expect(configSourcePreferenceKey("feature_demo", "resource")).not.toBe(
+      configSourcePreferenceKey("feature_demo", "proxy"),
     );
-    expect(configSourcePreferenceKey("feature_cr260", "link")).not.toBe(
-      configSourcePreferenceKey("feature_cr260", "runtime"),
+    expect(configSourcePreferenceKey("feature_demo", "link")).not.toBe(
+      configSourcePreferenceKey("feature_demo", "runtime"),
     );
+  });
+
+  it("only caches selections managed as workspace capability preferences", () => {
+    expect(managesConfigSourcePreference(undefined, "proxy")).toBe(true);
+    expect(managesConfigSourcePreference("team-proxy", "proxy")).toBe(false);
+    expect(managesConfigSourcePreference(undefined, undefined)).toBe(false);
+  });
+
+  it("uses local storage as a trimmed bootstrap cache", () => {
+    const key = configSourcePreferenceKey("feature-a", "proxy");
+    const storage = memoryStorage({ [key]: "  team-proxy  " });
+
+    expect(readConfigSourcePreferenceCache(storage, key)).toBe("team-proxy");
+    writeConfigSourcePreferenceCache(storage, key, " workspace-feature-a ");
+    expect(readConfigSourcePreferenceCache(storage, key)).toBe("workspace-feature-a");
+    writeConfigSourcePreferenceCache(storage, key, "  ");
+    expect(readConfigSourcePreferenceCache(storage, key)).toBeNull();
   });
 
   it("falls back to the default source when the requested source is stale", () => {

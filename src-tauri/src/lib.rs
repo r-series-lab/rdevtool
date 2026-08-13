@@ -5,10 +5,17 @@ use project_runtime::{
     ProjectRuntimeSnapshot, ProjectRuntimeState,
 };
 use rdevtool_core::agent::{AgentContext, context_for_workspace};
+use rdevtool_core::app_preferences::{
+    AppLanguagePreferenceRecord, load_app_language_preference,
+    save_app_language_preference as core_save_app_language_preference,
+};
 use rdevtool_core::artifacts::{
-    ManagedArtifactInventoryResponse, ManagedArtifactQuery, managed_artifact_inventory,
+    ManagedArtifactCleanupPlanResponse, ManagedArtifactCleanupQuery,
+    ManagedArtifactInventoryResponse, ManagedArtifactQuery, managed_artifact_cleanup_plan,
+    managed_artifact_inventory,
 };
 use rdevtool_core::build as core_build;
+use rdevtool_core::cli_locator::resolve_rdevtool_cli;
 use rdevtool_core::config::{
     AppConfig, BranchRules, BuildActionKind, BuildArtifactConfig, BuildTargetAdapter, ConfigPaths,
     CreateProjectWorkspaceRequest, DeployParamConfig, DeployParamKind, DeployTargetConfig, Jobs,
@@ -56,6 +63,7 @@ use rdevtool_core::core::{
     repair_project_worktree as core_repair_project_worktree, trigger_deploy,
 };
 use rdevtool_core::core::{MergeRequest, MergeResponse};
+use rdevtool_core::doctor::{DoctorRequest, DoctorSnapshot, inspect_doctor};
 use rdevtool_core::git;
 use rdevtool_core::health::{HealthSnapshot, collect_health_snapshot};
 use rdevtool_core::link::{
@@ -105,6 +113,9 @@ use rdevtool_core::proxy::{
     validate_proxy_rule,
 };
 use rdevtool_core::proxy_daemon::{ProxyDaemonRuntime as ProxyRuntimeState, proxy_daemon_status};
+use rdevtool_core::resource_actions::{
+    default_resource_actions_path, load_resource_actions_from_path,
+};
 use rdevtool_core::runtime as core_runtime;
 use rdevtool_core::runtime_daemon;
 use rdevtool_core::runtime_link::{
@@ -116,8 +127,8 @@ use rdevtool_core::storage::{
 };
 use rdevtool_core::ui_profiles::{UiProfileManifest, ui_profile_manifest};
 use rdevtool_core::workspace_init::{
-    InitDemandWorkspaceCopyMode, InitDemandWorkspaceRequest, InitDemandWorkspaceResult,
-    init_demand_workspace,
+    InitDemandWorkspaceCopyMode, InitDemandWorkspaceDependencyMode, InitDemandWorkspaceRequest,
+    InitDemandWorkspaceResult, init_demand_workspace,
 };
 use rdevtool_core::workspace_resources::{
     WorkspaceOperationWorklogEvent, append_workspace_operation_worklog,
@@ -145,9 +156,12 @@ use tauri_plugin_dialog::{DialogExt, MessageDialogKind};
 #[cfg(target_os = "macos")]
 use window_vibrancy::{NSVisualEffectMaterial, NSVisualEffectState, apply_vibrancy};
 
+mod active_sessions;
 mod commands;
 mod project_runtime;
 mod runtime_preflight;
+
+use active_sessions::{notify_active_sessions_changed, tray_active_session_change};
 
 #[derive(Clone)]
 struct AppState {
@@ -293,7 +307,7 @@ struct ProjectWorkspaceSummary {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectWorkspaceEditorState {
+pub(crate) struct ProjectWorkspaceEditorState {
     workspace: ProjectWorkspaceEditorDraft,
     projects: Vec<ProjectWorkspaceEditorProject>,
     navigation_categories: Vec<ProjectWorkspaceEditorNavigationCategory>,
@@ -433,6 +447,8 @@ struct InitDemandWorkspacePayload {
     instance_dir: Option<String>,
     #[serde(default)]
     copy_mode: Option<String>,
+    #[serde(default)]
+    dependency_mode: Option<String>,
     #[serde(default)]
     resource_dir: Option<String>,
     #[serde(default)]
@@ -764,6 +780,8 @@ struct DeployTargetEditor {
 struct DeployParamEditor {
     key: String,
     label: String,
+    #[serde(default)]
+    label_key: Option<String>,
     kind: String,
     default_value: Option<String>,
     options: Vec<String>,
@@ -1013,6 +1031,49 @@ struct WorkspacePinnedActionItem {
     params: Vec<WorkspaceActionParamItem>,
     confirm_required: bool,
     updated_at_ms: u64,
+    occurred_at: Option<String>,
+    is_latest: bool,
+    is_pinned: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceBranchHistoryReplay {
+    command: String,
+    request: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceBranchHistoryItem {
+    #[serde(default)]
+    project_key: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceBranchHistoryEntry {
+    id: String,
+    #[serde(default)]
+    task_kind: String,
+    #[serde(default)]
+    summary: String,
+    #[serde(default)]
+    created_at: String,
+    #[serde(default)]
+    workspace_key: Option<String>,
+    #[serde(default)]
+    items: Vec<WorkspaceBranchHistoryItem>,
+    #[serde(default)]
+    replay: Option<WorkspaceBranchHistoryReplay>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceLatestAction {
+    action: TrayReplayAction,
+    history_identity: String,
+    occurred_at: String,
+    sort_key: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1042,6 +1103,7 @@ struct WorkspaceResourceShortcutItem {
     kind_label: String,
     value: Option<String>,
     detail: Option<String>,
+    note: Option<String>,
     tool: Option<String>,
     tool_key: Option<String>,
     tool_action: Option<String>,
@@ -1231,6 +1293,7 @@ fn load_config_source_watch_targets() -> Result<Vec<ConfigSourceWatchTarget>, St
         .map(|source| {
             let mut files = vec![
                 PathBuf::from(source.files.navigation),
+                PathBuf::from(source.files.actions),
                 PathBuf::from(source.files.links),
             ];
             files.extend(source.files.proxy.map(PathBuf::from));
@@ -1554,12 +1617,7 @@ fn normalize_page_key(value: Option<String>) -> Option<String> {
         "navigation" | "projects" => Some("resources".to_string()),
         "deploy" => Some("build".to_string()),
         "health" => Some("knowledge".to_string()),
-        "overview"
-        | "knowledge"
-        | "projectManagement"
-        | "resources"
-        | "build"
-        | "merge"
+        "overview" | "knowledge" | "projectManagement" | "resources" | "build" | "merge"
         | "proxy" => Some(value),
         _ => None,
     }
@@ -1937,6 +1995,25 @@ fn project_workspace_editor_state(
 fn apply_active_workspace_context(config: &AppConfig) -> Result<AppConfig, String> {
     let paths = ensure_default_configs().map_err(|error| error.to_string())?;
     let workspace = load_active_project_workspace(&paths).map_err(|error| error.to_string())?;
+    apply_workspace_context(config, &workspace, &paths)
+}
+
+fn apply_requested_workspace_context(
+    config: &AppConfig,
+    workspace_key: Option<&str>,
+) -> Result<AppConfig, String> {
+    let Some(workspace_key) = workspace_key.map(str::trim).filter(|key| !key.is_empty()) else {
+        return apply_active_workspace_context(config);
+    };
+    let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+    let workspace = load_project_workspace_by_key(&paths.project_workspaces, workspace_key)
+        .map_err(|error| error.to_string())?;
+    if workspace.is_archived() {
+        return Err(format!(
+            "project workspace is archived: {}; restore it before listing branches",
+            workspace.key
+        ));
+    }
     apply_workspace_context(config, &workspace, &paths)
 }
 
@@ -2671,6 +2748,13 @@ fn select_proxy_profile_for_request_diagnosis(
 
 #[tauri::command]
 fn app_info() -> serde_json::Value {
+    let (rdevtool_cli, rdevtool_cli_error) = match resolve_rdevtool_cli() {
+        Ok(cli) => (
+            serde_json::to_value(cli).unwrap_or_default(),
+            serde_json::Value::Null,
+        ),
+        Err(error) => (serde_json::Value::Null, json!(error.to_string())),
+    };
     json!({
         "name": "rDevTool",
         "stack": "React + Tauri + SQLite",
@@ -2680,6 +2764,9 @@ fn app_info() -> serde_json::Value {
         "workspacePath": default_workspace_path().display().to_string(),
         "workspacesPath": default_project_workspaces_dir().display().to_string(),
         "navigationPath": navigation_file_path(),
+        "resourceActionsPath": default_resource_actions_path().display().to_string(),
+        "rdevtoolCli": rdevtool_cli,
+        "rdevtoolCliError": rdevtool_cli_error,
         "linksPath": links_file_path(),
         "proxyPath": default_proxy_path().display().to_string(),
         "storagePath": default_storage_path().display().to_string(),
@@ -2727,6 +2814,29 @@ async fn save_app_exit_runtime_policy(
     tauri::async_runtime::spawn_blocking(move || {
         persist_app_exit_runtime_policy(&storage, policy)?;
         Ok(policy.as_str().to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn get_app_language_preference(
+    state: tauri::State<'_, AppState>,
+) -> Result<Option<AppLanguagePreferenceRecord>, String> {
+    let storage = state.storage.clone();
+    tauri::async_runtime::spawn_blocking(move || load_app_language_preference(&storage))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn save_app_language_preference(
+    state: tauri::State<'_, AppState>,
+    record: AppLanguagePreferenceRecord,
+) -> Result<AppLanguagePreferenceRecord, String> {
+    let storage = state.storage.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        core_save_app_language_preference(&storage, record)
     })
     .await
     .map_err(|error| error.to_string())?
@@ -3033,6 +3143,11 @@ async fn init_demand_workspace_config(
             "clone" => InitDemandWorkspaceCopyMode::Clone,
             value => return Err(format!("不支持的工作区副本模式：{value}")),
         };
+        let dependency_mode = match payload.dependency_mode.as_deref().unwrap_or("auto-link") {
+            "none" => InitDemandWorkspaceDependencyMode::None,
+            "auto-link" => InitDemandWorkspaceDependencyMode::AutoLink,
+            value => return Err(format!("不支持的依赖复用模式：{value}")),
+        };
         init_demand_workspace(
             &paths,
             &config,
@@ -3052,6 +3167,7 @@ async fn init_demand_workspace_config(
                 root_dir: payload.root_dir.map(PathBuf::from),
                 instance_dir: payload.instance_dir.map(PathBuf::from),
                 copy_mode,
+                dependency_mode,
                 resource_dir: payload.resource_dir.map(PathBuf::from),
                 worklog_file: payload.worklog_file.map(PathBuf::from),
                 create_worklog: payload.create_worklog,
@@ -3329,6 +3445,9 @@ async fn start_proxy_profile(
             })),
         ),
     }
+    if result.is_ok() {
+        notify_active_sessions_changed(&app, &workspace_key, "proxy", "start");
+    }
     result
 }
 
@@ -3436,17 +3555,22 @@ async fn stop_proxy_profile(
             })),
         ),
     }
+    if result.is_ok() {
+        notify_active_sessions_changed(&app, &workspace_key, "proxy", "stop");
+    }
     result
 }
 
 #[tauri::command]
 async fn clear_proxy_events(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     source_id: Option<String>,
     profile_id: Option<String>,
 ) -> Result<ProxyDashboard, String> {
     let runtime = state.proxy_runtime.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let workspace_key = active_history_workspace()?.key;
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let (source, path) = proxy_path_for_source_id(source_id)?;
         if let Some(profile_id) = profile_id.as_deref() {
             runtime.clear_events(&path, Some(profile_id));
@@ -3468,7 +3592,11 @@ async fn clear_proxy_events(
         proxy_dashboard_for_source(&runtime, &source, &path)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        notify_active_sessions_changed(&app, &workspace_key, "proxy", "clearEvents");
+    }
+    result
 }
 
 #[tauri::command]
@@ -4519,6 +4647,7 @@ fn project_to_editor(project: &rdevtool_core::config::ProjectConfig) -> ProjectC
                     .map(|param| DeployParamEditor {
                         key: param.key.clone(),
                         label: param.label.clone(),
+                        label_key: param.label_key.clone(),
                         kind: deploy_param_kind_key(&param.kind).to_string(),
                         default_value: param.default.clone(),
                         options: param.options.clone(),
@@ -4631,6 +4760,7 @@ fn deploy_targets_from_editor(
             params.push(DeployParamConfig {
                 key: param_key,
                 label: label.to_string(),
+                label_key: optional_editor_string(param.label_key),
                 kind: deploy_param_kind_from_key(&param.kind)?,
                 default: optional_editor_string(param.default_value),
                 options: param
@@ -5021,11 +5151,12 @@ async fn get_project_detail(
 async fn get_project_branches(
     state: tauri::State<'_, AppState>,
     project: String,
+    workspace_key: Option<String>,
 ) -> Result<BranchCatalogResponse, String> {
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
-        let config = apply_active_workspace_context(&config)?;
+        let config = apply_requested_workspace_context(&config, workspace_key.as_deref())?;
         branch_catalog(&config, &project).map_err(|error| error.to_string())
     })
     .await
@@ -5332,7 +5463,10 @@ fn refresh_runtime_build_status(
             runtime_build_untracked_detail(&snapshot),
         )
     } else {
-        (snapshot.build_status_label.clone(), runtime_build_detail(&snapshot))
+        (
+            snapshot.build_status_label.clone(),
+            runtime_build_detail(&snapshot),
+        )
     };
     Ok(BuildStatusResponse {
         queue_url: None,
@@ -5682,6 +5816,7 @@ async fn bind_project_workspace_project_directory(
     workspace_key: Option<String>,
     project: String,
     path: String,
+    allow_remote_mismatch: Option<bool>,
 ) -> Result<ProjectWorkspaceEditorState, String> {
     let config_state = state.config_state.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -5705,18 +5840,23 @@ async fn bind_project_workspace_project_directory(
         } else {
             return Err("相对目录需要先配置工作区目录".to_string());
         };
-        if !path.exists() {
-            return Err(format!("目录不存在: {}", path.display()));
-        }
-        if !path.is_dir() {
-            return Err(format!("目标不是目录: {}", path.display()));
-        }
         let config = config_state.load()?;
-        config
+        let project_config = config
             .find_project(&project_key)
             .map_err(|error| error.to_string())?;
-        set_project_workspace_instance(&paths, &workspace.key, &project_key, path, false)
-            .map_err(|error| error.to_string())?;
+        let inspection = commands::workspace_instances::validate_project_instance_binding(
+            project_config,
+            &path,
+            allow_remote_mismatch.unwrap_or(false),
+        )?;
+        set_project_workspace_instance(
+            &paths,
+            &workspace.key,
+            &project_key,
+            PathBuf::from(inspection.effective_path),
+            false,
+        )
+        .map_err(|error| error.to_string())?;
         let config = config_state.load()?;
         project_workspace_editor_state(&config, Some(workspace.key))
     })
@@ -5962,6 +6102,20 @@ async fn get_health_snapshot() -> Result<HealthSnapshot, String> {
     tauri::async_runtime::spawn_blocking(collect_health_snapshot)
         .await
         .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+async fn get_doctor_snapshot(workspace: Option<String>) -> Result<DoctorSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        inspect_doctor(DoctorRequest {
+            config_override: None,
+            workspace_key: workspace,
+        })
+        .map(|inspection| inspection.snapshot)
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -6218,6 +6372,18 @@ fn inspect_config_source_state(source: ConfigSource) -> Result<ConfigSourceInspe
             resource_supported,
             |path| {
                 load_navigation_editor_data_from_path(path)
+                    .map(|_| ())
+                    .map_err(|error| error.to_string())
+            },
+        ),
+        inspect_config_source_file(
+            "actions",
+            "参数化 Action",
+            "resource",
+            Some(&source.files.actions),
+            resource_supported,
+            |path| {
+                load_resource_actions_from_path(path)
                     .map(|_| ())
                     .map_err(|error| error.to_string())
             },
@@ -6924,14 +7090,21 @@ fn link_runtime_summary_app(
                     blocked_steps += 1;
                     continue;
                 };
-                let running = proxy_runtime
+                let status = proxy_runtime
                     .statuses_for_profiles(proxy_path, std::slice::from_ref(profile))
                     .into_iter()
-                    .next()
-                    .is_some_and(|status| status.running);
-                if running {
-                    running_steps += 1;
-                    stoppable_steps += 1;
+                    .next();
+                match status.as_ref().map(|status| {
+                    link_proxy_check_status("proxy.start", status.running, status.managed)
+                }) {
+                    Some("checked") => {
+                        running_steps += 1;
+                        stoppable_steps += 1;
+                    }
+                    Some("blocked") => {
+                        blocked_steps += 1;
+                    }
+                    _ => {}
                 }
             }
             "runtime.start" => {
@@ -7932,6 +8105,38 @@ async fn list_managed_artifacts(
 }
 
 #[tauri::command]
+async fn plan_managed_artifact_cleanup(
+    state: tauri::State<'_, AppState>,
+    workspace: Option<String>,
+    all_workspaces: bool,
+    project: Option<String>,
+    kinds: Option<Vec<String>>,
+    artifact_ids: Option<Vec<String>>,
+) -> Result<ManagedArtifactCleanupPlanResponse, String> {
+    let config_state = state.config_state.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let config = config_state.load()?;
+        let paths = ensure_default_configs().map_err(|error| error.to_string())?;
+        managed_artifact_cleanup_plan(
+            &config,
+            &paths,
+            &ManagedArtifactCleanupQuery {
+                inventory: ManagedArtifactQuery {
+                    workspace,
+                    all_workspaces,
+                    project,
+                    kinds: kinds.unwrap_or_default(),
+                },
+                artifact_ids: artifact_ids.unwrap_or_default(),
+            },
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 async fn start_project_runtime(
     app: AppHandle,
     state: tauri::State<'_, AppState>,
@@ -7947,6 +8152,7 @@ async fn start_project_runtime(
     let proxy_runtime = state.proxy_runtime.clone();
     let storage = state.storage.clone();
     let workspace_key = active_history_workspace()?.key;
+    let notification_app = app.clone();
     let origin = operation_event_origin(operation_origin.as_deref());
     let event_id = operation_event_id(activity_id.as_deref(), origin, "runtime-start");
     let log_project = project.clone();
@@ -8156,6 +8362,9 @@ async fn start_project_runtime(
             })),
         ),
     }
+    if result.is_ok() {
+        notify_active_sessions_changed(&notification_app, &workspace_key, "runtime", "start");
+    }
     result
 }
 
@@ -8283,11 +8492,15 @@ async fn stop_project_runtime(
             Some(json!({ "projectKey": log_project.clone() })),
         ),
     }
+    if result.is_ok() {
+        notify_active_sessions_changed(&app, &workspace_key, "runtime", "stop");
+    }
     result
 }
 
 #[tauri::command]
 async fn adopt_project_runtime(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     project: String,
     pid: u32,
@@ -8344,6 +8557,9 @@ async fn adopt_project_runtime(
             Some(json!({ "projectKey": log_project, "pid": pid })),
         ),
     }
+    if result.is_ok() {
+        notify_active_sessions_changed(&app, &workspace_key, "runtime", "adopt");
+    }
     result
 }
 
@@ -8355,7 +8571,9 @@ async fn run_project_build(
 ) -> Result<ProjectRuntimeSnapshot, String> {
     let runtime = state.project_runtime.clone();
     let config_state = state.config_state.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let workspace_key = active_history_workspace()?.key;
+    let notification_app = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
         let updated = runtime.run_build(&config, &project)?;
         let action = tray_action_for_project(
@@ -8370,22 +8588,32 @@ async fn run_project_build(
         Ok(updated)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        notify_active_sessions_changed(&notification_app, &workspace_key, "build", "start");
+    }
+    result
 }
 
 #[tauri::command]
 async fn stop_project_build(
+    app: AppHandle,
     state: tauri::State<'_, AppState>,
     project: String,
 ) -> Result<ProjectRuntimeSnapshot, String> {
     let runtime = state.project_runtime.clone();
     let config_state = state.config_state.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    let workspace_key = active_history_workspace()?.key;
+    let result = tauri::async_runtime::spawn_blocking(move || {
         let config = config_state.load()?;
         runtime.stop_build(&config, &project)
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| error.to_string())?;
+    if result.is_ok() {
+        notify_active_sessions_changed(&app, &workspace_key, "build", "stop");
+    }
+    result
 }
 
 #[tauri::command]
@@ -9007,6 +9235,7 @@ fn workspace_resource_shortcuts(
                             let tool = entry.tool.clone();
                             let tool_key = entry.tool_key.clone();
                             let tool_action = entry.tool_action.clone();
+                            let note = entry.note.clone();
                             let detail = workspace_resource_detail(&entry, link_summaries);
                             let link_runtime = if kind == "tool"
                                 && tool
@@ -9039,6 +9268,7 @@ fn workspace_resource_shortcuts(
                                 kind,
                                 value,
                                 detail,
+                                note,
                                 tool,
                                 tool_key,
                                 tool_action,
@@ -9306,6 +9536,16 @@ fn workspace_pinned_action_item(
     config: &AppConfig,
     action: TrayReplayAction,
 ) -> WorkspacePinnedActionItem {
+    workspace_action_item(config, action, false, true, None)
+}
+
+fn workspace_action_item(
+    config: &AppConfig,
+    action: TrayReplayAction,
+    is_latest: bool,
+    is_pinned: bool,
+    occurred_at: Option<String>,
+) -> WorkspacePinnedActionItem {
     let project_key = tray_action_project_keys(&action).into_iter().next();
     let params = workspace_action_params(config, &action);
     WorkspacePinnedActionItem {
@@ -9316,6 +9556,9 @@ fn workspace_pinned_action_item(
         params,
         confirm_required: tray_action_confirm_required(&action.kind),
         updated_at_ms: action.updated_at_ms,
+        occurred_at,
+        is_latest,
+        is_pinned,
         action,
     }
 }
@@ -9718,6 +9961,316 @@ fn group_workspace_pinned_actions(
     grouped
 }
 
+fn workspace_branch_history(storage: &Storage) -> Vec<WorkspaceBranchHistoryEntry> {
+    storage
+        .get_json("branch-workflow", "history")
+        .ok()
+        .flatten()
+        .and_then(|value| value.as_array().cloned())
+        .map(|items| {
+            items
+                .into_iter()
+                .filter_map(|item| serde_json::from_value(item).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn workspace_history_sort_key(value: &str) -> String {
+    value.trim().replace(' ', "T")
+}
+
+fn is_terminal_workspace_build_history(entry: &BuildHistoryEntry) -> bool {
+    let state_key = entry.state_key.trim().to_ascii_lowercase();
+    if matches!(
+        state_key.as_str(),
+        "submitting" | "accepted" | "queued" | "running"
+    ) {
+        return false;
+    }
+    !(matches!(
+        state_key.as_str(),
+        "cancelled" | "canceled" | "stopped" | "idle"
+    ) && entry.state_label.trim() == "待打包"
+        && entry.detail.contains("配置已就绪"))
+}
+
+fn workspace_build_history_action(entry: &BuildHistoryEntry) -> WorkspaceLatestAction {
+    let target = entry.mode.trim();
+    let label = if target.is_empty() {
+        entry.project_name.clone()
+    } else {
+        format!("{} / {}", entry.project_name, target)
+    };
+    let detail = [
+        entry.env.trim(),
+        entry.branch.trim(),
+        entry.state_label.trim(),
+    ]
+    .into_iter()
+    .filter(|value| !value.is_empty())
+    .collect::<Vec<_>>()
+    .join(" · ");
+    let occurred_at = if entry.updated_at.trim().is_empty() {
+        entry.created_at.clone()
+    } else {
+        entry.updated_at.clone()
+    };
+    WorkspaceLatestAction {
+        action: TrayReplayAction {
+            kind: "build.replay".to_string(),
+            label,
+            detail: (!detail.is_empty()).then_some(detail),
+            workspace_key: entry.workspace_key.clone(),
+            project_key: Some(entry.project_key.clone()),
+            entry: None,
+            payload: Some(json!({
+                "project": entry.project_key,
+                "target": entry.mode,
+                "params": entry.params,
+            })),
+            execution_context: None,
+            dedupe_key: format!("workspace.latest.build:{}", entry.history_key),
+            updated_at_ms: 0,
+        },
+        history_identity: format!("build:{}", entry.history_key),
+        sort_key: workspace_history_sort_key(&occurred_at),
+        occurred_at,
+    }
+}
+
+fn workspace_branch_mode_label(task_kind: &str) -> &str {
+    match task_kind {
+        "sync" => "合并分支",
+        "create" => "创建分支",
+        "checkout" => "克隆",
+        "switch" => "副本管理",
+        "push" => "提交推送",
+        _ => "Git 操作",
+    }
+}
+
+fn workspace_branch_history_action(
+    entry: &WorkspaceBranchHistoryEntry,
+) -> Option<WorkspaceLatestAction> {
+    let replay = entry.replay.as_ref()?;
+    let first_item = entry.items.first();
+    let mut action = TrayReplayAction {
+        kind: "branch.replay".to_string(),
+        label: workspace_branch_mode_label(&entry.task_kind).to_string(),
+        detail: (!entry.summary.trim().is_empty()).then(|| entry.summary.clone()),
+        workspace_key: entry.workspace_key.clone(),
+        project_key: first_item
+            .map(|item| item.project_key.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        entry: None,
+        payload: Some(json!({
+            "command": replay.command,
+            "request": replay.request,
+        })),
+        execution_context: None,
+        dedupe_key: format!("workspace.latest.git:{}", entry.id),
+        updated_at_ms: 0,
+    };
+    if !branch_replay_action_available(&action) {
+        return None;
+    }
+    action.workspace_key = entry.workspace_key.clone();
+    Some(WorkspaceLatestAction {
+        action,
+        history_identity: format!("git:{}", entry.id),
+        occurred_at: entry.created_at.clone(),
+        sort_key: workspace_history_sort_key(&entry.created_at),
+    })
+}
+
+fn workspace_merge_history_action(entry: &MergeHistoryEntry) -> WorkspaceLatestAction {
+    WorkspaceLatestAction {
+        action: TrayReplayAction {
+            kind: "branch.replay".to_string(),
+            label: "合并分支".to_string(),
+            detail: (!entry.summary.trim().is_empty()).then(|| entry.summary.clone()),
+            workspace_key: entry.workspace_key.clone(),
+            project_key: Some(entry.project_key.clone()),
+            entry: None,
+            payload: Some(json!({
+                "command": "execute_branch_sync_task",
+                "request": {
+                    "project": entry.project_key,
+                    "projects": [entry.project_key],
+                    "sourceBranch": entry.source_branch,
+                    "targetBranches": [entry.target_branch],
+                },
+            })),
+            execution_context: None,
+            dedupe_key: format!("workspace.latest.git:{}", entry.history_key),
+            updated_at_ms: 0,
+        },
+        history_identity: format!("git:{}", entry.history_key),
+        occurred_at: entry.created_at.clone(),
+        sort_key: workspace_history_sort_key(&entry.created_at),
+    }
+}
+
+fn insert_workspace_latest_action(
+    latest: &mut BTreeMap<(String, String), WorkspaceLatestAction>,
+    workspace_key: String,
+    domain: &str,
+    mut candidate: WorkspaceLatestAction,
+) {
+    candidate.action.workspace_key = Some(workspace_key.clone());
+    let key = (workspace_key, domain.to_string());
+    let should_replace = latest
+        .get(&key)
+        .map(|current| candidate.sort_key > current.sort_key)
+        .unwrap_or(true);
+    if should_replace {
+        latest.insert(key, candidate);
+    }
+}
+
+fn workspace_key_for_latest_action(
+    workspaces: &[ProjectWorkspaceConfig],
+    action: &TrayReplayAction,
+) -> Option<String> {
+    if let Some(workspace_key) = action
+        .workspace_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|workspace_key| !workspace_key.is_empty())
+    {
+        return workspaces
+            .iter()
+            .any(|workspace| workspace.key == workspace_key)
+            .then(|| workspace_key.to_string());
+    }
+    Some(workspace_key_for_pinned_action(workspaces, action))
+}
+
+fn group_workspace_latest_actions(
+    workspaces: &[ProjectWorkspaceConfig],
+    build_history: &[BuildHistoryEntry],
+    branch_history: &[WorkspaceBranchHistoryEntry],
+    merge_history: &[MergeHistoryEntry],
+) -> BTreeMap<String, Vec<WorkspaceLatestAction>> {
+    let mut latest = BTreeMap::<(String, String), WorkspaceLatestAction>::new();
+
+    for entry in build_history
+        .iter()
+        .filter(|entry| is_terminal_workspace_build_history(entry))
+    {
+        let candidate = workspace_build_history_action(entry);
+        let Some(workspace_key) = workspace_key_for_latest_action(workspaces, &candidate.action)
+        else {
+            continue;
+        };
+        insert_workspace_latest_action(&mut latest, workspace_key, "build", candidate);
+    }
+
+    for entry in branch_history {
+        let Some(candidate) = workspace_branch_history_action(entry) else {
+            continue;
+        };
+        let Some(workspace_key) = workspace_key_for_latest_action(workspaces, &candidate.action)
+        else {
+            continue;
+        };
+        insert_workspace_latest_action(&mut latest, workspace_key, "git", candidate);
+    }
+
+    for entry in merge_history {
+        let candidate = workspace_merge_history_action(entry);
+        let Some(workspace_key) = workspace_key_for_latest_action(workspaces, &candidate.action)
+        else {
+            continue;
+        };
+        insert_workspace_latest_action(&mut latest, workspace_key, "git", candidate);
+    }
+
+    let mut grouped = BTreeMap::<String, Vec<WorkspaceLatestAction>>::new();
+    for ((workspace_key, _), candidate) in latest {
+        grouped.entry(workspace_key).or_default().push(candidate);
+    }
+    grouped
+}
+
+fn pinned_action_history_identity(action: &TrayReplayAction) -> Option<String> {
+    let (prefix, field, domain) = match action.kind.as_str() {
+        "build.replay" => ("build.replay:", "historyKey", "build"),
+        "deploy.replay" => ("deploy.replay:", "historyKey", "build"),
+        "branch.replay" => ("branch.replay:", "historyId", "git"),
+        _ => return None,
+    };
+    let encoded = action.dedupe_key.strip_prefix(prefix)?;
+    let value = serde_json::from_str::<serde_json::Value>(encoded).ok()?;
+    value
+        .get(field)
+        .and_then(|value| value.as_str())
+        .map(|history_key| format!("{domain}:{history_key}"))
+}
+
+fn workspace_actions_same_record(
+    latest: &WorkspaceLatestAction,
+    pinned: &TrayReplayAction,
+) -> bool {
+    if let Some(identity) = pinned_action_history_identity(pinned) {
+        return identity == latest.history_identity;
+    }
+    let latest_kind = latest.action.kind.replace("deploy.replay", "build.replay");
+    let pinned_kind = pinned.kind.replace("deploy.replay", "build.replay");
+    latest_kind == pinned_kind && latest.action.payload == pinned.payload
+}
+
+fn workspace_overview_action_items(
+    config: &AppConfig,
+    mut pinned: Vec<TrayReplayAction>,
+    latest: Vec<WorkspaceLatestAction>,
+) -> Vec<WorkspacePinnedActionItem> {
+    let mut items = Vec::with_capacity(pinned.len() + latest.len());
+    for latest_action in latest {
+        let pinned_index = pinned
+            .iter()
+            .position(|action| workspace_actions_same_record(&latest_action, action));
+        let action = pinned_index
+            .map(|index| pinned.remove(index))
+            .unwrap_or_else(|| latest_action.action.clone());
+        items.push(workspace_action_item(
+            config,
+            action,
+            true,
+            pinned_index.is_some(),
+            Some(latest_action.occurred_at),
+        ));
+    }
+    pinned.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
+    items.extend(
+        pinned
+            .into_iter()
+            .map(|action| workspace_pinned_action_item(config, action)),
+    );
+    items
+}
+
+fn workspace_overview_action_groups(
+    storage: &Storage,
+    workspaces: &[ProjectWorkspaceConfig],
+    actions: &[TrayReplayAction],
+) -> Result<
+    (
+        BTreeMap<String, Vec<TrayReplayAction>>,
+        BTreeMap<String, Vec<WorkspaceLatestAction>>,
+    ),
+    String,
+> {
+    let build_history = storage.list_all_deploy_history()?;
+    let branch_history = workspace_branch_history(storage);
+    let merge_history = storage.list_all_merge_history()?;
+    Ok((
+        group_workspace_pinned_actions(workspaces, actions, &build_history),
+        group_workspace_latest_actions(workspaces, &build_history, &branch_history, &merge_history),
+    ))
+}
+
 fn workspace_pinned_actions_overview_summary(
     config: &AppConfig,
     storage: &Storage,
@@ -9742,8 +10295,8 @@ fn workspace_pinned_actions_overview_summary(
             .map_err(|error| error.to_string())
     };
     let actions = core_list_tray_pinned_actions(storage).unwrap_or_default();
-    let build_history = storage.list_all_deploy_history()?;
-    let mut grouped = group_workspace_pinned_actions(&workspaces, &actions, &build_history);
+    let (mut grouped, mut latest_grouped) =
+        workspace_overview_action_groups(storage, &workspaces, &actions)?;
     let empty_link_summaries = BTreeMap::<String, LinkSummary>::new();
     let mut overview = Vec::with_capacity(workspaces.len());
 
@@ -9765,6 +10318,7 @@ fn workspace_pinned_actions_overview_summary(
         };
         let effective_config = apply_project_workspace_context(config, &workspace);
         let actions = grouped.remove(&workspace.key).unwrap_or_default();
+        let latest = latest_grouped.remove(&workspace.key).unwrap_or_default();
         let mut resources =
             workspace_resource_shortcuts(&workspace, &empty_link_summaries, &resource_source);
         for resource in &mut resources {
@@ -9774,10 +10328,7 @@ fn workspace_pinned_actions_overview_summary(
                 resource.tool_runtime_source_id = Some(runtime_source.id.clone());
             }
         }
-        let items = actions
-            .into_iter()
-            .map(|action| workspace_pinned_action_item(&effective_config, action))
-            .collect::<Vec<_>>();
+        let items = workspace_overview_action_items(&effective_config, actions, latest);
         let resource_status = workspace_resource_status(&workspace);
 
         overview.push(WorkspacePinnedActionsOverview {
@@ -9879,8 +10430,8 @@ fn workspace_pinned_actions_overview_filtered(
         .iter()
         .map(|workspace| (workspace.key.clone(), workspace_display_name(workspace)))
         .collect::<BTreeMap<_, _>>();
-    let build_history = storage.list_all_deploy_history()?;
-    let mut grouped = group_workspace_pinned_actions(&workspaces, &actions, &build_history);
+    let (mut grouped, mut latest_grouped) =
+        workspace_overview_action_groups(storage, &workspaces, &actions)?;
 
     let workspace_configs = workspaces.clone();
     let mut overview = Vec::new();
@@ -9948,6 +10499,7 @@ fn workspace_pinned_actions_overview_filtered(
             &project_runtime_statuses,
         );
         let actions = grouped.remove(&workspace.key).unwrap_or_default();
+        let latest = latest_grouped.remove(&workspace.key).unwrap_or_default();
         let project_count = workspace.project_count_for(config);
         let mut resources =
             workspace_resource_shortcuts(&workspace, &link_summaries, &resource_source);
@@ -9973,10 +10525,7 @@ fn workspace_pinned_actions_overview_filtered(
             &proxy_rule_counts,
             &proxy_statuses,
         );
-        let items = actions
-            .into_iter()
-            .map(|action| workspace_pinned_action_item(&effective_config, action))
-            .collect::<Vec<_>>();
+        let items = workspace_overview_action_items(&effective_config, actions, latest);
         let resource_status = workspace_resource_status(&workspace);
         overview.push(WorkspacePinnedActionsOverview {
             key: workspace.key.clone(),
@@ -10031,11 +10580,15 @@ pub(crate) fn workspace_pinned_actions_patches(
         .filter(|workspace| !workspace.is_archived())
         .collect::<Vec<_>>();
     let build_history = storage.list_all_deploy_history()?;
+    let branch_history = workspace_branch_history(storage);
+    let merge_history = storage.list_all_merge_history()?;
     Ok(build_workspace_pinned_actions_patches(
         config,
         &workspaces,
         actions,
         &build_history,
+        &branch_history,
+        &merge_history,
     ))
 }
 
@@ -10044,19 +10597,20 @@ fn build_workspace_pinned_actions_patches(
     workspaces: &[ProjectWorkspaceConfig],
     actions: &[TrayReplayAction],
     build_history: &[BuildHistoryEntry],
+    branch_history: &[WorkspaceBranchHistoryEntry],
+    merge_history: &[MergeHistoryEntry],
 ) -> Vec<WorkspacePinnedActionsPatch> {
     let mut grouped = group_workspace_pinned_actions(workspaces, actions, build_history);
+    let mut latest_grouped =
+        group_workspace_latest_actions(workspaces, build_history, branch_history, merge_history);
 
     workspaces
         .iter()
         .map(|workspace| {
             let effective_config = apply_project_workspace_context(config, workspace);
-            let actions = grouped
-                .remove(&workspace.key)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|action| workspace_pinned_action_item(&effective_config, action))
-                .collect::<Vec<_>>();
+            let pinned = grouped.remove(&workspace.key).unwrap_or_default();
+            let latest = latest_grouped.remove(&workspace.key).unwrap_or_default();
+            let actions = workspace_overview_action_items(&effective_config, pinned, latest);
             WorkspacePinnedActionsPatch {
                 key: workspace.key.clone(),
                 action_count: actions.len(),
@@ -11790,11 +12344,8 @@ fn execute_tray_replay_action<R: Runtime>(
             } else {
                 "stop"
             };
-            let event_id = operation_event_id(
-                None,
-                operation_origin,
-                &format!("proxy-{action_key}"),
-            );
+            let event_id =
+                operation_event_id(None, operation_origin, &format!("proxy-{action_key}"));
             let result: Result<(String, String, bool, serde_json::Value), String> = (|| {
                 let context = workspace_execution_context(
                     &state.config_state,
@@ -11934,11 +12485,8 @@ fn execute_tray_replay_action<R: Runtime>(
             } else {
                 "stop"
             };
-            let event_id = operation_event_id(
-                None,
-                operation_origin,
-                &format!("link-{action_key}"),
-            );
+            let event_id =
+                operation_event_id(None, operation_origin, &format!("link-{action_key}"));
             let result = execute_link_app(
                 &state.config_state,
                 &state.proxy_runtime,
@@ -11978,6 +12526,11 @@ fn execute_tray_replay_action<R: Runtime>(
             execute_branch_tray_replay(&context.config, action)?;
         }
         _ => return Err(format!("不支持回放的操作: {}", action.kind)),
+    }
+    if let Some((domain, lifecycle_action)) = tray_active_session_change(&action.kind) {
+        if let Ok(workspace_key) = tray_action_workspace_key(action) {
+            notify_active_sessions_changed(app, &workspace_key, domain, lifecycle_action);
+        }
     }
     if tray_action_is_repeatable(action) {
         record_tray_replay_action(app, action.clone())?;
@@ -12330,6 +12883,14 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app_info,
+            commands::config_pack::get_config_pack_inventory,
+            commands::config_pack::export_config_pack_file,
+            commands::config_pack::inspect_config_pack_file,
+            commands::config_pack::plan_config_pack_import_file,
+            commands::config_pack::apply_config_pack_import_plan,
+            commands::config_pack::rollback_config_pack_import_transaction,
+            get_app_language_preference,
+            save_app_language_preference,
             get_app_exit_runtime_policy,
             save_app_exit_runtime_policy,
             cancel_app_exit,
@@ -12385,8 +12946,11 @@ pub fn run() {
             execute_branch_create_task,
             checkout_branch_to_directory_task,
             create_project_workspace_project_copy,
+            commands::workspace_instances::repair_project_workspace_project_instance,
             bind_project_workspace_project_directory,
             unbind_project_workspace_project_directory,
+            commands::workspace_instances::inspect_project_workspace_project_directory,
+            commands::workspace_instances::list_project_workspace_instance_statuses,
             execute_branch_switch_task,
             list_project_worktrees,
             repair_project_worktree,
@@ -12394,6 +12958,7 @@ pub fn run() {
             get_project_file_diff,
             execute_branch_push_task,
             get_health_snapshot,
+            get_doctor_snapshot,
             get_notes_file_index,
             get_note_document,
             resolve_note_document_link,
@@ -12422,9 +12987,18 @@ pub fn run() {
             run_link,
             stop_link,
             open_page_navigation_entry,
+            commands::resource_actions::list_resource_actions,
+            commands::resource_actions::get_resource_action,
+            commands::resource_actions::run_resource_action,
+            commands::resource_actions::plan_resource_action,
+            commands::resource_actions::get_resource_action_plan,
+            commands::resource_actions::apply_resource_action_plan,
+            commands::resource_actions::cancel_resource_action,
+            commands::resource_actions::list_running_resource_actions,
             commands::web_actions::list_web_actions,
             commands::web_actions::open_web_action_target,
             commands::web_actions::open_web_action_navigation_target,
+            commands::web_actions::list_controlled_browser_sessions,
             commands::web_actions::list_web_action_targets,
             commands::web_actions::list_web_action_navigation_targets,
             commands::web_actions::run_web_action,
@@ -12458,10 +13032,12 @@ pub fn run() {
             commands::history::clear_merge_history,
             commands::runtime::list_project_runtimes,
             list_managed_artifacts,
+            plan_managed_artifact_cleanup,
             commands::runtime::list_selected_project_runtimes,
             commands::runtime::preflight_project_runtime,
             commands::runtime::get_project_runtime_context,
             commands::runtime::inspect_project_runtime,
+            active_sessions::inspect_active_session_port,
             start_project_runtime,
             stop_project_runtime,
             adopt_project_runtime,
@@ -12759,6 +13335,54 @@ mod workspace_config_watcher_tests {
         }
     }
 
+    fn workspace_build_history(history_key: &str, state_key: &str) -> BuildHistoryEntry {
+        BuildHistoryEntry {
+            history_key: history_key.to_string(),
+            workspace_key: Some("feature".to_string()),
+            project_instance_path: None,
+            project_key: "demo".to_string(),
+            project_name: "Demo".to_string(),
+            mode: "standard".to_string(),
+            env: "uat".to_string(),
+            branch: "feature/demo".to_string(),
+            state_key: state_key.to_string(),
+            state_label: "成功".to_string(),
+            detail: "构建完成".to_string(),
+            queue_url: None,
+            build_url: Some("https://jenkins.example/build/1".to_string()),
+            params: json!({ "branch": "feature/demo" }),
+            created_at: "2026-08-10T10:00:00Z".to_string(),
+            updated_at: "2026-08-10T10:05:00Z".to_string(),
+        }
+    }
+
+    fn pinned_build_history(history_key: &str) -> TrayReplayAction {
+        TrayReplayAction {
+            kind: "build.replay".to_string(),
+            label: "Demo / standard".to_string(),
+            detail: Some("uat · feature/demo".to_string()),
+            workspace_key: Some("feature".to_string()),
+            project_key: Some("demo".to_string()),
+            entry: None,
+            payload: Some(json!({
+                "project": "demo",
+                "target": "standard",
+                "params": { "branch": "feature/demo" },
+            })),
+            execution_context: None,
+            dedupe_key: format!(
+                "build.replay:{}",
+                json!({
+                    "historyKey": history_key,
+                    "mode": "standard",
+                    "params": { "branch": "feature/demo" },
+                    "projectKey": "demo",
+                })
+            ),
+            updated_at_ms: 10,
+        }
+    }
+
     fn test_navigation_entry(name: &str, kind: &str) -> NavigationEntry {
         NavigationEntry {
             name: name.to_string(),
@@ -12791,6 +13415,7 @@ mod workspace_config_watcher_tests {
             kind_label: "网站".to_string(),
             value: Some(format!("https://{name}.example.com")),
             detail: None,
+            note: None,
             tool: None,
             tool_key: None,
             tool_action: None,
@@ -12818,6 +13443,7 @@ mod workspace_config_watcher_tests {
             kind_label: "工具".to_string(),
             value: Some(format!("{workspace_key}-link")),
             detail: None,
+            note: None,
             tool: Some("link".to_string()),
             tool_key: Some(format!("{workspace_key}-link")),
             tool_action: Some("run".to_string()),
@@ -12991,18 +13617,135 @@ mod workspace_config_watcher_tests {
             &workspaces,
             &[branch_pin(Some("feature"))],
             &[],
+            &[],
+            &[],
         );
 
         assert_eq!(patches.len(), 3);
         let feature = patches.iter().find(|patch| patch.key == "feature").unwrap();
         assert_eq!(feature.action_count, 1);
         assert_eq!(feature.actions[0].action.dedupe_key, "branch.replay:demo");
+        assert!(feature.actions[0].is_pinned);
+        assert!(!feature.actions[0].is_latest);
         assert!(
             patches
                 .iter()
                 .filter(|patch| patch.key != "feature")
                 .all(|patch| patch.actions.is_empty())
         );
+    }
+
+    #[test]
+    fn merges_latest_and_pinned_when_they_reference_the_same_build_history() {
+        let config = serde_json::from_value::<AppConfig>(json!({
+            "defaults": {},
+            "projects": []
+        }))
+        .unwrap();
+        let latest = workspace_build_history_action(&workspace_build_history("build-1", "success"));
+        let items = workspace_overview_action_items(
+            &config,
+            vec![pinned_build_history("build-1")],
+            vec![latest],
+        );
+
+        assert_eq!(items.len(), 1);
+        assert!(items[0].is_latest);
+        assert!(items[0].is_pinned);
+        assert_eq!(
+            items[0].occurred_at.as_deref(),
+            Some("2026-08-10T10:05:00Z")
+        );
+    }
+
+    #[test]
+    fn keeps_distinct_build_histories_even_when_replay_parameters_match() {
+        let config = serde_json::from_value::<AppConfig>(json!({
+            "defaults": {},
+            "projects": []
+        }))
+        .unwrap();
+        let latest = workspace_build_history_action(&workspace_build_history("build-2", "success"));
+        let items = workspace_overview_action_items(
+            &config,
+            vec![pinned_build_history("build-1")],
+            vec![latest],
+        );
+
+        assert_eq!(items.len(), 2);
+        assert!(items[0].is_latest);
+        assert!(!items[0].is_pinned);
+        assert!(!items[1].is_latest);
+        assert!(items[1].is_pinned);
+    }
+
+    #[test]
+    fn merges_latest_and_pinned_git_history_by_branch_task_id() {
+        let config = serde_json::from_value::<AppConfig>(json!({
+            "defaults": {},
+            "projects": []
+        }))
+        .unwrap();
+        let latest = workspace_branch_history_action(&WorkspaceBranchHistoryEntry {
+            id: "branch-1".to_string(),
+            task_kind: "sync".to_string(),
+            summary: "成功 1".to_string(),
+            created_at: "2026-08-10T10:10:00Z".to_string(),
+            workspace_key: Some("feature".to_string()),
+            items: vec![WorkspaceBranchHistoryItem {
+                project_key: "demo".to_string(),
+            }],
+            replay: Some(WorkspaceBranchHistoryReplay {
+                command: "execute_branch_sync_task".to_string(),
+                request: json!({
+                    "project": "demo",
+                    "projects": ["demo"],
+                    "sourceBranch": "feature/demo",
+                    "targetBranches": ["main"],
+                }),
+            }),
+        })
+        .unwrap();
+        let mut pinned = latest.action.clone();
+        pinned.dedupe_key = format!(
+            "branch.replay:{}",
+            json!({
+                "command": "execute_branch_sync_task",
+                "historyId": "branch-1",
+                "request": pinned.payload.as_ref().unwrap()["request"],
+            })
+        );
+        pinned.updated_at_ms = 20;
+
+        let items = workspace_overview_action_items(&config, vec![pinned], vec![latest]);
+
+        assert_eq!(items.len(), 1);
+        assert!(items[0].is_latest);
+        assert!(items[0].is_pinned);
+    }
+
+    #[test]
+    fn excludes_active_builds_from_workspace_latest_actions() {
+        assert!(!is_terminal_workspace_build_history(
+            &workspace_build_history("build-running", "running",)
+        ));
+        assert!(is_terminal_workspace_build_history(
+            &workspace_build_history("build-success", "success",)
+        ));
+    }
+
+    #[test]
+    fn does_not_move_archived_workspace_history_into_the_system_workspace() {
+        let workspaces = vec![
+            ProjectWorkspaceConfig::default(),
+            workspace("feature", &["demo"]),
+        ];
+        let mut action =
+            workspace_build_history_action(&workspace_build_history("build-archived", "success"))
+                .action;
+        action.workspace_key = Some("archived".to_string());
+
+        assert_eq!(workspace_key_for_latest_action(&workspaces, &action), None);
     }
 
     #[test]

@@ -1,0 +1,53 @@
+schema_version = 1
+
+[[actions]]
+key = "preview-deploy"
+name = "预演批量部署"
+description = "先检查所有项目的预演计划，再按选择顺序触发部署。"
+effect = "remote_write"
+
+[actions.runner]
+type = "process"
+program = "/bin/zsh"
+args = ["preview-deploy.sh"]
+input = "json_stdin"
+output = "structured_json"
+timeout_seconds = 1800
+
+[[actions.params]]
+key = "projects"
+label = "项目"
+type = "project_multi"
+required = true
+
+[actions.params.source]
+type = "projects"
+deploy_target = "preview"
+adapter = "jenkins"
+action_kind = "deploy"
+
+[[actions.params]]
+key = "branchOverride"
+label = "统一分支覆盖"
+type = "branch"
+description = "仅覆盖声明了分支参数的项目；留空则沿用各项目配置。"
+placeholder = "可选，例如 release/preview"
+
+[[actions.params]]
+key = "environment"
+label = "环境"
+type = "text"
+placeholder = "例如 preview-1"
+
+[[actions.params]]
+key = "planOnly"
+label = "仅检查计划"
+type = "boolean"
+default = true
+role = "dry_run"
+
+[[actions.params]]
+key = "target"
+label = "构建目标"
+type = "hidden"
+default = "preview"

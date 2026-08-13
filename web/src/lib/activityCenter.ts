@@ -40,6 +40,7 @@ export type ActivityResource = {
 export type ActivityParameter = {
   key: string;
   label: string;
+  labelKey?: string | null;
   value: string;
   masked?: boolean;
 };
@@ -271,6 +272,9 @@ function normalizeActivityParameters(value: unknown): ActivityParameter[] {
       return [{
         key,
         label,
+        ...(normalizeString(candidate.labelKey).trim()
+          ? { labelKey: normalizeString(candidate.labelKey).trim() }
+          : {}),
         value: parameterValue,
         masked: candidate.masked === true,
       }];

@@ -33,10 +33,16 @@ export type CommitInfo = {
   committedAt: string;
 };
 
+export type BranchCommitOverview = {
+  source?: CommitInfo | null;
+  target?: CommitInfo | null;
+};
+
 export type BranchOption = {
   name: string;
   updatedAt: string;
   updatedTs: number;
+  commit?: CommitInfo | null;
 };
 
 export type BuildHistoryEntry = {
@@ -97,6 +103,8 @@ export type BranchPushStatus = {
   repoPath: string;
   currentBranch: string;
   upstreamBranch?: string | null;
+  upstreamComparable?: boolean;
+  comparisonStatus?: string;
   ahead: number;
   behind: number;
   clean: boolean;
@@ -315,6 +323,9 @@ export type InitDemandWorkspacePayload = {
   project?: string | null;
   branch?: string | null;
   rootDir?: string | null;
+  instanceDir?: string | null;
+  copyMode?: "existing" | "worktree" | "clone";
+  dependencyMode?: "none" | "auto-link";
   resourceDir?: string | null;
   worklogFile?: string | null;
   createWorklog: boolean;
@@ -326,6 +337,9 @@ export type InitDemandWorkspacePayload = {
 };
 
 export type InitDemandWorkspaceResult = {
+  schemaVersion?: number;
+  copyMode?: "existing" | "worktree" | "clone";
+  dependencyMode?: "none" | "auto-link";
   key: string;
   name: string;
   demandId?: string | null;
@@ -334,6 +348,12 @@ export type InitDemandWorkspaceResult = {
     name: string;
     repoPath: string;
   };
+  dependencyLinks?: Array<{
+    relativeDir: string;
+    lockFile: string;
+    source: string;
+    target: string;
+  }>;
   requirementEntry: {
     category: string;
     shortLabel: string;
@@ -363,6 +383,34 @@ export type ProjectWorkspaceProjectInstanceDraft = {
   project: string;
   path: string;
   managed: boolean;
+};
+
+export type ProjectWorkspaceDirectoryInspection = {
+  projectKey: string;
+  requestedPath: string;
+  effectivePath: string;
+  repositoryRoot: string;
+  configuredRemote?: string | null;
+  observedRemoteCount: number;
+  remoteMatches?: boolean | null;
+  requiresRemoteMismatchConfirmation: boolean;
+};
+
+export type ProjectWorkspaceInstanceStatus = {
+  projectKey: string;
+  projectName: string;
+  path: string;
+  managed: boolean;
+  statusKey: "healthy" | "missing" | "remoteMismatch" | "invalid" | string;
+  statusLabel: string;
+  detail: string;
+  exists: boolean;
+  canOpen: boolean;
+  repositoryRoot?: string | null;
+  remoteMatches?: boolean | null;
+  observedRemoteCount: number;
+  repairSupported: boolean;
+  repairBranch?: string | null;
 };
 
 export type ProjectWorkspaceEditorDraft = {
@@ -486,8 +534,13 @@ export type ProxyConfig = {
 export type ProxyProfileRuntimeStatus = {
   profileId: string;
   running: boolean;
+  managed: boolean;
+  versionCompatible: boolean;
   listenUrl: string;
+  pid?: number | null;
   startedAt?: string | null;
+  owner?: string | null;
+  detail: string;
 };
 
 export type ProxyEvent = {
@@ -536,7 +589,9 @@ export type ProxyRequestDiagnosis = {
   };
   statusKey: string;
   statusLabel: string;
+  statusMessage?: AppMessage;
   summary: string;
+  summaryMessage?: AppMessage;
   matchedRule?: {
     id: string;
     name: string;
@@ -555,12 +610,15 @@ export type ProxyRequestDiagnosis = {
       key: string;
       matched: boolean;
       detail: string;
+      detailMessage?: AppMessage;
     }>;
   }>;
   warnings: Array<{
     key: string;
     detail: string;
+    detailMessage?: AppMessage;
     action?: string | null;
+    actionMessage?: AppMessage | null;
   }>;
 };
 
@@ -727,6 +785,7 @@ export type DeployParamConfigKind = "select" | "boolean" | "branch" | "text" | "
 export type DeployParamConfigSummary = {
   key: string;
   label: string;
+  labelKey?: string | null;
   kind: DeployParamConfigKind;
   defaultValue?: string | null;
   options: string[];
@@ -868,11 +927,15 @@ export type ProjectRuntimeLogResponse = {
 export type ProjectRuntimePreflightCheck = {
   key: string;
   title: string;
+  titleMessage?: AppMessage | null;
   category: string;
   statusKey: "ok" | "warning" | "error" | "info" | string;
   statusLabel: string;
+  statusMessage?: AppMessage;
   detail: string;
+  detailMessage?: AppMessage | null;
   action?: string | null;
+  actionMessage?: AppMessage | null;
   fix?: ProjectRuntimePreflightFix | null;
 };
 
@@ -959,6 +1022,14 @@ export type ManagedArtifact = {
   lifecycle: string;
 };
 
+export type ManagedArtifactFocusRequest = {
+  requestId: number;
+  workspaceKey: string;
+  projectKey: string;
+  path: string;
+  kind: string;
+};
+
 export type ManagedArtifactRecord = {
   id: string;
   source: string;
@@ -1017,9 +1088,157 @@ export type ManagedArtifactInventoryResponse = {
   recommendedActions: RecommendedAction[];
 };
 
+export type ManagedArtifactCleanupAction = {
+  artifactId: string;
+  kind: string;
+  path: string;
+  action: string;
+  eligibility: "eligible" | "reviewRequired" | "blocked" | string;
+  destructive: boolean;
+  reason: string;
+  prerequisites: string[];
+};
+
+export type ManagedArtifactCleanupPlanResponse = {
+  schemaVersion: number;
+  requested: {
+    workspace?: string | null;
+    allWorkspaces: boolean;
+    project?: string | null;
+    kinds: string[];
+    artifactIds: string[];
+  };
+  effective: {
+    workspaceKeys: string[];
+    selectedArtifactIds: string[];
+    missingArtifactIds: string[];
+    executionSupported: boolean;
+  };
+  observed: {
+    actions: ManagedArtifactCleanupAction[];
+    eligibleCount: number;
+    reviewRequiredCount: number;
+    blockedCount: number;
+  };
+  status: OperationStatus;
+  evidence: OperationEvidence[];
+  risks: OperationRisk[];
+  managedArtifacts: ManagedArtifact[];
+  recommendedActions: RecommendedAction[];
+};
+
+export type HealthIdentity = {
+  schemaVersion?: number;
+  executablePath: string;
+  canonicalExecutablePath?: string | null;
+  installKind: string;
+  version: string;
+  buildCommit?: string | null;
+  buildDirty?: boolean | null;
+  buildProfile?: string | null;
+  buildTarget?: string | null;
+  currentSourceCommit?: string | null;
+  currentSourceDirty?: boolean | null;
+  sourceCommitMatchesBuild?: boolean | null;
+  sourceAvailable?: boolean;
+  sourceRoot?: string | null;
+  recommendedInvocation?: string;
+  invocationRecommendationReason?: string;
+  sourceInvocation?: string | null;
+};
+
+export type AppMessage = {
+  key: string;
+  params?: Record<string, string | number>;
+};
+
+export type HealthStorageEntry = {
+  key: string;
+  label: string;
+  labelMessage?: AppMessage;
+  path: string;
+  exists: boolean;
+  objectType: string;
+  sizeBytes: number;
+  fileCount: number;
+  largestFilePath?: string | null;
+  largestFileBytes: number;
+  statusKey: string;
+  detail: string;
+  detailMessage?: AppMessage;
+  inspectError?: string | null;
+};
+
+export type HealthRisk = {
+  code: string;
+  severity: string;
+  summary: string;
+  summaryMessage?: AppMessage;
+  detail: string;
+  detailMessage?: AppMessage | null;
+};
+
+export type HealthSnapshot = {
+  schemaVersion: number;
+  generatedAtMs: number;
+  statusKey: string;
+  statusLabel: string;
+  statusMessage?: AppMessage;
+  summary: string;
+  summaryMessage?: AppMessage;
+  identity: HealthIdentity;
+  storageTotalBytes: number;
+  storage: HealthStorageEntry[];
+  risks: HealthRisk[];
+  recommendedActions: RecommendedAction[];
+};
+
+export type DoctorStatus = "ok" | "warning" | "error";
+
+export type DoctorCheck = {
+  status: DoctorStatus;
+  code: string;
+  message: string;
+  detail?: string | null;
+};
+
+export type DoctorPaths = {
+  configDir: string;
+  projects: string;
+  workspace: string;
+  workspacesDir: string;
+  navigation: string;
+  proxy: string;
+  configSources: string;
+  proxyActive?: string | null;
+  webActions: string;
+  storage: string;
+};
+
+export type DoctorWorkspaceSummary = {
+  key: string;
+  name: string;
+  system: boolean;
+  projectCount: number;
+  includeAllProjects: boolean;
+  includeAllNavigation: boolean;
+};
+
+export type DoctorSnapshot = {
+  schemaVersion: number;
+  status: DoctorStatus;
+  errorCount: number;
+  warningCount: number;
+  paths: DoctorPaths;
+  health: HealthSnapshot;
+  activeWorkspace?: DoctorWorkspaceSummary | null;
+  checks: DoctorCheck[];
+};
+
 export type RecommendedAction = {
   command: string;
   reason: string;
+  reasonMessage?: AppMessage;
   risk: string;
 };
 
@@ -1135,7 +1354,9 @@ export type ProjectRuntimePreflightResponse = {
   runtimeProfileLabel?: string | null;
   statusKey: "ok" | "warning" | "error" | string;
   statusLabel: string;
+  statusMessage?: AppMessage;
   summary: string;
+  summaryMessage?: AppMessage;
   target?: ProjectRuntimeTargetSummary | null;
   checks: ProjectRuntimePreflightCheck[];
 };
@@ -1150,7 +1371,9 @@ export type ProjectRuntimeInspectResponse = {
   runtimeProfileLabel?: string | null;
   statusKey: string;
   statusLabel: string;
+  statusMessage?: AppMessage;
   summary: string;
+  summaryMessage?: AppMessage;
   target?: ProjectRuntimeTargetSummary | null;
   environment: {
     statusKey: "detected" | "partial" | "unavailable" | string;
@@ -1253,6 +1476,190 @@ export type FinderShortcutItem = {
   categoryTitle: string;
   categoryLabel: string;
   entry: FinderEntry;
+  sourceId?: string | null;
+};
+
+export type ResourceActionEffect =
+  | "read"
+  | "local_write"
+  | "remote_write"
+  | "destructive";
+
+export type ResourceActionRunnerKind = "process";
+export type ResourceActionExecutionMode = "direct" | "plan_apply";
+
+export type ResourceActionExecution = {
+  mode: ResourceActionExecutionMode;
+  planTtlSeconds: number;
+};
+
+export type ResourceActionParamKind =
+  | "text"
+  | "textarea"
+  | "number"
+  | "select"
+  | "multi_select"
+  | "boolean"
+  | "branch"
+  | "project"
+  | "project_multi"
+  | "file"
+  | "directory"
+  | "secret"
+  | "hidden";
+
+export type ResourceActionParamRole = "dry_run";
+
+export type ResourceActionParamValue = string | number | boolean | string[] | null;
+
+export type ResourceActionOption = {
+  value: string;
+  label: string;
+};
+
+export type ResourceActionParam = {
+  key: string;
+  label: string;
+  kind: ResourceActionParamKind;
+  description?: string | null;
+  placeholder?: string | null;
+  defaultValue?: ResourceActionParamValue;
+  required: boolean;
+  min?: number | null;
+  max?: number | null;
+  step?: number | null;
+  minLength?: number | null;
+  maxLength?: number | null;
+  minItems?: number | null;
+  maxItems?: number | null;
+  role?: ResourceActionParamRole | null;
+  options: ResourceActionOption[];
+};
+
+export type ResourceActionRunner = {
+  kind: ResourceActionRunnerKind;
+  program: string;
+  configuredProgram?: string;
+  args: string[];
+  cwd: string;
+  input: "json_stdin";
+  output: "text" | "structured_json";
+  timeoutSeconds: number;
+};
+
+export type ResourceActionView = {
+  configPath: string;
+  key: string;
+  name: string;
+  description?: string | null;
+  effect: ResourceActionEffect;
+  execution: ResourceActionExecution;
+  runner: ResourceActionRunner;
+  params: ResourceActionParam[];
+};
+
+export type ResourceActionSummary = {
+  key: string;
+  name: string;
+  description?: string | null;
+  effect: ResourceActionEffect;
+  executionMode: ResourceActionExecutionMode;
+  runnerKind: ResourceActionRunnerKind;
+  paramCount: number;
+};
+
+export type ResourceActionCatalog = {
+  configPath: string;
+  schemaVersion: number;
+  actions: ResourceActionSummary[];
+};
+
+export type ResourceActionRunRequest = {
+  key: string;
+  params: Record<string, ResourceActionParamValue>;
+};
+
+export type ResourceActionApplyRequest = {
+  planId: string;
+  params: Record<string, ResourceActionParamValue>;
+};
+
+export type ResourceActionPlan = {
+  schemaVersion: number;
+  planId: string;
+  actionKey: string;
+  actionName: string;
+  effect: ResourceActionEffect;
+  workspaceKey?: string | null;
+  configPath: string;
+  configFingerprint: string;
+  paramsFingerprint: string;
+  effectiveParams: Record<string, ResourceActionParamValue>;
+  secretParams: string[];
+  planOperationId: string;
+  planResult: ResourceActionStructuredResult;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt?: string | null;
+};
+
+export type ResourceActionRunResult = {
+  operationId: string;
+  key: string;
+  name: string;
+  success: boolean;
+  exitCode?: number | null;
+  timedOut: boolean;
+  cancelled?: boolean;
+  stdout: string;
+  stderr: string;
+  stdoutTruncated: boolean;
+  stderrTruncated: boolean;
+  structuredResult?: ResourceActionStructuredResult | null;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+};
+
+export type ResourceActionProgressStream = "stdout" | "stderr" | "system";
+
+export type ResourceActionProgressEvent = {
+  operationId: string;
+  sequence: number;
+  stream: ResourceActionProgressStream;
+  chunk: string;
+  outputSuppressed: boolean;
+  occurredAt: string;
+};
+
+export type ResourceActionResultStatus = "success" | "warning" | "failed" | "skipped";
+
+export type ResourceActionResultParameter = {
+  key: string;
+  label: string;
+  value: string;
+};
+
+export type ResourceActionResultItem = {
+  key: string;
+  label: string;
+  status: ResourceActionResultStatus;
+  summary?: string | null;
+  detail?: string | null;
+  url?: string | null;
+  parameters: ResourceActionResultParameter[];
+};
+
+export type ResourceActionRetry = {
+  param: string;
+  values: string[];
+};
+
+export type ResourceActionStructuredResult = {
+  schemaVersion: number;
+  summary?: string | null;
+  items: ResourceActionResultItem[];
+  retry?: ResourceActionRetry | null;
 };
 
 export type WebActionParamSummary = {
@@ -1293,6 +1700,7 @@ export type WebActionListResponse = {
 
 export type ConfigSourceFiles = {
   navigation: string;
+  actions: string;
   links: string;
   proxy?: string | null;
   runtimeOverrides?: string | null;
@@ -1313,6 +1721,7 @@ export type ConfigSource = {
 
 export type ConfigSourceFileDefinition = {
   navigation?: string | null;
+  actions?: string | null;
   links?: string | null;
   proxy?: string | null;
   runtimeOverrides?: string | null;

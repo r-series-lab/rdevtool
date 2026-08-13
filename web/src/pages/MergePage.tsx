@@ -17,6 +17,7 @@ import { useCallback, useEffect, useId, useMemo, useState, type KeyboardEvent, t
 import type { SelectChangeEvent } from "@mui/material/Select";
 import type {
   BranchOption,
+  CommitInfo,
   BranchPushAction,
   BranchPushStatus,
   BranchTaskHistoryEntry,
@@ -33,6 +34,7 @@ import {
 import { BranchHistoryPanel } from "../components/branch/BranchHistoryPanel";
 import { BranchPushStatusCard } from "../components/branch/BranchPushStatusCard";
 import { LocalWorkspaceStatusCard } from "../components/branch/LocalWorkspaceStatusCard";
+import { BranchRevisionSummary } from "../components/branch/BranchRevisionSummary";
 import {
   WorkflowLinksDialog,
   type WorkflowLinkListItem,
@@ -47,7 +49,12 @@ import {
   RefreshIcon,
 } from "../components/AppIcons";
 import { shouldHandlePrimaryEnter } from "../lib/keyboard";
+import {
+  loadSelectedBranchCommit,
+  type BranchCommitRole,
+} from "../lib/branchCommitOverview";
 import { useI18n } from "../i18n";
+import { translateInternalMessage } from "../i18n/internalMessages";
 import {
   defaultSignalIdForReplay,
   workflowReplayFromBranchHistory,
@@ -418,7 +425,7 @@ export function WorktreeSelector({
               if (!item) {
                 return loading ? t("正在读取项目实例") : t("选择项目实例");
               }
-              return `${item.label} · ${worktreeBranchLabel(item)} · ${item.statusLabel}`;
+              return `${item.label} · ${worktreeBranchLabel(item)} · ${translateInternalMessage(item.statusLabel, t)}`;
             }}
           >
             {items.map((item) => (
@@ -436,7 +443,7 @@ export function WorktreeSelector({
                     {item.isGitWorktree ? <Chip size="small" label="worktree" variant="outlined" /> : null}
                     <Chip
                       size="small"
-                      label={item.statusLabel}
+                      label={translateInternalMessage(item.statusLabel, t)}
                       color={item.statusKey === "clean" ? "success" : ["missing", "unavailable"].includes(item.statusKey) ? "error" : "primary"}
                       variant={item.statusKey === "clean" ? "outlined" : "filled"}
                     />
@@ -502,24 +509,32 @@ function BranchInput({
   value,
   options,
   branchEntryMap,
+  project,
+  role,
   onChange,
   onClear,
   onSyncBranches,
   disabled,
+  context = "",
 }: {
   label: string;
   value: string;
   options: string[];
   branchEntryMap: Map<string, BranchOption>;
+  project: string;
+  role: BranchCommitRole;
   onChange: (value: string) => void;
   onClear: () => void;
   onSyncBranches: () => void;
   disabled: boolean;
+  context?: string;
 }) {
   const { t } = useI18n();
   const translatedLabel = t(label);
+  const selectedEntry = branchEntryMap.get(value.trim());
   return (
-    <Autocomplete<string, false, false, true>
+    <Stack spacing={0.4} minWidth={0}>
+      <Autocomplete<string, false, false, true>
       freeSolo
       fullWidth
       forcePopupIcon={false}
@@ -636,6 +651,76 @@ function BranchInput({
           </Box>
         );
       }}
+      />
+      {selectedEntry ? (
+        <SelectedBranchRevisionSummary
+          project={project}
+          role={role}
+          label={translatedLabel}
+          entry={selectedEntry}
+          context={context}
+        />
+      ) : null}
+    </Stack>
+  );
+}
+
+function SelectedBranchRevisionSummary({
+  project,
+  role,
+  label,
+  entry,
+  context = "",
+}: {
+  project: string;
+  role: BranchCommitRole;
+  label: string;
+  entry: BranchOption;
+  context?: string;
+}) {
+  const revisionKey = JSON.stringify([project, role, entry.name, entry.updatedAt]);
+  const [resolvedRevision, setResolvedRevision] = useState<{
+    key: string;
+    commit: CommitInfo | null;
+  }>({ key: revisionKey, commit: entry.commit ?? null });
+
+  useEffect(() => {
+    if (entry.commit) {
+      return;
+    }
+
+    let active = true;
+    setResolvedRevision({ key: revisionKey, commit: null });
+    void loadSelectedBranchCommit({
+      project,
+      branch: entry.name,
+      role,
+      revisionHint: entry.updatedAt,
+    })
+      .then((commit) => {
+        if (active) {
+          setResolvedRevision({ key: revisionKey, commit });
+        }
+      })
+      .catch(() => {
+        // The catalog activity time remains a useful fallback when commit lookup fails.
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [entry.commit, entry.name, entry.updatedAt, project, revisionKey, role]);
+
+  const resolvedCommit =
+    resolvedRevision.key === revisionKey ? resolvedRevision.commit : null;
+
+  return (
+    <BranchRevisionSummary
+      label={label}
+      branch={entry.name}
+      commit={entry.commit ?? resolvedCommit}
+      updatedAt={entry.updatedAt}
+      context={context}
     />
   );
 }
@@ -751,6 +836,17 @@ export function MergePage({
     () => projects.filter((project) => syncProjects.includes(project.key)),
     [projects, syncProjects],
   );
+  const branchReferenceProject = projects.find(
+    (project) => project.key === selectedProject,
+  );
+  const batchBranchReferenceContext = branchReferenceProject
+    ? t("当前项目参考：{project}", {
+        project: branchReferenceProject.name,
+      })
+    : "";
+  const selectedSyncTargetEntries = syncTargets
+    .map((branch) => targetBranchEntryMap.get(branch.trim()))
+    .filter((entry): entry is BranchOption => Boolean(entry));
   const pushStatusStale = Boolean(
     pushStatusUpdatedAtMs && nowMs - pushStatusUpdatedAtMs > PUSH_STATUS_STALE_MS,
   );
@@ -996,12 +1092,13 @@ export function MergePage({
                     {item.projectName}
                   </Typography>
                   <Typography variant="caption" color="text.secondary" sx={{ overflowWrap: "anywhere" }}>
-                    {item.sourceBranch} → {item.targetBranch || "-"} · {item.summary}
+                    {item.sourceBranch} → {item.targetBranch || "-"} ·{" "}
+                    {translateInternalMessage(item.summary, t)}
                   </Typography>
                 </Box>
                 <Chip
                   size="small"
-                  label={item.statusLabel}
+                  label={translateInternalMessage(item.statusLabel, t)}
                   color={item.statusKey === "ready" ? "success" : item.success ? "default" : "error"}
                   variant="outlined"
                 />
@@ -1163,10 +1260,13 @@ export function MergePage({
                   value={syncSource}
                   options={sourceBranchOptions}
                   branchEntryMap={sourceBranchEntryMap}
+                  project={selectedProject}
+                  role="source"
                   onChange={onSyncSourceChange}
                   onClear={onClearSyncSource}
                   onSyncBranches={onSyncBranches}
                   disabled={!selectedProject || Boolean(busy)}
+                  context={batchBranchReferenceContext}
                 />
                 <BranchValueWarning
                   label={t("源分支")}
@@ -1276,6 +1376,20 @@ export function MergePage({
                     );
                   }}
                 />
+                {selectedSyncTargetEntries.length > 0 ? (
+                  <Stack spacing={0.45} minWidth={0}>
+                    {selectedSyncTargetEntries.map((entry) => (
+                      <SelectedBranchRevisionSummary
+                        key={entry.name}
+                        project={selectedProject}
+                        role="target"
+                        label={t("目标分支")}
+                        entry={entry}
+                        context={batchBranchReferenceContext}
+                      />
+                    ))}
+                  </Stack>
+                ) : null}
                 <BranchValueWarning
                   label={t("目标分支")}
                   values={syncTargets}
@@ -1329,20 +1443,26 @@ export function MergePage({
                     value={createSource}
                     options={sourceBranchOptions}
                     branchEntryMap={sourceBranchEntryMap}
+                    project={selectedProject}
+                    role="source"
                     onChange={onCreateSourceChange}
                     onClear={onClearCreateSource}
                     onSyncBranches={onSyncBranches}
                     disabled={!selectedProject || Boolean(busy)}
+                    context={batchBranchReferenceContext}
                   />
                   <BranchInput
                     label={t("目标分支")}
                     value={createTarget}
                     options={targetBranchOptions}
                     branchEntryMap={targetBranchEntryMap}
+                    project={selectedProject}
+                    role="target"
                     onChange={onCreateTargetChange}
                     onClear={onClearCreateTarget}
                     onSyncBranches={onSyncBranches}
                     disabled={!selectedProject || Boolean(busy)}
+                    context={batchBranchReferenceContext}
                   />
                 </Box>
                 <BranchValueWarning
@@ -1454,10 +1574,13 @@ export function MergePage({
                       value={switchTarget}
                       options={targetBranchOptions}
                       branchEntryMap={targetBranchEntryMap}
+                      project={selectedProject}
+                      role="target"
                       onChange={onSwitchTargetChange}
                       onClear={onClearSwitchTarget}
                       onSyncBranches={onSyncBranches}
                       disabled={!selectedProject || Boolean(busy)}
+                      context={batchBranchReferenceContext}
                     />
                     <BranchValueWarning
                       label={t("目标分支")}
@@ -1496,10 +1619,13 @@ export function MergePage({
                       value={checkoutSource}
                       options={sourceBranchOptions}
                       branchEntryMap={sourceBranchEntryMap}
+                      project={selectedProject}
+                      role="source"
                       onChange={onCheckoutSourceChange}
                       onClear={onClearCheckoutSource}
                       onSyncBranches={onSyncBranches}
                       disabled={!selectedProject || Boolean(busy)}
+                      context={batchBranchReferenceContext}
                     />
                     <BranchValueWarning
                       label={t("源分支")}

@@ -13,6 +13,7 @@ function source(overrides: Partial<ConfigSource> = {}): ConfigSource {
     baseDir: "/config/sources/team",
     files: {
       navigation: "/config/sources/team/navigation.toml",
+      actions: "/config/sources/team/actions.toml",
       links: "/config/sources/team/links.toml",
     },
     uiProfile: "resource-basic",

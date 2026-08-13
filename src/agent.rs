@@ -8,7 +8,7 @@ use crate::artifacts::{
     ManagedArtifactContextSummary, ManagedArtifactQuery, managed_artifact_context_summary,
 };
 use crate::config::{
-    AppConfig, ConfigPaths, ProjectWorkspaceConfig, apply_project_workspace_filter,
+    AppConfig, ConfigPaths, ProjectWorkspaceConfig, apply_project_workspace_context,
 };
 use crate::core::{
     DeployTargetMeta, ProjectDetail, ProjectSummary, branch_hint, deploy_target_meta,
@@ -32,11 +32,27 @@ use crate::workspace_resources::{
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentCapabilities {
+    pub schema_version: u16,
     pub app_name: String,
     pub app_version: String,
+    pub build_commit: Option<String>,
     pub storage_path: String,
     pub features: Vec<String>,
     pub commands: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command_specs: Vec<AgentCommandCapability>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentCommandCapability {
+    pub path: String,
+    pub risk: String,
+    pub supports_json: bool,
+    pub supports_follow: bool,
+    pub requires_confirmation: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deprecated_by: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -168,10 +184,22 @@ pub struct AgentWorkspaceContext {
     pub project_count: usize,
     pub root_dir: Option<String>,
     pub resource_dir: Option<String>,
+    pub worklog_path: Option<String>,
     pub worklog_auto_record: bool,
     pub worklog: Option<WorkspaceWorklogContent>,
+    pub project_instances: Vec<AgentWorkspaceProjectInstanceContext>,
     pub navigation_categories: Vec<String>,
     pub navigation_entries: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentWorkspaceProjectInstanceContext {
+    pub project_key: String,
+    pub configured_repo_path: Option<String>,
+    pub effective_repo_path: Option<String>,
+    pub path_source: String,
+    pub managed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,8 +212,10 @@ pub struct AgentProjectContext {
 
 pub fn capabilities() -> AgentCapabilities {
     AgentCapabilities {
+        schema_version: 2,
         app_name: "rDevTool".to_string(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
+        build_commit: option_env!("RDEVTOOL_BUILD_COMMIT").map(str::to_string),
         storage_path: path_to_string(&default_storage_path()),
         features: vec![
             "build-plan".to_string(),
@@ -213,6 +243,9 @@ pub fn capabilities() -> AgentCapabilities {
             "config-source-management".to_string(),
             "config-source-compare".to_string(),
             "config-source-copy".to_string(),
+            "config-pack-export".to_string(),
+            "config-pack-import-plan".to_string(),
+            "config-pack-transaction-rollback".to_string(),
             "proxy-read".to_string(),
             "proxy-config-source".to_string(),
             "proxy-profile-crud".to_string(),
@@ -238,6 +271,7 @@ pub fn capabilities() -> AgentCapabilities {
             "workspace-context".to_string(),
             "workspace-scope-cli".to_string(),
             "workspace-init-demand".to_string(),
+            "workspace-review".to_string(),
             "workspace-resources".to_string(),
             "workspace-worklog".to_string(),
             "workspace-worklog-auto-record".to_string(),
@@ -259,18 +293,23 @@ pub fn capabilities() -> AgentCapabilities {
             "shared-sqlite".to_string(),
             "project-notes".to_string(),
             "project-notes-search".to_string(),
+            "resource-actions".to_string(),
+            "resource-action-plan-apply".to_string(),
+            "agent-skill-compatibility".to_string(),
+            "structured-command-capabilities".to_string(),
             "cli-json-envelope".to_string(),
         ],
         commands: vec![
             "capabilities".to_string(),
             "context".to_string(),
             "app preferences|set-preferences".to_string(),
-            "workspace list|show|create|init-demand|resources-init|worklog-append|worklog-show|worklog-auto|use|scope".to_string(),
+            "workspace list|show|review|create|init-demand|resources-init|worklog-append|worklog-show|worklog-auto|use|archive|restore|scope".to_string(),
             "projects list|show|add|update|delete|set-command|build-target-add|build-target-update|build-target-delete|build-param-add|build-param-update|build-param-delete|branch|branches|envs|options".to_string(),
             "build targets|plan|run|trigger|status|history".to_string(),
             "deploy targets|plan|trigger|status|history".to_string(),
-            "git current|branches|overview|merge|merge-many|create|clone|switch|push-status|push|history"
+            "git current|branches|overview|merge|merge-many|create|clone|switch|push-status|diff|push|history"
                 .to_string(),
+            "workflow promote plan|run|status".to_string(),
             "workflow chain list|show|plan|run".to_string(),
             "doctor".to_string(),
             "list".to_string(),
@@ -297,12 +336,15 @@ pub fn capabilities() -> AgentCapabilities {
             "link path|list|inspect|show|plan|check|run|stop|save|delete|migrate|attach"
                 .to_string(),
             "config-source list|show|compare|copy|use".to_string(),
+            "pack inventory|export|inspect|import-plan|import-run|rollback".to_string(),
+            "action path|list|show|validate|plan|plan-show|apply|run".to_string(),
             "proxy path|source|list|start|stop|restart|status|show|add|update|delete|export|import|rule-list|rule-show|rule-add|rule-update|rule-delete|diagnose|verify|bind-runtime".to_string(),
             "runtime profiles|profile-show|inspect|preflight|start|status|list|stop|restart|adopt|diagnose|focus|wait|log".to_string(),
             "artifacts list|cleanup-plan".to_string(),
             "web-actions path|list|targets|open|run|script".to_string(),
-            "agent capabilities|context".to_string(),
+            "agent capabilities|compatibility|context".to_string(),
         ],
+        command_specs: Vec::new(),
     }
 }
 
@@ -389,7 +431,7 @@ fn context_for_workspace_with_options_and_optional_paths(
     paths: Option<&ConfigPaths>,
 ) -> Result<AgentContext> {
     let effective_config = workspace
-        .map(|workspace| apply_project_workspace_filter(config, workspace))
+        .map(|workspace| apply_project_workspace_context(config, workspace))
         .unwrap_or_else(|| config.clone());
     let mut project = project_key
         .map(|key| build_project_context(&effective_config, key))
@@ -641,6 +683,38 @@ fn workspace_context(
                 .and_then(|_| read_workspace_worklog_for_workspace(workspace, 80).ok())
         })
         .flatten();
+    let effective_config = apply_project_workspace_context(config, workspace);
+    let project_instances = effective_config
+        .projects
+        .iter()
+        .map(|project| {
+            let configured_repo_path = config
+                .projects
+                .iter()
+                .find(|configured| configured.key == project.key)
+                .and_then(|configured| configured.repo_path.as_ref())
+                .map(|path| path.display().to_string());
+            let instance = workspace
+                .project_instances
+                .iter()
+                .find(|instance| instance.project == project.key);
+            AgentWorkspaceProjectInstanceContext {
+                project_key: project.key.clone(),
+                configured_repo_path,
+                effective_repo_path: project
+                    .repo_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+                path_source: if instance.is_some() {
+                    "workspaceProjectInstance"
+                } else {
+                    "projectConfiguration"
+                }
+                .to_string(),
+                managed: instance.is_some_and(|instance| instance.managed),
+            }
+        })
+        .collect();
     AgentWorkspaceContext {
         key: workspace.key.clone(),
         name: workspace.name.clone(),
@@ -653,9 +727,15 @@ fn workspace_context(
             .root_dir
             .as_ref()
             .map(|path| path.display().to_string()),
-        resource_dir: resources.map(|resources| resources.resource_dir),
+        resource_dir: resources
+            .as_ref()
+            .map(|resources| resources.resource_dir.clone()),
+        worklog_path: resources
+            .as_ref()
+            .map(|resources| resources.worklog_path.clone()),
         worklog_auto_record: workspace.worklog_auto_record,
         worklog,
+        project_instances,
         navigation_categories: workspace.navigation_categories.clone(),
         navigation_entries: workspace.navigation_entries.clone(),
     }
@@ -772,6 +852,10 @@ fn context_capabilities(options: &AgentContextOptions) -> AgentCapabilities {
         let command = command.to_ascii_lowercase();
         terms.iter().any(|term| command.contains(term))
     });
+    value.command_specs.retain(|command| {
+        let path = command.path.to_ascii_lowercase();
+        terms.iter().any(|term| path.contains(term))
+    });
     value
 }
 
@@ -875,6 +959,103 @@ mod tests {
                 .iter()
                 .any(|command| command == "workflow chain list|show|plan|run")
         );
+        assert!(
+            value
+                .features
+                .iter()
+                .any(|feature| { feature == "agent-skill-compatibility" })
+        );
+        assert!(value.commands.iter().any(|command| {
+            command == "action path|list|show|validate|plan|plan-show|apply|run"
+        }));
+    }
+
+    #[test]
+    fn workspace_context_uses_effective_project_instance_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "rdevtool-agent-workspace-instance-{}",
+            Uuid::new_v4()
+        ));
+        let configured_repo = dir.join("configured");
+        let instance_repo = dir.join("workspace").join("sample");
+        std::fs::create_dir_all(&configured_repo).expect("create configured repository path");
+        std::fs::create_dir_all(&instance_repo).expect("create workspace instance path");
+        let config: AppConfig = serde_json::from_value(json!({
+            "defaults": {},
+            "projects": [{
+                "key": "sample",
+                "name": "Sample",
+                "git_url": "",
+                "repo_path": configured_repo
+            }]
+        }))
+        .expect("parse test config");
+        let workspace = ProjectWorkspaceConfig {
+            key: "feature-a".to_string(),
+            name: "Feature A".to_string(),
+            description: None,
+            archive: None,
+            workspace_type: "business".to_string(),
+            metadata: BTreeMap::new(),
+            root_dir: Some(dir.join("workspace")),
+            resource_dir: None,
+            worklog_file: None,
+            worklog_auto_record: false,
+            include_all_projects: false,
+            include_all_navigation: false,
+            projects: vec!["sample".to_string()],
+            navigation_categories: Vec::new(),
+            navigation_entries: Vec::new(),
+            project_instances: vec![ProjectWorkspaceProjectInstanceConfig {
+                project: "sample".to_string(),
+                path: instance_repo.clone(),
+                managed: false,
+            }],
+            resource_categories: Vec::new(),
+        };
+        let db_path = dir.join("agent.sqlite3");
+        let storage = Storage::new(db_path).expect("create test storage");
+
+        let value = context_for_workspace_with_options(
+            &config,
+            &storage,
+            Some(&workspace),
+            None,
+            None,
+            6,
+            &AgentContextOptions {
+                preset: Some(AgentContextPreset::Workspace),
+                compact: true,
+                ..AgentContextOptions::default()
+            },
+        )
+        .expect("build workspace context");
+
+        assert_eq!(value.projects.len(), 1);
+        assert_eq!(
+            value.projects[0].repo_path.as_deref(),
+            Some(instance_repo.to_string_lossy().as_ref())
+        );
+        let workspace_context = value.workspace.expect("workspace context");
+        assert_eq!(workspace_context.project_instances.len(), 1);
+        assert_eq!(
+            workspace_context.project_instances[0]
+                .configured_repo_path
+                .as_deref(),
+            Some(configured_repo.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            workspace_context.project_instances[0]
+                .effective_repo_path
+                .as_deref(),
+            Some(instance_repo.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            workspace_context.project_instances[0].path_source,
+            "workspaceProjectInstance"
+        );
+        drop(storage);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

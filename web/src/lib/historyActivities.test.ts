@@ -20,16 +20,16 @@ function buildHistory(
   return {
     historyKey: "http://jenkins/queue/item/42/",
     workspaceKey: "workspace",
-    projectKey: "cooperation-admin",
-    projectName: "新合作渠道",
+    projectKey: "demo-service",
+    projectName: "示例渠道",
     mode: "vke",
     env: "dc2",
-    branch: "env-dc2-vke",
+    branch: "env_demo_pre",
     stateKey: "success",
     stateLabel: "构建成功",
     detail: "构建 #825 当前结果：SUCCESS",
     queueUrl: "http://jenkins/queue/item/42/",
-    buildUrl: "http://jenkins/job/cooperation-admin/825/",
+    buildUrl: "http://jenkins/job/demo-service/825/",
     params: { env: "dc2" },
     createdAt: "2026-07-20T08:00:00.000Z",
     updatedAt: "2026-07-20T08:05:00.000Z",
@@ -43,14 +43,14 @@ function mergeHistory(
   return {
     historyKey: "cli-merge-1",
     workspaceKey: "workspace",
-    projectKey: "cooperation-admin",
-    projectName: "新合作渠道",
+    projectKey: "demo-service",
+    projectName: "示例渠道",
     sourceBranch: "feature",
-    targetBranch: "env-dc2-vke",
+    targetBranch: "env_demo_pre",
     success: true,
     remote: false,
     summary: "合并并推送成功",
-    detail: "feature -> env-dc2-vke",
+    detail: "feature -> env_demo_pre",
     createdAt: "2026-07-20T07:55:00.000Z",
     ...overrides,
   };
@@ -68,8 +68,8 @@ function branchHistory(
     detail: "批量任务包含失败项",
     items: [
       {
-        projectKey: "cooperation-admin",
-        projectName: "新合作渠道",
+        projectKey: "demo-service",
+        projectName: "示例渠道",
         sourceBranch: "feature",
         targetBranch: null,
         success: false,
@@ -102,8 +102,8 @@ function operationEvent(
     title: "提交推送",
     summary: response.summary,
     detail: response.detail,
-    projectKey: "cooperation-admin",
-    projectName: "新合作渠道",
+    projectKey: "demo-service",
+    projectName: "示例渠道",
     relatedHistoryKeys: ["operation-cli-push-1"],
     payload: {
       taskKind: response.taskKind,
@@ -130,7 +130,7 @@ describe("history activities", () => {
       detail: expect.stringContaining("remote rejected"),
       target: {
         page: "merge",
-        projectKey: "cooperation-admin",
+        projectKey: "demo-service",
         branchMode: "push",
       },
     });
@@ -140,8 +140,8 @@ describe("history activities", () => {
     const replay = {
       command: "execute_branch_push_task" as const,
       busyText: "正在重新推送分支",
-      request: { project: "cooperation-admin", branch: "feature" },
-      refreshPushStatusProject: "cooperation-admin",
+      request: { project: "demo-service", branch: "feature" },
+      refreshPushStatusProject: "demo-service",
     };
     const history = branchHistory({
       id: "operation-cli-push-1",
@@ -175,7 +175,7 @@ describe("history activities", () => {
 
     expect(activity).toMatchObject({
       status: "success",
-      summary: "新合作渠道: feature -> env-dc2-vke [已合并]",
+      summary: "示例渠道: feature -> env_demo_pre [已合并]",
       detail: "Merge Request !42 已合并",
     });
   });
@@ -189,7 +189,7 @@ describe("history activities", () => {
 
     expect(activity).toMatchObject({
       status: "failed",
-      summary: "新合作渠道: feature -> env-dc2-vke [合并失败]",
+      summary: "示例渠道: feature -> env_demo_pre [合并失败]",
       detail: "HTTP 401 Unauthorized",
     });
   });
@@ -198,7 +198,7 @@ describe("history activities", () => {
     const activity = activityFromBuildHistory(buildHistory({
       params: {
         env: "dc2",
-        BRANCH: "env-dc2-vke",
+        BRANCH: "env_demo_pre",
         IS_GRAY: "true",
         API_TOKEN: "secret-value",
       },
@@ -208,15 +208,33 @@ describe("history activities", () => {
       kind: "build",
       status: "success",
       title: "部署",
-      projectKey: "cooperation-admin",
+      projectKey: "demo-service",
       resource: {
-        value: "http://jenkins/job/cooperation-admin/825/",
+        value: "http://jenkins/job/demo-service/825/",
       },
     });
     expect(activity.parameters).toEqual([
-      { key: "target", label: "目标", value: "vke", masked: false },
-      { key: "environment", label: "环境", value: "dc2", masked: false },
-      { key: "branch", label: "分支", value: "env-dc2-vke", masked: false },
+      {
+        key: "target",
+        label: "目标",
+        labelKey: "build.param.target.label",
+        value: "vke",
+        masked: false,
+      },
+      {
+        key: "environment",
+        label: "环境",
+        labelKey: "build.param.environment.label",
+        value: "dc2",
+        masked: false,
+      },
+      {
+        key: "branch",
+        label: "分支",
+        labelKey: "build.param.branch.label",
+        value: "env_demo_pre",
+        masked: false,
+      },
       { key: "IS_GRAY", label: "IS_GRAY", value: "true", masked: false },
       { key: "API_TOKEN", label: "API_TOKEN", value: "已配置", masked: true },
     ]);
@@ -238,15 +256,15 @@ describe("history activities", () => {
     expect(failed.action).toEqual({
       kind: "buildRecover",
       label: "重新规划并重试部署",
-      projectKey: "cooperation-admin",
-      projectName: "新合作渠道",
+      projectKey: "demo-service",
+      projectName: "示例渠道",
       workspaceKey: "workspace",
       request: {
-        project: "cooperation-admin",
+        project: "demo-service",
         target: "vke",
         variant: false,
         env: "dc2",
-        branch: "env-dc2-vke",
+        branch: "env_demo_pre",
         params: { ENV_PROFILE: "dc2", BRANCH: "feature/a" },
       },
     });
@@ -265,15 +283,15 @@ describe("history activities", () => {
       detail: "构建计划已阻断：目标分支不存在",
       relatedHistoryKeys: [],
       payload: {
-        projectKey: "cooperation-admin",
-        projectName: "新合作渠道",
+        projectKey: "demo-service",
+        projectName: "示例渠道",
         mode: "vke",
         stateKey: "failed",
         stateLabel: "失败",
         detail: "构建计划已阻断：目标分支不存在",
         params: { ENV_PROFILE: "dc2" },
         replayRequest: {
-          project: "cooperation-admin",
+          project: "demo-service",
           target: "vke",
           env: "dc2",
           branch: "feature/a",
@@ -288,7 +306,7 @@ describe("history activities", () => {
       action: {
         kind: "buildRecover",
         request: {
-          project: "cooperation-admin",
+          project: "demo-service",
           target: "vke",
           env: "dc2",
           branch: "feature/a",
@@ -310,6 +328,7 @@ describe("history activities", () => {
     expect(parameters).toContainEqual({
       key: "platform",
       label: "系统",
+      labelKey: "build.param.platform.label",
       value: "macos",
       masked: false,
     });
@@ -329,7 +348,7 @@ describe("history activities", () => {
       title: "触发部署",
       summary: "排队中",
       detail: "http://jenkins/queue/item/42/",
-      projectKey: "cooperation-admin",
+      projectKey: "demo-service",
       resource: {
         kind: "url",
         label: "打开构建记录",
@@ -391,10 +410,10 @@ describe("history activities", () => {
       status: "success",
       title: "创建分支",
       summary: "成功 1 / 失败 0",
-      projectKey: "cooperation-admin",
+      projectKey: "demo-service",
       target: {
         page: "merge",
-        projectKey: "cooperation-admin",
+        projectKey: "demo-service",
         branchMode: "create",
       },
       createdAt: "2026-07-20T08:00:05.000Z",
@@ -405,7 +424,7 @@ describe("history activities", () => {
       taskKind: "create",
       success: true,
       summary: "成功 1 / 失败 0",
-      detail: "新合作渠道: feature -> release [已创建]",
+      detail: "示例渠道: feature -> release [已创建]",
       items: [
         {
           ...branchHistory().items[0],
@@ -434,8 +453,8 @@ describe("history activities", () => {
     const replay = {
       command: "execute_branch_push_task" as const,
       busyText: "正在重新推送分支",
-      request: { project: "cooperation-admin", branch: "feature" },
-      refreshPushStatusProject: "cooperation-admin",
+      request: { project: "demo-service", branch: "feature" },
+      refreshPushStatusProject: "demo-service",
     };
     const history = branchHistory({ replay });
     const current = createActivityEntry({
@@ -514,10 +533,10 @@ describe("history activities", () => {
       status: "running",
       title: "合并分支",
       summary: "正在合并分支",
-      projectKey: "cooperation-admin",
+      projectKey: "demo-service",
       target: {
         page: "merge",
-        projectKey: "cooperation-admin",
+        projectKey: "demo-service",
         branchMode: "sync",
       },
       createdAt: "2026-07-20T08:00:00.000Z",
@@ -546,7 +565,7 @@ describe("history activities", () => {
             statusKey: "merged",
             statusLabel: "已合并",
             summary: "合并成功",
-            targetBranch: "env-dc2-vke",
+            targetBranch: "env_demo_pre",
           },
         ],
       },
@@ -700,11 +719,11 @@ describe("history activities", () => {
       title: "启动 dev 服务",
       summary: "管理端",
       chainId: "chain-runtime-1",
-      projectKey: "cooperation-admin",
-      projectName: "合作渠道管理端",
+      projectKey: "demo-service",
+      projectName: "示例渠道管理台",
       target: {
         page: "projectManagement",
-        projectKey: "cooperation-admin",
+        projectKey: "demo-service",
       },
       createdAt: "2026-07-20T08:00:00.000Z",
       updatedAt: "2026-07-20T08:00:00.000Z",
@@ -719,9 +738,9 @@ describe("history activities", () => {
       detail: "Runtime Daemon 正在运行",
       relatedHistoryKeys: [],
       payload: {
-        projectKey: "cooperation-admin",
-        name: "合作渠道管理端",
-        logPath: "/tmp/cooperation-admin.log",
+        projectKey: "demo-service",
+        name: "示例渠道管理台",
+        logPath: "/tmp/demo-service.log",
       },
     });
     const proxyEvent = operationEvent({
@@ -730,13 +749,13 @@ describe("history activities", () => {
       action: "start",
       state: "success",
       title: "代理服务已启动",
-      summary: "合作渠道本地代理 · 已启动",
+      summary: "示例本地代理 · 已启动",
       detail: "监听地址：http://127.0.0.1:8791",
       projectKey: null,
       projectName: null,
       relatedHistoryKeys: [],
       payload: {
-        profileId: "cooperation-local",
+        profileId: "demo-local",
         listenUrl: "http://127.0.0.1:8791",
       },
     });
@@ -753,7 +772,7 @@ describe("history activities", () => {
     expect(reconciled.find((item) => item.id === runtimeActivity.id)).toMatchObject({
       status: "success",
       chainId: "chain-runtime-1",
-      resource: { value: "/tmp/cooperation-admin.log" },
+      resource: { value: "/tmp/demo-service.log" },
     });
     expect(reconciled.find((item) => item.id === proxyEvent.id)).toMatchObject({
       kind: "proxy",
@@ -769,8 +788,8 @@ describe("history activities", () => {
       origin: "app",
       status: "running",
       title: "启动联调链路",
-      summary: "合作渠道联调 · 正在启动",
-      executionKey: "link:run:cooperation-debug",
+      summary: "示例联调 · 正在启动",
+      executionKey: "link:run:demo-debug",
       target: { page: "overview" },
       createdAt: "2026-07-20T08:00:00.000Z",
       updatedAt: "2026-07-20T08:00:00.000Z",
@@ -782,13 +801,13 @@ describe("history activities", () => {
       action: "run",
       state: "success",
       title: "启动联调链路",
-      summary: "合作渠道联调 · 完成 3 / 失败 0 / 跳过 0",
+      summary: "示例联调 · 完成 3 / 失败 0 / 跳过 0",
       detail: "联调链路已启动",
-      projectKey: "cooperation-admin",
+      projectKey: "demo-service",
       relatedHistoryKeys: [],
       payload: {
-        linkKey: "cooperation-debug",
-        linkName: "合作渠道联调",
+        linkKey: "demo-debug",
+        linkName: "示例联调",
         mode: "run",
         stepCount: 3,
         completedCount: 3,
@@ -812,8 +831,8 @@ describe("history activities", () => {
       kind: "link",
       origin: "app",
       status: "success",
-      summary: "合作渠道联调 · 完成 3 / 失败 0 / 跳过 0",
-      target: { page: "overview", projectKey: "cooperation-admin" },
+      summary: "示例联调 · 完成 3 / 失败 0 / 跳过 0",
+      target: { page: "overview", projectKey: "demo-service" },
     });
   });
 
@@ -824,7 +843,7 @@ describe("history activities", () => {
       origin: "tray",
       status: "failed",
       title: "启动联调链路",
-      summary: "合作渠道联调 · 启动失败",
+      summary: "示例联调 · 启动失败",
       detail: "端口已被占用",
       action: null,
       acknowledgedAt: "2026-07-20T08:10:00.000Z",
@@ -838,12 +857,12 @@ describe("history activities", () => {
       action: "run",
       state: "failed",
       title: "启动联调链路",
-      summary: "合作渠道联调 · 启动失败",
+      summary: "示例联调 · 启动失败",
       detail: "端口已被占用",
       relatedHistoryKeys: [],
       payload: {
-        linkKey: "cooperation-debug",
-        linkName: "合作渠道联调",
+        linkKey: "demo-debug",
+        linkName: "示例联调",
         sourceId: "workspace-links",
         failedSteps: [
           {

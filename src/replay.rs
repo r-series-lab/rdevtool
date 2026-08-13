@@ -459,8 +459,8 @@ job_name = "demo"
         DeployRequest {
             project: "demo".to_string(),
             target: Some("vke".to_string()),
-            branch: Some("env-dc2-vke".to_string()),
-            params: BTreeMap::from([("BRANCH".to_string(), "env-dc2-vke".to_string())]),
+            branch: Some("env_demo_pre".to_string()),
+            params: BTreeMap::from([("BRANCH".to_string(), "env_demo_pre".to_string())]),
             ..DeployRequest::default()
         }
     }
@@ -472,13 +472,13 @@ job_name = "demo"
         assert_eq!(request.branch, None);
         assert_eq!(
             request.params.get("BRANCH").map(String::as_str),
-            Some("env-dc2-vke")
+            Some("env_demo_pre")
         );
         let plan = crate::core::build_plan(&config(false), &request)
             .expect("raw replay branch remains executable");
         assert_eq!(
             plan.params.get("BRANCH").map(String::as_str),
-            Some("env-dc2-vke")
+            Some("env_demo_pre")
         );
         assert!(
             !plan
@@ -492,7 +492,7 @@ job_name = "demo"
     fn merges_matching_raw_and_typed_branch_into_structured_input() {
         let mut request = replay_request();
         normalize_build_replay_request(&config(true), &mut request).expect("normalize replay");
-        assert_eq!(request.branch.as_deref(), Some("env-dc2-vke"));
+        assert_eq!(request.branch.as_deref(), Some("env_demo_pre"));
         assert!(!request.params.contains_key("BRANCH"));
     }
 

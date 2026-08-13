@@ -5,14 +5,22 @@ import {
   Chip,
   Collapse,
   IconButton,
+  InputAdornment,
+  MenuItem,
   Stack,
+  TextField,
   Typography,
 } from "@mui/material";
 import type {
   BranchTaskHistoryEntry,
+  BranchTaskItemResult,
   BranchTaskPendingEntry,
 } from "../../app-types";
-import { branchTaskDisplayDetail } from "../../lib/branchTaskDetails";
+import {
+  branchTaskDisplayDetail,
+  branchTaskFailureExplanation,
+  middleTruncateBranch,
+} from "../../lib/branchTaskDetails";
 import type { TrayPinnedAction } from "../../lib/trayPins";
 import { AppEmptyState } from "../AppEmptyState";
 import { AppListEndState } from "../AppListEndState";
@@ -27,16 +35,170 @@ import {
   OpenExternalIcon,
   RefreshIcon,
   ReplayIcon,
+  SearchIcon,
   StarIcon,
   TrashIcon,
 } from "../AppIcons";
 import { groupConsecutiveBy, stableStringify } from "../../lib/historyGroups";
+import {
+  filterHistoryGroups,
+  matchesBranchHistoryEntry,
+  type BranchHistoryKindFilter,
+  type BranchHistoryResultFilter,
+} from "../../lib/historyRecordFilters";
 import { useTrayPinnedActions } from "../../hooks/useTrayPinnedActions";
 import { useI18n } from "../../i18n";
 import { translateInternalMessage } from "../../i18n/internalMessages";
 import { branchWorkflowModeLabel } from "./BranchModeTabs";
 
 const HISTORY_SCROLL_PAGE_SIZE = 8;
+const COLLAPSED_PROJECT_ROW_COUNT = 3;
+const COLLAPSED_BRANCH_MAX_LENGTH = 30;
+
+function branchTaskItemTarget(item: BranchTaskItemResult) {
+  return item.targetBranch?.trim() || item.outputPath?.trim() || "-";
+}
+
+function branchTaskItemStatus(item: BranchTaskItemResult) {
+  return item.statusLabel.trim() || item.summary.trim() || (item.success ? "成功" : "失败");
+}
+
+function BranchHistoryProjectDetail({
+  item,
+}: {
+  item: BranchTaskHistoryEntry;
+}) {
+  const { t } = useI18n();
+  const [expanded, setExpanded] = useState(false);
+  const hasLongBranch = item.items.some(
+    (taskItem) =>
+      Array.from(taskItem.sourceBranch.trim()).length > COLLAPSED_BRANCH_MAX_LENGTH ||
+      Array.from(branchTaskItemTarget(taskItem)).length > COLLAPSED_BRANCH_MAX_LENGTH,
+  );
+  const hasFailureDetail = item.items.some(
+    (taskItem) => !taskItem.success && Boolean(taskItem.detail.trim()),
+  );
+  const canExpand =
+    item.items.length > COLLAPSED_PROJECT_ROW_COUNT ||
+    hasLongBranch ||
+    hasFailureDetail;
+  const visibleItems = expanded
+    ? item.items
+    : item.items.slice(0, COLLAPSED_PROJECT_ROW_COUNT);
+  const hiddenProjectCount = Math.max(0, item.items.length - visibleItems.length);
+
+  return (
+    <Stack
+      className={`branch-history-project-detail${expanded ? " is-expanded" : ""}`}
+      spacing={0.4}
+      minWidth={0}
+    >
+      <Stack className="branch-history-project-list" spacing={0.35} minWidth={0}>
+        {visibleItems.map((taskItem, index) => {
+          const projectName =
+            taskItem.projectName.trim() || taskItem.projectKey.trim() || t("项目");
+          const sourceBranch = taskItem.sourceBranch.trim() || "-";
+          const targetBranch = branchTaskItemTarget(taskItem);
+          const failureDetail = taskItem.success
+            ? ""
+            : translateInternalMessage(branchTaskFailureExplanation(taskItem), t);
+          return (
+            <Box
+              className={`branch-history-project-row${taskItem.success ? " is-success" : " is-failed"}`}
+              key={`${taskItem.projectKey}-${taskItem.targetBranch ?? taskItem.outputPath ?? index}-${index}`}
+            >
+              <Typography
+                className="branch-history-project-name"
+                variant="caption"
+                title={projectName}
+                noWrap={!expanded}
+              >
+                {projectName}
+              </Typography>
+              <Box
+                className="branch-history-branch-route"
+                title={`${sourceBranch} -> ${targetBranch}`}
+              >
+                <Typography component="span" variant="caption">
+                  {expanded
+                    ? sourceBranch
+                    : middleTruncateBranch(
+                        sourceBranch,
+                        COLLAPSED_BRANCH_MAX_LENGTH,
+                      )}
+                </Typography>
+                <Typography
+                  className="branch-history-branch-arrow"
+                  component="span"
+                  variant="caption"
+                  aria-hidden="true"
+                >
+                  -&gt;
+                </Typography>
+                <Typography component="span" variant="caption">
+                  {expanded
+                    ? targetBranch
+                    : middleTruncateBranch(
+                        targetBranch,
+                        COLLAPSED_BRANCH_MAX_LENGTH,
+                      )}
+                </Typography>
+              </Box>
+              <Chip
+                className="branch-history-project-status"
+                size="small"
+                color={taskItem.success ? "success" : "error"}
+                variant="outlined"
+                label={translateInternalMessage(branchTaskItemStatus(taskItem), t)}
+              />
+              {failureDetail ? (
+                <Typography
+                  className="branch-history-project-failure"
+                  variant="caption"
+                  color="error"
+                  title={failureDetail}
+                >
+                  {failureDetail}
+                </Typography>
+              ) : null}
+            </Box>
+          );
+        })}
+      </Stack>
+      {canExpand ? (
+        <Stack
+          className="branch-history-detail-actions"
+          direction="row"
+          alignItems="center"
+          spacing={0.5}
+        >
+          <Button
+            className="branch-history-detail-toggle"
+            size="small"
+            variant="text"
+            color="inherit"
+            startIcon={
+              expanded ? (
+                <CollapseIcon fontSize="small" />
+              ) : (
+                <ExpandIcon fontSize="small" />
+              )
+            }
+            aria-expanded={expanded}
+            onClick={() => setExpanded((current) => !current)}
+          >
+            {t(expanded ? "收起详情" : "展开详情")}
+          </Button>
+          {!expanded && hiddenProjectCount > 0 ? (
+            <Typography variant="caption" color="text.secondary">
+              {t("还有 {count} 个项目", { count: hiddenProjectCount })}
+            </Typography>
+          ) : null}
+        </Stack>
+      ) : null}
+    </Stack>
+  );
+}
 
 function branchHistoryAccent(item: BranchTaskHistoryEntry): HistoryAccent {
   if (!item.success || item.items.some((taskItem) => !taskItem.success)) {
@@ -158,6 +320,12 @@ export function BranchHistoryPanel({
   const [historyVisibleCount, setHistoryVisibleCount] = useState(
     HISTORY_SCROLL_PAGE_SIZE,
   );
+  const [historyQuery, setHistoryQuery] = useState("");
+  const [historyResultFilter, setHistoryResultFilter] =
+    useState<BranchHistoryResultFilter>("all");
+  const [historyKindFilter, setHistoryKindFilter] =
+    useState<BranchHistoryKindFilter>("all");
+  const [historyMarkedOnly, setHistoryMarkedOnly] = useState(false);
   const [expandedHistoryGroups, setExpandedHistoryGroups] = useState<Set<string>>(
     () => new Set(),
   );
@@ -254,13 +422,6 @@ export function BranchHistoryPanel({
       pinnedBranchActions,
     ],
   );
-  const pinnedActionOrder = useMemo(
-    () =>
-      new Map(
-        displayPinnedBranchActions.map((action, index) => [action.dedupeKey, index]),
-      ),
-    [displayPinnedBranchActions],
-  );
   const pinnedActionByKey = useMemo(
     () =>
       new Map(
@@ -277,92 +438,63 @@ export function BranchHistoryPanel({
       ),
     [history],
   );
-  function pinnedOrderForBranchGroup(group: (typeof groupedHistory)[number]) {
-    let order: number | undefined;
-    for (const item of group.items) {
-      const key = branchTrayDedupeKeyFromHistory(item);
-      const itemOrder = key ? pinnedActionOrder.get(key) : undefined;
-      if (itemOrder !== undefined) {
-        order = order === undefined ? itemOrder : Math.min(order, itemOrder);
-      }
+  function pinnedActionForBranchItem(item: BranchTaskHistoryEntry) {
+    const exactKey = branchTrayDedupeKeyFromHistory(item);
+    const exactAction = exactKey ? pinnedActionByKey.get(exactKey) : null;
+    if (
+      exactAction &&
+      (exactAction.workspaceKey ?? null) === (item.workspaceKey ?? null)
+    ) {
+      return exactAction;
     }
-    if (order !== undefined) {
-      return order;
-    }
-    const legacyKey = branchLegacyTrayDedupeKeyFromHistory(group.latest);
-    return legacyKey ? pinnedActionOrder.get(legacyKey) : undefined;
-  }
-  const sortedHistoryGroups = useMemo(() => {
-    const originalOrder = new Map(
-      groupedHistory.map((group, index) => [group.id, index]),
-    );
-    return [...groupedHistory].sort((left, right) => {
-      const leftPinnedOrder = pinnedOrderForBranchGroup(left);
-      const rightPinnedOrder = pinnedOrderForBranchGroup(right);
-      const leftPinned = leftPinnedOrder !== undefined;
-      const rightPinned = rightPinnedOrder !== undefined;
-
-      if (leftPinned && rightPinned) {
-        return (
-          (leftPinnedOrder ?? 0) - (rightPinnedOrder ?? 0) ||
-          (originalOrder.get(left.id) ?? 0) - (originalOrder.get(right.id) ?? 0)
-        );
-      }
-      if (leftPinned !== rightPinned) {
-        return leftPinned ? -1 : 1;
-      }
-      return (originalOrder.get(left.id) ?? 0) - (originalOrder.get(right.id) ?? 0);
-    });
-  }, [groupedHistory, pinnedActionOrder]);
-  const pinnedHistoryGroups = useMemo(
-    () =>
-      sortedHistoryGroups.filter(
-        (group) => pinnedOrderForBranchGroup(group) !== undefined,
-      ),
-    [pinnedActionOrder, sortedHistoryGroups],
-  );
-  const unpinnedHistoryGroups = useMemo(
-    () =>
-      sortedHistoryGroups.filter(
-        (group) => pinnedOrderForBranchGroup(group) === undefined,
-      ),
-    [pinnedActionOrder, sortedHistoryGroups],
-  );
-  function pinnedActionForBranchGroup(group: (typeof groupedHistory)[number]) {
-    let pinnedAction: TrayPinnedAction | null = null;
-    let pinnedOrder = Number.POSITIVE_INFINITY;
-    for (const item of group.items) {
-      const key = branchTrayDedupeKeyFromHistory(item);
-      const order = key ? pinnedActionOrder.get(key) : undefined;
-      const action = key ? pinnedActionByKey.get(key) : undefined;
-      if (action && order !== undefined && order < pinnedOrder) {
-        pinnedAction = action;
-        pinnedOrder = order;
-      }
-    }
-    if (pinnedAction) {
-      return pinnedAction;
-    }
-    const legacyKey = branchLegacyTrayDedupeKeyFromHistory(group.latest);
+    const legacyKey = branchLegacyTrayDedupeKeyFromHistory(item);
     const legacyAction = legacyKey ? pinnedActionByKey.get(legacyKey) : null;
     return legacyAction &&
-      (legacyAction.workspaceKey ?? null) === (group.latest.workspaceKey ?? null)
+      (legacyAction.workspaceKey ?? null) === (item.workspaceKey ?? null)
       ? legacyAction
       : null;
   }
-  const visibleUnpinnedHistoryGroups = useMemo(
+  function pinnedActionForBranchGroup(group: (typeof groupedHistory)[number]) {
+    return group.items.map(pinnedActionForBranchItem).find(Boolean) ?? null;
+  }
+  const filteredHistoryGroups = useMemo(
     () =>
-      unpinnedHistoryGroups.slice(
-        0,
-        historyVisibleCount,
+      filterHistoryGroups(groupedHistory, (item) =>
+        matchesBranchHistoryEntry(
+          item,
+          {
+            query: historyQuery,
+            result: historyResultFilter,
+            kind: historyKindFilter,
+            markedOnly: historyMarkedOnly,
+          },
+          (entry) => Boolean(pinnedActionForBranchItem(entry)),
+        ),
       ),
-    [historyVisibleCount, unpinnedHistoryGroups],
+    [
+      groupedHistory,
+      historyKindFilter,
+      historyMarkedOnly,
+      historyQuery,
+      historyResultFilter,
+      pinnedActionByKey,
+    ],
   );
   const visibleHistoryGroups = useMemo(
-    () => [...pinnedHistoryGroups, ...visibleUnpinnedHistoryGroups],
-    [pinnedHistoryGroups, visibleUnpinnedHistoryGroups],
+    () => filteredHistoryGroups.slice(0, historyVisibleCount),
+    [filteredHistoryGroups, historyVisibleCount],
   );
-  const hasMoreHistoryGroups = historyVisibleCount < unpinnedHistoryGroups.length;
+  const hasMoreHistoryGroups = historyVisibleCount < filteredHistoryGroups.length;
+  const filteredHistoryRecordCount = useMemo(
+    () => filteredHistoryGroups.reduce((count, group) => count + group.items.length, 0),
+    [filteredHistoryGroups],
+  );
+  const hasHistoryFilters = Boolean(
+    historyQuery.trim() ||
+      historyResultFilter !== "all" ||
+      historyKindFilter !== "all" ||
+      historyMarkedOnly,
+  );
   const hasDisplayHistory = history.length > 0 || Boolean(currentTask);
   const latestTaskEntry = useMemo(() => {
     if (currentHistoryId) {
@@ -378,11 +510,11 @@ export function BranchHistoryPanel({
       return "";
     }
     return (
-      sortedHistoryGroups.find((group) =>
+      filteredHistoryGroups.find((group) =>
         group.items.some((item) => item.id === latestTaskEntry.id),
       )?.id ?? ""
     );
-  }, [latestTaskEntry, sortedHistoryGroups]);
+  }, [filteredHistoryGroups, latestTaskEntry]);
 
   useEffect(() => {
     if (currentTask) {
@@ -397,18 +529,22 @@ export function BranchHistoryPanel({
       }
       return Math.min(
         current,
-        Math.max(HISTORY_SCROLL_PAGE_SIZE, unpinnedHistoryGroups.length),
+        Math.max(HISTORY_SCROLL_PAGE_SIZE, filteredHistoryGroups.length),
       );
     });
-  }, [unpinnedHistoryGroups.length]);
+  }, [filteredHistoryGroups.length]);
+
+  useEffect(() => {
+    setHistoryVisibleCount(HISTORY_SCROLL_PAGE_SIZE);
+  }, [historyKindFilter, historyMarkedOnly, historyQuery, historyResultFilter]);
 
   useEffect(() => {
     setExpandedHistoryGroups((current) => {
-      const visibleIds = new Set(sortedHistoryGroups.map((group) => group.id));
+      const visibleIds = new Set(filteredHistoryGroups.map((group) => group.id));
       const next = new Set([...current].filter((id) => visibleIds.has(id)));
       return next.size === current.size ? current : next;
     });
-  }, [sortedHistoryGroups]);
+  }, [filteredHistoryGroups]);
 
   useEffect(() => {
     if (!currentHistoryGroupId) {
@@ -457,7 +593,7 @@ export function BranchHistoryPanel({
 
   function loadMoreHistoryGroups() {
     setHistoryVisibleCount((current) =>
-      Math.min(current + HISTORY_SCROLL_PAGE_SIZE, unpinnedHistoryGroups.length),
+      Math.min(current + HISTORY_SCROLL_PAGE_SIZE, filteredHistoryGroups.length),
     );
   }
 
@@ -533,6 +669,82 @@ export function BranchHistoryPanel({
         <Collapse in={expanded} timeout="auto" unmountOnExit>
           {hasDisplayHistory ? (
             <Stack className="workflow-history-content" spacing={0.65} minWidth={0}>
+              {history.length > 0 ? (
+                <Stack
+                  className="history-filter-toolbar"
+                  direction="row"
+                  spacing={0.65}
+                  alignItems="center"
+                  flexWrap="wrap"
+                  useFlexGap
+                >
+                  <TextField
+                    size="small"
+                    value={historyQuery}
+                    onChange={(event) => setHistoryQuery(event.target.value)}
+                    placeholder={t("搜索项目、分支、Commit 或摘要")}
+                    className="history-filter-search"
+                    slotProps={{
+                      input: {
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <SearchIcon fontSize="small" />
+                          </InputAdornment>
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    select
+                    size="small"
+                    value={historyResultFilter}
+                    onChange={(event) =>
+                      setHistoryResultFilter(event.target.value as BranchHistoryResultFilter)
+                    }
+                    className="history-filter-select"
+                    slotProps={{ htmlInput: { "aria-label": t("执行结果") } }}
+                  >
+                    <MenuItem value="all">{t("全部结果")}</MenuItem>
+                    <MenuItem value="success">{t("成功")}</MenuItem>
+                    <MenuItem value="failed">{t("失败")}</MenuItem>
+                  </TextField>
+                  <TextField
+                    select
+                    size="small"
+                    value={historyKindFilter}
+                    onChange={(event) =>
+                      setHistoryKindFilter(event.target.value as BranchHistoryKindFilter)
+                    }
+                    className="history-filter-select history-filter-select--wide"
+                    slotProps={{ htmlInput: { "aria-label": t("操作类型") } }}
+                  >
+                    <MenuItem value="all">{t("全部操作")}</MenuItem>
+                    {(["sync", "create", "checkout", "switch", "push"] as const).map(
+                      (kind) => (
+                        <MenuItem key={kind} value={kind}>
+                          {t(branchWorkflowModeLabel(kind))}
+                        </MenuItem>
+                      ),
+                    )}
+                  </TextField>
+                  <IconButton
+                    size="small"
+                    className={historyMarkedOnly ? "is-active" : ""}
+                    color={historyMarkedOnly ? "primary" : "default"}
+                    onClick={() => setHistoryMarkedOnly((current) => !current)}
+                    aria-pressed={historyMarkedOnly}
+                    aria-label={t("仅看已标记")}
+                    title={t("仅看已标记")}
+                  >
+                    <StarIcon fontSize="small" />
+                  </IconButton>
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={t("{count} 条记录", { count: filteredHistoryRecordCount })}
+                  />
+                </Stack>
+              ) : null}
               <Box className="module-list-scroll" onScroll={handleHistoryScroll}>
                 <Stack spacing={0.65} minWidth={0}>
                   {currentTask ? (
@@ -556,6 +768,29 @@ export function BranchHistoryPanel({
                         />
                       }
                     />
+                  ) : null}
+                  {history.length > 0 && filteredHistoryGroups.length === 0 ? (
+                    <Stack alignItems="center" spacing={0.4}>
+                      <AppEmptyState
+                        compact
+                        title={t("没有符合条件的记录")}
+                        description={t("调整搜索或筛选条件。")}
+                      />
+                      {hasHistoryFilters ? (
+                        <Button
+                          size="small"
+                          variant="text"
+                          onClick={() => {
+                            setHistoryQuery("");
+                            setHistoryResultFilter("all");
+                            setHistoryKindFilter("all");
+                            setHistoryMarkedOnly(false);
+                          }}
+                        >
+                          {t("清除筛选")}
+                        </Button>
+                      ) : null}
+                    </Stack>
                   ) : null}
                   {visibleHistoryGroups.map((group) => {
                     const item = group.latest;
@@ -679,7 +914,7 @@ export function BranchHistoryPanel({
                             ) : null}
                           </Stack>
                         }
-                        detail={translateInternalMessage(branchTaskDisplayDetail(item), t)}
+                        detail={<BranchHistoryProjectDetail item={item} />}
                         meta={[
                           isGrouped
                             ? t("连续 {count} 次", { count: group.items.length })
@@ -770,7 +1005,7 @@ export function BranchHistoryPanel({
                       </HistoryCard>
                     );
                   })}
-                  {history.length > 0 ? (
+                  {filteredHistoryGroups.length > 0 ? (
                     <Box
                       className={
                         hasMoreHistoryGroups

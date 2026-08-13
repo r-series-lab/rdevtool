@@ -30,6 +30,7 @@ if (mode === "build-cache") {
   runCargoClean(["-p", "rdevtool-core", "-p", "rdevtool-tauri"]);
   await remove("web/dist");
   await remove("target/release/bundle");
+  await remove("src-tauri/binaries");
   try {
     for (const entry of await readdir(path.join(rootDir, "target"), { withFileTypes: true })) {
       if (entry.isDirectory() && entry.name.includes("-")) {
@@ -42,5 +43,6 @@ if (mode === "build-cache") {
 } else {
   runCargoClean();
   await remove("web/dist");
+  await remove("src-tauri/binaries");
   if (mode === "all") await remove("web/node_modules");
 }

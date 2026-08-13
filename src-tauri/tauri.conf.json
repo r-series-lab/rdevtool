@@ -38,6 +38,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "externalBin": ["binaries/rdevtool"],
     "macOS": {
       "signingIdentity": "-"
     },

@@ -34,6 +34,7 @@ import type {
   ProxyEvent,
   ProxyOutboundMode,
   ProxyProfile,
+  ProxyProfileRuntimeStatus,
   ProxyRequestDiagnosis,
   ProxyRequestDiagnosisInput,
   ProxyRule,
@@ -57,6 +58,7 @@ import {
   StopIcon,
   TrashIcon,
   UploadIcon,
+  WarningIcon,
   WebsiteIcon,
 } from "../components/AppIcons";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
@@ -72,6 +74,7 @@ import {
 import { useConfigSource, type ConfigSourceStatus } from "../hooks/useConfigSource";
 import { useI18n, type Translate } from "../i18n";
 import { configSourceSupports } from "../lib/configSources";
+import { translateAppMessage } from "../i18n/appMessages";
 
 const HTTP_METHODS = ["", "GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"] as const;
 const ACTION_KINDS: Array<{ value: ProxyRuleAction["kind"]; label: string }> = [
@@ -348,6 +351,46 @@ function statusByProfile(dashboard: ProxyDashboard | null) {
   return new Map((dashboard?.statuses ?? []).map((item) => [item.profileId, item]));
 }
 
+function proxyStatusPresentation(
+  status: ProxyProfileRuntimeStatus | null | undefined,
+  t: Translate,
+) {
+  if (!status?.running) {
+    return {
+      key: "stopped",
+      label: t("已停止"),
+      color: "default" as const,
+      detail: status?.detail || t("代理服务未监听"),
+    };
+  }
+  if (!status.managed) {
+    return {
+      key: "external",
+      label: t("外部占用"),
+      color: "warning" as const,
+      detail: status.owner
+        ? t("端口由 {owner} 占用，rDevTool 不会停止该进程。", {
+            owner: status.owner,
+          })
+        : t("端口由外部进程占用，rDevTool 不会停止该进程。"),
+    };
+  }
+  if (!status.versionCompatible) {
+    return {
+      key: "upgrade",
+      label: t("需要重启升级"),
+      color: "warning" as const,
+      detail: t("代理服务版本与当前应用不一致，停止后重新启动即可升级。"),
+    };
+  }
+  return {
+    key: "running",
+    label: t("运行中"),
+    color: "success" as const,
+    detail: t("代理服务由 rDevTool 管理并正在监听。"),
+  };
+}
+
 function formatDateTime(value?: string | null) {
   if (!value) {
     return "-";
@@ -554,6 +597,9 @@ export function ProxyPage({
   const selectedProfile =
     profiles.find((profile) => profile.id === selectedProfileId) ?? profiles[0] ?? null;
   const selectedStatus = selectedProfile ? statuses.get(selectedProfile.id) : null;
+  const selectedManagedRunning = Boolean(
+    selectedStatus?.running && selectedStatus.managed,
+  );
   const rules = useMemo(
     () =>
       selectedProfile
@@ -647,7 +693,16 @@ export function ProxyPage({
   const enabledRuleCount = rules.filter((rule) => rule.enabled).length;
   const disabledRuleCount = rules.length - enabledRuleCount;
   const runningServiceCount = profiles.filter(
-    (profile) => statuses.get(profile.id)?.running,
+    (profile) => {
+      const status = statuses.get(profile.id);
+      return status?.running && status.managed;
+    },
+  ).length;
+  const externalServiceCount = profiles.filter(
+    (profile) => {
+      const status = statuses.get(profile.id);
+      return status?.running && !status.managed;
+    },
   ).length;
   const totalRuleCount = visibleDashboard?.config.rules.length ?? 0;
   const totalRequestCount = visibleDashboard?.events.length ?? 0;
@@ -701,7 +756,7 @@ export function ProxyPage({
   }, [loadConfigSources, preferredSourceId]);
 
   useEffect(() => {
-    if (!requestsDialogOpen || !selectedProfile || !selectedStatus?.running) {
+    if (!requestsDialogOpen || !selectedProfile || !selectedManagedRunning) {
       return;
     }
     const refreshIfVisible = () => {
@@ -717,7 +772,7 @@ export function ProxyPage({
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", refreshIfVisible);
     };
-  }, [refreshRequests, requestsDialogOpen, selectedProfile?.id, selectedStatus?.running]);
+  }, [refreshRequests, requestsDialogOpen, selectedManagedRunning, selectedProfile?.id]);
 
   useEffect(() => {
     if (!selectedEvent || filteredEvents.some((event) => event.id === selectedEventId)) {
@@ -1136,7 +1191,10 @@ export function ProxyPage({
   }
 
   return (
-    <Box className="workspace workspace--narrow proxy-workspace">
+    <Box
+      className="workspace workspace--narrow proxy-workspace"
+      data-proxy-dashboard="services-rules"
+    >
       <AppToast
         message={error || formError || busy}
         severity={error ? "error" : formError ? "warning" : "info"}
@@ -1145,6 +1203,7 @@ export function ProxyPage({
       />
 
       <WorkspacePageToolbar
+        className="proxy-overview-toolbar"
         ariaLabel={t("本地代理概览与配置")}
         metrics={[
           {
@@ -1160,6 +1219,16 @@ export function ProxyPage({
             value: runningServiceCount,
             tone: "green",
           },
+          ...(externalServiceCount > 0
+            ? [{
+                key: "external",
+                label: t("外部占用"),
+                value: externalServiceCount,
+                icon: <WarningIcon fontSize="small" />,
+                tone: "neutral" as const,
+                title: t("端口由非 rDevTool 进程监听"),
+              }]
+            : []),
           {
             key: "rules",
             label: t("规则"),
@@ -1178,14 +1247,20 @@ export function ProxyPage({
         actions={
           <>
             <WorkspacePageToolbarAction
+              className="proxy-overview-action"
               startIcon={<WebsiteIcon fontSize="small" />}
+              aria-label={t("请求记录")}
+              title={t("请求记录")}
               disabled={!selectedProfile}
               onClick={() => setRequestsDialogOpen(true)}
             >
               {t("请求记录")}
             </WorkspacePageToolbarAction>
             <WorkspacePageToolbarAction
+              className="proxy-overview-action"
               startIcon={<SettingsIcon fontSize="small" />}
+              aria-label={t("代理配置")}
+              title={t("代理配置")}
               onClick={openProxyConfigDialog}
             >
               {t("代理配置")}
@@ -1239,6 +1314,7 @@ export function ProxyPage({
                   <>
                   {profiles.map((profile) => {
                     const status = statuses.get(profile.id);
+                    const statusPresentation = proxyStatusPresentation(status, t);
                     const selected = selectedProfile?.id === profile.id;
                     const listenUrl =
                       status?.listenUrl ?? `http://${profile.listenHost}:${profile.listenPort}`;
@@ -1249,7 +1325,7 @@ export function ProxyPage({
                         key={profile.id}
                         className={`proxy-list-item proxy-service-card${
                           selected ? " is-active" : ""
-                        }${status?.running ? " is-running" : " is-stopped"}`}
+                        } is-${statusPresentation.key}`}
                         role="listitem"
                       >
                         <Box
@@ -1281,9 +1357,10 @@ export function ProxyPage({
                             <Chip
                               className="proxy-service-status-chip"
                               size="small"
-                              label={status?.running ? t("运行中") : t("已停止")}
-                              color={status?.running ? "success" : "default"}
+                              label={statusPresentation.label}
+                              color={statusPresentation.color}
                               variant={status?.running ? "filled" : "outlined"}
+                              title={t(statusPresentation.detail)}
                             />
                             <Chip
                               className="proxy-service-metric-chip proxy-service-metric-chip--rules"
@@ -1299,19 +1376,32 @@ export function ProxyPage({
                             />
                           </span>
                           <span className="proxy-list-actions proxy-service-actions">
-                            <Tooltip title={status?.running ? t("停止代理") : t("启动代理")}>
-                              <IconButton
-                                aria-label={status?.running ? t("停止代理") : t("启动代理")}
-                                onClick={(event) => {
-                                  event.stopPropagation();
-                                  void (status?.running
-                                    ? onStopProfile(profile.id, selectedSourceId)
-                                    : onStartProfile(profile.id, selectedSourceId));
-                                }}
-                              >
-                                {status?.running ? <StopIcon fontSize="small" /> : <PlayIcon fontSize="small" />}
-                              </IconButton>
-                            </Tooltip>
+                            {status?.running && !status.managed ? (
+                              <Tooltip title={t(statusPresentation.detail)}>
+                                <span>
+                                  <IconButton
+                                    disabled
+                                    aria-label={t("外部进程占用，无法操作")}
+                                  >
+                                    <WarningIcon fontSize="small" />
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                            ) : (
+                              <Tooltip title={status?.running ? t("停止代理") : t("启动代理")}>
+                                <IconButton
+                                  aria-label={status?.running ? t("停止代理") : t("启动代理")}
+                                  onClick={(event) => {
+                                    event.stopPropagation();
+                                    void (status?.running
+                                      ? onStopProfile(profile.id, selectedSourceId)
+                                      : onStartProfile(profile.id, selectedSourceId));
+                                  }}
+                                >
+                                  {status?.running ? <StopIcon fontSize="small" /> : <PlayIcon fontSize="small" />}
+                                </IconButton>
+                              </Tooltip>
+                            )}
                           </span>
                         </span>
                       </Box>
@@ -1326,6 +1416,21 @@ export function ProxyPage({
                   />
                 )}
                 </Box>
+              ) : null}
+              {!servicePanelCollapsed ? (
+                <Button
+                  className="proxy-panel-add-action"
+                  variant="outlined"
+                  color="inherit"
+                  startIcon={<PlusIcon fontSize="small" />}
+                  disabled={!sourceAllowsProxy || blockingBusy}
+                  onClick={() => {
+                    setProxyConfigDialogOpen(true);
+                    startNewConfigProfileDraft();
+                  }}
+                >
+                  {t("新建服务")}
+                </Button>
               ) : null}
             </Box>
 
@@ -1492,6 +1597,20 @@ export function ProxyPage({
                   />
                 )}
               </Box>
+              <Button
+                className="proxy-panel-add-action"
+                variant="outlined"
+                color="inherit"
+                startIcon={<PlusIcon fontSize="small" />}
+                disabled={!selectedProfile || blockingBusy}
+                onClick={() => {
+                  if (selectedProfile) {
+                    openRuleDialog(createRule(selectedProfile.id, nextRulePriority));
+                  }
+                }}
+              >
+                {t("新建规则")}
+              </Button>
             </Box>
           </Box>
         </section>
@@ -1555,7 +1674,7 @@ export function ProxyPage({
             <Stack direction="row" spacing={0.6}>
               <Tooltip
                 title={
-                  selectedStatus?.running
+                  selectedManagedRunning
                     ? t("刷新请求记录（打开时自动刷新）")
                     : t("刷新请求记录")
                 }
@@ -1643,7 +1762,7 @@ export function ProxyPage({
               </TextField>
               <TextField
                 size="small"
-                label="Path / URL"
+                label={t("路径 / URL")}
                 value={diagnosisUrl}
                 onChange={(event) => {
                   setDiagnosisUrl(event.target.value);
@@ -1675,9 +1794,20 @@ export function ProxyPage({
                 <Stack spacing={0.5} minWidth={0}>
                   <Stack direction="row" spacing={0.6} alignItems="center" flexWrap="wrap" useFlexGap>
                     <Typography variant="body2" fontWeight={760}>
-                      {diagnosisResult.summary}
+                      {translateAppMessage(
+                        diagnosisResult.summaryMessage,
+                        diagnosisResult.summary,
+                        t,
+                      )}
                     </Typography>
-                    <Chip size="small" label={diagnosisResult.statusLabel} />
+                    <Chip
+                      size="small"
+                      label={translateAppMessage(
+                        diagnosisResult.statusMessage,
+                        diagnosisResult.statusLabel,
+                        t,
+                      )}
+                    />
                     <Chip
                       size="small"
                       variant="outlined"
@@ -1701,7 +1831,11 @@ export function ProxyPage({
                     <Stack spacing={0.25}>
                       {diagnosisResult.warnings.map((warning) => (
                         <Typography key={warning.key} variant="caption">
-                          {warning.detail}
+                          {translateAppMessage(
+                            warning.detailMessage,
+                            warning.detail,
+                            t,
+                          )}
                         </Typography>
                       ))}
                     </Stack>
@@ -2008,6 +2142,7 @@ function ProxyConfigDialog({
 }) {
   const { t } = useI18n();
   const selectedStatus = selectedProfile ? statuses.get(selectedProfile.id) : null;
+  const selectedStatusPresentation = proxyStatusPresentation(selectedStatus, t);
   const selectedRules = selectedProfile ? rulesForProfile(dashboard, selectedProfile.id) : [];
   const selectedEvents = selectedProfile ? eventsForProfile(dashboard, selectedProfile.id) : [];
   const selectedListenUrl = profileDraft ? profileUrl(profileDraft) : "";
@@ -2138,7 +2273,7 @@ function ProxyConfigDialog({
                   const listenUrl = status?.listenUrl ?? profileUrl(profile);
                   const ruleCount = isDraft ? 0 : rulesForProfile(dashboard, profile.id).length;
                   const eventCount = isDraft ? 0 : eventsForProfile(dashboard, profile.id).length;
-                  const running = Boolean(status?.running);
+                  const statusPresentation = proxyStatusPresentation(status, t);
                   return (
                     <Box
                       key={profile.id}
@@ -2150,8 +2285,8 @@ function ProxyConfigDialog({
                       <span className="proxy-config-service-main">
                         <span className="proxy-config-service-title-row">
                           <b>{profile.name}</b>
-                          <span className={`proxy-config-service-state${running ? " is-running" : ""}${isDraft ? " is-draft" : ""}`}>
-                            {isDraft ? t("未保存") : running ? t("运行中") : t("已停止")}
+                          <span className={`proxy-config-service-state is-${statusPresentation.key}${isDraft ? " is-draft" : ""}`}>
+                            {isDraft ? t("未保存") : statusPresentation.label}
                           </span>
                         </span>
                         <small translate="no">{listenUrl}</small>
@@ -2203,12 +2338,11 @@ function ProxyConfigDialog({
                       label={
                         draftIsUnsaved
                           ? t("未保存")
-                          : selectedStatus?.running
-                            ? t("运行中")
-                            : t("已停止")
+                          : selectedStatusPresentation.label
                       }
-                      color={selectedStatus?.running ? "success" : "default"}
+                      color={selectedStatusPresentation.color}
                       variant={selectedStatus?.running ? "filled" : "outlined"}
+                      title={t(selectedStatusPresentation.detail)}
                     />
                     <Chip
                       size="small"

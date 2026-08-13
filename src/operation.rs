@@ -942,12 +942,12 @@ mod operation_event_tests {
     #[test]
     fn link_event_keeps_compact_failure_evidence() {
         let mut report = LinkExecutionReport {
-            key: "cooperation-debug".to_string(),
-            name: "合作渠道联调".to_string(),
+            key: "demo-debug".to_string(),
+            name: "示例联调".to_string(),
             mode: "run".to_string(),
             plan: LinkPlan {
-                key: "cooperation-debug".to_string(),
-                name: "合作渠道联调".to_string(),
+                key: "demo-debug".to_string(),
+                name: "示例联调".to_string(),
                 kind: None,
                 ui_profile: "default".to_string(),
                 schema_version: 1,

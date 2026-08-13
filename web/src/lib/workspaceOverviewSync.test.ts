@@ -3,7 +3,37 @@ import {
   mergeWorkspaceActionPatches,
   mergeWorkspaceOverviewDetails,
   mergeWorkspaceOverviewSummaries,
+  resolveWorkspaceOverviewScope,
+  workspaceActionPreview,
+  workspaceOverviewDetailKeys,
 } from "./workspaceOverviewSync";
+
+describe("workspaceActionPreview", () => {
+  const actions = ["latest", "pinned-1", "pinned-2", "pinned-3", "pinned-4"];
+
+  it("keeps the latest action and three marked actions in the compact view", () => {
+    expect(workspaceActionPreview(actions, false)).toEqual({
+      items: actions.slice(0, 4),
+      hiddenCount: 1,
+      expandable: true,
+    });
+  });
+
+  it("returns every unique action after expansion", () => {
+    expect(workspaceActionPreview(actions, true)).toEqual({
+      items: actions,
+      hiddenCount: 0,
+      expandable: true,
+    });
+  });
+
+  it("does not expose an expansion control for four or fewer actions", () => {
+    expect(workspaceActionPreview(actions.slice(0, 4), false)).toMatchObject({
+      hiddenCount: 0,
+      expandable: false,
+    });
+  });
+});
 
 type Overview = {
   key: string;
@@ -114,5 +144,43 @@ describe("progressive workspace overview merging", () => {
 
     expect(result[0]).toBe(system);
     expect(result[1]).toBe(detail);
+  });
+});
+
+describe("workspace overview scope", () => {
+  const system = { ...overview("system"), system: true };
+  const featureA = { ...overview("feature-a"), system: false };
+  const featureB = { ...overview("feature-b"), system: false };
+
+  it("uses the system workspace as an index of concrete workspaces", () => {
+    expect(
+      resolveWorkspaceOverviewScope([system, featureA, featureB], "system"),
+    ).toEqual({
+      activeGroup: system,
+      systemScope: true,
+      workspaceIndexGroups: [featureA, featureB],
+    });
+  });
+
+  it("keeps a concrete workspace focused on its own details", () => {
+    expect(
+      resolveWorkspaceOverviewScope([system, featureA, featureB], "feature-a"),
+    ).toEqual({
+      activeGroup: featureA,
+      systemScope: false,
+      workspaceIndexGroups: [],
+    });
+  });
+
+  it("hydrates only the active workspace details in either scope", () => {
+    expect(
+      workspaceOverviewDetailKeys([system, featureA, featureB], "system"),
+    ).toEqual(["system"]);
+    expect(
+      workspaceOverviewDetailKeys(
+        [system, featureA, featureB],
+        "feature-b",
+      ),
+    ).toEqual(["feature-b"]);
   });
 });

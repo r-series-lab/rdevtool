@@ -19,7 +19,14 @@ export const EN_BRANCH_MESSAGES: Record<string, string> = {
   "创建分支": "Create Branch",
   "合并分支": "Merge Branches",
   "提交推送": "Commit and Push",
+  "分支：{action} / {project}": "Branch: {action} / {project}",
   "副本管理": "Worktree Management",
+  "源分支合并到多个目标分支": "Merge a source branch into multiple target branches",
+  "批量创建目标分支": "Create target branches in batch",
+  "检查工作副本状态，并执行提交推送或仅推送":
+    "Check the working tree, then commit and push or push only",
+  "选择本地工作副本，切换分支或克隆新目录":
+    "Select a local working tree to switch branches or clone a new directory",
   "克隆": "Clone",
   "克隆分支": "Clone Branch",
   "推送分支": "Push Branch",
@@ -56,6 +63,17 @@ export const EN_BRANCH_MESSAGES: Record<string, string> = {
   "工作副本干净": "Working Tree Clean",
   "存在本地改动": "Local Changes",
   "最近提交": "Latest Commit",
+  "最近活动于 {time}": "Last active {time}",
+  "最近同步于 {time} · {source} · {count} 个分支":
+    "Last synced at {time} · {source} · {count} branches",
+  "本地仓库": "Local repository",
+  "本地引用（远端刷新失败）": "Local refs (remote refresh failed)",
+  "兼容模式": "Compatibility mode",
+  "；进入 Git 或切换项目会自动刷新":
+    "; refreshes automatically when opening Git or switching projects",
+  "进入 Git 或切换项目时会自动拉取远程分支，也可点右侧刷新图标重试":
+    "Remote branches load automatically when opening Git or switching projects. Use the refresh button on the right to retry.",
+  "当前项目参考：{project}": "Current project reference: {project}",
   "切换已暂停": "Branch Switch Paused",
   "先处理本地变更，再切换到目标分支。":
     "Resolve local changes before switching branches.",
@@ -83,6 +101,11 @@ export const EN_BRANCH_MESSAGES: Record<string, string> = {
   "收起文件列表": "Collapse File List",
   "默认显示前 {count} 条高度，可下拉查看更多。":
     "Shows {count} rows by default. Scroll for more.",
+  "搜索项目、分支、Commit 或摘要": "Search projects, branches, commits, or summaries",
+  "全部结果": "All Results",
+  "操作类型": "Operation Type",
+  "全部操作": "All Operations",
+  "失败": "Failed",
   "刷新分支任务记录": "Refresh Branch History",
   "清空分支任务记录": "Clear Branch History",
   "收起最近任务": "Collapse Recent Tasks",
@@ -92,6 +115,9 @@ export const EN_BRANCH_MESSAGES: Record<string, string> = {
   "旧记录缺少回放参数": "Replay parameters are unavailable for this older record.",
   "收起同参数记录": "Collapse Matching Runs",
   "展开同参数记录": "Expand Matching Runs",
+  "展开详情": "Expand Details",
+  "收起详情": "Collapse Details",
+  "还有 {count} 个项目": "{count} more projects",
   "含失败": "Includes Failures",
   "已提交": "Committed",
   "已提交并推送": "Committed and pushed",
@@ -101,6 +127,8 @@ export const EN_BRANCH_MESSAGES: Record<string, string> = {
   "推送成功": "Push succeeded",
   "推送分支失败": "Push branch failed",
   "合并成功": "Merge succeeded",
+  "合并失败": "Merge failed",
+  "已合并": "Merged",
   "合并并推送成功": "Merge and push succeeded",
   "创建成功": "Create succeeded",
   "克隆成功": "Clone succeeded",
@@ -113,6 +141,41 @@ export const EN_BRANCH_MESSAGES: Record<string, string> = {
     "GitLab rejected this operation (HTTP 403). Check token permissions and project membership.",
   "分支存在合并冲突（HTTP 409），请先处理冲突后重试。":
     "The branch has merge conflicts (HTTP 409). Resolve them before retrying.",
+  "分支存在合并冲突，请先处理冲突后重试。":
+    "The branches have merge conflicts. Resolve them before retrying.",
+  "GitLab 流水线尚未通过，当前不能合并。":
+    "The GitLab pipeline has not passed, so the merge is currently blocked.",
+  "GitLab 合并请求仍有未解决的讨论，当前不能合并。":
+    "The GitLab merge request has unresolved discussions and cannot be merged yet.",
+  "GitLab 合并请求尚未满足审批条件，当前不能合并。":
+    "The GitLab merge request has not met its approval requirements.",
+  "GitLab 当前暂不可合并，请检查合并请求状态。":
+    "GitLab currently blocks this merge. Check the merge request status.",
+  "存在合并冲突": "Merge conflicts detected",
+  "GitLab 身份验证失败": "GitLab authentication failed",
+  "GitLab 权限不足": "Insufficient GitLab permissions",
+  "流水线阻止合并": "Pipeline blocks merge",
+  "讨论未解决": "Unresolved discussions",
+  "审批条件未满足": "Approval requirements not met",
+  "GitLab 暂不可合并": "GitLab merge blocked",
+  "GitLab 状态：{status}": "GitLab status: {status}",
+  "MR：!{iid}": "MR: !{iid}",
+  "链接：{url}": "Link: {url}",
+  "建议：{suggestion}": "Suggestion: {suggestion}",
+  "先解决 {source} -> {target} 的合并冲突后重试。":
+    "Resolve the merge conflicts from {source} into {target}, then retry.",
+  "更新或重新配置有效的 GitLab 访问令牌后重试。":
+    "Update or configure a valid GitLab access token, then retry.",
+  "检查访问令牌 API 权限、项目成员角色和目标分支保护规则后重试。":
+    "Check the token API scope, project role, and target branch protection rules, then retry.",
+  "等待流水线通过或修复失败任务后重试。":
+    "Wait for the pipeline to pass or fix the failed jobs, then retry.",
+  "解决合并请求中的未解决讨论后重试。":
+    "Resolve all open discussions in the merge request, then retry.",
+  "完成合并请求要求的审批后重试。":
+    "Complete the required merge request approvals, then retry.",
+  "打开合并请求检查详细合并状态后重试。":
+    "Open the merge request, inspect its detailed merge status, then retry.",
   "当前批次包含同一项目的部分成功结果，请打开 Git 页面核对后按剩余目标执行。":
     "This batch has partial successes for the same project. Open the Git page, review it, and run the remaining targets.",
   "暂无分支任务": "No Branch Tasks",

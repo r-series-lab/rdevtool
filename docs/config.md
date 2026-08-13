@@ -32,6 +32,7 @@ Linux:
 | `config_sources.toml` | 自建配置源注册表：目录、文件映射、界面配置和能力范围 |
 | `sources/workspaces/<key>/` | 工作区自动生成的独立配置目录 |
 | `navigation.toml` | 入口事实源：网站、目录、应用、脚本 |
+| `actions.toml` | 参数化 Action 事实源：参数 Schema 与受控执行配置 |
 | `links.toml` | Link 事实源：本地文件、代理、Runtime 与页面步骤 |
 | `proxy.toml` | 代理事实源：profile、规则、工作区归属 |
 | `runtime_overrides.toml` | 配置源提供的 Runtime profile 覆盖 |
@@ -44,16 +45,19 @@ projects.template.toml
 workspace.template.toml
 project-workspace.template.toml
 navigation.template.toml
+actions.template.toml
 ```
 
 ## Local State And Migrations
 
-`~/.rdevtool/rdevtool.sqlite` 保存 notes、构建/合并历史、统一操作事件和少量本机状态，不是项目配置事实源。数据库启用 WAL，并使用 `PRAGMA user_version` 做只向前迁移：
+`~/.rdevtool/rdevtool.sqlite` 保存 notes、构建/合并历史、统一操作事件、分支观测缓存和少量本机状态，不是项目配置事实源。数据库启用 WAL，并使用 `PRAGMA user_version` 做只向前迁移：
 
 - schema v1：KV、notes、构建历史和合并历史基础表。
 - schema v2：为构建与合并历史增加工作区和项目实例范围。
 
 应用会在启动时逐级迁移旧库；如果数据库版本高于当前应用支持版本，会拒绝打开而不是尝试降级。SQLite 没有应用层加密，备份或迁移时应把它视为本机开发历史数据；不要在构建参数、活动 payload 或 notes 中保存 token、密码、cookie 和私钥。
+
+分支目录缓存与 Git 合并默认选择按“工作区 + 项目”分组，工作区实例切换后不会复用其他实例的分支上下文。分支目录仍会在进入 Git 页面时重新观测；旧版 `ruritool.*` 浏览器缓存只迁移一次，成功写入 SQLite 后即清理。
 
 ## Workspace
 
@@ -72,13 +76,15 @@ active_workspace = "r-series"
 
 `system` 工作区的配置源偏好保存在 `workspace.toml`；普通工作区的偏好保存在各自 `workspaces/<key>.toml` 的 `metadata` 中。App 会自动维护这些字段，通常不需要手改。
 
+桌面端会在 WebView `localStorage` 中保留后端已确认选择的启动镜像，以避免页面初始化时短暂跳回默认来源。TOML 始终是权威值，加载完成后会覆盖镜像；配置源管理器中的临时浏览选择不会写入镜像，也不会改变工作区偏好。
+
 CLI 与 App 使用同一套按工作区、按能力解析规则。Link 定义、代理 profile 和 Runtime override 可以来自不同配置源，计划结果中的 `sourceContext` 会明确列出三者；缺失或不支持能力时会失败，不会静默回退到默认源。
 
 App 从资源卡片、活动重试和托盘菜单执行 Link 时会固定工作区和 Link、Proxy、Runtime 三个来源。`skipped` 仅在没有风险时视为正常跳过，带风险的跳过会保持阻断状态。
 
 ## Config Sources
 
-配置源把资源入口、链路、代理和运行配置映射到一组可独立迁移的文件。内置来源包括默认配置和每个普通工作区的自动来源，也可以在 App 的“配置源管理”中添加团队目录或个人目录。
+配置源把资源入口、参数化 Action、链路、代理和运行配置映射到一组可独立迁移的文件。内置来源包括默认配置和每个普通工作区的自动来源，也可以在 App 的“配置源管理”中添加团队目录或个人目录。
 
 ```toml
 [[sources]]
@@ -91,6 +97,7 @@ capabilities = ["resource", "link", "proxy", "runtime"]
 
 [sources.files]
 navigation = "navigation.toml"
+actions = "actions.toml"
 links = "links.toml"
 proxy = "proxy.toml"
 runtimeOverrides = "runtime_overrides.toml"
@@ -128,9 +135,9 @@ worklog_file = "WORKLOG.md"
 worklog_auto_record = true
 include_all_projects = false
 include_all_navigation = false
-projects = ["imop-admin", "imop-coupon"]
+projects = ["demo-console", "demo-mobile"]
 navigation_categories = ["营销后台", "Jenkins"]
-navigation_entries = ["Jenkins 智能营销"]
+navigation_entries = ["CI 示例构建"]
 ```
 
 `root_dir` 是项目副本和运行目录的根；`resource_dir` 是该需求的文档、附件、脚本和软链接目录；`worklog_file` 必须是 `resource_dir` 内的相对 Markdown 路径。`worklog_auto_record` 默认开启，只记录构建、Git、Runtime 和关键配置操作的完成或失败结果，并对同一终态事件去重。它们与全局 SQLite notes 的用途不同，工作日志会随工作区资料一起迁移，并进入 AI 工作区上下文。

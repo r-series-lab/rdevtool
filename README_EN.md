@@ -11,15 +11,34 @@ Stack: `Tauri 2 + Rust + React + Vite + TypeScript + Material UI`.
 ## Product Areas
 
 - **Workbench** groups projects, shortcuts, proxy profiles, Links, build and Git actions, and recent activity by workspace.
-- **Resource Finder** manages projects, websites, directories, apps, and scripts with search, favorites, recents, and workspace filtering.
+- **Resource Finder** manages projects, websites, directories, apps, scripts, and parameterized Actions with search, favorites, recents, and workspace filtering.
+- **Parameterized Actions** generate a generic dialog from `actions.toml`, with fully visible multi-select values, fixed context, plan/apply, live logs, cancellation, background execution, failed-item retry, and operation history.
+- **CLI Bridge** bundles a version-matched `rdevtool` sidecar and exposes it to Action scripts through `RDEVTOOL_CLI`.
+- **Configuration Transfer** exports projects, workspaces, and resource sources as `.rdtpack` archives, then imports through path mapping, conflict planning, state validation, transaction backup, and rollback.
 - **Configuration Sources** select resource, Link, proxy, and runtime sources independently per workspace, with comparison and external-change detection.
 - **Link Chains** compose local-file checks, proxy lifecycle, runtime lifecycle, and page focus into previewable and runnable workflows.
-- **Git Workflow** covers branch listing, multi-target sync, branch creation, checkout, merge preview, merge, push status, and push.
-- **Build Tasks** create executable plans for Jenkins, local commands, and R Series packaging.
+- **Git Workflow** covers branch listing, multi-target sync, branch creation, checkout, merge preview, merge, push status, and push. Batch records use one row per project and keep 403 or merge-conflict evidence actionable.
+- **Build Tasks** create executable plans for Jenkins, local commands, and R Series packaging. Build Record prioritizes parameter overrides, defaults, failure evidence, and repeated-run timelines.
 - **Local Proxy** manages forwarding, mocks, blocking rules, diagnostics, import/export, and runtime binding.
 - **Project Runtime** inspects, preflights, starts, waits for, stops, restarts, and diagnoses supervised local processes.
-- **Activity Center** records build, Git, runtime, proxy, Link, and external-configuration activity with guarded replay.
+- **Activity Center** records Action, build, Git, runtime, proxy, Link, and external-configuration activity with guarded replay.
 - **AI / CLI** exposes deterministic JSON for important read and action surfaces so agents do not need GUI automation.
+
+## Interface Preview
+
+The Workspace image shows the current dark interface; operation images are generated from repository-owned mock data at the app's default window ratio. Public images contain no credentials. See the [Interface Guide](docs/interface-guide_EN.md) for the behavior behind each surface.
+
+<p align="center">
+  <img src="docs/assets/screenshots/workspace-overview.png" alt="The R Series Workspace home in dark mode" width="99%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshots/action-batch-deploy-pre.png" alt="Generic Batch Deploy Pre Action dialog" width="49%">
+  <img src="docs/assets/screenshots/build-record-details.png" alt="Project Management Build controls and Build Record" width="49%">
+</p>
+<p align="center">
+  <img src="docs/assets/screenshots/branch-record-summary.png" alt="Project Management Git controls and Branch Record" width="99%">
+</p>
 
 ## Quick Start
 
@@ -67,9 +86,14 @@ rdevtool --json workspace list
 rdevtool --json projects list
 rdevtool --json navigation search Jenkins
 rdevtool --json config-source list
+rdevtool --workspace <key> --json action validate
+rdevtool --workspace <key> --json action plan <action-key> --set projects='["demo"]'
+rdevtool --workspace <key> --json action apply --plan-id <plan-id> --yes
 rdevtool --json link list
 rdevtool --json proxy list
 rdevtool --json runtime list --running-only
+rdevtool --json history operations --domain action --limit 24
+rdevtool --workspace <key> --json workflow chain list
 ```
 
 Preview consequential operations before running them:
@@ -78,6 +102,7 @@ Preview consequential operations before running them:
 rdevtool --json build plan <project> --target <target> --env <env> --branch <branch>
 rdevtool --json git overview --project <project> --source <source> --target <target>
 rdevtool --json git push-status --project <project>
+rdevtool --workspace <key> --json action plan <action-key> --params-file ./params.json
 ```
 
 The complete CLI reference currently lives in [docs/cli.md](docs/cli.md). Stable command names and JSON keys remain English even when reader-facing documentation is localized.
@@ -101,6 +126,7 @@ Main files:
 | `workspaces/*.toml` | Scoped workspaces containing project, resource, and proxy references |
 | `config_sources.toml` | Custom configuration sources and capability mappings |
 | `navigation.toml` | Websites, directories, apps, and scripts |
+| `actions.toml` | Parameterized Action schemas and controlled process execution |
 | `links.toml` | Reusable local-debug chains |
 | `proxy.toml` | Local proxy profiles, rules, and workspace ownership |
 | `runtime_overrides.toml` | Runtime overrides supplied by a configuration source |
@@ -119,7 +145,10 @@ Main files:
 ## Documentation
 
 - [docs/cli.md](docs/cli.md): command grammar, JSON contracts, and examples.
+- [docs/interface-guide_EN.md](docs/interface-guide_EN.md): workspace, generic Action, Build Record, and Branch Record interface behavior.
 - [docs/config.md](docs/config.md): local configuration and the workspace model.
+- [docs/configuration-packs_EN.md](docs/configuration-packs_EN.md): safe project, workspace, and resource configuration transfer and rollback.
+- [docs/resource-actions.md](docs/resource-actions.md): parameterized Actions, script input protocol, and safety boundaries.
 - [docs/r-series-apps.md](docs/r-series-apps.md): R Series project registration, build targets, workspaces, and resource entry patterns.
 - [docs/ai-agent.md](docs/ai-agent.md): agent workflow and safety rules.
 - [docs/architecture.md](docs/architecture.md): shared core, domain boundaries, and staged decomposition.
@@ -139,6 +168,7 @@ npm run web:dev
 npm run web:build
 npm run web:test
 npm run web:test:e2e
+npm run docs:screenshots
 npm run rust-check
 npm run rust-test
 npm run manifest:check

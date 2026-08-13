@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
+use crate::app_message::AppMessage;
 use crate::config::default_config_dir;
 use crate::log_support::DEFAULT_RUNTIME_LOG_MAX_BYTES;
 use crate::self_info::{SelfIdentity, collect_self_identity};
@@ -16,7 +17,9 @@ pub struct HealthSnapshot {
     pub generated_at_ms: u64,
     pub status_key: String,
     pub status_label: String,
+    pub status_message: AppMessage,
     pub summary: String,
+    pub summary_message: AppMessage,
     pub identity: SelfIdentity,
     pub storage_total_bytes: u64,
     pub storage: Vec<HealthStorageEntry>,
@@ -29,6 +32,7 @@ pub struct HealthSnapshot {
 pub struct HealthStorageEntry {
     pub key: String,
     pub label: String,
+    pub label_message: AppMessage,
     pub path: PathBuf,
     pub exists: bool,
     pub object_type: String,
@@ -38,6 +42,7 @@ pub struct HealthStorageEntry {
     pub largest_file_bytes: u64,
     pub status_key: String,
     pub detail: String,
+    pub detail_message: AppMessage,
     pub inspect_error: Option<String>,
 }
 
@@ -47,7 +52,10 @@ pub struct HealthRisk {
     pub code: String,
     pub severity: String,
     pub summary: String,
+    pub summary_message: AppMessage,
     pub detail: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail_message: Option<AppMessage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,6 +63,7 @@ pub struct HealthRisk {
 pub struct HealthRecommendedAction {
     pub command: String,
     pub reason: String,
+    pub reason_message: AppMessage,
     pub risk: String,
 }
 
@@ -110,6 +119,7 @@ fn collect_health_snapshot_in(config_dir: &Path, identity: SelfIdentity) -> Heal
                 code: "runtimeLogOversized".to_string(),
                 severity: "warning".to_string(),
                 summary: "存在超过轮转阈值的运行日志".to_string(),
+                summary_message: AppMessage::new("health.risk.runtime_log_oversized.summary"),
                 detail: format!(
                     "{}（{} 字节）将在对应项目下次启动或重启时轮转",
                     usage
@@ -119,6 +129,19 @@ fn collect_health_snapshot_in(config_dir: &Path, identity: SelfIdentity) -> Heal
                         .display(),
                     usage.largest_file_bytes
                 ),
+                detail_message: Some(
+                    AppMessage::new("health.risk.runtime_log_oversized.detail")
+                        .with_param(
+                            "path",
+                            usage
+                                .largest_file_path
+                                .as_deref()
+                                .unwrap_or(&path)
+                                .display()
+                                .to_string(),
+                        )
+                        .with_param("bytes", usage.largest_file_bytes),
+                ),
             });
         }
         if let Some(error) = usage.inspect_error.as_ref() {
@@ -126,12 +149,17 @@ fn collect_health_snapshot_in(config_dir: &Path, identity: SelfIdentity) -> Heal
                 code: format!("{key}InspectFailed"),
                 severity: "warning".to_string(),
                 summary: format!("无法完整统计{label}"),
+                summary_message: AppMessage::new(format!(
+                    "health.risk.storage_inspect_failed.{key}.summary"
+                )),
                 detail: error.clone(),
+                detail_message: None,
             });
         }
         storage.push(HealthStorageEntry {
             key: key.to_string(),
             label: label.to_string(),
+            label_message: AppMessage::new(format!("health.storage.{key}.label")),
             path,
             exists: usage.exists,
             object_type: usage.object_type,
@@ -141,6 +169,9 @@ fn collect_health_snapshot_in(config_dir: &Path, identity: SelfIdentity) -> Heal
             largest_file_bytes: usage.largest_file_bytes,
             status_key: status_key.to_string(),
             detail: format!("{} 个文件，共 {} 字节", usage.file_count, usage.size_bytes),
+            detail_message: AppMessage::new("health.storage.detail")
+                .with_param("count", usage.file_count)
+                .with_param("bytes", usage.size_bytes),
             inspect_error: usage.inspect_error,
         });
     }
@@ -152,6 +183,7 @@ fn collect_health_snapshot_in(config_dir: &Path, identity: SelfIdentity) -> Heal
             code: "binarySourceMismatch".to_string(),
             severity: "warning".to_string(),
             summary: "当前可执行文件与本地源码版本不一致".to_string(),
+            summary_message: AppMessage::new("health.risk.binary_source_mismatch.summary"),
             detail: format!(
                 "build={} source={}",
                 identity.build_commit.as_deref().unwrap_or("unknown"),
@@ -160,6 +192,7 @@ fn collect_health_snapshot_in(config_dir: &Path, identity: SelfIdentity) -> Heal
                     .as_deref()
                     .unwrap_or("unknown")
             ),
+            detail_message: None,
         });
     }
 
@@ -179,6 +212,15 @@ fn collect_health_snapshot_in(config_dir: &Path, identity: SelfIdentity) -> Heal
         recommended_actions.push(HealthRecommendedAction {
             command: "rdevtool --json artifacts cleanup-plan --kind runtimeLog".to_string(),
             reason: "先查看日志归属与活动状态，再决定是否清理；活跃日志不会被直接删除".to_string(),
+            reason_message: AppMessage::new("health.action.review_runtime_logs.reason"),
+            risk: "readOnly".to_string(),
+        });
+    }
+    if risks.iter().any(|risk| risk.code == "binarySourceMismatch") {
+        recommended_actions.push(HealthRecommendedAction {
+            command: "rdevtool --json agent compatibility".to_string(),
+            reason: "核对当前 CLI 与 rDevTool Skill 的命令和能力契约，再决定是否更新".to_string(),
+            reason_message: AppMessage::new("health.action.check_agent_compatibility.reason"),
             risk: "readOnly".to_string(),
         });
     }
@@ -191,10 +233,20 @@ fn collect_health_snapshot_in(config_dir: &Path, identity: SelfIdentity) -> Heal
             .as_millis() as u64,
         status_key: status_key.to_string(),
         status_label: status_label.to_string(),
+        status_message: AppMessage::new(if warning_count > 0 {
+            "health.status.warning"
+        } else {
+            "health.status.ok"
+        }),
         summary: if warning_count == 0 {
             "rDevTool 核心存储与当前可执行文件状态正常".to_string()
         } else {
             format!("发现 {warning_count} 个需要关注的问题")
+        },
+        summary_message: if warning_count == 0 {
+            AppMessage::new("health.snapshot.ok")
+        } else {
+            AppMessage::new("health.snapshot.warning").with_param("count", warning_count)
         },
         identity,
         storage_total_bytes,
@@ -336,6 +388,12 @@ mod tests {
             current_source_commit: None,
             current_source_dirty: Some(true),
             source_commit_matches_build: None,
+            recommended_invocation: root.join("rdevtool").display().to_string(),
+            invocation_recommendation_reason: "explicitDevelopmentExecutable".to_string(),
+            source_invocation: Some(format!(
+                "cargo run --quiet --manifest-path {}/Cargo.toml --",
+                root.display()
+            )),
         }
     }
 
@@ -370,6 +428,40 @@ mod tests {
                 .iter()
                 .any(|risk| risk.code == "runtimeLogOversized")
         );
+        assert_eq!(snapshot.summary_message.key, "health.snapshot.warning");
+        let risk = snapshot
+            .risks
+            .iter()
+            .find(|risk| risk.code == "runtimeLogOversized")
+            .expect("runtime log risk");
+        assert_eq!(
+            risk.summary_message.key,
+            "health.risk.runtime_log_oversized.summary"
+        );
+        assert_eq!(
+            risk.detail_message
+                .as_ref()
+                .map(|message| message.key.as_str()),
+            Some("health.risk.runtime_log_oversized.detail")
+        );
+        fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn recommends_agent_compatibility_for_binary_source_mismatch() {
+        let root = std::env::temp_dir().join(format!("rdevtool-health-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create temp root");
+        let mut identity = test_identity(&root);
+        identity.install_kind = "installed".to_string();
+        identity.build_commit = Some("build-commit".to_string());
+        identity.current_source_commit = Some("source-commit".to_string());
+        identity.source_commit_matches_build = Some(false);
+
+        let snapshot = collect_health_snapshot_in(&root, identity);
+        assert!(snapshot.recommended_actions.iter().any(|action| {
+            action.command == "rdevtool --json agent compatibility"
+                && action.reason_message.key == "health.action.check_agent_compatibility.reason"
+        }));
         fs::remove_dir_all(root).expect("cleanup");
     }
 }

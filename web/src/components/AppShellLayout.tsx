@@ -4,10 +4,16 @@ import type { PageKey } from "../app-shell";
 import type {
   AppExitRuntimePolicy,
   CreateProjectWorkspacePayload,
+  ManagedArtifactFocusRequest,
   ProjectManagementViewKey,
   ProjectWorkspaceSummary,
 } from "../app-types";
 import type { ActivityEntry } from "../lib/activityCenter";
+import type {
+  ActiveSession,
+  ActiveSessionAction,
+  ActiveSessionActionResult,
+} from "../lib/activeSessions";
 import { useI18n } from "../i18n";
 import type { AppStyleMode } from "../theme";
 import {
@@ -25,11 +31,12 @@ import {
 import { ActivityCenter } from "./ActivityCenter";
 import { AppToast } from "./AppToast";
 import { SettingsPanel, type SettingsSection } from "./SettingsPanel";
-import { OPEN_SETTINGS_EVENT } from "./settingsEvents";
 import {
-  WorkspaceSwitcherMenu,
-  workspaceDisplayName,
-} from "./WorkspaceSwitcherMenu";
+  OPEN_SETTINGS_EVENT,
+  type OpenSettingsEventDetail,
+} from "./settingsEvents";
+import { WorkspaceSwitcherMenu } from "./WorkspaceSwitcherMenu";
+import { workspaceDisplayName } from "../lib/workspacePresentation";
 
 type NavItem = {
   key: PageKey;
@@ -65,6 +72,9 @@ type AppShellLayoutProps = {
   onProjectConfigSaved: () => Promise<void> | void;
   activityItems: ActivityEntry[];
   activityAlertCount: number;
+  activeSessions: ActiveSession[];
+  activeSessionsLoading: boolean;
+  activeSessionsError: string;
   onOpenActivityEntry: (entry: ActivityEntry) => void;
   onOpenActivityResource: (entry: ActivityEntry) => void;
   onRunActivityAction: (entry: ActivityEntry) => Promise<void> | void;
@@ -72,6 +82,11 @@ type AppShellLayoutProps = {
   onResolveActivityEntry: (entry: ActivityEntry) => void;
   onResolveActivityEntries: (entries: ActivityEntry[]) => void;
   onClearHandledActivities: () => void;
+  onRefreshActiveSessions: (options?: { silent?: boolean }) => Promise<void> | void;
+  onRunActiveSessionAction: (
+    session: ActiveSession,
+    action: ActiveSessionAction,
+  ) => Promise<ActiveSessionActionResult> | ActiveSessionActionResult;
   busy: string;
   error: string;
   children: ReactNode;
@@ -138,6 +153,9 @@ export function AppShellLayout({
   onProjectConfigSaved,
   activityItems,
   activityAlertCount,
+  activeSessions,
+  activeSessionsLoading,
+  activeSessionsError,
   onOpenActivityEntry,
   onOpenActivityResource,
   onRunActivityAction,
@@ -145,6 +163,8 @@ export function AppShellLayout({
   onResolveActivityEntry,
   onResolveActivityEntries,
   onClearHandledActivities,
+  onRefreshActiveSessions,
+  onRunActiveSessionAction,
   busy,
   error,
   children,
@@ -153,6 +173,8 @@ export function AppShellLayout({
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsInitialSection, setSettingsInitialSection] =
     useState<SettingsSection | undefined>();
+  const [settingsArtifactFocus, setSettingsArtifactFocus] =
+    useState<ManagedArtifactFocusRequest | null>(null);
   const [activityOpen, setActivityOpen] = useState(false);
   const [workspaceMenuAnchor, setWorkspaceMenuAnchor] = useState<HTMLElement | null>(null);
   const [workspaceSwitchingKey, setWorkspaceSwitchingKey] = useState("");
@@ -182,7 +204,10 @@ export function AppShellLayout({
     }
   }, [activePage]);
 
-  function openSettings(section?: SettingsSection) {
+  function openSettings(
+    section?: SettingsSection,
+    artifactFocus?: ManagedArtifactFocusRequest,
+  ) {
     if (section === "workspace") {
       onOpenWorkspaceConfig();
       return;
@@ -194,6 +219,9 @@ export function AppShellLayout({
     setWorkspaceMenuAnchor(null);
     setActivityOpen(false);
     setSettingsInitialSection(section);
+    setSettingsArtifactFocus(
+      section === "artifacts" ? (artifactFocus ?? null) : null,
+    );
     setSettingsOpen(true);
   }
 
@@ -253,8 +281,8 @@ export function AppShellLayout({
 
   useEffect(() => {
     const handleOpenSettings = (event: Event) => {
-      const section = (event as CustomEvent<{ section?: SettingsSection }>).detail?.section;
-      openSettings(section);
+      const detail = (event as CustomEvent<OpenSettingsEventDetail>).detail;
+      openSettings(detail?.section, detail?.artifactFocus);
     };
     window.addEventListener(OPEN_SETTINGS_EVENT, handleOpenSettings);
     return () => {
@@ -322,7 +350,7 @@ export function AppShellLayout({
           type="button"
           className="activity-icon-toggle"
           aria-label={t(activityOpen ? "关闭活动中心" : "打开活动中心")}
-          title={t("活动")}
+          title={t("运行与活动")}
           onClick={() => setActivityOpen((current) => !current)}
           aria-expanded={activityOpen}
         >
@@ -331,6 +359,8 @@ export function AppShellLayout({
             <span className="activity-badge">
               {activityAlertCount > 99 ? "99+" : activityAlertCount}
             </span>
+          ) : activeSessions.length > 0 ? (
+            <span className="activity-live-indicator" aria-hidden="true" />
           ) : null}
         </button>
         <button
@@ -470,7 +500,7 @@ export function AppShellLayout({
                 <span className="workspace-switcher-name">
                   {activeProjectWorkspace?.system
                     ? t("全局")
-                    : workspaceDisplayName(activeProjectWorkspace)}
+                    : workspaceDisplayName(activeProjectWorkspace, t)}
                 </span>
               </span>
               <ExpandIcon className="workspace-switcher-chevron" fontSize="small" />
@@ -503,6 +533,7 @@ export function AppShellLayout({
           projectWorkspaces={projectWorkspaces}
           activeProjectWorkspaceKey={activeProjectWorkspaceKey}
           initialSection={settingsInitialSection}
+          initialArtifactFocus={settingsArtifactFocus}
           activePage={activePage}
           enabledPages={enabledPages}
           onEnabledPagesChange={onEnabledPagesChange}
@@ -529,6 +560,16 @@ export function AppShellLayout({
           onRefresh={onRefreshActivities}
           onResolveEntry={onResolveActivityEntry}
           onResolveEntries={onResolveActivityEntries}
+          activeSessions={activeSessions}
+          activeSessionsLoading={activeSessionsLoading}
+          activeSessionsError={activeSessionsError}
+          onRefreshActiveSessions={onRefreshActiveSessions}
+          onRunActiveSessionAction={async (session, action) => {
+            if (action === "details") {
+              setActivityOpen(false);
+            }
+            return await onRunActiveSessionAction(session, action);
+          }}
           onOpenEntry={(entry) => {
             onOpenActivityEntry(entry);
             setActivityOpen(false);
@@ -565,6 +606,16 @@ export function AppShellLayout({
             onRefresh={onRefreshActivities}
             onResolveEntry={onResolveActivityEntry}
             onResolveEntries={onResolveActivityEntries}
+            activeSessions={activeSessions}
+            activeSessionsLoading={activeSessionsLoading}
+            activeSessionsError={activeSessionsError}
+            onRefreshActiveSessions={onRefreshActiveSessions}
+            onRunActiveSessionAction={async (session, action) => {
+              if (action === "details") {
+                setActivityOpen(false);
+              }
+              return await onRunActiveSessionAction(session, action);
+            }}
             onOpenEntry={(entry) => {
               onOpenActivityEntry(entry);
             }}

@@ -15,6 +15,7 @@ type UseMergeSelectionOptions = {
   selectedProjectInfo: ProjectSummary | null;
   branchEntries: BranchOption[];
   branchOptions: string[];
+  selectionStorageKey: string;
   selectedProjectSelection: ProjectSelectionEntry | null;
   setProjectSelections: Dispatch<SetStateAction<ProjectSelectionMap>>;
 };
@@ -54,13 +55,14 @@ export function useMergeSelection({
   selectedProjectInfo,
   branchEntries,
   branchOptions,
+  selectionStorageKey,
   selectedProjectSelection,
   setProjectSelections,
 }: UseMergeSelectionOptions) {
-  const initializedProjectRef = useRef("");
+  const initializedSelectionRef = useRef("");
   const [mergeSource, setMergeSource] = useState("");
   const [mergeTarget, setMergeTarget] = useState("");
-  const [selectionProjectKey, setSelectionProjectKey] = useState("");
+  const [initializedSelectionKey, setInitializedSelectionKey] = useState("");
 
   const targetBranchKeywords = useMemo(
     () =>
@@ -84,8 +86,8 @@ export function useMergeSelection({
   );
 
   useEffect(() => {
-    initializedProjectRef.current = "";
-    setSelectionProjectKey("");
+    initializedSelectionRef.current = "";
+    setInitializedSelectionKey("");
     if (!enabled) {
       setMergeSource("");
       setMergeTarget("");
@@ -94,18 +96,18 @@ export function useMergeSelection({
 
   useEffect(() => {
     if (!enabled || !selectedProject) {
-      initializedProjectRef.current = "";
-      setSelectionProjectKey("");
+      initializedSelectionRef.current = "";
+      setInitializedSelectionKey("");
       setMergeSource("");
       setMergeTarget("");
       return;
     }
 
-    if (initializedProjectRef.current === selectedProject) {
+    if (initializedSelectionRef.current === selectionStorageKey) {
       return;
     }
 
-    initializedProjectRef.current = selectedProject;
+    initializedSelectionRef.current = selectionStorageKey;
     const nextTarget = resolveInitialTargetBranch(
       selectedProjectSelection?.mergeTarget,
       targetBranchOptions,
@@ -120,13 +122,14 @@ export function useMergeSelection({
 
     setMergeTarget(nextTarget);
     setMergeSource(nextSource);
-    setSelectionProjectKey(selectedProject);
+    setInitializedSelectionKey(selectionStorageKey);
   }, [
     branchOptions,
     enabled,
     selectedProject,
     selectedProjectSelection?.mergeSource,
     selectedProjectSelection?.mergeTarget,
+    selectionStorageKey,
     sourceBranchOptions,
     targetBranchOptions,
   ]);
@@ -162,12 +165,16 @@ export function useMergeSelection({
   ]);
 
   useEffect(() => {
-    if (!enabled || !selectedProject || selectionProjectKey !== selectedProject) {
+    if (
+      !enabled ||
+      !selectedProject ||
+      initializedSelectionKey !== selectionStorageKey
+    ) {
       return;
     }
 
     setProjectSelections((current) => {
-      const previous = current[selectedProject] ?? {};
+      const previous = current[selectionStorageKey] ?? {};
       const next = normalizeProjectSelectionEntry({
         ...previous,
         mergeSource: mergeSource || undefined,
@@ -180,7 +187,7 @@ export function useMergeSelection({
 
       return {
         ...current,
-        [selectedProject]: next ?? {},
+        [selectionStorageKey]: next ?? {},
       };
     });
   }, [
@@ -188,7 +195,8 @@ export function useMergeSelection({
     mergeSource,
     mergeTarget,
     selectedProject,
-    selectionProjectKey,
+    initializedSelectionKey,
+    selectionStorageKey,
     setProjectSelections,
   ]);
 

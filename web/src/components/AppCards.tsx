@@ -69,7 +69,7 @@ export function HistoryCard({
   title: string;
   subtitle: string;
   badge?: ReactNode;
-  detail: string;
+  detail: ReactNode;
   meta: string[];
   children?: ReactNode;
   pinned?: boolean;
@@ -96,20 +96,16 @@ export function HistoryCard({
         overflow: "hidden",
         borderRadius: "14px",
         bgcolor:
-          pinned && theme.palette.mode === "dark"
-            ? alpha(theme.palette.primary.main, 0.07)
-            : pinned
-              ? alpha(theme.palette.primary.main, 0.045)
-              : theme.palette.mode === "dark"
-                ? "rgba(18,22,28,0.42)"
-                : "rgba(255,255,255,0.84)",
+          theme.palette.mode === "dark"
+            ? "rgba(18,22,28,0.42)"
+            : "rgba(255,255,255,0.84)",
         borderColor: pinned
-          ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.26 : 0.22)
+          ? alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.22 : 0.18)
           : theme.palette.mode === "dark"
             ? "rgba(143,184,234,0.085)"
             : "rgba(74,96,122,0.14)",
         boxShadow: pinned
-          ? `0 0 0 1px ${alpha(theme.palette.primary.main, theme.palette.mode === "dark" ? 0.08 : 0.06)}, 0 12px 28px ${alpha(theme.palette.primary.main, 0.08)}`
+          ? `inset 0 1px 0 ${alpha(theme.palette.common.white, theme.palette.mode === "dark" ? 0.035 : 0.72)}, 0 0 0 1px ${alpha(theme.palette.primary.main, 0.045)}, 0 10px 24px ${alpha(theme.palette.primary.main, 0.045)}`
           : theme.palette.mode === "dark"
             ? "inset 0 1px 0 rgba(255,255,255,0.028), 0 10px 24px rgba(0,0,0,0.14)"
             : "inset 0 1px 0 rgba(255,255,255,0.74), 0 12px 28px rgba(33,52,74,0.05)",
@@ -196,24 +192,30 @@ export function HistoryCard({
             </Box>
             <Box className="app-history-card-actions" sx={{ flexShrink: 0, maxWidth: "52%" }}>{badge}</Box>
           </Stack>
-          <Typography
-            className="app-history-card-detail"
-            variant="caption"
-            color="text.secondary"
-            title={detail}
-            sx={{
-              display: "-webkit-box",
-              overflow: "hidden",
-              WebkitBoxOrient: "vertical",
-              WebkitLineClamp: 2,
-              overflowWrap: "anywhere",
-              lineHeight: 1.38,
-              fontSize: "0.76rem",
-              fontWeight: 650,
-            }}
-          >
-            {detail}
-          </Typography>
+          {typeof detail === "string" ? (
+            <Typography
+              className="app-history-card-detail"
+              variant="caption"
+              color="text.secondary"
+              title={detail}
+              sx={{
+                display: "-webkit-box",
+                overflow: "hidden",
+                WebkitBoxOrient: "vertical",
+                WebkitLineClamp: 2,
+                overflowWrap: "anywhere",
+                lineHeight: 1.38,
+                fontSize: "0.76rem",
+                fontWeight: 650,
+              }}
+            >
+              {detail}
+            </Typography>
+          ) : (
+            <Box className="app-history-card-detail-node" minWidth={0}>
+              {detail}
+            </Box>
+          )}
           <Stack
             className="app-history-card-meta"
             direction="row"

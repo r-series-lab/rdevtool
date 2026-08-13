@@ -14,7 +14,7 @@ Tray actions -------------> Rust core -> operation events
 - `src-tauri/`：窗口、托盘、文件监听和 Tauri transport。Command 负责解析参数、调用 core、序列化结果。
 - `web/src/`：页面、组件、hooks 与前端派生状态。业务事实来自 typed response，不在 UI 复制 domain 规则。
 - TOML：项目、工作区、配置源和工具定义的事实源。
-- SQLite：历史、统一操作事件、本机运行状态，以及兼容保留的全局便笺。
+- SQLite：历史、统一操作事件、本机运行状态、按工作区隔离的分支观测缓存，以及兼容保留的全局便笺。
 - 应用数据目录 Markdown：知识库事实源，包含收件箱、项目级经验、跨项目 playbook 与共享环境约定；索引只返回有界摘要和路径，正文按需读取。
 
 ## Domain Map

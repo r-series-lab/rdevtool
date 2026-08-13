@@ -73,22 +73,22 @@ describe("Link editor migration", () => {
           type: "runtime.start",
           project: "demo",
           debugProfile: "proxy",
-          runtimeProfile: "dc2-vke",
-          command: "npm exec vite -- --mode dc2-vke",
+          runtimeProfile: "env_demo_pre",
+          command: "npm exec vite -- --mode env_demo_pre",
           expectedPort: 1420,
         },
       ],
     };
     const draft = buildLinkDraftFromConfig(link, [], []);
     expect(draft.debugProfile).toBe("proxy");
-    expect(draft.runtimeProfile).toBe("dc2-vke");
-    expect(draft.commandOverride).toContain("--mode dc2-vke");
+    expect(draft.runtimeProfile).toBe("env_demo_pre");
+    expect(draft.commandOverride).toContain("--mode env_demo_pre");
     expect(draft.expectedPort).toBe("1420");
 
     const saved = buildLinkConfig(draft, link);
     expect(saved.steps[0]).toMatchObject({
-      runtimeProfile: "dc2-vke",
-      command: "npm exec vite -- --mode dc2-vke",
+      runtimeProfile: "env_demo_pre",
+      command: "npm exec vite -- --mode env_demo_pre",
       expectedPort: 1420,
     });
   });

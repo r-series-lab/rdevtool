@@ -1,0 +1,76 @@
+schema_version = 1
+
+# Parameterized resource actions live here. Resource entries reference an action with:
+# kind = "tool", tool = "action", tool_key = "example-action", tool_action = "run".
+#
+# [[actions]]
+# key = "example-action"
+# name = "Example action"
+# description = "Runs a fixed program and passes validated parameters as JSON on stdin."
+# effect = "local_write"
+#
+# High-risk Actions can require a persisted, single-use plan before apply:
+# [actions.execution]
+# mode = "plan_apply"
+# plan_ttl_seconds = 300
+#
+# [actions.runner]
+# type = "process"
+# program = "/bin/zsh"
+# args = ["scripts/example-action.sh"]
+# input = "json_stdin"
+# output = "structured_json" # Optional; defaults to text.
+# timeout_seconds = 900
+#
+# The App injects its bundled CLI path as RDEVTOOL_CLI. A direct CLI Action can
+# also use program = "@rdevtool"; scripts should invoke "$RDEVTOOL_CLI".
+#
+# [[actions.params]]
+# key = "projects"
+# label = "Projects"
+# type = "project_multi"
+# required = true
+#
+# [actions.params.source]
+# type = "projects"
+# deploy_target = "preview"
+#
+# [[actions.params]]
+# key = "branchOverride"
+# label = "Shared branch override"
+# type = "branch"
+# description = "Leave empty to use each project's configured or current branch."
+#
+# [[actions.params]]
+# key = "environment"
+# label = "Environment"
+# type = "select"
+# options = ["preview-1", "preview-2"]
+# default = "preview-1"
+#
+# Number parameters support min, max, and step. Text-like parameters support
+# min_length and max_length; multi-value parameters support min_items and
+# max_items. The Rust runner always validates these constraints again.
+# [[actions.params]]
+# key = "port"
+# label = "Port"
+# type = "number"
+# required = true
+# min = 1
+# max = 65535
+# step = 1
+#
+# A boolean dry-run role changes the submit label and skips remote-write
+# confirmation while true:
+# [[actions.params]]
+# key = "planOnly"
+# label = "Plan only"
+# type = "boolean"
+# default = true
+# role = "dry_run"
+#
+# [[actions.params]]
+# key = "target"
+# label = "Target"
+# type = "hidden"
+# default = "preview"

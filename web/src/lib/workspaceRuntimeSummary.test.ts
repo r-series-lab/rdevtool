@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
 import type { ProjectRuntimeEntry } from "../app-types";
-import { workspaceProjectRuntimeProfileInfo } from "./workspaceRuntimeSummary";
+import { translateMessage, type Translate } from "../i18n";
+import {
+  translateWorkspaceRuntimeSourceTag,
+  translateWorkspaceRuntimeSummary,
+  workspaceProjectRuntimeProfileInfo,
+} from "./workspaceRuntimeSummary";
+
+const englishT: Translate = (message, params) =>
+  translateMessage("en-US", message, params);
 
 const runtimeEntry: ProjectRuntimeEntry = {
   key: "demo",
@@ -131,5 +139,28 @@ describe("workspace runtime summary", () => {
     expect(result.profileMissing).toBe(true);
     expect(result.summary).toContain("档案 缺失 (removed)");
     expect(result.sourceTags[0]?.label).toBe("档案 · 选择已失效");
+  });
+
+  it("translates every generated summary segment in the English interface", () => {
+    expect(
+      translateWorkspaceRuntimeSummary(
+        "切换到该工作区后读取默认启动档案",
+        englishT,
+      ),
+    ).toBe("Switch to this workspace to load its default launch profile");
+    expect(
+      translateWorkspaceRuntimeSummary(
+        "档案 默认 · 端口 自动 · Runtime 默认 · 网络代理 关 · 本地代理 关",
+        englishT,
+      ),
+    ).toBe(
+      "Profile Default · Port Auto · Runtime Default · Network Proxy Off · Local Proxy Off",
+    );
+    expect(
+      translateWorkspaceRuntimeSourceTag("命令/端口 · 项目基础/自动识别", englishT),
+    ).toBe("Command/Port · Project Base/Auto Detect");
+    expect(
+      translateWorkspaceRuntimeSourceTag("环境 · 继承的共享环境", englishT),
+    ).toBe("Environment · Inherited Shared Runtime");
   });
 });

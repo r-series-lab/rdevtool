@@ -10,6 +10,7 @@ import {
   mergeWorkspaceActionPatches,
   mergeWorkspaceOverviewDetails,
   mergeWorkspaceOverviewSummaries,
+  workspaceOverviewDetailKeys,
   type WorkspaceProgressiveOverview,
 } from "../lib/workspaceOverviewSync";
 
@@ -81,9 +82,7 @@ export function useWorkspaceOverviewData<TOverview extends WorkspaceProgressiveO
       setLoading(false);
 
       const activeKey = activeWorkspaceKeyRef.current.trim();
-      const activeKeys = summaries.some((group) => group.key === activeKey)
-        ? [activeKey]
-        : [];
+      const activeKeys = workspaceOverviewDetailKeys(summaries, activeKey);
       if (activeKeys.length > 0) {
         const activeDetails = await invoke<TOverview[]>(
           "get_workspace_pinned_actions_overview_details",
@@ -96,28 +95,6 @@ export function useWorkspaceOverviewData<TOverview extends WorkspaceProgressiveO
           mergeWorkspaceOverviewDetails(
             groupsRef.current,
             activeDetails,
-          ),
-        );
-      }
-
-      const remainingKeys = summaries
-        .map((group) => group.key)
-        .filter((key) => !activeKeys.includes(key));
-      if (remainingKeys.length > 0) {
-        await new Promise<void>((resolve) => {
-          window.setTimeout(resolve, 0);
-        });
-        const remainingDetails = await invoke<TOverview[]>(
-          "get_workspace_pinned_actions_overview_details",
-          { workspaceKeys: remainingKeys },
-        );
-        if (requestId !== overviewRequestIdRef.current) {
-          return;
-        }
-        commitGroups(
-          mergeWorkspaceOverviewDetails(
-            groupsRef.current,
-            remainingDetails,
           ),
         );
       }
@@ -174,7 +151,7 @@ export function useWorkspaceOverviewData<TOverview extends WorkspaceProgressiveO
 
   useEffect(() => {
     void loadOverview();
-  }, [loadOverview]);
+  }, [activeWorkspaceKey, loadOverview]);
 
   useEffect(() => {
     let disposed = false;

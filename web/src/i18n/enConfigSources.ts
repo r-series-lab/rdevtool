@@ -1,4 +1,12 @@
 export const EN_CONFIG_SOURCE_MESSAGES: Record<string, string> = {
+  "配置源已变更": "Configuration source changed",
+  "配置源列表已变更": "Configuration source list changed",
+  "配置源“{name}”已变更": "Configuration source \"{name}\" changed",
+  "检测到配置源列表发生外部修改":
+    "External changes to the configuration source list were detected",
+  "检测到配置源文件发生外部修改":
+    "External changes to configuration source files were detected",
+  "比较配置源": "Compare Configuration Source",
   "，{count} 个源文件缺失": ", {count} source files missing",
   "“{left}”与“{right}”完全一致": "\"{left}\" and \"{right}\" are identical",
   "{count} 项不同": "{count} differences",

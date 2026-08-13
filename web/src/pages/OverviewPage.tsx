@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -21,6 +22,7 @@ import {
   FormControlLabel,
   IconButton,
   InputAdornment,
+  Menu,
   MenuItem,
   Stack,
   TextField,
@@ -39,6 +41,7 @@ import type {
   ProjectManagementViewKey,
   ProjectRuntimeEntry,
   ProjectRuntimeStartPromptMode,
+  ProjectWorkspaceDirectoryInspection,
   ProjectWorkspaceEditorDraft,
   ProjectWorkspaceEditorState,
   ProjectWorkspaceState,
@@ -51,9 +54,11 @@ import {
   ClearIcon,
   CopyIcon,
   ExpandIcon,
+  ActionIcon,
   AppWindowIcon,
   FolderIcon,
   LocateIcon,
+  MoreIcon,
   PackageIcon,
   PlayIcon,
   PlusIcon,
@@ -83,6 +88,10 @@ import {
   type LinkPlanDialogAction,
   type LinkPlanDialogState,
 } from "../components/LinkPlanDialog";
+import {
+  ResourceActionDialog,
+  type ResourceActionDialogTarget,
+} from "../components/ResourceActionDialog";
 import { AppToast } from "../components/AppToast";
 import { WorkspaceTypeSelect } from "../components/WorkspaceTypeSelect";
 import {
@@ -93,7 +102,9 @@ import { useWorkspaceTypeOptions } from "../hooks/useWorkspaceTypeOptions";
 import { useConfirmationPreferences } from "../hooks/useConfirmationPreferences";
 import { useWorkspaceLifecycle } from "../hooks/useWorkspaceLifecycle";
 import { useWorkspaceOverviewData } from "../hooks/useWorkspaceOverviewData";
+import { useWorkspaceProjectInstanceStatuses } from "../hooks/useWorkspaceProjectInstanceStatuses";
 import { useProjectRuntimeStartDialog } from "../hooks/useProjectRuntimeStartDialog";
+import { requestOpenManagedArtifacts } from "../components/settingsEvents";
 import {
   AI_CONTEXT_LIMIT_OPTIONS,
   AI_CONTEXT_SCOPE_OPTIONS,
@@ -108,6 +119,12 @@ import {
   type AiContextPreset as WorkspaceAiContextPreset,
 } from "../lib/aiContextTemplates";
 import type { TrayPinnedAction } from "../lib/trayPins";
+import {
+  missingDirectoryCountLabel,
+  workspaceDisplayName,
+  workspaceLinkToolSummary,
+  workspaceSummaryCountLabel,
+} from "../lib/workspacePresentation";
 import {
   isWorkspaceWorkflowActionSupported,
   type WorkspaceWorkflowChain,
@@ -130,10 +147,15 @@ import {
 } from "../lib/workspaceTypes";
 import { configSourceIdForWorkspace } from "../lib/configSources";
 import {
+  resolveWorkspaceOverviewScope,
+  workspaceActionPreview,
+} from "../lib/workspaceOverviewSync";
+import { localizedResourceActionText } from "../lib/resourceActions";
+import {
   confirmationEnabled,
   confirmationPreferenceKeyForTrayAction,
 } from "../lib/confirmationPreferences";
-import { useI18n } from "../i18n";
+import { useI18n, type Translate } from "../i18n";
 
 export type OverviewPageProps = {
   projectWorkspaces: ProjectWorkspaceSummary[];
@@ -203,6 +225,22 @@ type OverviewSectionQuickAction = {
   disabled?: boolean;
 };
 
+type OverviewModuleKey =
+  | "resources"
+  | "tools"
+  | "projects"
+  | "proxy"
+  | "workflow"
+  | "build"
+  | "git"
+  | "other"
+  | "workspaces";
+
+type OverviewSectionCollapse = {
+  collapsed: boolean;
+  onToggle: () => void;
+};
+
 type WorkspacePinnedActionItem = {
   action: TrayPinnedAction;
   kindLabel: string;
@@ -215,6 +253,11 @@ type WorkspacePinnedActionItem = {
   }>;
   confirmRequired: boolean;
   updatedAtMs: number;
+  occurredAt?: string | null;
+  isLatest?: boolean;
+  isPinned?: boolean;
+  sourceWorkspaceKey?: string;
+  sourceWorkspaceName?: string;
 };
 
 type WorkspacePinnedActionsOverview = {
@@ -301,6 +344,7 @@ type WorkspaceResourceShortcutItem = {
   kindLabel: string;
   value?: string | null;
   detail?: string | null;
+  note?: string | null;
   tool?: string | null;
   toolKey?: string | null;
   toolAction?: string | null;
@@ -308,6 +352,59 @@ type WorkspaceResourceShortcutItem = {
   openKind?: "url" | "localPath" | string | null;
   openable: boolean;
 };
+
+function resourceActionResourceName(
+  resource: WorkspaceResourceShortcutItem,
+  t: Translate,
+) {
+  const actionKey = resource.toolKey?.trim();
+  return actionKey
+    ? localizedResourceActionText(actionKey, "name", resource.label, t)
+    : resource.label;
+}
+
+function legacyResourceActionNote(resource: WorkspaceResourceShortcutItem) {
+  const detail = resource.detail?.trim() ?? "";
+  if (!detail) {
+    return "";
+  }
+  const prefix = [
+    resource.tool ? `工具 ${resource.tool}` : "",
+    resource.toolKey?.trim() ?? "",
+    resource.toolAction ? `动作 ${resource.toolAction}` : "",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  if (detail === prefix) {
+    return "";
+  }
+  return prefix && detail.startsWith(`${prefix} · `)
+    ? detail.slice(prefix.length + 3)
+    : detail;
+}
+
+function resourceActionResourceDetail(
+  resource: WorkspaceResourceShortcutItem,
+  t: Translate,
+) {
+  const actionKey = resource.toolKey?.trim() ?? "";
+  const note = resource.note?.trim() || legacyResourceActionNote(resource);
+  const localizedNote = note
+    ? actionKey
+      ? localizedResourceActionText(actionKey, "resourceNote", note, t)
+      : note
+    : "";
+  return [
+    resource.tool ? t("工具 {tool}", { tool: resource.tool }) : "",
+    actionKey,
+    resource.toolAction
+      ? t("动作 {action}", { action: resource.toolAction })
+      : "",
+    localizedNote,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
 
 type WorkspaceProxyProfileItem = {
   id: string;
@@ -325,7 +422,9 @@ type WorkspaceProxyProfileItem = {
 const COLLAPSED_WORKSPACES_STORAGE_KEY =
   "rdevtool:overview:collapsed-workspaces";
 const COLLAPSED_WORKSPACES_DEFAULTED_KEY =
-  "rdevtool:overview:collapsed-workspaces:v3-system-defaulted";
+  "rdevtool:overview:collapsed-workspaces:v4-global-index-expanded";
+const COLLAPSED_WORKSPACE_MODULES_STORAGE_KEY =
+  "rdevtool:overview:collapsed-workspace-modules:v1";
 const SYSTEM_WORKSPACE_KEY = "system";
 
 const NAVIGATION_ENTRY_KIND_LABELS: Record<string, string> = {
@@ -337,7 +436,7 @@ const NAVIGATION_ENTRY_KIND_LABELS: Record<string, string> = {
 };
 
 function defaultCollapsedWorkspaceKeys() {
-  return new Set<string>([SYSTEM_WORKSPACE_KEY]);
+  return new Set<string>();
 }
 
 function readCollapsedWorkspaceKeys() {
@@ -355,7 +454,7 @@ function readCollapsedWorkspaceKeys() {
         : [],
     );
     if (!window.localStorage.getItem(COLLAPSED_WORKSPACES_DEFAULTED_KEY)) {
-      keys.add(SYSTEM_WORKSPACE_KEY);
+      keys.delete(SYSTEM_WORKSPACE_KEY);
       window.localStorage.setItem(
         COLLAPSED_WORKSPACES_STORAGE_KEY,
         JSON.stringify([...keys]),
@@ -366,6 +465,49 @@ function readCollapsedWorkspaceKeys() {
   } catch {
     return defaultCollapsedWorkspaceKeys();
   }
+}
+
+function workspaceModuleStorageKey(
+  workspaceKey: string,
+  moduleKey: OverviewModuleKey,
+) {
+  return `${workspaceKey}:${moduleKey}`;
+}
+
+function readCollapsedWorkspaceModuleKeys() {
+  if (typeof window === "undefined") {
+    return new Set<string>();
+  }
+  try {
+    const stored = window.localStorage.getItem(
+      COLLAPSED_WORKSPACE_MODULES_STORAGE_KEY,
+    );
+    if (stored) {
+      const values = JSON.parse(stored);
+      return new Set<string>(
+        Array.isArray(values)
+          ? values.filter((value) => typeof value === "string")
+          : [],
+      );
+    }
+  } catch {
+    // Ignore malformed local state and use the responsive defaults below.
+  }
+  if (window.matchMedia("(max-width: 720px)").matches) {
+    return new Set(
+      ([
+        "tools",
+        "proxy",
+        "workflow",
+        "build",
+        "git",
+        "other",
+      ] as OverviewModuleKey[]).map((moduleKey) =>
+        workspaceModuleStorageKey(SYSTEM_WORKSPACE_KEY, moduleKey),
+      ),
+    );
+  }
+  return new Set<string>();
 }
 
 function normalizeWorkspaceKey(value: string) {
@@ -402,6 +544,22 @@ function formatUpdatedAt(value: number) {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(
     date.getMinutes(),
   )}`;
+}
+
+function formatActionUpdatedAt(item: WorkspacePinnedActionItem) {
+  const occurredAt = item.occurredAt?.trim();
+  if (occurredAt) {
+    const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?$/.test(
+      occurredAt,
+    )
+      ? `${occurredAt.replace(" ", "T")}${occurredAt.length === 16 ? ":00" : ""}Z`
+      : occurredAt;
+    const timestamp = Date.parse(normalized);
+    if (Number.isFinite(timestamp)) {
+      return formatUpdatedAt(timestamp);
+    }
+  }
+  return formatUpdatedAt(item.updatedAtMs);
 }
 
 function actionTone(kindLabel: string): "default" | "primary" | "warning" {
@@ -683,6 +841,30 @@ function workspaceMatchesOverviewQuery(
   );
 }
 
+function overviewEntityMatchesQuery(
+  query: string,
+  valuesByField: Partial<
+    Record<
+      "key" | "type" | "project" | "entry" | "proxy" | "action" | "path",
+      Array<string | null | undefined>
+    >
+  >,
+) {
+  const tokens = parseOverviewQuery(query);
+  if (tokens.length === 0) {
+    return true;
+  }
+  const allValues = Object.values(valuesByField).flat();
+  return tokens.every((token) =>
+    token.field
+      ? textIncludes(
+          valuesByField[token.field as keyof typeof valuesByField] ?? [],
+          token.value,
+        )
+      : textIncludes(allValues, token.value),
+  );
+}
+
 function workspaceStateItems(
   group: WorkspacePinnedActionsOverview,
   active: boolean,
@@ -713,10 +895,17 @@ function workspaceStateItems(
   return items.slice(0, 2);
 }
 
-function workspaceStateItemLabel(item: WorkspaceStateItem, t: (message: string, params?: Record<string, string | number>) => string) {
+function workspaceStateItemLabel(
+  item: WorkspaceStateItem,
+  language: "zh-CN" | "en-US",
+  t: (message: string, params?: Record<string, string | number>) => string,
+) {
   const missingDirectoriesMatch = item.label.match(/^(\d+)\s+目录待配$/);
   if (missingDirectoriesMatch) {
-    return t("{count} 目录待配", { count: missingDirectoriesMatch[1] });
+    return missingDirectoryCountLabel(
+      language,
+      Number(missingDirectoriesMatch[1]),
+    );
   }
   return t(item.label);
 }
@@ -833,12 +1022,17 @@ export function OverviewPage({
   onRunWorkflowChain,
   onCancelWorkflowRun,
 }: OverviewPageProps) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [workspaceSaving, setWorkspaceSaving] = useState(false);
   const [workspaceDirectoryBusy, setWorkspaceDirectoryBusy] = useState("");
   const [collapsedWorkspaceKeys, setCollapsedWorkspaceKeys] = useState<
     Set<string>
   >(() => readCollapsedWorkspaceKeys());
+  const [collapsedWorkspaceModuleKeys, setCollapsedWorkspaceModuleKeys] =
+    useState<Set<string>>(() => readCollapsedWorkspaceModuleKeys());
+  const searchCollapsedWorkspaceModuleKeysRef = useRef<Set<string> | null>(
+    null,
+  );
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [manageOpen, setManageOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
@@ -867,10 +1061,21 @@ export function OverviewPage({
   const [demandRepoPath, setDemandRepoPath] = useState("");
   const [demandBranch, setDemandBranch] = useState("");
   const [demandProjectKey, setDemandProjectKey] = useState("");
+  const [reuseDemandDependencies, setReuseDemandDependencies] = useState(true);
   const [error, setErrorValue] = useState("");
   const [status, setStatusValue] = useState("");
   const [toastNonce, setToastNonce] = useState(0);
   const [runningKey, setRunningKey] = useState("");
+  const [openingWorkspaceKey, setOpeningWorkspaceKey] = useState("");
+  const [workspaceIndexMenu, setWorkspaceIndexMenu] = useState<{
+    anchorEl: HTMLElement;
+    group: WorkspacePinnedActionsOverview;
+  } | null>(null);
+  const [workspaceModuleMenu, setWorkspaceModuleMenu] = useState<{
+    anchorEl: HTMLElement;
+    workspaceKey: string;
+    moduleKeys: OverviewModuleKey[];
+  } | null>(null);
   const [runningChainId, setRunningChainId] = useState("");
   const [aiContextOpen, setAiContextOpen] = useState(false);
   const [aiContextGroup, setAiContextGroup] =
@@ -880,6 +1085,8 @@ export function OverviewPage({
   const [aiContextLoading, setAiContextLoading] = useState(false);
   const [linkPlanDialog, setLinkPlanDialog] =
     useState<LinkPlanDialogState | null>(null);
+  const [resourceActionDialog, setResourceActionDialog] =
+    useState<ResourceActionDialogTarget | null>(null);
   const [aiContextView, setAiContextView] = useState<"markdown" | "json">(
     "markdown",
   );
@@ -894,6 +1101,9 @@ export function OverviewPage({
     useState<WorkspaceAiContextOptions>(DEFAULT_AI_CONTEXT_OPTIONS);
   const [overviewQuery, setOverviewQuery] = useState("");
   const [workspaceTypeFilter, setWorkspaceTypeFilter] = useState("all");
+  const [expandedActionPanelKeys, setExpandedActionPanelKeys] = useState<
+    Set<string>
+  >(new Set());
   const {
     groups,
     loading,
@@ -966,6 +1176,61 @@ export function OverviewPage({
   }, [collapsedWorkspaceKeys]);
 
   useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      COLLAPSED_WORKSPACE_MODULES_STORAGE_KEY,
+      JSON.stringify(Array.from(collapsedWorkspaceModuleKeys)),
+    );
+  }, [collapsedWorkspaceModuleKeys]);
+
+  useEffect(() => {
+    const queryActive = overviewQuery.trim().length > 0;
+    if (queryActive) {
+      if (!searchCollapsedWorkspaceModuleKeysRef.current) {
+        searchCollapsedWorkspaceModuleKeysRef.current = new Set(
+          collapsedWorkspaceModuleKeys,
+        );
+      }
+      setCollapsedWorkspaceModuleKeys((current) => {
+        const next = new Set(current);
+        let changed = false;
+        for (const key of next) {
+          if (key.startsWith(`${SYSTEM_WORKSPACE_KEY}:`)) {
+            next.delete(key);
+            changed = true;
+          }
+        }
+        return changed ? next : current;
+      });
+      return;
+    }
+    const previous = searchCollapsedWorkspaceModuleKeysRef.current;
+    if (previous) {
+      searchCollapsedWorkspaceModuleKeysRef.current = null;
+      setCollapsedWorkspaceModuleKeys(previous);
+    }
+  }, [overviewQuery]);
+
+  useEffect(() => {
+    if (
+      !activeProjectWorkspaceKey ||
+      activeProjectWorkspaceKey === SYSTEM_WORKSPACE_KEY
+    ) {
+      return;
+    }
+    setCollapsedWorkspaceKeys((current) => {
+      if (!current.has(activeProjectWorkspaceKey)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.delete(activeProjectWorkspaceKey);
+      return next;
+    });
+  }, [activeProjectWorkspaceKey]);
+
+  useEffect(() => {
     let cancelled = false;
     async function loadPresets() {
       const nextPresets = await loadAiContextPresets();
@@ -1023,13 +1288,122 @@ export function OverviewPage({
     });
   }
 
-  const activeGroup = useMemo(
-    () =>
-      groups.find((group) => group.key === activeProjectWorkspaceKey) ??
-      groups[0] ??
-      null,
+  function isWorkspaceModuleCollapsed(
+    workspaceKey: string,
+    moduleKey: OverviewModuleKey,
+  ) {
+    return collapsedWorkspaceModuleKeys.has(
+      workspaceModuleStorageKey(workspaceKey, moduleKey),
+    );
+  }
+
+  function toggleWorkspaceModuleCollapsed(
+    workspaceKey: string,
+    moduleKey: OverviewModuleKey,
+  ) {
+    const storageKey = workspaceModuleStorageKey(workspaceKey, moduleKey);
+    setCollapsedWorkspaceModuleKeys((current) => {
+      const next = new Set(current);
+      if (next.has(storageKey)) {
+        next.delete(storageKey);
+      } else {
+        next.add(storageKey);
+      }
+      return next;
+    });
+  }
+
+  function setWorkspaceModulesCollapsed(
+    workspaceKey: string,
+    moduleKeys: OverviewModuleKey[],
+    collapsed: boolean,
+  ) {
+    setCollapsedWorkspaceModuleKeys((current) => {
+      const next = new Set(current);
+      for (const moduleKey of moduleKeys) {
+        const storageKey = workspaceModuleStorageKey(workspaceKey, moduleKey);
+        if (collapsed) {
+          next.add(storageKey);
+        } else {
+          next.delete(storageKey);
+        }
+      }
+      return next;
+    });
+  }
+
+  const overviewScope = useMemo(
+    () => resolveWorkspaceOverviewScope(groups, activeProjectWorkspaceKey),
     [activeProjectWorkspaceKey, groups],
   );
+  const activeGroup = overviewScope.activeGroup;
+  const isSystemWorkspaceActive = overviewScope.systemScope;
+  const workspaceIndexGroups = overviewScope.workspaceIndexGroups;
+  const activeOverviewGroup = useMemo(() => {
+    if (!activeGroup?.system) {
+      return activeGroup;
+    }
+
+    const focusedGroups = groups.filter((group) => !group.system);
+    const uniqueBy = <T,>(items: T[], keyFor: (item: T) => string) => {
+      const unique = new Map<string, T>();
+      for (const item of items) {
+        const key = keyFor(item);
+        if (key && !unique.has(key)) {
+          unique.set(key, item);
+        }
+      }
+      return Array.from(unique.values());
+    };
+    const resources = uniqueBy(
+      [...activeGroup.resources, ...focusedGroups.flatMap((group) => group.resources)],
+      (resource) => resource.key,
+    );
+    const projectDirectories = uniqueBy(
+      [
+        ...activeGroup.projectDirectories,
+        ...focusedGroups.flatMap((group) => group.projectDirectories),
+      ],
+      (directory) => directory.projectKey,
+    );
+    const proxyProfiles = uniqueBy(
+      [
+        ...activeGroup.proxyProfiles,
+        ...focusedGroups.flatMap((group) => group.proxyProfiles),
+      ],
+      (profile) => `${profile.id}:${profile.listenUrl}`,
+    );
+    const actions = uniqueBy(
+      [
+        ...focusedGroups.flatMap((group) =>
+          group.actions.map((item) => ({
+            ...item,
+            sourceWorkspaceKey: group.key,
+            sourceWorkspaceName: workspaceDisplayName(group, t),
+          })),
+        ),
+        ...activeGroup.actions.map((item) => ({
+          ...item,
+          sourceWorkspaceKey: activeGroup.key,
+          sourceWorkspaceName: workspaceDisplayName(activeGroup, t),
+        })),
+      ],
+      (item) => item.action.dedupeKey,
+    );
+
+    return {
+      ...activeGroup,
+      resources,
+      projectDirectories,
+      proxyProfiles,
+      actions,
+      actionCount: Math.max(activeGroup.actionCount, actions.length),
+      proxyProfileCount: Math.max(
+        activeGroup.proxyProfileCount,
+        proxyProfiles.length,
+      ),
+    };
+  }, [activeGroup, groups, t]);
   const editingWorkspaceKey =
     workspaceDraft?.key ??
     workspaceEditor?.workspace.key ??
@@ -1055,12 +1429,8 @@ export function OverviewPage({
     return counts;
   }, [groups]);
   const workspaceTypeFilterOptions = useMemo(
-    () => workspaceTypeCountOptions(groups, workspaceTypeOptions),
-    [groups, workspaceTypeOptions],
-  );
-  const workspaceToolbarTypeTags = useMemo(
-    () => workspaceTypeFilterOptions.filter((option) => option.count > 0),
-    [workspaceTypeFilterOptions],
+    () => workspaceTypeCountOptions(workspaceIndexGroups, workspaceTypeOptions),
+    [workspaceIndexGroups, workspaceTypeOptions],
   );
   const workspaceTypeSelectOptions = useMemo(
     () =>
@@ -1078,10 +1448,10 @@ export function OverviewPage({
       workspaceTypeOptions,
     ],
   );
-  const filteredGroups = useMemo(
+  const filteredWorkspaceIndexGroups = useMemo(
     () =>
       systemWorkspaceThenCurrent(
-        groups.filter(
+        workspaceIndexGroups.filter(
           (group) =>
             (workspaceTypeFilter === "all" ||
               normalizeWorkspaceType(group.workspaceType) ===
@@ -1090,7 +1460,12 @@ export function OverviewPage({
         ),
         activeProjectWorkspaceKey,
       ),
-    [groups, activeProjectWorkspaceKey, workspaceTypeFilter, overviewQuery],
+    [
+      workspaceIndexGroups,
+      activeProjectWorkspaceKey,
+      workspaceTypeFilter,
+      overviewQuery,
+    ],
   );
   const orderedProjectWorkspaces = useMemo(
     () =>
@@ -1104,8 +1479,6 @@ export function OverviewPage({
       ),
     [groups],
   );
-  const overviewFilterActive =
-    workspaceTypeFilter !== "all" || overviewQuery.trim().length > 0;
   const aiContextJsonText = useMemo(
     () =>
       aiContextResponse ? JSON.stringify(aiContextResponse.json, null, 2) : "",
@@ -1182,6 +1555,11 @@ export function OverviewPage({
       ),
     [workspaceDraft?.projectInstances],
   );
+  const workspaceInstanceStatuses = useWorkspaceProjectInstanceStatuses({
+    enabled: manageOpen && Boolean(workspaceDraft),
+    workspaceKey: workspaceDraft?.key ?? "",
+    instances: workspaceDraft?.projectInstances ?? [],
+  });
   const scopedWorkspaceProjects = useMemo(
     () =>
       (workspaceEditor?.projects ?? []).filter(
@@ -1228,13 +1606,7 @@ export function OverviewPage({
     setError("");
     try {
       await onExecutePinnedAction(item.action);
-      if (
-        item.action.kind !== "branch.replay" &&
-        item.action.kind !== "build.replay" &&
-        item.action.kind !== "deploy.replay"
-      ) {
-        await loadOverview({ silent: true });
-      }
+      await loadOverview({ silent: true });
       setStatus(t("已运行 {label}", { label: item.label }));
     } catch (reason) {
       setError(String(reason));
@@ -1360,7 +1732,14 @@ export function OverviewPage({
     );
   }
 
-  function linkSourceIdForResource(
+  function isActionToolResource(resource: WorkspaceResourceShortcutItem) {
+    return (
+      resource.kind === "tool" &&
+      resource.tool?.toLowerCase() === "action"
+    );
+  }
+
+  function toolSourceIdForResource(
     resource?: WorkspaceResourceShortcutItem | null,
   ) {
     return (
@@ -1397,7 +1776,7 @@ export function OverviewPage({
     resource: WorkspaceResourceShortcutItem,
   ) {
     const key = (resource.toolKey || resource.value || "").trim();
-    const sourceId = linkSourceIdForResource(resource);
+    const sourceId = toolSourceIdForResource(resource);
     const proxySourceId = resource.toolProxySourceId ?? null;
     const runtimeSourceId = resource.toolRuntimeSourceId ?? null;
     const workspaceKey = resource.workspaceKey;
@@ -1580,7 +1959,7 @@ export function OverviewPage({
     action: "run" | "stop",
   ) {
     const key = (resource.toolKey || resource.value || "").trim();
-    const sourceId = linkSourceIdForResource(resource);
+    const sourceId = toolSourceIdForResource(resource);
     const proxySourceId = resource.toolProxySourceId ?? null;
     const runtimeSourceId = resource.toolRuntimeSourceId ?? null;
     if (!key) {
@@ -1664,6 +2043,19 @@ export function OverviewPage({
     } finally {
       setRunningKey("");
     }
+  }
+
+  function openWorkspaceAction(resource: WorkspaceResourceShortcutItem) {
+    const key = (resource.toolKey || resource.value || "").trim();
+    if (!key) {
+      return;
+    }
+    setResourceActionDialog({
+      key,
+      sourceId: toolSourceIdForResource(resource),
+      entryName: resource.label,
+      mode: resource.toolAction === "inspect" ? "inspect" : "run",
+    });
   }
 
   async function openWorkspaceRootDirectory(
@@ -2068,6 +2460,10 @@ export function OverviewPage({
       setError(t("请填写项目目录"));
       return;
     }
+    if (newWorkspaceIndependentDir && !demandBranch.trim()) {
+      setError(t("独立需求工作区需要填写分支"));
+      return;
+    }
 
     setCreatingWorkspace(true);
     setError("");
@@ -2086,6 +2482,11 @@ export function OverviewPage({
         rootDir: newWorkspaceIndependentDir
           ? newWorkspaceRootDir.trim() || null
           : null,
+        copyMode: newWorkspaceIndependentDir ? "worktree" : "existing",
+        dependencyMode:
+          newWorkspaceIndependentDir && reuseDemandDependencies
+            ? "auto-link"
+            : "none",
         resourceDir: newWorkspaceResourceDir.trim() || null,
         worklogFile: "WORKLOG.md",
         createWorklog: createWorkspaceWorklog,
@@ -2107,6 +2508,7 @@ export function OverviewPage({
       setDemandRepoPath("");
       setDemandBranch("");
       setDemandProjectKey("");
+      setReuseDemandDependencies(true);
       setCreateWorkspaceMode("basic");
       setCreateOpen(false);
       await loadOverview();
@@ -2209,7 +2611,7 @@ export function OverviewPage({
     try {
       const nextState = await invoke<ProjectWorkspaceEditorState>(
         "create_project_workspace_project_copy",
-        { project: projectKey },
+        { workspaceKey: workspaceDraft.key, project: projectKey },
       );
       applyWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
@@ -2220,6 +2622,67 @@ export function OverviewPage({
     } finally {
       setWorkspaceDirectoryBusy("");
     }
+  }
+
+  async function repairWorkspaceProjectInstance(projectKey: string) {
+    if (!workspaceDraft || workspaceDraft.system) {
+      return;
+    }
+    const instanceStatus = workspaceInstanceStatuses.byProject.get(projectKey);
+    if (!instanceStatus?.repairSupported || !instanceStatus.repairBranch) {
+      return;
+    }
+    const projectName =
+      workspaceEditor?.projects.find((project) => project.key === projectKey)
+        ?.name ?? projectKey;
+    const confirmed = await confirm({
+      title: t("修复 {name} 的工作区副本？", { name: projectName }),
+      description: t(
+        "将按 Git 登记在原路径 {path} 重建分支 {branch}。不会删除其他目录，也不会切换项目的全局目录。",
+        {
+          path: instanceStatus.path,
+          branch: instanceStatus.repairBranch,
+        },
+      ),
+      confirmLabel: t("修复"),
+      tone: "warning",
+    });
+    if (!confirmed) {
+      return;
+    }
+    setWorkspaceDirectoryBusy(projectKey);
+    setError("");
+    setStatus("");
+    try {
+      const nextState = await workspaceInstanceStatuses.repair(projectKey);
+      applyWorkspaceEditorState(nextState);
+      await onProjectConfigSaved();
+      await Promise.all([
+        loadOverview(),
+        workspaceInstanceStatuses.refresh(),
+      ]);
+      setStatus(t("已修复工作区副本"));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setWorkspaceDirectoryBusy("");
+    }
+  }
+
+  function inspectWorkspaceProjectInstanceCleanup(
+    projectKey: string,
+    path: string,
+  ) {
+    if (!workspaceDraft || workspaceDraft.system) {
+      return;
+    }
+    setManageOpen(false);
+    requestOpenManagedArtifacts({
+      workspaceKey: workspaceDraft.key,
+      projectKey,
+      path,
+      kind: "workspaceProjectInstance",
+    });
   }
 
   async function bindWorkspaceProjectDirectory(projectKey: string) {
@@ -2238,9 +2701,41 @@ export function OverviewPage({
     setError("");
     setStatus("");
     try {
+      const inspection = await invoke<ProjectWorkspaceDirectoryInspection>(
+        "inspect_project_workspace_project_directory",
+        {
+          workspaceKey: workspaceDraft.key,
+          project: projectKey,
+          path: selected,
+        },
+      );
+      let allowRemoteMismatch = false;
+      if (inspection.requiresRemoteMismatchConfirmation) {
+        const projectName =
+          workspaceEditor?.projects.find((project) => project.key === projectKey)
+            ?.name ?? projectKey;
+        const confirmed = await confirm({
+          title: t("目录 Remote 不匹配，仍然绑定？"),
+          description: t(
+            "{name} 的项目配置与所选目录 Remote 不一致。继续后，Git、构建和运行操作都会使用该目录。",
+            { name: projectName },
+          ),
+          confirmLabel: t("仍然绑定"),
+          tone: "warning",
+        });
+        if (!confirmed) {
+          return;
+        }
+        allowRemoteMismatch = true;
+      }
       const nextState = await invoke<ProjectWorkspaceEditorState>(
         "bind_project_workspace_project_directory",
-        { project: projectKey, path: selected },
+        {
+          workspaceKey: workspaceDraft.key,
+          project: projectKey,
+          path: selected,
+          allowRemoteMismatch,
+        },
       );
       applyWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
@@ -2257,13 +2752,28 @@ export function OverviewPage({
     if (!workspaceDraft || workspaceDraft.system) {
       return;
     }
+    const instance = workspaceInstanceByProject.get(projectKey);
+    const projectName =
+      workspaceEditor?.projects.find((project) => project.key === projectKey)
+        ?.name ?? projectKey;
+    const confirmed = await confirm({
+      title: t("解除 {name} 的项目实例关联？", { name: projectName }),
+      description: instance?.managed
+        ? t("只解除工作区关联，不会删除托管目录或其中的代码。")
+        : t("解除后，该工作区将恢复使用项目的全局目录。"),
+      confirmLabel: t("解除关联"),
+      tone: "warning",
+    });
+    if (!confirmed) {
+      return;
+    }
     setWorkspaceDirectoryBusy(projectKey);
     setError("");
     setStatus("");
     try {
       const nextState = await invoke<ProjectWorkspaceEditorState>(
         "unbind_project_workspace_project_directory",
-        { project: projectKey },
+        { workspaceKey: workspaceDraft.key, project: projectKey },
       );
       applyWorkspaceEditorState(nextState);
       await onProjectConfigSaved();
@@ -2392,18 +2902,74 @@ export function OverviewPage({
     setCreateOpen(false);
   }
 
-  const featuredGroup = overviewFilterActive
-    ? (filteredGroups.find((group) => group.system) ??
-      filteredGroups.find((group) => group.key === activeProjectWorkspaceKey) ??
-      filteredGroups[0] ??
-      null)
-    : (filteredGroups.find((group) => group.system) ??
-      activeGroup ??
-      filteredGroups[0] ??
-      null);
-  const listedGroups = featuredGroup
-    ? filteredGroups.filter((group) => group.key !== featuredGroup.key)
-    : filteredGroups;
+  const workspaceToolbarMetrics = isSystemWorkspaceActive
+    ? [
+        {
+          key: "workspaces",
+          label: t("工作区"),
+          value: workspaceIndexGroups.length,
+          icon: <PackageIcon fontSize="small" />,
+          tone: "blue" as const,
+        },
+        {
+          key: "projects",
+          label: t("项目"),
+          value: activeOverviewGroup?.projectCount ?? 0,
+          icon: <AppWindowIcon fontSize="small" />,
+          tone: "cyan" as const,
+        },
+        {
+          key: "entries",
+          label: t("入口"),
+          value: activeOverviewGroup?.entryCount ?? 0,
+          icon: <WebsiteIcon fontSize="small" />,
+          tone: "green" as const,
+        },
+        {
+          key: "proxies",
+          label: t("本地代理"),
+          value: activeOverviewGroup?.proxyProfileCount ?? 0,
+          icon: <TerminalIcon fontSize="small" />,
+          tone: "violet" as const,
+        },
+        {
+          key: "actions",
+          label: t("动作"),
+          value: activeOverviewGroup?.actionCount ?? 0,
+          icon: <WorkflowIcon fontSize="small" />,
+          tone: "blue" as const,
+        },
+      ]
+    : [
+        {
+          key: "projects",
+          label: t("项目"),
+          value: activeOverviewGroup?.projectCount ?? 0,
+          icon: <PackageIcon fontSize="small" />,
+          tone: "blue" as const,
+        },
+        {
+          key: "entries",
+          label: t("入口"),
+          value: activeOverviewGroup?.entryCount ?? 0,
+          icon: <WebsiteIcon fontSize="small" />,
+          tone: "cyan" as const,
+        },
+        {
+          key: "proxies",
+          label: t("本地代理"),
+          value: activeOverviewGroup?.proxyProfileCount ?? 0,
+          icon: <TerminalIcon fontSize="small" />,
+          tone: "green" as const,
+        },
+        {
+          key: "actions",
+          label: t("动作"),
+          value: activeOverviewGroup?.actionCount ?? 0,
+          icon: <WorkflowIcon fontSize="small" />,
+          tone: "violet" as const,
+        },
+      ];
 
   async function openWorkspaceModule(
     group: WorkspacePinnedActionsOverview,
@@ -2492,6 +3058,7 @@ export function OverviewPage({
     title: string,
     actions: OverviewSectionQuickAction[] = [],
     count?: number,
+    collapse?: OverviewSectionCollapse,
   ) {
     return (
       <div className="overview-section-heading">
@@ -2501,7 +3068,7 @@ export function OverviewPage({
             <Chip size="small" className="overview-count-chip" label={count} />
           ) : null}
         </div>
-        {actions.length > 0 ? (
+        {actions.length > 0 || collapse ? (
           <div
             className="overview-section-actions"
             aria-label={t("{title}快捷入口", { title })}
@@ -2521,6 +3088,26 @@ export function OverviewPage({
                 </span>
               </Tooltip>
             ))}
+            {collapse ? (
+              <Tooltip title={t(collapse.collapsed ? "展开" : "收起")}>
+                <IconButton
+                  size="small"
+                  className="overview-section-action-button overview-section-collapse-button"
+                  onClick={collapse.onToggle}
+                  aria-label={t(
+                    collapse.collapsed ? "展开 {name}" : "收起 {name}",
+                    { name: title },
+                  )}
+                  aria-expanded={!collapse.collapsed}
+                >
+                  {collapse.collapsed ? (
+                    <ExpandIcon fontSize="small" />
+                  ) : (
+                    <CollapseIcon fontSize="small" />
+                  )}
+                </IconButton>
+              </Tooltip>
+            ) : null}
           </div>
         ) : null}
       </div>
@@ -2528,6 +3115,8 @@ export function OverviewPage({
   }
 
   function renderActionPanel(
+    group: WorkspacePinnedActionsOverview,
+    moduleKey: OverviewModuleKey,
     title: string,
     actions: WorkspacePinnedActionItem[],
     className = "",
@@ -2536,13 +3125,36 @@ export function OverviewPage({
     if (actions.length === 0) {
       return null;
     }
+    const collapsed = isWorkspaceModuleCollapsed(group.key, moduleKey);
+    const actionPanelKey = `${group.key}:${moduleKey}`;
+    const recordsExpanded = expandedActionPanelKeys.has(actionPanelKey);
+    const {
+      items: visiblePanelActions,
+      hiddenCount: hiddenActionCount,
+      expandable: panelExpandable,
+    } = workspaceActionPreview(actions, recordsExpanded);
     return (
-      <div className={`overview-actions-panel ${className}`.trim()}>
-        {renderSectionHeading(title, sectionActions, actions.length)}
-        <div className="overview-action-list">
-          {actions.map((item) => {
+      <div
+        className={`overview-actions-panel${collapsed ? " is-collapsed" : ""} ${className}`.trim()}
+        data-overview-module={moduleKey}
+      >
+        {renderSectionHeading(title, sectionActions, actions.length, {
+          collapsed,
+          onToggle: () =>
+            toggleWorkspaceModuleCollapsed(group.key, moduleKey),
+        })}
+        {!collapsed ? <div className="overview-action-list">
+          {visiblePanelActions.map((item) => {
             const running = runningKey === item.action.dedupeKey;
-            const updatedAt = formatUpdatedAt(item.updatedAtMs);
+            const updatedAt = formatActionUpdatedAt(item);
+            const displayKindLabel = translateInternalMessage(
+              item.kindLabel,
+              t,
+            );
+            const displayLabel = translateInternalMessage(item.label, t);
+            const displayDetail = item.detail
+              ? translateInternalMessage(item.detail, t)
+              : "";
             const confirmationPreferenceKey =
               confirmationPreferenceKeyForTrayAction(item.action.kind);
             const actionNeedsConfirmation = confirmationPreferenceKey
@@ -2567,7 +3179,7 @@ export function OverviewPage({
                           key={`${item.action.dedupeKey}:${param.label}:${param.value}`}
                           className="overview-action-param-tooltip-row"
                         >
-                          <b>{param.label}</b>
+                          <b>{translateInternalMessage(param.label, t)}</b>
                           <span>{param.value}</span>
                         </span>
                       ))}
@@ -2593,15 +3205,25 @@ export function OverviewPage({
                       color={actionTone(item.kindLabel)}
                       variant="outlined"
                       className="overview-action-chip"
-                      label={item.kindLabel}
+                      label={displayKindLabel}
                     />
+                    {item.isLatest ? (
+                      <span className="overview-action-origin is-latest">
+                        {t("最近")}
+                      </span>
+                    ) : null}
+                    {(item.isPinned ?? true) ? (
+                      <span className="overview-action-origin is-pinned">
+                        {t("已标记")}
+                      </span>
+                    ) : null}
                     {paramTag}
                     <Typography
                       className="overview-action-title"
                       noWrap
-                      title={item.label}
+                      title={displayLabel}
                     >
-                      {item.label}
+                      {displayLabel}
                     </Typography>
                   </Stack>
                   <Stack
@@ -2616,9 +3238,18 @@ export function OverviewPage({
                         {item.projectKey}
                       </Typography>
                     ) : null}
-                    {item.detail ? (
+                    {group.system && item.sourceWorkspaceName ? (
+                      <Typography
+                        component="span"
+                        className="overview-action-workspace"
+                        noWrap
+                      >
+                        {item.sourceWorkspaceName}
+                      </Typography>
+                    ) : null}
+                    {displayDetail ? (
                       <Typography component="span" noWrap>
-                        {item.detail}
+                        {displayDetail}
                       </Typography>
                     ) : null}
                   </Stack>
@@ -2654,7 +3285,37 @@ export function OverviewPage({
               </Box>
             );
           })}
-        </div>
+          {panelExpandable ? (
+            <Button
+              size="small"
+              variant="text"
+              className="overview-action-more"
+              startIcon={
+                recordsExpanded ? (
+                  <CollapseIcon fontSize="small" />
+                ) : (
+                  <ExpandIcon fontSize="small" />
+                )
+              }
+              aria-expanded={recordsExpanded}
+              onClick={() =>
+                setExpandedActionPanelKeys((current) => {
+                  const next = new Set(current);
+                  if (recordsExpanded) {
+                    next.delete(actionPanelKey);
+                  } else {
+                    next.add(actionPanelKey);
+                  }
+                  return next;
+                })
+              }
+            >
+              {recordsExpanded
+                ? t("收起其余记录")
+                : t("还有 {count} 条", { count: hiddenActionCount })}
+            </Button>
+          ) : null}
+        </div> : null}
       </div>
     );
   }
@@ -2666,21 +3327,98 @@ export function OverviewPage({
     const active = group.key === activeProjectWorkspaceKey;
     const collapsed = collapsedWorkspaceKeys.has(group.key);
     const stateItems = workspaceStateItems(group, active);
-    const visibleResources = group.resources.filter(
+    const filterGlobalItems = group.system && overviewQuery.trim().length > 0;
+    const filteredResources = filterGlobalItems
+      ? group.resources.filter((resource) =>
+          overviewEntityMatchesQuery(overviewQuery, {
+            key: [resource.key],
+            entry: [
+              resource.key,
+              resource.workspaceKey,
+              resource.category,
+              resource.label,
+              resource.kind,
+              resource.kindLabel,
+              resource.value,
+              resource.detail,
+              resource.toolKey,
+            ],
+            path:
+              resource.kind === "directory"
+                ? [resource.value, resource.detail]
+                : [],
+          }),
+        )
+      : group.resources;
+    const visibleResources = filteredResources.filter(
       (resource) => resource.kind !== "tool",
     );
-    const visibleTools = group.resources.filter(
+    const visibleTools = filteredResources.filter(
       (resource) => resource.kind === "tool",
     );
-    const visibleDirectories = group.projectDirectories;
-    const visibleProxyProfiles = group.proxyProfiles;
-    const visibleBuildActions = group.actions.filter(
+    const visibleDirectories = filterGlobalItems
+      ? group.projectDirectories.filter((directory) =>
+          overviewEntityMatchesQuery(overviewQuery, {
+            key: [directory.projectKey],
+            project: [
+              directory.projectKey,
+              directory.projectName,
+              directory.mode,
+              directory.modeLabel,
+              directory.statusKey,
+              directory.statusLabel,
+              directory.path,
+            ],
+            path: [directory.path, directory.projectKey, directory.projectName],
+          }),
+        )
+      : group.projectDirectories;
+    const visibleProxyProfiles = filterGlobalItems
+      ? group.proxyProfiles.filter((profile) =>
+          overviewEntityMatchesQuery(overviewQuery, {
+            key: [profile.id],
+            proxy: [
+              profile.id,
+              profile.name,
+              profile.listenHost,
+              String(profile.listenPort),
+              profile.listenUrl,
+              profile.workspaceKey,
+              profile.workspaceLabel,
+              profile.running ? "运行中" : "未启动",
+            ],
+          }),
+        )
+      : group.proxyProfiles;
+    const visibleActions = filterGlobalItems
+      ? group.actions.filter((item) =>
+          overviewEntityMatchesQuery(overviewQuery, {
+            key: [item.action.dedupeKey],
+            project: [item.projectKey, item.action.projectKey],
+            action: [
+              item.label,
+              item.detail,
+              item.kindLabel,
+              item.projectKey,
+              item.action.label,
+              item.action.detail,
+              item.action.projectKey,
+              item.isLatest ? "最近" : "",
+              (item.isPinned ?? true) ? "已标记" : "",
+              item.sourceWorkspaceKey,
+              item.sourceWorkspaceName,
+              ...item.params.flatMap((param) => [param.label, param.value]),
+            ],
+          }),
+        )
+      : group.actions;
+    const visibleBuildActions = visibleActions.filter(
       (item) => actionGroupKind(item) === "build",
     );
-    const visibleGitActions = group.actions.filter(
+    const visibleGitActions = visibleActions.filter(
       (item) => actionGroupKind(item) === "git",
     );
-    const visibleOtherActions = group.actions.filter(
+    const visibleOtherActions = visibleActions.filter(
       (item) => actionGroupKind(item) === "other",
     );
     const groupWorkflowChains = workflowChains.filter(
@@ -2720,11 +3458,9 @@ export function OverviewPage({
     const showActionsPanel =
       showBuildActionsPanel || showGitActionsPanel || showOtherActionsPanel;
     const showBodyPanel =
-      showContentPanel || showWorkflowPanel || showActionsPanel;
-    const actionSummaryCount =
-      visibleBuildActions.length +
-      visibleGitActions.length +
-      visibleOtherActions.length;
+      showContentPanel ||
+      showWorkflowPanel ||
+      showActionsPanel;
     const typeLabel = workspaceTypeLabel(
       group.workspaceType,
       group.workspaceTypeLabel,
@@ -2732,26 +3468,39 @@ export function OverviewPage({
     );
     const displayTypeLabel = t(typeLabel);
     const showTypeChip = !group.system && typeLabel.trim().length > 0;
+    const displayName = workspaceDisplayName(group, t);
     const summaryItems = [
       group.entryCount > 0
-        ? t("{count} 个入口", { count: group.entryCount })
+        ? workspaceSummaryCountLabel(language, "entry", group.entryCount)
         : "",
       group.projectCount > 0
-        ? t("{count} 个项目", { count: group.projectCount })
+        ? workspaceSummaryCountLabel(language, "project", group.projectCount)
         : "",
       group.proxyProfileCount > 0
-        ? t("{count} 个代理", { count: group.proxyProfileCount })
+        ? workspaceSummaryCountLabel(language, "proxy", group.proxyProfileCount)
         : "",
-      actionSummaryCount > 0
-        ? t("{count} 个动作", { count: actionSummaryCount })
+      group.actionCount > 0
+        ? workspaceSummaryCountLabel(language, "action", group.actionCount)
         : "",
     ].filter(Boolean);
+    const moduleKeys = [
+      showShortcutPanel ? "resources" : null,
+      showToolPanel ? "tools" : null,
+      showDirectoryPanel ? "projects" : null,
+      showProxyPanel ? "proxy" : null,
+      showWorkflowPanel ? "workflow" : null,
+      showBuildActionsPanel ? "build" : null,
+      showGitActionsPanel ? "git" : null,
+      showOtherActionsPanel ? "other" : null,
+    ].filter((key): key is OverviewModuleKey => Boolean(key));
+    const moduleCollapsed = (moduleKey: OverviewModuleKey) =>
+      isWorkspaceModuleCollapsed(group.key, moduleKey);
 
     return (
       <Box
         key={group.key}
         component="section"
-        className={`overview-workspace-card${group.system ? " is-system" : ""}${active ? " is-active" : ""}${featured ? " is-featured" : ""}${collapsed ? " is-collapsed" : ""}`}
+        className={`overview-workspace-card${group.system ? " overview-global-workspace-panel is-system" : ""}${active ? " is-active" : ""}${featured ? " is-featured" : ""}${collapsed ? " is-collapsed" : ""}`}
       >
         <div className="overview-workspace-header">
           <div className="overview-workspace-heading">
@@ -2761,7 +3510,7 @@ export function OverviewPage({
                 className="overview-workspace-title"
                 noWrap
               >
-                {group.name}
+                {displayName}
               </Typography>
               {showTypeChip ? (
                 <Chip
@@ -2775,7 +3524,7 @@ export function OverviewPage({
                   key={`${item.tone}:${item.label}`}
                   className={`overview-workspace-state-chip is-${item.tone}`}
                 >
-                  {workspaceStateItemLabel(item, t)}
+                  {workspaceStateItemLabel(item, language, t)}
                 </span>
               ))}
             </div>
@@ -2791,6 +3540,28 @@ export function OverviewPage({
                 ))}
               </div>
             ) : null}
+            {!collapsed && moduleKeys.length > 1 ? (
+              <Tooltip title={t("模块布局")}>
+                <IconButton
+                  size="small"
+                  className="overview-module-menu-button"
+                  onClick={(event) =>
+                    setWorkspaceModuleMenu({
+                      anchorEl: event.currentTarget,
+                      workspaceKey: group.key,
+                      moduleKeys,
+                    })
+                  }
+                  aria-label={t("{name} 的模块布局", { name: displayName })}
+                  aria-haspopup="menu"
+                  aria-expanded={
+                    workspaceModuleMenu?.workspaceKey === group.key
+                  }
+                >
+                  <MoreIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+            ) : null}
             <Tooltip title={t("提取 AI 上下文")}>
               <span>
                 <IconButton
@@ -2799,7 +3570,7 @@ export function OverviewPage({
                   onClick={() => void openWorkspaceAiContext(group)}
                   disabled={aiContextLoading}
                   aria-label={t("提取 {name} 的 AI 上下文", {
-                    name: group.name,
+                    name: displayName,
                   })}
                 >
                   {aiContextLoading && aiContextGroup?.key === group.key ? (
@@ -2817,7 +3588,7 @@ export function OverviewPage({
                 onClick={() => toggleWorkspaceCollapsed(group.key)}
                 aria-label={t(
                   collapsed ? "展开 {name}" : "收起 {name}",
-                  { name: group.name },
+                  { name: displayName },
                 )}
                 aria-expanded={!collapsed}
               >
@@ -2836,7 +3607,10 @@ export function OverviewPage({
             {showContentPanel ? (
               <div className="overview-workspace-content">
                 {showShortcutPanel ? (
-                  <div className="overview-shortcut-panel">
+                  <div
+                    className={`overview-shortcut-panel${moduleCollapsed("resources") ? " is-collapsed" : ""}`}
+                    data-overview-module="resources"
+                  >
                     {renderSectionHeading(
                       t("入口"),
                       moduleQuickActions(
@@ -2845,8 +3619,18 @@ export function OverviewPage({
                         t("资源入口"),
                         <WebsiteIcon fontSize="small" />,
                       ),
+                      visibleResources.length +
+                        (showRootDirectoryShortcut ? 1 : 0),
+                      {
+                        collapsed: moduleCollapsed("resources"),
+                        onToggle: () =>
+                          toggleWorkspaceModuleCollapsed(
+                            group.key,
+                            "resources",
+                          ),
+                      },
                     )}
-                    <div
+                    {!moduleCollapsed("resources") ? <div
                       className={`overview-shortcut-grid${group.system ? " is-system" : ""}`}
                     >
                       {visibleResources.map((resource) => {
@@ -2916,12 +3700,15 @@ export function OverviewPage({
                           </span>
                         </button>
                       ) : null}
-                    </div>
+                    </div> : null}
                   </div>
                 ) : null}
 
                 {showToolPanel ? (
-                  <div className="overview-shortcut-panel">
+                  <div
+                    className={`overview-shortcut-panel${moduleCollapsed("tools") ? " is-collapsed" : ""}`}
+                    data-overview-module="tools"
+                  >
                     {renderSectionHeading(
                       t("工具"),
                       moduleQuickActions(
@@ -2930,19 +3717,38 @@ export function OverviewPage({
                         t("资源入口"),
                         <WorkflowIcon fontSize="small" />,
                       ),
+                      visibleTools.length,
+                      {
+                        collapsed: moduleCollapsed("tools"),
+                        onToggle: () =>
+                          toggleWorkspaceModuleCollapsed(group.key, "tools"),
+                      },
                     )}
-                    <div
+                    {!moduleCollapsed("tools") ? <div
                       className={`overview-shortcut-grid${group.system ? " is-system" : ""}`}
                     >
                       {visibleTools.map((resource) => {
                         const running = runningKey === `tool:${resource.key}`;
                         const canPlan = isLinkToolResource(resource);
+                        const isResourceAction = isActionToolResource(resource);
+                        const displayLabel = isResourceAction
+                          ? resourceActionResourceName(resource, t)
+                          : resource.label;
+                        const displayDetail = isResourceAction
+                          ? resourceActionResourceDetail(resource, t)
+                          : resource.detail;
                         const disabled =
                           Boolean(runningKey) ||
-                          (!canPlan && !resource.openable);
+                          (!canPlan && !isResourceAction && !resource.openable);
                         if (canPlan) {
                           const runtimeAction = linkRuntimeAction(resource);
-                          const runtimeStatus = linkRuntimeLabel(resource);
+                          const displaySummary = workspaceLinkToolSummary(
+                            resource.detail,
+                            resource.value ||
+                              translateInternalMessage(resource.kindLabel, t),
+                            linkRuntimeLabel(resource),
+                            t,
+                          );
                           const actionTitle =
                             runtimeAction === "stop"
                               ? t("一键停止")
@@ -2959,9 +3765,7 @@ export function OverviewPage({
                               key={resource.key}
                               className={`overview-shortcut overview-shortcut--${resource.kind} overview-shortcut--with-run`}
                               title={
-                                resource.detail ??
-                                resource.value ??
-                                resource.label
+                                displaySummary || resource.label
                               }
                             >
                               <button
@@ -2984,16 +3788,7 @@ export function OverviewPage({
                                 </span>
                                 <span className="overview-shortcut-copy">
                                   <strong>{resource.label}</strong>
-                                  <small>
-                                    {[
-                                      resource.detail ||
-                                        resource.value ||
-                                        resource.kindLabel,
-                                      runtimeStatus,
-                                    ]
-                                      .filter(Boolean)
-                                      .join(" · ")}
-                                  </small>
+                                  <small>{displaySummary}</small>
                                 </span>
                               </button>
                               <Tooltip title={actionTitle}>
@@ -3024,6 +3819,70 @@ export function OverviewPage({
                                       <StopIcon fontSize="small" />
                                     ) : (
                                       <PlayIcon fontSize="small" />
+                                    )}
+                                  </IconButton>
+                                </span>
+                              </Tooltip>
+                            </div>
+                          );
+                        }
+                        if (isResourceAction) {
+                          const actionKey = (
+                            resource.toolKey ||
+                            resource.value ||
+                            ""
+                          ).trim();
+                          const inspectOnly = resource.toolAction === "inspect";
+                          const actionTitle = t(
+                            inspectOnly ? "打开 {name}" : "配置并运行 {name}",
+                            { name: displayLabel },
+                          );
+                          const actionDisabled =
+                            Boolean(runningKey) || !actionKey;
+                          return (
+                            <div
+                              key={resource.key}
+                              className={`overview-shortcut overview-shortcut--${resource.kind} overview-shortcut--with-run`}
+                              title={
+                                displayDetail ??
+                                resource.value ??
+                                displayLabel
+                              }
+                            >
+                              <button
+                                type="button"
+                                className="overview-shortcut-main"
+                                onClick={() => openWorkspaceAction(resource)}
+                                disabled={actionDisabled}
+                              >
+                                <span
+                                  className="overview-shortcut-icon"
+                                  aria-hidden="true"
+                                >
+                                  {shortcutIcon(resource.kind)}
+                                </span>
+                                <span className="overview-shortcut-copy">
+                                  <strong>{displayLabel}</strong>
+                                  <small>
+                                    {displayDetail ||
+                                      resource.value ||
+                                      t(resource.kindLabel)}
+                                  </small>
+                                </span>
+                              </button>
+                              <Tooltip title={actionTitle}>
+                                <span className="overview-shortcut-run-shell">
+                                  <IconButton
+                                    size="small"
+                                    className="overview-shortcut-run-button"
+                                    onClick={() => openWorkspaceAction(resource)}
+                                    disabled={actionDisabled}
+                                    aria-label={actionTitle}
+                                  >
+                                    {inspectOnly ? (
+                                      <SearchIcon fontSize="small" />
+                                    ) : (
+                                      <ActionIcon fontSize="small" />
                                     )}
                                   </IconButton>
                                 </span>
@@ -3071,17 +3930,29 @@ export function OverviewPage({
                           </button>
                         );
                       })}
-                    </div>
+                    </div> : null}
                   </div>
                 ) : null}
 
                 {showDirectoryPanel ? (
-                  <div className="overview-directory-panel">
+                  <div
+                    className={`overview-directory-panel${moduleCollapsed("projects") ? " is-collapsed" : ""}`}
+                    data-overview-module="projects"
+                  >
                     {renderSectionHeading(
                       t("项目"),
                       projectSectionQuickActions(group),
+                      visibleDirectories.length,
+                      {
+                        collapsed: moduleCollapsed("projects"),
+                        onToggle: () =>
+                          toggleWorkspaceModuleCollapsed(
+                            group.key,
+                            "projects",
+                          ),
+                      },
                     )}
-                    <div className="overview-directory-list">
+                    {!moduleCollapsed("projects") ? <div className="overview-directory-list">
                       {visibleDirectories.map((directory) => {
                         const projectRunning =
                           directory.running || directory.canStop;
@@ -3156,12 +4027,15 @@ export function OverviewPage({
                           />
                         );
                       })}
-                    </div>
+                    </div> : null}
                   </div>
                 ) : null}
 
                 {showProxyPanel ? (
-                  <div className="overview-directory-panel overview-proxy-panel">
+                  <div
+                    className={`overview-directory-panel overview-proxy-panel${moduleCollapsed("proxy") ? " is-collapsed" : ""}`}
+                    data-overview-module="proxy"
+                  >
                     {renderSectionHeading(
                       t("本地代理"),
                       moduleQuickActions(
@@ -3170,8 +4044,14 @@ export function OverviewPage({
                         t("本地代理"),
                         <TerminalIcon fontSize="small" />,
                       ),
+                      visibleProxyProfiles.length,
+                      {
+                        collapsed: moduleCollapsed("proxy"),
+                        onToggle: () =>
+                          toggleWorkspaceModuleCollapsed(group.key, "proxy"),
+                      },
                     )}
-                    <div className="overview-directory-list overview-proxy-list">
+                    {!moduleCollapsed("proxy") ? <div className="overview-directory-list overview-proxy-list">
                       {visibleProxyProfiles.length === 0 ? (
                         <div className="overview-directory-row overview-proxy-row overview-proxy-empty-row">
                           <div className="overview-directory-main overview-proxy-main">
@@ -3271,7 +4151,7 @@ export function OverviewPage({
                           </div>
                         );
                       })}
-                    </div>
+                    </div> : null}
                   </div>
                 ) : null}
               </div>
@@ -3289,12 +4169,18 @@ export function OverviewPage({
                 onEnabledChange={setWorkflowChainEnabled}
                 onRun={runWorkflowChain}
                 onCancelRun={cancelWorkflowRun}
+                collapsed={moduleCollapsed("workflow")}
+                onCollapsedChange={() =>
+                  toggleWorkspaceModuleCollapsed(group.key, "workflow")
+                }
               />
             ) : null}
 
             {showActionsPanel ? (
               <>
                 {renderActionPanel(
+                  group,
+                  "build",
                   t("构建"),
                   visibleBuildActions,
                   "overview-build-actions-panel",
@@ -3307,6 +4193,8 @@ export function OverviewPage({
                   ),
                 )}
                 {renderActionPanel(
+                  group,
+                  "git",
                   "Git",
                   visibleGitActions,
                   "overview-git-actions-panel",
@@ -3318,17 +4206,215 @@ export function OverviewPage({
                     "git",
                   ),
                 )}
-                {renderActionPanel(t("其他动作"), visibleOtherActions)}
+                {renderActionPanel(
+                  group,
+                  "other",
+                  t("其他动作"),
+                  visibleOtherActions,
+                )}
               </>
             ) : null}
+
           </div>
         ) : null}
       </Box>
     );
   }
 
+  async function openWorkspaceFromIndex(
+    group: WorkspacePinnedActionsOverview,
+  ) {
+    if (group.key === activeProjectWorkspaceKey || openingWorkspaceKey) {
+      return;
+    }
+    setOpeningWorkspaceKey(group.key);
+    setError("");
+    setStatus("");
+    try {
+      await onProjectWorkspaceChange(group.key);
+      setStatus(t("已进入工作区 {name}", { name: group.name }));
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setOpeningWorkspaceKey("");
+    }
+  }
+
+  function renderWorkspaceIndexCard(
+    group: WorkspacePinnedActionsOverview,
+    index: number,
+  ) {
+    const typeLabel = workspaceTypeLabel(
+      group.workspaceType,
+      group.workspaceTypeLabel,
+      workspaceTypeOptions,
+    );
+    const summaryItems = [
+      group.projectCount > 0
+        ? workspaceSummaryCountLabel(language, "project", group.projectCount)
+        : "",
+      group.entryCount > 0
+        ? workspaceSummaryCountLabel(language, "entry", group.entryCount)
+        : "",
+      group.actionCount > 0
+        ? workspaceSummaryCountLabel(language, "action", group.actionCount)
+        : "",
+    ].filter(Boolean);
+    const opening = openingWorkspaceKey === group.key;
+
+    return (
+      <Box
+        key={group.key}
+        component="article"
+        className="overview-workspace-index-card"
+        data-index-tone={(["blue", "violet", "cyan", "amber"] as const)[
+          index % 4
+        ]}
+        data-workspace-type={normalizeWorkspaceType(group.workspaceType)}
+      >
+        <span className="overview-workspace-index-icon" aria-hidden="true">
+          <PackageIcon fontSize="small" />
+        </span>
+        <div className="overview-workspace-index-copy">
+          <div className="overview-workspace-index-title-row">
+            <Typography
+              component="h3"
+              className="overview-workspace-index-title"
+              noWrap
+            >
+              {workspaceDisplayName(group, t)}
+            </Typography>
+            {typeLabel.trim() ? (
+              <Chip
+                size="small"
+                className="overview-workspace-type-chip"
+                label={t(typeLabel)}
+              />
+            ) : null}
+          </div>
+          {group.description ? (
+            <Typography
+              className="overview-workspace-index-description"
+              noWrap
+            >
+              {group.description}
+            </Typography>
+          ) : (
+            <Typography
+              className="overview-workspace-index-description"
+              noWrap
+            >
+              {group.key}
+            </Typography>
+          )}
+        </div>
+        {summaryItems.length > 0 ? (
+          <div className="overview-workspace-summary overview-workspace-index-summary">
+            {summaryItems.map((item) => (
+              <span key={item}>{item}</span>
+            ))}
+          </div>
+        ) : (
+          <span className="overview-workspace-index-empty">{t("空工作区")}</span>
+        )}
+        <Button
+          size="small"
+          variant="text"
+          className="overview-workspace-index-enter"
+          disabled={Boolean(openingWorkspaceKey)}
+          onClick={() => void openWorkspaceFromIndex(group)}
+        >
+          {opening ? <CircularProgress size={14} thickness={5} /> : t("进入")}
+        </Button>
+        <Tooltip title={t("更多操作")}>
+          <IconButton
+            size="small"
+            className="overview-workspace-index-menu-button"
+            aria-label={t("{name} 的更多操作", {
+              name: workspaceDisplayName(group, t),
+            })}
+            aria-haspopup="menu"
+            aria-expanded={workspaceIndexMenu?.group.key === group.key}
+            onClick={(event) =>
+              setWorkspaceIndexMenu({
+                anchorEl: event.currentTarget,
+                group,
+              })
+            }
+          >
+            <MoreIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Box>
+    );
+  }
+
+  function renderWorkspaceDirectoryPanel() {
+    const collapsed = isWorkspaceModuleCollapsed(
+      SYSTEM_WORKSPACE_KEY,
+      "workspaces",
+    );
+    return (
+      <Box
+        component="section"
+        className={`overview-directory-panel overview-workspace-index-panel overview-workspace-directory-panel${collapsed ? " is-collapsed" : ""}`}
+        data-overview-module="workspaces"
+      >
+        {renderSectionHeading(
+          t("工作区"),
+          [
+            {
+              key: "workspace-config",
+              label: t("工作区配置"),
+              title: t("工作区配置"),
+              icon: <SettingsIcon fontSize="small" />,
+              onClick: () => setManageOpen(true),
+            },
+          ],
+          filteredWorkspaceIndexGroups.length,
+          {
+            collapsed,
+            onToggle: () =>
+              toggleWorkspaceModuleCollapsed(
+                SYSTEM_WORKSPACE_KEY,
+                "workspaces",
+              ),
+          },
+        )}
+        {!collapsed ? (
+          filteredWorkspaceIndexGroups.length > 0 ? (
+            <div className="overview-workspace-index-grid">
+              {filteredWorkspaceIndexGroups.map((workspace, index) =>
+                renderWorkspaceIndexCard(workspace, index),
+              )}
+            </div>
+          ) : (
+            <AppEmptyState
+              className="overview-workspace-module-empty"
+              compact
+              title={t(
+                workspaceIndexGroups.length > 0
+                  ? "没有匹配工作区"
+                  : "还没有具体工作区",
+              )}
+              description={t(
+                workspaceIndexGroups.length > 0
+                  ? "换个关键词或筛选项。"
+                  : "新建工作区后会显示在这里。",
+              )}
+            />
+          )
+        ) : null}
+      </Box>
+    );
+  }
+
   return (
-    <Box className="overview-page">
+    <Box
+      className={`overview-page${
+        isSystemWorkspaceActive ? " is-global-workspace" : ""
+      }`}
+    >
       <Stack className="overview-page-stack" minWidth={0}>
         <AppToast
           message={error || status}
@@ -3347,23 +4433,22 @@ export function OverviewPage({
           onAction={(action) => void runLinkDialogAction(action)}
         />
 
+        <ResourceActionDialog
+          open={Boolean(resourceActionDialog)}
+          target={resourceActionDialog}
+          onClose={() => setResourceActionDialog(null)}
+          recordActivity={recordActivity}
+          updateActivity={updateActivity}
+        />
+
         <WorkspacePageToolbar
-          ariaLabel={t("工作区概览与配置")}
-          metrics={[
-            {
-              key: "workspaces",
-              label: t("工作区"),
-              value: groups.length,
-              icon: <PackageIcon fontSize="small" />,
-              tone: "blue" as const,
-            },
-            ...workspaceToolbarTypeTags.map((option, index) => ({
-              key: option.key,
-              label: t(option.label),
-              value: option.count,
-              tone: (["cyan", "violet", "green"] as const)[index % 3],
-            })),
-          ]}
+          className={isSystemWorkspaceActive ? "overview-global-toolbar" : ""}
+          ariaLabel={t(
+            isSystemWorkspaceActive
+              ? "全局工作区概览与配置"
+              : "当前工作区概览与配置",
+          )}
+          metrics={workspaceToolbarMetrics}
           actions={
             <WorkspacePageToolbarAction
               startIcon={<SettingsIcon fontSize="small" />}
@@ -3374,7 +4459,10 @@ export function OverviewPage({
           }
         />
 
-        <Box className="overview-filter-bar">
+        <Box
+          className="overview-filter-bar"
+          hidden={!isSystemWorkspaceActive}
+        >
           <TextField
             className="overview-search-field"
             size="small"
@@ -3417,7 +4505,9 @@ export function OverviewPage({
             SelectProps={{ MenuProps: workspaceTypeSelectMenuProps }}
           >
             <MenuItem value="all">
-              {t("全部类型 {count}", { count: groups.length })}
+              {t("全部类型 {count}", {
+                count: workspaceIndexGroups.length,
+              })}
             </MenuItem>
             {workspaceTypeFilterOptions.map((option) => (
               <MenuItem key={option.key} value={option.key}>
@@ -3431,7 +4521,13 @@ export function OverviewPage({
         </Box>
 
         <Box className="overview-workspace-list">
-          {featuredGroup ? renderWorkspaceCard(featuredGroup, true) : null}
+          {activeOverviewGroup
+            ? renderWorkspaceCard(activeOverviewGroup, true)
+            : null}
+
+          {isSystemWorkspaceActive && activeOverviewGroup
+            ? renderWorkspaceDirectoryPanel()
+            : null}
 
           {loading && groups.length === 0 ? (
             <Box className="overview-loading-state">
@@ -3447,17 +4543,125 @@ export function OverviewPage({
             </Box>
           ) : null}
 
-          {!loading && groups.length > 0 && filteredGroups.length === 0 ? (
-            <AppEmptyState
-              className="overview-filter-empty-state"
-              compact
-              title={t("没有匹配工作区")}
-              description={t("换个关键词或筛选项。")}
-            />
+          {!loading &&
+          isSystemWorkspaceActive &&
+          activeOverviewGroup &&
+          !isWorkspaceModuleCollapsed(SYSTEM_WORKSPACE_KEY, "workspaces") ? (
+            <AppListEndState className="overview-workspace-index-end" />
           ) : null}
-
-          {listedGroups.map((group) => renderWorkspaceCard(group))}
         </Box>
+
+        <Menu
+          anchorEl={workspaceIndexMenu?.anchorEl ?? null}
+          open={Boolean(workspaceIndexMenu)}
+          onClose={() => setWorkspaceIndexMenu(null)}
+          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+          transformOrigin={{ vertical: "top", horizontal: "right" }}
+          slotProps={{
+            paper: {
+              className: "overview-workspace-index-menu-paper",
+            },
+          }}
+        >
+          <MenuItem
+            className="overview-workspace-index-menu-item"
+            disabled={!workspaceIndexMenu}
+            onClick={() => {
+              const group = workspaceIndexMenu?.group;
+              setWorkspaceIndexMenu(null);
+              if (group) {
+                void openWorkspaceAiContext(group);
+              }
+            }}
+          >
+            <CopyIcon fontSize="small" />
+            {t("提取 AI 上下文")}
+          </MenuItem>
+          <MenuItem
+            className="overview-workspace-index-menu-item"
+            disabled={!workspaceIndexMenu}
+            onClick={() => {
+              const group = workspaceIndexMenu?.group;
+              setWorkspaceIndexMenu(null);
+              if (group) {
+                setManageOpen(true);
+                void selectWorkspaceConfig(group.key);
+              }
+            }}
+          >
+            <SettingsIcon fontSize="small" />
+            {t("工作区配置")}
+          </MenuItem>
+        </Menu>
+
+        <Menu
+          anchorEl={workspaceModuleMenu?.anchorEl ?? null}
+          open={Boolean(workspaceModuleMenu)}
+          onClose={() => setWorkspaceModuleMenu(null)}
+          anchorOrigin={{ vertical: "bottom", horizontal: "right" }}
+          transformOrigin={{ vertical: "top", horizontal: "right" }}
+          slotProps={{
+            paper: {
+              className: "overview-workspace-index-menu-paper",
+            },
+          }}
+        >
+          <MenuItem
+            className="overview-workspace-index-menu-item"
+            disabled={
+              !workspaceModuleMenu ||
+              workspaceModuleMenu.moduleKeys.every(
+                (moduleKey) =>
+                  !collapsedWorkspaceModuleKeys.has(
+                    workspaceModuleStorageKey(
+                      workspaceModuleMenu.workspaceKey,
+                      moduleKey,
+                    ),
+                  ),
+              )
+            }
+            onClick={() => {
+              if (workspaceModuleMenu) {
+                setWorkspaceModulesCollapsed(
+                  workspaceModuleMenu.workspaceKey,
+                  workspaceModuleMenu.moduleKeys,
+                  false,
+                );
+              }
+              setWorkspaceModuleMenu(null);
+            }}
+          >
+            <ExpandIcon fontSize="small" />
+            {t("展开全部模块")}
+          </MenuItem>
+          <MenuItem
+            className="overview-workspace-index-menu-item"
+            disabled={
+              !workspaceModuleMenu ||
+              workspaceModuleMenu.moduleKeys.every((moduleKey) =>
+                collapsedWorkspaceModuleKeys.has(
+                  workspaceModuleStorageKey(
+                    workspaceModuleMenu.workspaceKey,
+                    moduleKey,
+                  ),
+                ),
+              )
+            }
+            onClick={() => {
+              if (workspaceModuleMenu) {
+                setWorkspaceModulesCollapsed(
+                  workspaceModuleMenu.workspaceKey,
+                  workspaceModuleMenu.moduleKeys,
+                  true,
+                );
+              }
+              setWorkspaceModuleMenu(null);
+            }}
+          >
+            <CollapseIcon fontSize="small" />
+            {t("收起全部模块")}
+          </MenuItem>
+        </Menu>
 
         <Dialog
           open={aiContextOpen}
@@ -4012,7 +5216,7 @@ export function OverviewPage({
                               size="small"
                               label={t("需求号")}
                               value={demandId}
-                              placeholder={t("可选，如 CR2606150041")}
+                              placeholder={t("可选，如 REQ-1234")}
                               onChange={(event) =>
                                 setDemandId(event.target.value)
                               }
@@ -4122,6 +5326,25 @@ export function OverviewPage({
                             }
                             disabled={creatingWorkspace}
                             sx={{ gridColumn: { xs: "auto", md: "1 / -1" } }}
+                          />
+                        ) : null}
+                        {createWorkspaceMode === "demand" &&
+                        newWorkspaceIndependentDir ? (
+                          <FormControlLabel
+                            sx={{ m: 0, whiteSpace: "nowrap" }}
+                            control={
+                              <Checkbox
+                                size="small"
+                                checked={reuseDemandDependencies}
+                                onChange={(event) =>
+                                  setReuseDemandDependencies(
+                                    event.target.checked,
+                                  )
+                                }
+                                disabled={creatingWorkspace}
+                              />
+                            }
+                            label={t("锁文件一致时复用源项目依赖")}
                           />
                         ) : null}
                         <TextField
@@ -4235,7 +5458,9 @@ export function OverviewPage({
                             !newWorkspaceName.trim() ||
                             (createWorkspaceMode === "demand" &&
                               (!demandRequirementDir.trim() ||
-                                !demandRepoPath.trim()))
+                                !demandRepoPath.trim() ||
+                                (newWorkspaceIndependentDir &&
+                                  !demandBranch.trim())))
                           }
                         >
                           {t(createWorkspaceMode === "demand" ? "初始化" : "创建")}
@@ -4522,12 +5747,27 @@ export function OverviewPage({
                               >
                                 {t("全局目录 / 工作区副本 / 绑定目录")}
                               </Typography>
+                              {workspaceInstanceStatuses.loading ? (
+                                <CircularProgress size={12} thickness={5} />
+                              ) : null}
                             </Stack>
+                            {workspaceInstanceStatuses.error ? (
+                              <Typography
+                                className="overview-workspace-instance-status-error"
+                                variant="caption"
+                              >
+                                {t("部分项目实例状态暂不可用")}
+                              </Typography>
+                            ) : null}
                             {scopedWorkspaceProjects.length > 0 ? (
                               scopedWorkspaceProjects.map((project) => {
                                 const instance = workspaceInstanceByProject.get(
                                   project.key,
                                 );
+                                const instanceStatus =
+                                  workspaceInstanceStatuses.byProject.get(
+                                    project.key,
+                                  );
                                 const modeLabel = instance
                                   ? instance.managed
                                     ? t("工作区副本")
@@ -4591,6 +5831,20 @@ export function OverviewPage({
                                             variant="outlined"
                                           />
                                         ) : null}
+                                        {instanceStatus ? (
+                                          <Chip
+                                            size="small"
+                                            className={`overview-workspace-instance-status is-${instanceStatus.statusKey}`}
+                                            label={translateInternalMessage(
+                                              instanceStatus.statusLabel,
+                                              t,
+                                            )}
+                                            title={translateInternalMessage(
+                                              instanceStatus.detail,
+                                              t,
+                                            )}
+                                          />
+                                        ) : null}
                                       </Stack>
                                       <Typography
                                         variant="caption"
@@ -4599,6 +5853,18 @@ export function OverviewPage({
                                       >
                                         {path}
                                       </Typography>
+                                      {instanceStatus &&
+                                      instanceStatus.statusKey !== "healthy" ? (
+                                        <Typography
+                                          className="overview-workspace-instance-detail"
+                                          variant="caption"
+                                        >
+                                          {translateInternalMessage(
+                                            instanceStatus.detail,
+                                            t,
+                                          )}
+                                        </Typography>
+                                      ) : null}
                                     </Stack>
                                     {!workspaceScopeReadOnly ? (
                                       <Stack
@@ -4607,22 +5873,124 @@ export function OverviewPage({
                                         justifyContent="flex-end"
                                       >
                                         {instance ? (
-                                          <Button
-                                            size="small"
-                                            variant="outlined"
-                                            sx={directoryActionButtonSx}
-                                            onClick={() =>
-                                              void unbindWorkspaceProjectDirectory(
-                                                project.key,
-                                              )
-                                            }
-                                            disabled={
-                                              workspaceSaving ||
-                                              Boolean(workspaceDirectoryBusy)
-                                            }
-                                          >
-                                            {t(busy ? "处理中" : "解绑")}
-                                          </Button>
+                                          <>
+                                            {instanceStatus?.canOpen ? (
+                                              <Tooltip title={t("打开项目目录")}>
+                                                <span>
+                                                  <IconButton
+                                                    size="small"
+                                                    aria-label={t("打开项目目录")}
+                                                    onClick={() =>
+                                                      void openWorkspaceProjectDirectory(
+                                                        instance.path,
+                                                      )
+                                                    }
+                                                    disabled={
+                                                      workspaceSaving ||
+                                                      Boolean(
+                                                        workspaceDirectoryBusy,
+                                                      )
+                                                    }
+                                                  >
+                                                    <FolderIcon fontSize="small" />
+                                                  </IconButton>
+                                                </span>
+                                              </Tooltip>
+                                            ) : null}
+                                            {!instance.managed ? (
+                                              <Button
+                                                size="small"
+                                                variant="outlined"
+                                                sx={directoryActionButtonSx}
+                                                onClick={() =>
+                                                  void bindWorkspaceProjectDirectory(
+                                                    project.key,
+                                                  )
+                                                }
+                                                disabled={
+                                                  workspaceSaving ||
+                                                  Boolean(
+                                                    workspaceDirectoryBusy,
+                                                  )
+                                                }
+                                              >
+                                                {t("更换目录")}
+                                              </Button>
+                                            ) : null}
+                                            {instanceStatus?.repairSupported ? (
+                                              <Button
+                                                size="small"
+                                                variant="outlined"
+                                                startIcon={
+                                                  <ReplayIcon fontSize="small" />
+                                                }
+                                                sx={directoryActionButtonSx}
+                                                onClick={() =>
+                                                  void repairWorkspaceProjectInstance(
+                                                    project.key,
+                                                  )
+                                                }
+                                                disabled={
+                                                  workspaceSaving ||
+                                                  Boolean(
+                                                    workspaceDirectoryBusy,
+                                                  )
+                                                }
+                                              >
+                                                {t(
+                                                  busy
+                                                    ? "处理中"
+                                                    : "修复副本",
+                                                )}
+                                              </Button>
+                                            ) : null}
+                                            {instance.managed ? (
+                                              <Tooltip
+                                                title={t(
+                                                  "评估托管副本清理",
+                                                )}
+                                              >
+                                                <span>
+                                                  <IconButton
+                                                    size="small"
+                                                    aria-label={t(
+                                                      "评估托管副本清理",
+                                                    )}
+                                                    onClick={() =>
+                                                      inspectWorkspaceProjectInstanceCleanup(
+                                                        project.key,
+                                                        instance.path,
+                                                      )
+                                                    }
+                                                    disabled={
+                                                      workspaceSaving ||
+                                                      Boolean(
+                                                        workspaceDirectoryBusy,
+                                                      )
+                                                    }
+                                                  >
+                                                    <PackageIcon fontSize="small" />
+                                                  </IconButton>
+                                                </span>
+                                              </Tooltip>
+                                            ) : null}
+                                            <Button
+                                              size="small"
+                                              variant="outlined"
+                                              sx={directoryActionButtonSx}
+                                              onClick={() =>
+                                                void unbindWorkspaceProjectDirectory(
+                                                  project.key,
+                                                )
+                                              }
+                                              disabled={
+                                                workspaceSaving ||
+                                                Boolean(workspaceDirectoryBusy)
+                                              }
+                                            >
+                                              {t(busy ? "处理中" : "解除关联")}
+                                            </Button>
+                                          </>
                                         ) : (
                                           <>
                                             <Button

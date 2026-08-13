@@ -784,6 +784,8 @@ fn default_build_action_kind() -> BuildActionKind {
 pub struct DeployParamConfig {
     pub key: String,
     pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_key: Option<String>,
     #[serde(rename = "type")]
     pub kind: DeployParamKind,
     #[serde(default)]
@@ -1595,6 +1597,38 @@ job_name = "Demo/legacy"
         .expect("parse legacy target");
 
         assert!(target.artifact.is_none());
+    }
+
+    #[test]
+    fn deploy_parameter_label_key_is_optional_and_round_trips() {
+        let legacy: DeployParamConfig = toml::from_str(
+            r#"
+key = "platform"
+label = "系统"
+type = "select"
+options = ["macos"]
+"#,
+        )
+        .expect("parse legacy parameter");
+        assert_eq!(legacy.label_key, None);
+
+        let parameter: DeployParamConfig = toml::from_str(
+            r#"
+key = "platform"
+label = "系统"
+label_key = "build.param.platform.label"
+type = "select"
+options = ["macos"]
+"#,
+        )
+        .expect("parse parameter with label key");
+        assert_eq!(
+            parameter.label_key.as_deref(),
+            Some("build.param.platform.label")
+        );
+
+        let serialized = toml::to_string(&parameter).expect("serialize parameter");
+        assert!(serialized.contains("label_key = \"build.param.platform.label\""));
     }
 }
 

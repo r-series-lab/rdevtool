@@ -1,3 +1,4 @@
+use rdevtool_core::app_message::AppMessage;
 use rdevtool_core::proxy::ProxyDashboard;
 use rdevtool_core::runtime::{
     ProjectRuntimePreflightFix, ProjectRuntimePreflightResponse,
@@ -26,8 +27,16 @@ pub(crate) fn enrich_bound_proxy_preflight(
     else {
         check.status_key = "error".to_string();
         check.status_label = "异常".to_string();
+        check.status_message = AppMessage::new("runtime.preflight.check.status.error");
         check.detail = format!("绑定的代理配置不存在: {profile_id}");
+        check.detail_message = Some(
+            AppMessage::new("runtime.preflight.detail.runtime_proxy.missing_profile")
+                .with_param("id", profile_id),
+        );
         check.action = Some("打开本地代理，恢复该配置或重新绑定运行环境。".to_string());
+        check.action_message = Some(AppMessage::new(
+            "runtime.preflight.action.runtime_proxy.restore_or_rebind",
+        ));
         check.fix = None;
         refresh_project_runtime_preflight_summary(response);
         return;
@@ -38,21 +47,57 @@ pub(crate) fn enrich_bound_proxy_preflight(
         .iter()
         .find(|status| status.profile_id == profile.id);
     let running = status.is_some_and(|status| status.running);
+    let managed = status.is_some_and(|status| status.managed);
     let listen_url = status
         .map(|status| status.listen_url.clone())
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| profile.listen_url());
-    if running {
+    if running && managed {
         check.status_key = "ok".to_string();
         check.status_label = "正常".to_string();
+        check.status_message = AppMessage::new("runtime.preflight.check.status.ok");
         check.detail = format!("{} 正在监听 {}", profile.name, listen_url);
+        check.detail_message = Some(
+            AppMessage::new("runtime.preflight.detail.runtime_proxy.listening")
+                .with_param("name", profile.name.clone())
+                .with_param("url", listen_url.clone()),
+        );
         check.action = None;
+        check.action_message = None;
+        check.fix = None;
+    } else if running {
+        let owner = status
+            .and_then(|status| status.owner.as_deref())
+            .unwrap_or("外部进程");
+        check.status_key = "error".to_string();
+        check.status_label = "异常".to_string();
+        check.status_message = AppMessage::new("runtime.preflight.check.status.error");
+        check.detail = format!("{} 的端口由 {} 占用：{}", profile.name, owner, listen_url);
+        check.detail_message = Some(
+            AppMessage::new("runtime.preflight.detail.runtime_proxy.external")
+                .with_param("name", profile.name.clone())
+                .with_param("owner", owner)
+                .with_param("url", listen_url.clone()),
+        );
+        check.action = Some("先确认并释放外部监听，或调整代理服务端口。".to_string());
+        check.action_message = Some(AppMessage::new(
+            "runtime.preflight.action.runtime_proxy.resolve_external",
+        ));
         check.fix = None;
     } else {
         check.status_key = "warning".to_string();
         check.status_label = "未启动".to_string();
+        check.status_message = AppMessage::new("runtime.preflight.check.status.warning");
         check.detail = format!("{} 尚未监听 {}", profile.name, listen_url);
+        check.detail_message = Some(
+            AppMessage::new("runtime.preflight.detail.runtime_proxy.stopped")
+                .with_param("name", profile.name.clone())
+                .with_param("url", listen_url.clone()),
+        );
         check.action = Some("可先启动该代理，再重新执行启动预检。".to_string());
+        check.action_message = Some(AppMessage::new(
+            "runtime.preflight.action.runtime_proxy.start_then_retry",
+        ));
         let mut fix = ProjectRuntimePreflightFix::new(
             "startProxy",
             "启动代理",
@@ -81,8 +126,16 @@ pub(crate) fn mark_bound_proxy_preflight_unavailable(
     };
     check.status_key = "error".to_string();
     check.status_label = "异常".to_string();
+    check.status_message = AppMessage::new("runtime.preflight.check.status.error");
     check.detail = detail.into();
+    check.detail_message = Some(
+        AppMessage::new("runtime.preflight.detail.runtime_proxy.unavailable")
+            .with_param("detail", check.detail.clone()),
+    );
     check.action = Some("检查当前工作区的代理配置源，修复后重新预检。".to_string());
+    check.action_message = Some(AppMessage::new(
+        "runtime.preflight.action.runtime_proxy.fix_source",
+    ));
     check.fix = None;
     refresh_project_runtime_preflight_summary(response);
 }
@@ -103,7 +156,9 @@ mod tests {
             runtime_profile_label: Some("Shared".to_string()),
             status_key: "ok".to_string(),
             status_label: "可启动".to_string(),
+            status_message: AppMessage::new("runtime.preflight.status.ok"),
             summary: "关键链路正常".to_string(),
+            summary_message: AppMessage::new("runtime.preflight.summary.ok"),
             target: None,
             checks: vec![ProjectRuntimePreflightCheck {
                 key: "runtimeProxy".to_string(),
@@ -111,14 +166,27 @@ mod tests {
                 category: "network".to_string(),
                 status_key: "ok".to_string(),
                 status_label: "正常".to_string(),
+                status_message: AppMessage::new("runtime.preflight.check.status.ok"),
                 detail: "已绑定 local-proxy".to_string(),
+                title_message: Some(AppMessage::new(
+                    "runtime.preflight.check.title.runtime_proxy",
+                )),
+                detail_message: Some(
+                    AppMessage::new("runtime.preflight.detail.runtime_proxy.bound")
+                        .with_param("id", "local-proxy"),
+                ),
                 action: None,
+                action_message: None,
                 fix: None,
             }],
         }
     }
 
     fn dashboard(running: bool) -> ProxyDashboard {
+        dashboard_with_ownership(running, running)
+    }
+
+    fn dashboard_with_ownership(running: bool, managed: bool) -> ProxyDashboard {
         let profile = ProxyProfile {
             id: "local-proxy".to_string(),
             name: "本地联调代理".to_string(),
@@ -134,8 +202,25 @@ mod tests {
             statuses: vec![ProxyProfileRuntimeStatus {
                 profile_id: "local-proxy".to_string(),
                 running,
+                managed,
+                version_compatible: managed || !running,
                 listen_url: "http://127.0.0.1:8791".to_string(),
-                started_at: running.then(|| "2026-07-27T10:00:00Z".to_string()),
+                pid: (running && managed).then_some(42),
+                started_at: (running && managed).then(|| "2026-07-27T10:00:00Z".to_string()),
+                owner: running.then(|| {
+                    if managed {
+                        "rDevTool proxy daemon (PID 42)".to_string()
+                    } else {
+                        "node (PID 81)".to_string()
+                    }
+                }),
+                detail: if running && managed {
+                    "proxy daemon is listening".to_string()
+                } else if running {
+                    "port is listening but is not owned by rDevTool daemon".to_string()
+                } else {
+                    "proxy daemon is stopped".to_string()
+                },
             }],
             events: Vec::new(),
         }
@@ -175,6 +260,31 @@ mod tests {
         assert_eq!(response.status_key, "ok");
         assert_eq!(response.checks[0].status_key, "ok");
         assert!(response.checks[0].fix.is_none());
+    }
+
+    #[test]
+    fn blocks_a_bound_proxy_owned_by_an_external_process() {
+        let mut response = response();
+        enrich_bound_proxy_preflight(
+            &mut response,
+            "workspace-proxy",
+            "工作区代理",
+            "local-proxy",
+            &dashboard_with_ownership(true, false),
+        );
+
+        assert_eq!(response.status_key, "error");
+        let check = &response.checks[0];
+        assert_eq!(check.status_key, "error");
+        assert!(check.detail.contains("node (PID 81)"));
+        assert_eq!(
+            check
+                .detail_message
+                .as_ref()
+                .map(|message| message.key.as_str()),
+            Some("runtime.preflight.detail.runtime_proxy.external")
+        );
+        assert!(check.fix.is_none());
     }
 
     #[test]

@@ -4,6 +4,7 @@ import type { PageKey } from "../app-shell";
 import type { ProjectSummary } from "../hooks/useBranchContext";
 import type { FinderShortcutItem } from "../hooks/useProjectsModule";
 import { useI18n } from "../i18n";
+import { translateBuildDetail } from "../lib/buildPresentation";
 import {
   AppWindowIcon,
   FolderIcon,
@@ -334,7 +335,9 @@ export function CommandPalette({
         items.push({
           id: `project:${project.key}:stop-build`,
           title: t("停止构建 {name}", { name: project.name || project.key }),
-          subtitle: runtime.buildDetail || t("中止构建任务"),
+          subtitle:
+            translateBuildDetail(runtime.buildDetail || "", t) ||
+            t("中止构建任务"),
           group: t("项目动作"),
           badge: "stop",
           icon: <StopIcon fontSize="small" />,

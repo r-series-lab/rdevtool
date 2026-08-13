@@ -98,9 +98,9 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  acceptanceServer.closeAllConnections?.();
   await new Promise<void>((resolve, reject) => {
     acceptanceServer.close((error) => (error ? reject(error) : resolve()));
+    acceptanceServer.closeAllConnections?.();
   });
 });
 

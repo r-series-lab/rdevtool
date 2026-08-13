@@ -5,6 +5,7 @@ import type {
 } from "../app-types";
 import {
   buildProjectRuntimeLaunchPlan,
+  compareFinderShortcutPriority,
   projectRuntimePreflightBlocksStart,
   projectRuntimePollingEnabled,
   projectRuntimePreferencesAllowStart,
@@ -15,6 +16,35 @@ import {
   updateWorkspaceDebugProfileKey,
   updateWorkspaceRuntimeStartPromptMode,
 } from "./useProjectsModule";
+
+describe("resource shortcut priority", () => {
+  const favorites = new Set(["favorite"]);
+  const recentRanks = new Map([
+    ["recent-first", 0],
+    ["recent-second", 1],
+  ]);
+
+  it("orders favorites before recent entries and keeps recency order", () => {
+    const keys = ["configured", "recent-second", "favorite", "recent-first"];
+
+    expect(
+      keys.sort((left, right) =>
+        compareFinderShortcutPriority(left, right, favorites, recentRanks),
+      ),
+    ).toEqual(["favorite", "recent-first", "recent-second", "configured"]);
+  });
+
+  it("preserves configured order when neither entry has a preference", () => {
+    expect(
+      compareFinderShortcutPriority(
+        "configured-a",
+        "configured-b",
+        favorites,
+        recentRanks,
+      ),
+    ).toBe(0);
+  });
+});
 
 function debugProfile(
   key: string,

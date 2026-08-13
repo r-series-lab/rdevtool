@@ -9,6 +9,7 @@ import { alpha } from "@mui/material/styles";
 import type { BranchPushStatus } from "../../app-types";
 import { useI18n } from "../../i18n";
 import { BranchChangesDialog } from "./BranchChangedFilesList";
+import { BranchRevisionSummary } from "./BranchRevisionSummary";
 
 type BranchPushStatusCardProps = {
   status: BranchPushStatus;
@@ -34,13 +35,15 @@ export function BranchPushStatusCard({
     selectedPaths.length > 0 &&
     status.files.some((item) => item.staged && !selectedPathSet.has(item.path));
   const dirty = !status.clean;
+  const upstreamComparable =
+    status.upstreamComparable ?? Boolean(status.upstreamBranch);
   const statusMetrics = [
-    { key: "ahead", label: "领先", value: status.ahead, tone: "primary" },
-    { key: "behind", label: "落后", value: status.behind, tone: "warning" },
-    { key: "staged", label: "暂存", value: status.stagedCount, tone: "success" },
-    { key: "unstaged", label: "未暂存", value: status.unstagedCount, tone: "primary" },
-    { key: "untracked", label: "未跟踪", value: status.untrackedCount, tone: "default" },
-    { key: "conflict", label: "冲突", value: status.conflictedCount, tone: "error" },
+    { key: "ahead", label: "领先", value: status.ahead, tone: "primary", available: upstreamComparable },
+    { key: "behind", label: "落后", value: status.behind, tone: "warning", available: upstreamComparable },
+    { key: "staged", label: "暂存", value: status.stagedCount, tone: "success", available: true },
+    { key: "unstaged", label: "未暂存", value: status.unstagedCount, tone: "primary", available: true },
+    { key: "untracked", label: "未跟踪", value: status.untrackedCount, tone: "default", available: true },
+    { key: "conflict", label: "冲突", value: status.conflictedCount, tone: "error", available: true },
   ] as const;
 
   return (
@@ -158,7 +161,7 @@ export function BranchPushStatusCard({
 
             <Stack direction="row" columnGap={0.45} rowGap={0.42} flexWrap="wrap">
               {statusMetrics.map((metric) => {
-                const active = metric.value > 0;
+                const active = metric.available && metric.value > 0;
                 const color =
                   metric.tone === "error"
                     ? "error.main"
@@ -222,7 +225,7 @@ export function BranchPushStatusCard({
                         fontVariantNumeric: "tabular-nums",
                       }}
                     >
-                      {metric.value}
+                      {metric.available ? metric.value : "—"}
                     </Typography>
                   </Box>
                 );
@@ -230,36 +233,10 @@ export function BranchPushStatusCard({
             </Stack>
 
             {status.latestCommit ? (
-              <Typography
-                variant="caption"
-                color="text.secondary"
-                title={`${status.latestCommit.shortHash} · ${status.latestCommit.subject}`}
-                sx={{
-                  display: "block",
-                  minWidth: 0,
-                  overflow: "hidden",
-                  textOverflow: "ellipsis",
-                  whiteSpace: "nowrap",
-                  fontSize: "0.71rem",
-                  lineHeight: 1.35,
-                  fontWeight: 720,
-                }}
-              >
-                {t("最近提交")}{" "}
-                <Box
-                  component="span"
-                  sx={{
-                    fontFamily:
-                      '"SFMono-Regular","IBM Plex Mono","Fira Code","Menlo",monospace',
-                    color: "text.primary",
-                    fontWeight: 820,
-                  }}
-                >
-                  {status.latestCommit.shortHash}
-                </Box>
-                {" · "}
-                {status.latestCommit.subject}
-              </Typography>
+              <BranchRevisionSummary
+                label={t("最近提交")}
+                commit={status.latestCommit}
+              />
             ) : null}
           </Stack>
 

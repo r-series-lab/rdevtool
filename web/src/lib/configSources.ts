@@ -5,6 +5,12 @@ export const SYSTEM_WORKSPACE_KEY = "system";
 export const CONFIG_SOURCE_PREFERENCE_PREFIX = "rdevtool.config-source";
 export const CONFIG_SOURCES_CHANGED_EVENT = "rdevtool://config-sources-changed";
 
+type ConfigSourcePreferenceCache = {
+  getItem: (key: string) => string | null;
+  setItem: (key: string, value: string) => void;
+  removeItem: (key: string) => void;
+};
+
 export type ConfigSourcesChangedPayload = {
   revision: number;
   origin?: "internal" | "external";
@@ -89,6 +95,46 @@ export function configSourcePreferenceKey(
   const workspace = normalizeConfigSourceId(workspaceKey ?? "") || SYSTEM_WORKSPACE_KEY;
   const scope = normalizeConfigSourceId(capability) || "resource";
   return `${CONFIG_SOURCE_PREFERENCE_PREFIX}.${scope}.${workspace}`;
+}
+
+export function managesConfigSourcePreference(
+  initialSourceId?: string,
+  requiredCapability?: string,
+): boolean {
+  return !initialSourceId?.trim() && Boolean(requiredCapability?.trim());
+}
+
+export function normalizeCachedConfigSourceId(value?: string | null): string | null {
+  const sourceId = value?.trim();
+  return sourceId || null;
+}
+
+export function readConfigSourcePreferenceCache(
+  storage: ConfigSourcePreferenceCache,
+  preferenceKey: string,
+): string | null {
+  try {
+    return normalizeCachedConfigSourceId(storage.getItem(preferenceKey));
+  } catch {
+    return null;
+  }
+}
+
+export function writeConfigSourcePreferenceCache(
+  storage: ConfigSourcePreferenceCache,
+  preferenceKey: string,
+  sourceId: string,
+): void {
+  try {
+    const normalized = normalizeCachedConfigSourceId(sourceId);
+    if (normalized) {
+      storage.setItem(preferenceKey, normalized);
+    } else {
+      storage.removeItem(preferenceKey);
+    }
+  } catch {
+    // The TOML preference remains authoritative when WebView storage is unavailable.
+  }
 }
 
 export function configSourceSupports(

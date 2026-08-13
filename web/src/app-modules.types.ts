@@ -195,6 +195,7 @@ export type BuildModuleContext = {
 export type BranchModuleContext = {
   branchEntries: BranchOption[];
   branchOptions: string[];
+  selectionStorageKey: string;
   selectedProjectSelection: ProjectSelectionEntry | null;
   handleSyncBranches: (projectKey?: string) => Promise<void>;
   branchSyncText: string;
@@ -325,9 +326,9 @@ export type ProjectsModuleContext = {
   handleAdoptRuntime: (
     projectKey: string,
     debugProfileKey?: string,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   handleRunBuild: (projectKey: string) => Promise<void>;
-  handleStopBuild: (projectKey: string) => Promise<void>;
+  handleStopBuild: (projectKey: string) => Promise<boolean>;
   handleOpenBuildOutput: (projectKey: string) => Promise<void>;
   handleFocusRuntime: (
     projectKey: string,

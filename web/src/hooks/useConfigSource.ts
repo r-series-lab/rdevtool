@@ -10,8 +10,11 @@ import {
   ConfigSourceRequestTracker,
   configSourceSupports,
   findConfigSource,
+  managesConfigSourcePreference,
   mergeConfigSourcesChangedPayload,
+  readConfigSourcePreferenceCache,
   resolveConfigSource,
+  writeConfigSourcePreferenceCache,
   type ConfigSourcesChangedPayload,
 } from "../lib/configSources";
 import { disposeTauriListener } from "../lib/tauriEvents";
@@ -47,18 +50,28 @@ export function useConfigSource({
     [requiredCapability, workspaceKey],
   );
   const resolvedWorkspaceKey = workspaceKey?.trim() || "system";
+  const managesPreference = useMemo(
+    () => managesConfigSourcePreference(initialSourceId, requiredCapability),
+    [initialSourceId, requiredCapability],
+  );
   const preferredSourceId = useMemo(
     () => {
       if (initialSourceId) {
         return initialSourceId;
       }
-      try {
-        return window.localStorage.getItem(preferenceKey) || configSourceIdForWorkspace(workspaceKey);
-      } catch {
-        return configSourceIdForWorkspace(workspaceKey);
+      if (managesPreference) {
+        try {
+          return (
+            readConfigSourcePreferenceCache(window.localStorage, preferenceKey) ||
+            configSourceIdForWorkspace(workspaceKey)
+          );
+        } catch {
+          return configSourceIdForWorkspace(workspaceKey);
+        }
       }
+      return configSourceIdForWorkspace(workspaceKey);
     },
-    [initialSourceId, preferenceKey, workspaceKey],
+    [initialSourceId, managesPreference, preferenceKey, workspaceKey],
   );
   const [sources, setSources] = useState<ConfigSource[]>([]);
   const [selectedSourceIdState, setSelectedSourceId] = useState(preferredSourceId);
@@ -87,24 +100,29 @@ export function useConfigSource({
 
   const rememberLocalSource = useCallback(
     (sourceId: string) => {
-      try {
-        window.localStorage.setItem(preferenceKey, sourceId);
-      } catch {
-        // Selection still works when persistent browser storage is unavailable.
+      if (managesPreference) {
+        try {
+          writeConfigSourcePreferenceCache(window.localStorage, preferenceKey, sourceId);
+        } catch {
+          // Selection still works when WebView storage is unavailable.
+        }
       }
     },
-    [preferenceKey],
+    [managesPreference, preferenceKey],
   );
 
   const notifySourceSelection = useCallback(
     (sourceId: string) => {
+      if (!managesPreference) {
+        return;
+      }
       window.dispatchEvent(
         new CustomEvent<ConfigSourceSelectionDetail>(CONFIG_SOURCE_SELECTION_EVENT, {
           detail: { preferenceKey, sourceId },
         }),
       );
     },
-    [preferenceKey],
+    [managesPreference, preferenceKey],
   );
 
   const selectedSource = useMemo(
@@ -154,12 +172,12 @@ export function useConfigSource({
       setSourceError("");
       try {
         const preferencePromise =
-          requestedSourceId || initialSourceId || !requiredCapability
+          requestedSourceId || !managesPreference
             ? Promise.resolve(requestedSourceId ?? initialSourceId ?? preferredSourceId)
             : invoke<string>("get_config_source_preference", {
                 workspaceKey: resolvedWorkspaceKey,
                 capability: requiredCapability,
-              }).catch(() => preferredSourceId);
+              });
         const [persistedSourceId, nextSources] = await Promise.all([
           preferencePromise,
           invoke<ConfigSource[]>("list_config_sources"),
@@ -181,6 +199,7 @@ export function useConfigSource({
     [
       applySources,
       initialSourceId,
+      managesPreference,
       preferredSourceId,
       requiredCapability,
       resolvedWorkspaceKey,
@@ -252,7 +271,7 @@ export function useConfigSource({
       setSourceStatus("saving");
       try {
         const persistedSourceId =
-          !initialSourceId && requiredCapability
+          managesPreference && requiredCapability
             ? await invoke<string>("save_config_source_preference", {
                 workspaceKey: resolvedWorkspaceKey,
                 capability: requiredCapability,
@@ -281,6 +300,7 @@ export function useConfigSource({
     },
     [
       initialSourceId,
+      managesPreference,
       preferenceKey,
       notifySourceSelection,
       rememberLocalSource,
@@ -291,12 +311,12 @@ export function useConfigSource({
   );
 
   useEffect(() => {
-    function handleSelection(event: Event) {
-      const detail = (event as CustomEvent<ConfigSourceSelectionDetail>).detail;
-      if (!detail || detail.preferenceKey !== preferenceKey) {
-        return;
-      }
-      const source = findConfigSource(sources, detail.sourceId);
+    if (!managesPreference) {
+      return;
+    }
+
+    function adoptSelectedSource(sourceId?: string | null) {
+      const source = findConfigSource(sources, sourceId);
       if (
         !source ||
         selectedSourceIdRef.current === source.id ||
@@ -308,14 +328,32 @@ export function useConfigSource({
       selectedSourceIdRef.current = source.id;
       setSelectedScopeKey(preferenceKey);
       setSelectedSourceId(source.id);
-      rememberLocalSource(source.id);
       setSourceError("");
       setSourceStatus("ready");
     }
 
+    function handleSelection(event: Event) {
+      const detail = (event as CustomEvent<ConfigSourceSelectionDetail>).detail;
+      if (!detail || detail.preferenceKey !== preferenceKey) {
+        return;
+      }
+      adoptSelectedSource(detail.sourceId);
+    }
+
+    function handleStorage(event: StorageEvent) {
+      if (event.key !== preferenceKey) {
+        return;
+      }
+      void refreshSources().catch(() => undefined);
+    }
+
     window.addEventListener(CONFIG_SOURCE_SELECTION_EVENT, handleSelection);
-    return () => window.removeEventListener(CONFIG_SOURCE_SELECTION_EVENT, handleSelection);
-  }, [preferenceKey, rememberLocalSource, requiredCapability, sources]);
+    window.addEventListener("storage", handleStorage);
+    return () => {
+      window.removeEventListener(CONFIG_SOURCE_SELECTION_EVENT, handleSelection);
+      window.removeEventListener("storage", handleStorage);
+    };
+  }, [managesPreference, preferenceKey, refreshSources, requiredCapability, sources]);
 
   const loadingSources = sourceStatus === "loading";
   const savingSource = sourceStatus === "saving";

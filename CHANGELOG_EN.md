@@ -6,6 +6,12 @@
 
 ### Added
 
+- A `.rdtpack` configuration transfer center covering projects, builds, deployments, Git, workspaces, and resource sources, with secret removal, portable path placeholders, conflict planning, destination-state validation, transaction backup, full rollback, and matching CLI commands.
+- A schema-driven parameterized Action dialog with fixed context, fully visible project selection, plan/apply confirmation, live logs, cancellation, background execution, failed-item retry, and unified operation history.
+- Build Record parameter-difference previews, complete effective/default details, secret masking, failure diagnostics, and repeated-run timelines.
+- Branch Record per-project rows, expandable long branches, a stable three-card viewport, and structured GitLab 403 or merge-conflict explanations.
+- Lockfile-aware local dependency linking for requirement workspaces and blocking Runtime preflight when a Node launch entry is missing.
+- Chinese and English interface guides plus a reproducible public-screenshot generator backed by real components and mock IPC.
 - Product Manifest, a standalone validator, and R Series family consistency checks.
 - Unified operation events for Git, builds, Runtime, Proxy, and Link, plus structured diagnostics and guarded retry entry points in the Activity Center.
 - An IPC contract check covering 129 registered Tauri commands and literal frontend invokes.
@@ -15,6 +21,9 @@
 
 ### Changed
 
+- Generic Action and resource copy now localizes in Chinese and English, and project multi-select no longer hides selected values behind `+N`.
+- Build and Branch record cards use tighter content spacing, consistent pinned surfaces, and a More menu for secondary commands.
+- GitLab and Jenkins failures retain HTTP status, permission scope, and recommended checks instead of collapsing into a generic failure.
 - macOS and Windows now use the canonical release build entry point at the repository root; macOS target post-processing supports a target triple.
 - The minimum desktop window is now `820 x 640`, with a compact-window browser regression test.
 - Agent capability discovery now includes Link and unified operation-history capabilities.

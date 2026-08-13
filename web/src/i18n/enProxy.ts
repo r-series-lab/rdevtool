@@ -1,4 +1,40 @@
 export const EN_PROXY_MESSAGES: Record<string, string> = {
+  "已命中": "Matched",
+  "规则命中但端口未监听": "Rule Matched but Port Is Not Listening",
+  "未命中": "Not Matched",
+  "请求会命中规则 {name}": "The request will match rule {name}",
+  "请求会命中规则 {name}，但代理端口当前未监听":
+    "The request will match rule {name}, but the proxy port is not listening",
+  "没有启用规则会处理这个请求":
+    "No enabled rule will handle this request",
+  "{url} 当前没有监听": "{url} is not listening",
+  "该 profile 没有启用中的规则": "This profile has no enabled rules",
+  "请求进入该 profile 后会走默认转发，不会命中规则动作":
+    "The request will use default forwarding and will not match a rule action",
+  "规则已停用": "Rule is disabled",
+  "未限制 method": "Any method is allowed",
+  "需要 {required}，当前 {current}": "Requires {required}; current: {current}",
+  "未限制 URL 包含内容": "No URL content restriction",
+  "需要 URL 包含 {value}": "URL must contain {value}",
+  "未限制 pathPrefix": "No pathPrefix restriction",
+  "需要路径以 {required} 开头，当前 {current}":
+    "Path must start with {required}; current: {current}",
+  "找到请求头 {name}={value}": "Found request header {name}={value}",
+  "请求头 {name} 需要包含 {required}，当前 {current}":
+    "Header {name} must contain {required}; current: {current}",
+  "缺少请求头 {name}": "Missing request header {name}",
+  "未限制请求头": "No request header restriction",
+  "更具体的规则也能命中，但排序在 {selected} 之后：{shadowed}":
+    "More specific rules also match but are ordered after {selected}: {shadowed}",
+  "先启动该代理 profile，再验证请求是否进入代理。":
+    "Start this proxy profile before verifying that requests reach it.",
+  "启用至少一条规则，或创建新的转发/Mock/阻断规则。":
+    "Enable at least one rule or create a forwarding, mock, or blocking rule.",
+  "检查 pathPrefix、method、urlContains 和 header 条件。":
+    "Check the pathPrefix, method, urlContains, and header conditions.",
+  "把更具体的 pathPrefix 规则设置为更小的 priority。":
+    "Give the more specific pathPrefix rule a smaller priority value.",
+  "路径 / URL": "Path / URL",
   "{count} 个": "{count} items",
   "{count} 个 + 草稿": "{count} items + draft",
   "{count} 规则": "{count} rules",
@@ -19,6 +55,14 @@ export const EN_PROXY_MESSAGES: Record<string, string> = {
   "代理服务列表": "Proxy Service List",
   "代理服务配置列表": "Proxy Service Configuration List",
   "代理服务与规则": "Proxy Services and Rules",
+  "代理服务未监听": "The proxy service is not listening",
+  "代理服务由 rDevTool 管理并正在监听。":
+    "The proxy service is managed by rDevTool and is listening.",
+  "代理服务版本与当前应用不一致":
+    "The proxy service version does not match the current app",
+  "代理服务版本与当前应用不一致，停止后重新启动即可升级。":
+    "The proxy service version does not match the current app. Stop and start it again to upgrade.",
+  "代理端口由外部进程占用": "The proxy port is occupied by an external process",
   "代理规则列表": "Proxy Rule List",
   "代理名称不能为空": "Proxy name is required.",
   "代理配置": "Proxy Configuration",
@@ -43,6 +87,12 @@ export const EN_PROXY_MESSAGES: Record<string, string> = {
   "调整搜索或筛选条件。": "Adjust the search or filter criteria.",
   "动作": "Action",
   "端口": "Port",
+  "端口由 {owner} 占用，rDevTool 不会停止该进程。":
+    "The port is occupied by {owner}. rDevTool will not stop that process.",
+  "端口由非 rDevTool 进程监听":
+    "The port is listening in a non-rDevTool process",
+  "端口由外部进程占用，rDevTool 不会停止该进程。":
+    "The port is occupied by an external process. rDevTool will not stop that process.",
   "端口监听中": "Port Listening",
   "端口未监听": "Port Not Listening",
   "方法": "Method",
@@ -129,6 +179,8 @@ export const EN_PROXY_MESSAGES: Record<string, string> = {
   "停止代理": "Stop Proxy",
   "为空则使用原请求地址": "Leave blank to use the original request URL",
   "未命名代理": "Unnamed Proxy",
+  "外部进程占用，无法操作": "Occupied by an external process; actions are disabled",
+  "外部占用": "External Occupancy",
   "下滑加载更多": "Scroll to Load More",
   "响应 Header": "Response Headers",
   "响应正文": "Response Body",
@@ -150,6 +202,7 @@ export const EN_PROXY_MESSAGES: Record<string, string> = {
     "Enabled. Request and response body previews are saved.",
   "优先级": "Priority",
   "运行中": "Running",
+  "需要重启升级": "Restart to Upgrade",
   "暂无服务": "No Services",
   "暂无规则": "No Rules",
   "暂无请求记录": "No Request Log",

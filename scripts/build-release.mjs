@@ -41,6 +41,16 @@ const tauriBinary = path.join(
   process.platform === "win32" ? "tauri.cmd" : "tauri",
 );
 
+run(
+  process.execPath,
+  [
+    path.join(rootDir, "scripts", "prepare-cli-sidecar.mjs"),
+    "--profile",
+    "release",
+    ...(target ? ["--target", target] : []),
+  ],
+);
+
 run(tauriBinary, ["build", "--config", "tauri.conf.json", ...forwardedArgs], path.join(rootDir, "src-tauri"));
 
 const macBuild = target ? target.endsWith("-apple-darwin") : process.platform === "darwin";

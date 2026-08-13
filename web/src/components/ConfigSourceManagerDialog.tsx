@@ -46,6 +46,7 @@ import {
 } from "../lib/configSources";
 import { UI_PROFILES, uiProfileDefinition } from "../lib/uiProfiles";
 import { useI18n, type Translate } from "../i18n";
+import { translateInternalMessage } from "../i18n/internalMessages";
 
 const CAPABILITIES = [
   { key: "resource", label: "资源入口" },
@@ -56,6 +57,7 @@ const CAPABILITIES = [
 
 const FILE_FIELDS = [
   { key: "navigation", label: "资源入口", fallback: "navigation.toml" },
+  { key: "actions", label: "参数化 Action", fallback: "actions.toml" },
   { key: "links", label: "链路", fallback: "links.toml" },
   { key: "proxy", label: "代理", fallback: "proxy.toml" },
   {
@@ -690,7 +692,7 @@ export function ConfigSourceManagerDialog({
               ) : null}
             </Stack>
             <Typography variant="caption" color="text.secondary">
-              {inspection.summary}
+              {translateInternalMessage(inspection.summary, t)}
             </Typography>
           </Box>
           {inspection.editable ? (
@@ -818,7 +820,7 @@ export function ConfigSourceManagerDialog({
               {comparison.files.map((file) => (
                 <div key={file.key} className={file.equivalent ? "is-equal" : "is-different"}>
                   <span>{FILE_FIELDS.find((item) => item.key === file.key)?.label ?? file.key}</span>
-                  <small>{file.summary}</small>
+                  <small>{translateInternalMessage(file.summary, t)}</small>
                   <Chip
                     size="small"
                     variant="outlined"
@@ -838,14 +840,16 @@ export function ConfigSourceManagerDialog({
               </div>
               <div className="config-source-manager-file-main">
                 <Stack direction="row" spacing={0.65} alignItems="center">
-                  <Typography variant="body2">{file.label}</Typography>
+                  <Typography variant="body2">
+                    {translateInternalMessage(file.label, t)}
+                  </Typography>
                   <Chip size="small" label={healthLabel(file.status, t)} variant="outlined" />
                 </Stack>
                 <Typography variant="caption" noWrap title={file.path ?? ""}>
                   {file.path ?? t("未配置路径")}
                 </Typography>
                 <Typography variant="caption" className="config-source-manager-file-message">
-                  {file.message}
+                  {translateInternalMessage(file.message, t)}
                 </Typography>
               </div>
               {file.supported ? (

@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import type { BranchTaskHistoryEntry, MergeHistoryEntry } from "../app-types";
 import {
+  branchCacheMatchesRepoPath,
+  branchContextStorageKey,
   BranchSyncRequestTracker,
+  clearLegacyBranchContextStorage,
+  normalizeBranchCacheMap,
   normalizeBranchCatalogResponse,
+  scopeLegacyBranchContextMap,
 } from "./useBranchContext";
 import {
   branchTaskHistoryFromCliMergeHistory,
@@ -301,6 +306,122 @@ describe("Git CLI merge history", () => {
 });
 
 describe("Git branch automatic refresh", () => {
+  it("scopes cached branches and selections by workspace and project", () => {
+    expect(branchContextStorageKey("feature-a", "demo")).toBe(
+      "workspace:feature-a:project:demo",
+    );
+    expect(branchContextStorageKey("feature-b", "demo")).not.toBe(
+      branchContextStorageKey("feature-a", "demo"),
+    );
+  });
+
+  it("migrates legacy project keys without replacing existing scoped values", () => {
+    const activeKey = branchContextStorageKey("feature-a", "demo");
+    const otherKey = branchContextStorageKey("feature-b", "demo");
+
+    expect(
+      scopeLegacyBranchContextMap(
+        {
+          demo: "legacy",
+          [activeKey]: "active",
+          [otherKey]: "other",
+        },
+        "feature-a",
+      ),
+    ).toEqual({
+      [activeKey]: "active",
+      [otherKey]: "other",
+    });
+  });
+
+  it("moves a legacy project key into the active workspace scope", () => {
+    expect(
+      scopeLegacyBranchContextMap({ demo: "legacy" }, "feature-a"),
+    ).toEqual({
+      [branchContextStorageKey("feature-a", "demo")]: "legacy",
+    });
+  });
+
+  it("preserves branch observation metadata when hydrating the SQLite cache", () => {
+    expect(
+      normalizeBranchCacheMap({
+        demo: {
+          branches: [
+            {
+              name: " main ",
+              updatedAt: "now",
+              updatedTs: 12,
+              commit: {
+                shortHash: " abc1234 ",
+                subject: " fix: visible revision ",
+                committedAt: " 2026-08-10 11:42:06 +0800 ",
+              },
+            },
+          ],
+          syncedAt: 42,
+          source: " localRepository ",
+          freshness: " cached ",
+          elapsedMs: 125,
+          repoPath: " /tmp/demo ",
+        },
+      }),
+    ).toEqual({
+      demo: {
+        branches: [
+          {
+            name: "main",
+            updatedAt: "now",
+            updatedTs: 12,
+            commit: {
+              shortHash: "abc1234",
+              subject: "fix: visible revision",
+              committedAt: "2026-08-10 11:42:06 +0800",
+            },
+          },
+        ],
+        syncedAt: 42,
+        source: "localRepository",
+        freshness: "cached",
+        elapsedMs: 125,
+        repoPath: "/tmp/demo",
+      },
+    });
+  });
+
+  it("does not reuse a branch cache after the workspace project path changes", () => {
+    const cached = normalizeBranchCacheMap({
+      demo: {
+        branches: ["main"],
+        syncedAt: 42,
+        repoPath: "/worktrees/feature-a/demo",
+      },
+    }).demo;
+
+    expect(branchCacheMatchesRepoPath(cached, "/worktrees/feature-a/demo")).toBe(true);
+    expect(branchCacheMatchesRepoPath(cached, "/worktrees/feature-b/demo")).toBe(false);
+  });
+
+  it("does not show a legacy cache with unknown path for a bound repository", () => {
+    const cached = normalizeBranchCacheMap({
+      demo: {
+        branches: ["main"],
+        syncedAt: 42,
+      },
+    }).demo;
+
+    expect(branchCacheMatchesRepoPath(cached, "/worktrees/feature-a/demo")).toBe(false);
+    expect(branchCacheMatchesRepoPath(cached, null)).toBe(true);
+  });
+
+  it("clears obsolete browser cache keys after SQLite migration", () => {
+    const removeItem = vi.fn();
+
+    clearLegacyBranchContextStorage({ removeItem });
+
+    expect(removeItem).toHaveBeenCalledWith("ruritool.branch-cache.v1");
+    expect(removeItem).toHaveBeenCalledWith("ruritool.project-selection.v1");
+  });
+
   it("keeps compatibility with the legacy branch-array response", () => {
     const response = normalizeBranchCatalogResponse(
       [{ name: "main", updatedAt: "", updatedTs: 0 }],
@@ -355,6 +476,38 @@ describe("Git branch automatic refresh", () => {
     expect(response.observed.freshness).toBe("cached");
     expect(response.branches).toEqual([
       { name: "main", updatedAt: "", updatedTs: 2 },
+    ]);
+  });
+
+  it("prefers commit metadata when duplicate branch observations are equally fresh", () => {
+    expect(
+      normalizeBranchCatalogResponse(
+        [
+          { name: "main", updatedAt: "now", updatedTs: 2 },
+          {
+            name: "main",
+            updatedAt: "now",
+            updatedTs: 2,
+            commit: {
+              shortHash: "abc1234",
+              subject: "latest subject",
+              committedAt: "2026-08-10 11:42:06 +0800",
+            },
+          },
+        ],
+        "demo",
+      ).branches,
+    ).toEqual([
+      {
+        name: "main",
+        updatedAt: "now",
+        updatedTs: 2,
+        commit: {
+          shortHash: "abc1234",
+          subject: "latest subject",
+          committedAt: "2026-08-10 11:42:06 +0800",
+        },
+      },
     ]);
   });
 

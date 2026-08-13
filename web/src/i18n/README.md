@@ -13,8 +13,16 @@ changing their persisted configuration or backend command contracts.
 4. Add English copy to `EN_MESSAGES` using the existing Chinese UI text as the
    stable message key.
 
-The provider stores only the language preference in local storage under
-`rdevtool.language`. Supported preferences are `system`, `zh-CN`, and `en-US`.
+The provider persists the language preference in rDevTool's SQLite `kv_store`
+through typed Tauri commands. A timestamped mirror remains in local storage
+under `rdevtool.language` so the first frame and bootstrap errors can resolve a
+language before Tauri storage hydration completes. Supported preferences are
+`system`, `zh-CN`, and `en-US`.
+
+On first launch after migration, the legacy local value is written to SQLite.
+Afterward, the newer timestamp wins and repairs the older copy. SQLite writes
+also reject stale records, so rapid or out-of-order updates cannot roll the
+preference backward.
 
 Common components use a safe Chinese fallback when rendered without the
 provider, which keeps server-rendered tests and optional modules functional.

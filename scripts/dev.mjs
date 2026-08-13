@@ -1,6 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
 const projectRoot = new URL("../", import.meta.url);
 const projectPath = process.cwd();
@@ -42,6 +43,14 @@ async function waitForReady(url, label, timeoutMs = 45_000) {
 }
 
 async function main() {
+  const sidecar = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL("./prepare-cli-sidecar.mjs", import.meta.url))],
+    { cwd: projectPath, stdio: "inherit" },
+  );
+  if (sidecar.error) throw sidecar.error;
+  if (sidecar.status !== 0) process.exit(sidecar.status ?? 1);
+
   viteProcess = spawn("npm", ["--prefix", "web", "run", "dev", "--", "--force"], {
     cwd: projectPath,
     stdio: "inherit",

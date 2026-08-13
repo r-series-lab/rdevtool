@@ -79,6 +79,7 @@ export type FinderShortcutItem = {
   categoryTitle: string;
   categoryLabel: string;
   entry: NavigationEntry;
+  sourceId?: string | null;
 };
 
 const FINDER_TYPE_OPTIONS = ["项目", "网站", "目录", "工具"] as const;
@@ -501,6 +502,34 @@ function compareMarkedFirst(leftMarked: boolean, rightMarked: boolean) {
   return Number(rightMarked) - Number(leftMarked);
 }
 
+export function compareFinderShortcutPriority(
+  leftKey: string,
+  rightKey: string,
+  favoriteKeys: ReadonlySet<string>,
+  recentRanks: ReadonlyMap<string, number>,
+) {
+  const favoriteOrder = compareMarkedFirst(
+    favoriteKeys.has(leftKey),
+    favoriteKeys.has(rightKey),
+  );
+  if (favoriteOrder !== 0) {
+    return favoriteOrder;
+  }
+
+  const leftRecentRank = recentRanks.get(leftKey);
+  const rightRecentRank = recentRanks.get(rightKey);
+  if (leftRecentRank === undefined && rightRecentRank === undefined) {
+    return 0;
+  }
+  if (leftRecentRank === undefined) {
+    return 1;
+  }
+  if (rightRecentRank === undefined) {
+    return -1;
+  }
+  return leftRecentRank - rightRecentRank;
+}
+
 function entry_matches_finder_type(entry: NavigationEntry, value: FinderType) {
   switch (value) {
     case "网站":
@@ -664,9 +693,9 @@ export type ProjectsModuleState = {
   handleAdoptRuntime: (
     projectKey: string,
     debugProfileKey?: string,
-  ) => Promise<void>;
+  ) => Promise<boolean>;
   handleRunBuild: (projectKey: string) => Promise<void>;
-  handleStopBuild: (projectKey: string) => Promise<void>;
+  handleStopBuild: (projectKey: string) => Promise<boolean>;
   handleOpenBuildOutput: (projectKey: string) => Promise<void>;
   handleFocusRuntime: (
     projectKey: string,
@@ -750,6 +779,11 @@ export function useProjectsModule({
     () => new Set(preferences.favoriteShortcutKeys),
     [preferences.favoriteShortcutKeys],
   );
+  const recentShortcutRanks = useMemo(
+    () =>
+      new Map(preferences.recentShortcutKeys.map((key, index) => [key, index])),
+    [preferences.recentShortcutKeys],
+  );
   const selectedDebugProfileKeys = useMemo(() => {
     return resolveWorkspaceDebugProfileKeys(
       activeProjectWorkspaceKey,
@@ -785,9 +819,10 @@ export function useProjectsModule({
           categoryTitle: category.title,
           categoryLabel: category.shortLabel,
           entry,
+          sourceId: navigationConfigSourceId,
         })),
     );
-  }, [finderType, navigationCategories]);
+  }, [finderType, navigationCategories, navigationConfigSourceId]);
 
   const finderTypeCounts = useMemo(
     () => ({
@@ -903,9 +938,11 @@ export function useProjectsModule({
     return [...filtered].sort((a, b) => {
       const aKey = buildFinderShortcutKey(a);
       const bKey = buildFinderShortcutKey(b);
-      return compareMarkedFirst(
-        favoriteShortcutKeySet.has(aKey),
-        favoriteShortcutKeySet.has(bKey),
+      return compareFinderShortcutPriority(
+        aKey,
+        bKey,
+        favoriteShortcutKeySet,
+        recentShortcutRanks,
       );
     });
   }, [
@@ -913,6 +950,7 @@ export function useProjectsModule({
     finderCategory,
     finderQuery,
     finderType,
+    recentShortcutRanks,
     shortcutEntries,
   ]);
 
@@ -1841,12 +1879,12 @@ export function useProjectsModule({
     debugProfileKey?: string,
   ) {
     if (!enabled) {
-      return;
+      return false;
     }
     const runtime = runtimeItems.find((item) => item.key === projectKey);
     if (!runtime?.canAdopt || !runtime.pid) {
       setError("未检测到可认领的外部 dev 服务");
-      return;
+      return false;
     }
     const selectedDebugProfile =
       debugProfileKey ?? selectedDebugProfileKeys[projectKey];
@@ -1887,6 +1925,7 @@ export function useProjectsModule({
           projectName: updated.name,
         });
       }
+      return true;
     } catch (reason) {
       if (activityId) {
         updateActivity?.(activityId, {
@@ -1897,6 +1936,7 @@ export function useProjectsModule({
       }
       setError(String(reason));
       await loadProjectRuntimes();
+      return false;
     } finally {
       setBusy("");
     }
@@ -1983,7 +2023,7 @@ export function useProjectsModule({
 
   async function handleStopBuild(projectKey: string) {
     if (!enabled) {
-      return;
+      return false;
     }
 
     setBusy("正在中止构建任务");
@@ -2042,6 +2082,7 @@ export function useProjectsModule({
           resource: buildResource(updated),
         });
       }
+      return true;
     } catch (reason) {
       if (activityId) {
         updateActivity?.(activityId, {
@@ -2053,6 +2094,7 @@ export function useProjectsModule({
       }
       setError(String(reason));
       await loadProjectRuntimes();
+      return false;
     } finally {
       setBusy("");
     }

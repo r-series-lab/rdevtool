@@ -16,6 +16,7 @@ import type {
   ProjectRuntimeStartPromptMode,
 } from "../app-types";
 import { useI18n, type Translate } from "../i18n";
+import { translateAppMessage } from "../i18n/appMessages";
 import { useWorkspaceRuntimePreflight } from "../hooks/useWorkspaceRuntimePreflight";
 import { AppActionDialog } from "./AppActionDialog";
 import { PlayIcon, RefreshIcon } from "./AppIcons";
@@ -330,10 +331,20 @@ export function ProjectRuntimeStartDialog({
                 <Typography variant="caption">
                   {preflight.loading
                     ? t("正在检查启动条件")
-                    : preflight.statusLabel || t("等待启动预检")}
+                    : translateAppMessage(
+                        preflight.statusMessage,
+                        preflight.statusLabel,
+                        t,
+                      ) ||
+                      t("等待启动预检")}
                 </Typography>
                 <Typography variant="caption">
-                  {preflight.summary || t("检查命令、端口、代理和运行环境。")}
+                  {translateAppMessage(
+                    preflight.summaryMessage,
+                    preflight.summary,
+                    t,
+                  ) ||
+                    t("检查命令、端口、代理和运行环境。")}
                 </Typography>
               </Box>
               <Button
@@ -355,8 +366,14 @@ export function ProjectRuntimeStartDialog({
                       aria-hidden="true"
                     />
                     <Typography variant="caption">
-                      <strong>{check.title}</strong>
-                      {check.detail || check.statusLabel}
+                      <strong>
+                        {translateAppMessage(check.titleMessage, check.title, t)}
+                      </strong>
+                      {translateAppMessage(
+                        check.detailMessage ?? check.statusMessage,
+                        check.detail || check.statusLabel,
+                        t,
+                      )}
                     </Typography>
                   </Box>
                 ))}

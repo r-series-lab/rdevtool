@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AppMessage,
   ProjectRuntimePreflightCheck,
   ProjectRuntimePreflightResponse,
 } from "../app-types";
@@ -10,7 +11,9 @@ export type RuntimePreflightPreview = {
   loading: boolean;
   statusKey: string;
   statusLabel: string;
+  statusMessage?: AppMessage;
   summary: string;
+  summaryMessage?: AppMessage;
   checks: ProjectRuntimePreflightCheck[];
   updatedAtMs: number | null;
 };
@@ -45,7 +48,9 @@ export function useWorkspaceRuntimePreflight({
     loading: false,
     statusKey: "",
     statusLabel: "",
+    statusMessage: undefined,
     summary: "",
+    summaryMessage: undefined,
     checks: [],
     updatedAtMs: null,
   });
@@ -57,7 +62,9 @@ export function useWorkspaceRuntimePreflight({
         loading: false,
         statusKey: running ? "running" : "",
         statusLabel: running ? "运行中" : "",
+        statusMessage: undefined,
         summary: "",
+        summaryMessage: undefined,
         checks: [],
         updatedAtMs: null,
       });
@@ -69,7 +76,9 @@ export function useWorkspaceRuntimePreflight({
       loading: true,
       statusKey: "",
       statusLabel: "检查中",
+      statusMessage: undefined,
       summary: "",
+      summaryMessage: undefined,
       checks: [],
       updatedAtMs: null,
     });
@@ -91,7 +100,9 @@ export function useWorkspaceRuntimePreflight({
             statusLabel:
               response.statusLabel ||
               runtimePreflightPreviewLabel(response.statusKey),
+            statusMessage: response.statusMessage,
             summary: response.summary,
+            summaryMessage: response.summaryMessage,
             checks: response.checks,
             updatedAtMs: Date.now(),
           });
@@ -104,7 +115,9 @@ export function useWorkspaceRuntimePreflight({
             loading: false,
             statusKey: "error",
             statusLabel: "检查失败",
+            statusMessage: undefined,
             summary: String(reason),
+            summaryMessage: undefined,
             checks: [],
             updatedAtMs: Date.now(),
           });

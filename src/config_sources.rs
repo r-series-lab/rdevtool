@@ -51,6 +51,8 @@ pub struct ConfigSourceFileDefinition {
     #[serde(default)]
     pub navigation: Option<String>,
     #[serde(default)]
+    pub actions: Option<String>,
+    #[serde(default)]
     pub links: Option<String>,
     #[serde(default)]
     pub proxy: Option<String>,
@@ -77,6 +79,7 @@ pub struct ConfigSource {
 #[serde(rename_all = "camelCase")]
 pub struct ConfigSourceFiles {
     pub navigation: String,
+    pub actions: String,
     pub links: String,
     pub proxy: Option<String>,
     pub runtime_overrides: Option<String>,
@@ -176,11 +179,16 @@ struct ConfigSourceFileSpec {
     file_name: &'static str,
 }
 
-const CONFIG_SOURCE_FILE_SPECS: [ConfigSourceFileSpec; 4] = [
+const CONFIG_SOURCE_FILE_SPECS: [ConfigSourceFileSpec; 5] = [
     ConfigSourceFileSpec {
         key: "navigation",
         capability: "resource",
         file_name: "navigation.toml",
+    },
+    ConfigSourceFileSpec {
+        key: "actions",
+        capability: "resource",
+        file_name: "actions.toml",
     },
     ConfigSourceFileSpec {
         key: "links",
@@ -776,6 +784,7 @@ fn copy_resolved_config_source(
     let target_files = ConfigSourceFileDefinition {
         navigation: config_source_supports(source, "resource")
             .then(|| "navigation.toml".to_string()),
+        actions: config_source_supports(source, "resource").then(|| "actions.toml".to_string()),
         links: config_source_supports(source, "link").then(|| "links.toml".to_string()),
         proxy: config_source_supports(source, "proxy").then(|| "proxy.toml".to_string()),
         runtime_overrides: config_source_supports(source, "runtime")
@@ -967,6 +976,7 @@ pub fn config_source_supports(source: &ConfigSource, capability: &str) -> bool {
 fn config_source_file_path(source: &ConfigSource, spec: ConfigSourceFileSpec) -> Option<PathBuf> {
     match spec.key {
         "navigation" => Some(PathBuf::from(&source.files.navigation)),
+        "actions" => Some(PathBuf::from(&source.files.actions)),
         "links" => Some(PathBuf::from(&source.files.links)),
         "proxy" => source.files.proxy.as_deref().map(PathBuf::from),
         "runtimeOverrides" => source.files.runtime_overrides.as_deref().map(PathBuf::from),
@@ -993,6 +1003,7 @@ fn default_config_source() -> ConfigSource {
         base_dir: display_path(&base_dir),
         files: ConfigSourceFiles {
             navigation: display_path(&base_dir.join("navigation.toml")),
+            actions: display_path(&base_dir.join("actions.toml")),
             links: display_path(&base_dir.join("links.toml")),
             proxy: Some(display_path(&base_dir.join("proxy.toml"))),
             runtime_overrides: Some(display_path(&base_dir.join("runtime_overrides.toml"))),
@@ -1030,6 +1041,7 @@ fn workspace_config_source(workspace: &ProjectWorkspaceConfig) -> Option<ConfigS
         base_dir: display_path(&base_dir),
         files: ConfigSourceFiles {
             navigation: display_path(&base_dir.join("navigation.toml")),
+            actions: display_path(&base_dir.join("actions.toml")),
             links: display_path(&base_dir.join("links.toml")),
             proxy: Some(display_path(&base_dir.join("proxy.toml"))),
             runtime_overrides: Some(display_path(&base_dir.join("runtime_overrides.toml"))),
@@ -1119,6 +1131,7 @@ fn normalize_custom_definition(
 fn normalize_file_definition(files: ConfigSourceFileDefinition) -> ConfigSourceFileDefinition {
     ConfigSourceFileDefinition {
         navigation: files.navigation.as_deref().and_then(normalize_text),
+        actions: files.actions.as_deref().and_then(normalize_text),
         links: files.links.as_deref().and_then(normalize_text),
         proxy: files.proxy.as_deref().and_then(normalize_text),
         runtime_overrides: files.runtime_overrides.as_deref().and_then(normalize_text),
@@ -1181,6 +1194,11 @@ fn custom_config_source(definition: ConfigSourceDefinition) -> Option<ConfigSour
                 &base_dir,
                 definition.files.navigation.as_deref(),
                 "navigation.toml",
+            )),
+            actions: display_path(&resolve_source_file(
+                &base_dir,
+                definition.files.actions.as_deref(),
+                "actions.toml",
             )),
             links: display_path(&resolve_source_file(
                 &base_dir,
@@ -1301,6 +1319,7 @@ mod tests {
             base_dir: display_path(base_dir),
             files: ConfigSourceFiles {
                 navigation: display_path(&base_dir.join("navigation.toml")),
+                actions: display_path(&base_dir.join("actions.toml")),
                 links: display_path(&base_dir.join("links.toml")),
                 proxy: Some(display_path(&base_dir.join("proxy.toml"))),
                 runtime_overrides: Some(display_path(&base_dir.join("runtime_overrides.toml"))),
@@ -1333,6 +1352,7 @@ mod tests {
             base_dir: Some("/tmp/rdevtool-config-source".to_string()),
             files: ConfigSourceFileDefinition {
                 navigation: Some(" config/navigation.toml ".to_string()),
+                actions: None,
                 links: None,
                 proxy: Some("proxy/team.toml".to_string()),
                 runtime_overrides: None,
@@ -1388,21 +1408,21 @@ mod tests {
     #[test]
     fn workspace_source_id_matches_the_generated_source() {
         let workspace = ProjectWorkspaceConfig {
-            key: "feature_cr260_ykd_car".to_string(),
-            name: "CR260".to_string(),
+            key: "feature_demo_checkout".to_string(),
+            name: "Demo Workspace".to_string(),
             ..ProjectWorkspaceConfig::default()
         };
         assert_eq!(
             config_source_id_for_workspace(&workspace),
-            "workspace-feature_cr260_ykd_car"
+            "workspace-feature_demo_checkout"
         );
     }
 
     #[test]
     fn preloaded_source_resolution_preserves_global_and_separator_aliases() {
         let workspace = ProjectWorkspaceConfig {
-            key: "feature_cr260_ykd_car".to_string(),
-            name: "CR260".to_string(),
+            key: "feature_demo_checkout".to_string(),
+            name: "Demo Workspace".to_string(),
             ..ProjectWorkspaceConfig::default()
         };
         let sources = vec![
@@ -1417,10 +1437,10 @@ mod tests {
             DEFAULT_SOURCE_ID
         );
         assert_eq!(
-            resolve_config_source_from_sources(Some("workspace-feature-cr260-ykd-car"), &sources,)
+            resolve_config_source_from_sources(Some("workspace-feature-demo-checkout"), &sources,)
                 .unwrap()
                 .id,
-            "workspace-feature_cr260_ykd_car"
+            "workspace-feature_demo_checkout"
         );
     }
 
@@ -1446,8 +1466,8 @@ mod tests {
     #[test]
     fn workspace_can_prefer_an_explicit_source_per_capability() {
         let mut workspace = ProjectWorkspaceConfig {
-            key: "feature-cr260".to_string(),
-            name: "CR260".to_string(),
+            key: "feature-demo".to_string(),
+            name: "Demo Workspace".to_string(),
             ..ProjectWorkspaceConfig::default()
         };
         set_config_source_preference_for_workspace(&mut workspace, "proxy", Some("default"))
@@ -1458,17 +1478,17 @@ mod tests {
         );
         assert_eq!(
             preferred_config_source_id_for_workspace(&workspace, "resource"),
-            "workspace-feature-cr260"
+            "workspace-feature-demo"
         );
         set_config_source_preference_for_workspace(
             &mut workspace,
             "proxy",
-            Some("workspace-feature-cr260"),
+            Some("workspace-feature-demo"),
         )
         .unwrap();
         assert_eq!(
             preferred_config_source_id_for_workspace(&workspace, "proxy"),
-            "workspace-feature-cr260"
+            "workspace-feature-demo"
         );
     }
 
@@ -1594,15 +1614,22 @@ mod tests {
                 .iter()
                 .map(|file| file.key.as_str())
                 .collect::<Vec<_>>(),
-            vec!["navigation", "links", "proxy", "runtimeOverrides"]
+            vec![
+                "navigation",
+                "actions",
+                "links",
+                "proxy",
+                "runtimeOverrides"
+            ]
         );
         assert_eq!(comparison.files[0].status, "equal");
-        assert_eq!(comparison.files[1].size_equal, Some(true));
-        assert_eq!(comparison.files[1].content_equal, Some(false));
-        assert_eq!(comparison.files[2].status, "missingLeft");
-        assert_eq!(comparison.files[3].status, "missingBoth");
+        assert_eq!(comparison.files[1].status, "missingBoth");
+        assert_eq!(comparison.files[2].size_equal, Some(true));
+        assert_eq!(comparison.files[2].content_equal, Some(false));
+        assert_eq!(comparison.files[3].status, "missingLeft");
+        assert_eq!(comparison.files[4].status, "missingBoth");
         assert_eq!(comparison.summary.missing_left, 1);
-        assert_eq!(comparison.summary.missing_both, 1);
+        assert_eq!(comparison.summary.missing_both, 2);
         let json = serde_json::to_string(&comparison).unwrap();
         assert!(!json.contains("secret ="));
         assert!(!json.contains("value ="));
@@ -1637,7 +1664,7 @@ mod tests {
         assert_eq!(result.target.id, "team-copy");
         assert_eq!(result.target.kind, "custom");
         assert_eq!(result.copied_count, 3);
-        assert_eq!(result.missing_count, 1);
+        assert_eq!(result.missing_count, 2);
         assert_eq!(
             fs::read(target_dir.join("links.toml")).unwrap(),
             b"version = 2\n"

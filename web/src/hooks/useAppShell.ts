@@ -33,11 +33,13 @@ import {
 import { disposeTauriListener } from "../lib/tauriEvents";
 import type { AppResolvedStyleMode, AppStyleMode } from "../theme";
 import {
-  normalizeBranchOptions,
+  clearLegacyBranchContextStorage,
+  isBranchContextStorageKey,
+  normalizeBranchCacheMap,
   loadLegacyBranchCache,
   loadLegacyProjectSelections,
   normalizeProjectSelectionEntry,
-  type BranchCacheEntry,
+  scopeLegacyBranchContextMap,
   type BranchCacheMap,
   type ProjectSelectionMap,
   type ProjectSummary,
@@ -275,8 +277,8 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       APP_STORAGE_NAMESPACE,
       BRANCH_CACHE_STORAGE_KEY,
       branchCache,
-    );
-  }, [branchCache, storageHydrated]);
+    ).catch((reason) => setError(String(reason)));
+  }, [branchCache, setError, storageHydrated]);
 
   useEffect(() => {
     if (!storageHydrated) {
@@ -286,8 +288,8 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       APP_STORAGE_NAMESPACE,
       PROJECT_SELECTION_STORAGE_KEY,
       projectSelections,
-    );
-  }, [projectSelections, storageHydrated]);
+    ).catch((reason) => setError(String(reason)));
+  }, [projectSelections, setError, storageHydrated]);
 
   useEffect(() => {
     if (!storageHydrated || !selectedProject) {
@@ -298,8 +300,8 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       APP_STORAGE_NAMESPACE,
       LAST_PROJECT_STORAGE_KEY,
       selectedProject,
-    );
-  }, [selectedProject, storageHydrated]);
+    ).catch((reason) => setError(String(reason)));
+  }, [selectedProject, setError, storageHydrated]);
 
   const applyProjectList = useCallback(
     (
@@ -682,48 +684,38 @@ export function useAppShell({ setError }: UseAppShellOptions) {
       invoke<string>("get_app_exit_runtime_policy").catch(() => "ask"),
     ]);
 
-    const nextBranchCache = storedBranchCache
-      ? Object.fromEntries(
-          Object.entries(storedBranchCache)
-            .map(([project, value]) => {
-              if (!value || typeof value !== "object") {
-                return null;
-              }
-              const branchesValue = (value as { branches?: unknown }).branches;
-              const syncedAtValue = (value as { syncedAt?: unknown }).syncedAt;
-              const branches = Array.isArray(branchesValue)
-                ? normalizeBranchOptions(branchesValue)
-                : [];
-              if (branches.length === 0) {
-                return null;
-              }
-              return [
-                project,
-                {
-                  branches,
-                  syncedAt:
-                    typeof syncedAtValue === "number" &&
-                    Number.isFinite(syncedAtValue)
-                      ? syncedAtValue
-                      : 0,
-                },
-              ];
-            })
-            .filter((item): item is [string, BranchCacheEntry] =>
-              Boolean(item),
-            ),
-        )
-      : loadLegacyBranchCache();
+    const activeBranchWorkspaceKey = projectWorkspaceState?.activeKey || "system";
+    const unscopedBranchCache = normalizeBranchCacheMap(
+      storedBranchCache ?? loadLegacyBranchCache(),
+    );
+    const branchCacheNeedsMigration =
+      storedBranchCache == null ||
+      Object.keys(unscopedBranchCache).some(
+        (key) => !isBranchContextStorageKey(key),
+      );
+    const nextBranchCache = scopeLegacyBranchContextMap(
+      unscopedBranchCache,
+      activeBranchWorkspaceKey,
+    );
 
-    const nextProjectSelections: ProjectSelectionMap = {};
+    const unscopedProjectSelections: ProjectSelectionMap = {};
     const rawSelections =
       storedProjectSelections ?? loadLegacyProjectSelections();
     for (const [project, value] of Object.entries(rawSelections)) {
       const normalized = normalizeProjectSelectionEntry(value);
       if (normalized) {
-        nextProjectSelections[project] = normalized;
+        unscopedProjectSelections[project] = normalized;
       }
     }
+    const projectSelectionsNeedMigration =
+      storedProjectSelections == null ||
+      Object.keys(unscopedProjectSelections).some(
+        (key) => !isBranchContextStorageKey(key),
+      );
+    const nextProjectSelections = scopeLegacyBranchContextMap(
+      unscopedProjectSelections,
+      activeBranchWorkspaceKey,
+    );
 
     setBranchCache(nextBranchCache);
     setProjectSelections(nextProjectSelections);
@@ -770,23 +762,21 @@ export function useAppShell({ setError }: UseAppShellOptions) {
     setPage(initialPage);
     setStorageHydrated(true);
 
-    if (!storedBranchCache && Object.keys(nextBranchCache).length > 0) {
+    if (branchCacheNeedsMigration) {
       await setStoredJson(
         APP_STORAGE_NAMESPACE,
         BRANCH_CACHE_STORAGE_KEY,
         nextBranchCache,
       );
     }
-    if (
-      !storedProjectSelections &&
-      Object.keys(nextProjectSelections).length > 0
-    ) {
+    if (projectSelectionsNeedMigration) {
       await setStoredJson(
         APP_STORAGE_NAMESPACE,
         PROJECT_SELECTION_STORAGE_KEY,
         nextProjectSelections,
       );
     }
+    clearLegacyBranchContextStorage();
     if (!projectMenuSplitMigrated) {
       await setStoredJson(
         APP_STORAGE_NAMESPACE,

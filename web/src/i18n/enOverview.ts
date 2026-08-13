@@ -1,4 +1,8 @@
 export const EN_OVERVIEW_MESSAGES: Record<string, string> = {
+  "独立需求工作区需要填写分支":
+    "A branch is required for an independent demand workspace",
+  "锁文件一致时复用源项目依赖":
+    "Reuse source dependencies when lockfiles match",
   "{count} 个实例": "{count} instances",
   "确认运行": "Confirm Run",
   "确认运行“{label}”？": "Run “{label}”?",
@@ -34,13 +38,20 @@ export const EN_OVERVIEW_MESSAGES: Record<string, string> = {
   "打开{label}": "Open {label}",
   "{title}快捷入口": "{title} Quick Access",
   "参数 {count}": "{count} Parameters",
+  "最近": "Latest",
+  "还有 {count} 条": "{count} more",
+  "收起其余记录": "Show fewer",
   "确认后运行": "Run After Confirmation",
   "运行 {label}": "Run {label}",
+  "配置并运行 {name}": "Configure and run {name}",
   "工作区概览与配置": "Workspace overview and configuration",
+  "全局工作区概览与配置": "Global workspace overview and configuration",
+  "当前工作区概览与配置": "Current workspace overview and configuration",
   "工作区配置": "Workspace Configuration",
   "关闭工作区配置": "Close Workspace Configuration",
   "搜索工作区、项目、入口、代理或动作":
     "Search workspaces, projects, resources, proxies, or actions",
+  "搜索工作区、入口或动作": "Search workspaces, resources, or actions",
   "搜索工作区": "Search Workspaces",
   "清空工作区搜索": "Clear Workspace Search",
   "按工作区类型筛选": "Filter by workspace type",
@@ -49,6 +60,11 @@ export const EN_OVERVIEW_MESSAGES: Record<string, string> = {
   "还没有工作区": "No workspaces yet",
   "没有匹配工作区": "No matching workspaces",
   "换个关键词或筛选项。": "Try another keyword or filter.",
+  "还没有具体工作区": "No focused workspaces yet",
+  "新建工作区后会显示在这里。": "New workspaces will appear here.",
+  "选择工作区进入聚焦视图": "Choose a workspace to enter its focused view",
+  "进入": "Open",
+  "已进入工作区 {name}": "Opened workspace {name}",
   "当前": "Current",
   "空工作区": "Empty Workspace",
   "无项目": "No Projects",
@@ -62,6 +78,12 @@ export const EN_OVERVIEW_MESSAGES: Record<string, string> = {
   "{selected}/{total} 个代理": "{selected}/{total} proxies",
   "提取 AI 上下文": "Extract AI Context",
   "提取 {name} 的 AI 上下文": "Extract AI context for {name}",
+  "模块布局": "Module Layout",
+  "{name} 的模块布局": "Module layout for {name}",
+  "展开全部模块": "Expand All Modules",
+  "收起全部模块": "Collapse All Modules",
+  "展开 {name}": "Expand {name}",
+  "收起 {name}": "Collapse {name}",
   "AI 上下文": "AI Context",
   "关闭 AI 上下文": "Close AI Context",
   "AI 上下文格式": "AI Context Format",
@@ -93,7 +115,7 @@ export const EN_OVERVIEW_MESSAGES: Record<string, string> = {
   "普通": "Basic",
   "需求": "Demand",
   "需求号": "Demand ID",
-  "可选，如 CR2606150041": "Optional, e.g. CR2606150041",
+  "可选，如 REQ-1234": "Optional, e.g. REQ-1234",
   "需求目录": "Requirement Directory",
   "项目 key": "Project key",
   "可选，自动匹配失败时填写":
@@ -142,10 +164,48 @@ export const EN_OVERVIEW_MESSAGES: Record<string, string> = {
   "未配置目录": "Directory not configured",
   "处理中": "Processing",
   "解绑": "Unbind",
+  "解除关联": "Remove Association",
+  "更换目录": "Change Directory",
+  "目录 Remote 不匹配，仍然绑定？":
+    "Bind the Directory Despite the Remote Mismatch?",
+  "{name} 的项目配置与所选目录 Remote 不一致。继续后，Git、构建和运行操作都会使用该目录。":
+    "The selected directory Remote does not match {name}'s project configuration. Git, build, and runtime operations will use this directory after binding.",
+  "仍然绑定": "Bind Anyway",
+  "解除 {name} 的项目实例关联？":
+    "Remove {name}'s Project Instance Association?",
+  "只解除工作区关联，不会删除托管目录或其中的代码。":
+    "This only removes the workspace association. The managed directory and its code will not be deleted.",
+  "解除后，该工作区将恢复使用项目的全局目录。":
+    "The workspace will return to the project's global directory.",
+  "部分项目实例状态暂不可用":
+    "Some project instance statuses are temporarily unavailable",
+  "目录缺失": "Directory Missing",
+  "Remote 不匹配": "Remote Mismatch",
+  "仓库无效": "Invalid Repository",
+  "项目配置缺失": "Project Configuration Missing",
+  "项目实例目录不存在，可以解除关联后重新绑定":
+    "The project instance directory is missing. Remove the association and bind it again.",
+  "目录已被删除，但 Git 仍保留工作副本登记；可按原路径和分支修复":
+    "The directory was deleted, but Git still has its worktree registration. It can be restored at the original path and branch.",
+  "目录 Git Remote 与项目配置不一致":
+    "The directory Git Remote does not match the project configuration",
+  "目录不是可验证的 Git 仓库根目录":
+    "The directory is not a verifiable Git repository root",
+  "Git 仓库根目录与 Remote 已验证":
+    "The Git repository root and Remote are verified",
+  "实例引用的项目已不在当前配置中":
+    "The project referenced by this instance is no longer in the current configuration",
   "创建中": "Creating",
   "创建副本": "Create Copy",
+  "修复副本": "Repair Copy",
+  "评估托管副本清理": "Assess Managed Copy Cleanup",
+  "修复": "Repair",
+  "修复 {name} 的工作区副本？": "Repair {name}'s Workspace Copy?",
+  "将按 Git 登记在原路径 {path} 重建分支 {branch}。不会删除其他目录，也不会切换项目的全局目录。":
+    "Recreate branch {branch} at its Git-registered path {path}. This will not delete other directories or change the project's global directory.",
   "已更新工作区 {name}": "Updated workspace {name}",
   "已创建工作区副本": "Workspace copy created",
+  "已修复工作区副本": "Workspace copy repaired",
   "已绑定已有目录": "Bound existing directory",
   "已恢复使用全局目录": "Restored global directory",
   "已打开项目目录": "Project directory opened",
@@ -192,4 +252,5 @@ export const EN_OVERVIEW_MESSAGES: Record<string, string> = {
   "停止代理服务": "Stop Proxy Service",
   "启动代理服务": "Start Proxy Service",
   "其他动作": "Other Actions",
+  "{name} 的更多操作": "More actions for {name}",
 };

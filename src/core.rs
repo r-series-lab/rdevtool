@@ -53,6 +53,7 @@ pub struct BranchOption {
     pub name: String,
     pub updated_at: String,
     pub updated_ts: i64,
+    pub commit: Option<BranchCommitInfo>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -218,8 +219,11 @@ pub struct DeployTargetMeta {
 pub struct DeployParamMeta {
     pub key: String,
     pub label: String,
+    pub label_key: Option<String>,
     pub kind: String,
     pub default_value: String,
+    pub configured_default: Option<String>,
+    pub default_source: String,
     pub options: Vec<String>,
     pub required: bool,
     pub true_value: String,
@@ -375,6 +379,8 @@ pub struct BranchPushStatus {
     pub repo_path: String,
     pub current_branch: String,
     pub upstream_branch: Option<String>,
+    pub upstream_comparable: bool,
+    pub comparison_status: String,
     pub ahead: usize,
     pub behind: usize,
     pub clean: bool,
@@ -572,63 +578,80 @@ pub fn branch_catalog(config: &AppConfig, key: &str) -> Result<BranchCatalogResp
 
     if let Some(repo_path) = project.repo_path.as_deref() {
         if repo_path.is_dir() {
-            let attempt_started = Instant::now();
-            match git::available_branch_activity_with_timeout(repo_path, BRANCH_LOCAL_FETCH_TIMEOUT)
-            {
-                Ok(snapshot) if !snapshot.branches.is_empty() => {
-                    let source = "localRepository";
-                    let freshness = if snapshot.fresh { "fresh" } else { "cached" };
-                    if let Some(error) = snapshot.fetch_error.as_deref() {
+            if git::repository_root(repo_path).is_err() {
+                let detail = format!("配置的本地目录不是 Git 仓库：{}", repo_path.display());
+                attempts.push(BranchCatalogAttempt {
+                    source: "localRepository".to_string(),
+                    status: "skipped".to_string(),
+                    elapsed_ms: 0,
+                    detail: detail.clone(),
+                });
+                risks.push(OperationRisk {
+                    code: "localRepositoryUnavailable".to_string(),
+                    severity: "warning".to_string(),
+                    detail,
+                });
+            } else {
+                let attempt_started = Instant::now();
+                match git::available_branch_activity_with_timeout(
+                    repo_path,
+                    BRANCH_LOCAL_FETCH_TIMEOUT,
+                ) {
+                    Ok(snapshot) if !snapshot.branches.is_empty() => {
+                        let source = "localRepository";
+                        let freshness = if snapshot.fresh { "fresh" } else { "cached" };
+                        if let Some(error) = snapshot.fetch_error.as_deref() {
+                            risks.push(OperationRisk {
+                                code: "localFetchFailed".to_string(),
+                                severity: "warning".to_string(),
+                                detail: safe_branch_error(config, project, error),
+                            });
+                        }
+                        attempts.push(BranchCatalogAttempt {
+                            source: source.to_string(),
+                            status: if snapshot.fresh {
+                                "succeeded".to_string()
+                            } else {
+                                "degraded".to_string()
+                            },
+                            elapsed_ms: snapshot.elapsed_ms,
+                            detail: if snapshot.fresh {
+                                "远端引用已刷新，并从本地仓库读取分支。".to_string()
+                            } else {
+                                "远端刷新失败，已立即降级使用本地已有引用。".to_string()
+                            },
+                        });
+                        return Ok(successful_branch_catalog(
+                            requested,
+                            effective,
+                            started,
+                            source,
+                            freshness,
+                            attempts,
+                            branch_options(snapshot.branches),
+                            risks,
+                        ));
+                    }
+                    Ok(snapshot) => attempts.push(BranchCatalogAttempt {
+                        source: "localRepository".to_string(),
+                        status: "empty".to_string(),
+                        elapsed_ms: snapshot.elapsed_ms,
+                        detail: "本地仓库没有可用分支引用，继续尝试远端来源。".to_string(),
+                    }),
+                    Err(error) => {
+                        let detail = safe_branch_error(config, project, &error.to_string());
+                        attempts.push(BranchCatalogAttempt {
+                            source: "localRepository".to_string(),
+                            status: "failed".to_string(),
+                            elapsed_ms: elapsed_ms(attempt_started),
+                            detail: detail.clone(),
+                        });
                         risks.push(OperationRisk {
-                            code: "localFetchFailed".to_string(),
+                            code: "localRepositoryReadFailed".to_string(),
                             severity: "warning".to_string(),
-                            detail: safe_branch_error(config, project, error),
+                            detail,
                         });
                     }
-                    attempts.push(BranchCatalogAttempt {
-                        source: source.to_string(),
-                        status: if snapshot.fresh {
-                            "succeeded".to_string()
-                        } else {
-                            "degraded".to_string()
-                        },
-                        elapsed_ms: snapshot.elapsed_ms,
-                        detail: if snapshot.fresh {
-                            "远端引用已刷新，并从本地仓库读取分支。".to_string()
-                        } else {
-                            "远端刷新失败，已立即降级使用本地已有引用。".to_string()
-                        },
-                    });
-                    return Ok(successful_branch_catalog(
-                        requested,
-                        effective,
-                        started,
-                        source,
-                        freshness,
-                        attempts,
-                        branch_options(snapshot.branches),
-                        risks,
-                    ));
-                }
-                Ok(snapshot) => attempts.push(BranchCatalogAttempt {
-                    source: "localRepository".to_string(),
-                    status: "empty".to_string(),
-                    elapsed_ms: snapshot.elapsed_ms,
-                    detail: "本地仓库没有可用分支引用，继续尝试远端来源。".to_string(),
-                }),
-                Err(error) => {
-                    let detail = safe_branch_error(config, project, &error.to_string());
-                    attempts.push(BranchCatalogAttempt {
-                        source: "localRepository".to_string(),
-                        status: "failed".to_string(),
-                        elapsed_ms: elapsed_ms(attempt_started),
-                        detail: detail.clone(),
-                    });
-                    risks.push(OperationRisk {
-                        code: "localRepositoryReadFailed".to_string(),
-                        severity: "warning".to_string(),
-                        detail,
-                    });
                 }
             }
         } else {
@@ -657,7 +680,14 @@ pub fn branch_catalog(config: &AppConfig, key: &str) -> Result<BranchCatalogResp
         });
     }
 
-    if let Ok(token) = credentials::load_gitlab_token(&config.defaults) {
+    if project.git_url.trim().is_empty() {
+        attempts.push(BranchCatalogAttempt {
+            source: "gitlabApi".to_string(),
+            status: "skipped".to_string(),
+            elapsed_ms: 0,
+            detail: "项目未配置 gitUrl。".to_string(),
+        });
+    } else if let Ok(token) = credentials::load_gitlab_token(&config.defaults) {
         let attempt_started = Instant::now();
         match gitlab::available_branch_activity_with_timeout(
             &project.git_url,
@@ -734,6 +764,7 @@ pub fn branch_catalog(config: &AppConfig, key: &str) -> Result<BranchCatalogResp
                         name,
                         updated_at: String::new(),
                         updated_ts: 0,
+                        commit: None,
                     })
                     .collect();
                 return Ok(successful_branch_catalog(
@@ -777,6 +808,7 @@ pub fn branch_catalog(config: &AppConfig, key: &str) -> Result<BranchCatalogResp
         });
     }
 
+    let unavailable = attempts.iter().all(|attempt| attempt.status == "skipped");
     let detail = attempts
         .iter()
         .filter(|attempt| matches!(attempt.status.as_str(), "failed" | "empty"))
@@ -794,11 +826,18 @@ pub fn branch_catalog(config: &AppConfig, key: &str) -> Result<BranchCatalogResp
             attempts,
         },
         status: OperationStatus {
-            key: "failed".to_string(),
-            label: "同步失败".to_string(),
+            key: if unavailable { "unavailable" } else { "failed" }.to_string(),
+            label: if unavailable {
+                "分支不可用"
+            } else {
+                "同步失败"
+            }
+            .to_string(),
             success: false,
             terminal: true,
-            detail: if detail.is_empty() {
+            detail: if unavailable {
+                "当前项目未配置可用的 Git 仓库或远端地址。".to_string()
+            } else if detail.is_empty() {
                 "没有可用的分支来源。".to_string()
             } else {
                 detail
@@ -822,6 +861,7 @@ fn branch_options(items: Vec<git::BranchActivity>) -> Vec<BranchOption> {
             name: item.name,
             updated_at: item.updated_at,
             updated_ts: item.updated_ts,
+            commit: item.commit.map(branch_commit_info),
         })
         .collect()
 }
@@ -1651,13 +1691,14 @@ pub fn execute_branch_sync(
             Ok(result) => items.push(branch_task_item_from_merge_result(result)),
             Err(error) => {
                 let project = config.find_project(&item.project_key)?;
+                let (status_key, summary) = branch_merge_failure_status(&error);
                 items.push(branch_task_failure(
                     project,
                     &item.source_branch,
                     item.target_branch.as_deref(),
-                    "merge_failed",
+                    status_key,
                     "失败",
-                    "合并失败",
+                    summary,
                     &error.to_string(),
                 ));
             }
@@ -2348,6 +2389,15 @@ pub fn branch_push_status(
         repo_path: repo_path.display().to_string(),
         current_branch: status.current_branch.clone(),
         upstream_branch: status.upstream_branch.clone(),
+        upstream_comparable: status.upstream_branch.is_some(),
+        comparison_status: if status.detached {
+            "detachedHead"
+        } else if status.upstream_branch.is_some() {
+            "comparedToUpstream"
+        } else {
+            "upstreamNotConfigured"
+        }
+        .to_string(),
         ahead: status.ahead,
         behind: status.behind,
         clean: status.clean,
@@ -2519,6 +2569,43 @@ fn branch_task_item_from_merge_result(result: MergeResponse) -> BranchTaskItemRe
         remote: result.remote,
         commit: result.target_commit.or(result.latest_commit),
     }
+}
+
+fn branch_merge_failure_status(error: &anyhow::Error) -> (&'static str, &'static str) {
+    if let Some(failure) = error.downcast_ref::<gitlab::MergeFailure>() {
+        return (failure.kind.status_key(), failure.kind.summary());
+    }
+
+    let normalized = error.to_string().to_ascii_lowercase();
+    if normalized.contains("cannot_be_merged")
+        || normalized.contains("has_conflicts")
+        || normalized.contains("http 409")
+        || normalized.contains("merge conflict")
+        || normalized.contains("conflict in")
+        || normalized.contains("合并冲突")
+    {
+        return ("merge_conflict", "存在合并冲突");
+    }
+    if normalized.contains("http 401") || normalized.contains("unauthorized") {
+        return ("gitlab_auth_failed", "GitLab 身份验证失败");
+    }
+    if normalized.contains("http 403") || normalized.contains("forbidden") {
+        return ("gitlab_forbidden", "GitLab 权限不足");
+    }
+    if normalized.contains("ci_must_pass")
+        || normalized.contains("ci_still_running")
+        || normalized.contains("pipeline_blocked")
+    {
+        return ("merge_pipeline_blocked", "流水线阻止合并");
+    }
+    if normalized.contains("discussions_not_resolved") {
+        return ("merge_discussion_blocked", "讨论未解决");
+    }
+    if normalized.contains("not_approved") || normalized.contains("approval_required") {
+        return ("merge_approval_blocked", "审批条件未满足");
+    }
+
+    ("merge_failed", "合并失败")
 }
 
 fn branch_task_failure(
@@ -2815,7 +2902,6 @@ fn validate_effective_deploy_params(
 fn default_impact_paths(param_key: &str) -> Vec<String> {
     match param_key {
         "IS_BUILD_MOBILE" => vec!["mobile/**".to_string()],
-        "IS_BUILD_ADMIN" => vec!["imop-admin/**".to_string()],
         _ => Vec::new(),
     }
 }
@@ -2995,12 +3081,15 @@ fn selected_deploy_target<'a>(
 }
 
 fn deploy_param_meta(project: &ProjectConfig, param: &DeployParamConfig) -> DeployParamMeta {
-    let default_value = param_default_value(project, param);
+    let (default_value, default_source) = param_default_resolution(project, param);
     DeployParamMeta {
         key: param.key.clone(),
         label: param.label.clone(),
+        label_key: param.label_key.clone(),
         kind: deploy_param_kind_key(&param.kind).to_string(),
         default_value,
+        configured_default: param.default.clone(),
+        default_source: default_source.to_string(),
         options: param.options.clone(),
         required: param.required,
         true_value: param.true_value.clone().unwrap_or_else(|| "是".to_string()),
@@ -3036,25 +3125,42 @@ fn resolve_deploy_param_value(
 }
 
 fn param_default_value(project: &ProjectConfig, param: &DeployParamConfig) -> String {
+    param_default_resolution(project, param).0
+}
+
+fn param_default_resolution(
+    project: &ProjectConfig,
+    param: &DeployParamConfig,
+) -> (String, &'static str) {
     if param.kind == DeployParamKind::Branch {
-        return param
-            .default
-            .clone()
-            .or_else(|| infer_branch(project, None).ok())
-            .unwrap_or_default();
+        if let Some(default) = &param.default {
+            return (default.clone(), "projectDefault");
+        }
+        return infer_branch(project, None)
+            .map(|branch| (branch, "currentBranch"))
+            .unwrap_or_else(|_| (String::new(), "none"));
     }
     if param.kind == DeployParamKind::Boolean {
-        return param
-            .default
-            .clone()
-            .or_else(|| param.false_value.clone())
-            .unwrap_or_else(|| "否".to_string());
+        if let Some(default) = &param.default {
+            return (default.clone(), "projectDefault");
+        }
+        return (
+            param
+                .false_value
+                .clone()
+                .unwrap_or_else(|| "否".to_string()),
+            "booleanFalseValue",
+        );
+    }
+    if let Some(default) = &param.default {
+        return (default.clone(), "projectDefault");
     }
     param
-        .default
-        .clone()
-        .or_else(|| param.options.first().cloned())
-        .unwrap_or_default()
+        .options
+        .first()
+        .cloned()
+        .map(|value| (value, "firstOption"))
+        .unwrap_or_else(|| (String::new(), "none"))
 }
 
 fn deploy_param_kind_key(kind: &DeployParamKind) -> &'static str {
@@ -3238,7 +3344,7 @@ job_name = "true"
 key = "ENV_PROFILE"
 label = "环境"
 type = "select"
-options = ["dc2", "uat"]
+options = ["demo", "uat"]
 required = true
 
 [[projects.deploy_targets.params]]
@@ -3248,7 +3354,7 @@ type = "boolean"
 default = "是"
 true_value = "是"
 false_value = "否"
-impact_paths = ["imop-admin/**"]
+impact_paths = ["demo-console/**"]
 
 [[projects.deploy_targets.params]]
 key = "IS_BUILD_MOBILE"
@@ -3266,18 +3372,34 @@ impact_paths = ["mobile/**"]
     }
 
     #[test]
+    fn push_status_marks_missing_upstream_as_not_comparable() {
+        let (root, repo) = branch_catalog_test_repo(None);
+        let config = branch_catalog_test_config(&repo, "");
+
+        let status = branch_push_status(&config, "demo", None).expect("read push status");
+
+        assert_eq!(status.upstream_branch, None);
+        assert!(!status.upstream_comparable);
+        assert_eq!(status.comparison_status, "upstreamNotConfigured");
+        assert_eq!(status.ahead, 0);
+        assert_eq!(status.behind, 0);
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_plan_reports_and_blocks_an_unmapped_branch_input() {
         let (root, repo) = branch_catalog_test_repo(None);
         let config = build_plan_test_config(&repo, false);
         let request = DeployRequest {
             project: "demo".to_string(),
-            branch: Some("env-dc2-vke".to_string()),
+            branch: Some("env-demo-vke".to_string()),
             ..DeployRequest::default()
         };
         let plan = build_plan(&config, &request).expect("plan should remain inspectable");
 
         assert_eq!(plan.effective.target, "vke");
-        assert_eq!(plan.effective.env.as_deref(), Some("dc2"));
+        assert_eq!(plan.effective.env.as_deref(), Some("demo"));
         assert_eq!(plan.effective.branch, None);
         assert!(!plan.params.contains_key("BRANCH"));
         assert_eq!(plan.ignored_inputs.len(), 1);
@@ -3295,15 +3417,33 @@ impact_paths = ["mobile/**"]
     }
 
     #[test]
+    fn deploy_target_meta_explains_where_defaults_come_from() {
+        let (root, repo) = branch_catalog_test_repo(None);
+        let config = build_plan_test_config(&repo, true);
+        let meta = deploy_target_meta(&config, "demo", Some("vke"))
+            .expect("resolve deploy target metadata");
+        let find = |key: &str| meta.params.iter().find(|param| param.key == key).unwrap();
+
+        assert_eq!(find("ENV_PROFILE").default_value, "demo");
+        assert_eq!(find("ENV_PROFILE").configured_default, None);
+        assert_eq!(find("ENV_PROFILE").default_source, "firstOption");
+        assert_eq!(find("IS_BUILD_ADMIN").default_source, "projectDefault");
+        assert_eq!(find("BRANCH").default_value, "main");
+        assert_eq!(find("BRANCH").default_source, "currentBranch");
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn build_plan_maps_branch_and_infers_target_and_environment_from_config() {
         let (root, repo) = branch_catalog_test_repo(None);
-        run_test_git(&repo, &["branch", "env-dc2-vke"]);
+        run_test_git(&repo, &["branch", "env-demo-vke"]);
         let config = build_plan_test_config(&repo, true);
         let plan = build_plan(
             &config,
             &DeployRequest {
                 project: "demo".to_string(),
-                branch: Some("env-dc2-vke".to_string()),
+                branch: Some("env-demo-vke".to_string()),
                 ..DeployRequest::default()
             },
         )
@@ -3312,13 +3452,13 @@ impact_paths = ["mobile/**"]
         assert_eq!(plan.job_kind, "vke");
         assert_eq!(
             plan.params.get("ENV_PROFILE").map(String::as_str),
-            Some("dc2")
+            Some("demo")
         );
         assert_eq!(
             plan.params.get("BRANCH").map(String::as_str),
-            Some("env-dc2-vke")
+            Some("env-demo-vke")
         );
-        assert_eq!(plan.effective.branch.as_deref(), Some("env-dc2-vke"));
+        assert_eq!(plan.effective.branch.as_deref(), Some("env-demo-vke"));
         assert!(plan.ignored_inputs.is_empty());
         assert!(plan.status.success);
         assert!(plan.observed.commit.is_some());
@@ -3352,7 +3492,7 @@ impact_paths = ["mobile/**"]
         let request = DeployRequest {
             project: "demo".to_string(),
             target: Some("vke".to_string()),
-            env: Some("dc2".to_string()),
+            env: Some("demo".to_string()),
             branch: Some("main".to_string()),
             ..DeployRequest::default()
         };
@@ -3404,7 +3544,7 @@ impact_paths = ["mobile/**"]
             &DeployRequest {
                 project: "demo".to_string(),
                 target: Some("vke".to_string()),
-                env: Some("dc2".to_string()),
+                env: Some("demo".to_string()),
                 branch: Some("main".to_string()),
                 ..DeployRequest::default()
             },
@@ -3443,7 +3583,7 @@ impact_paths = ["mobile/**"]
             &DeployRequest {
                 project: "demo".to_string(),
                 target: Some("vke".to_string()),
-                env: Some("dc2".to_string()),
+                env: Some("demo".to_string()),
                 branch: Some("main".to_string()),
                 extra_params: BTreeMap::from([
                     ("ENV_PROFILE".to_string(), "uat".to_string()),
@@ -3507,6 +3647,42 @@ impact_paths = ["mobile/**"]
                 .iter()
                 .any(|risk| risk.code == "localFetchFailed")
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn branch_catalog_reports_unavailable_for_non_git_project_without_remote() {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "rdevtool-non-git-project-{}-{suffix}",
+            std::process::id()
+        ));
+        let project_dir = root.join("project");
+        std::fs::create_dir_all(&project_dir).expect("create non-git project directory");
+        let config = branch_catalog_test_config(&project_dir, "");
+
+        let response = branch_catalog(&config, "demo").expect("load branch catalog");
+
+        assert!(!response.status.success);
+        assert_eq!(response.status.key, "unavailable");
+        assert_eq!(response.observed.source, "none");
+        assert!(response.branches.is_empty());
+        assert_eq!(
+            response.status.detail,
+            "当前项目未配置可用的 Git 仓库或远端地址。"
+        );
+        assert!(
+            response
+                .observed
+                .attempts
+                .iter()
+                .all(|attempt| attempt.status == "skipped")
+        );
+        assert!(!response.status.detail.contains("invalid git url"));
+        assert!(!response.status.detail.contains("fatal:"));
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -3701,5 +3877,43 @@ git_url = "{}"
         );
         assert!(response.detail.contains("原因：合并失败"));
         assert!(response.detail.contains("HTTP 401 Unauthorized"));
+    }
+
+    #[test]
+    fn branch_merge_failure_status_uses_typed_gitlab_category() {
+        let error = anyhow::Error::new(gitlab::MergeFailure::new(
+            gitlab::MergeFailureKind::Conflict,
+            "合并 MR 失败: cannot_be_merged（MR !403）",
+        ));
+
+        assert_eq!(
+            branch_merge_failure_status(&error),
+            ("merge_conflict", "存在合并冲突")
+        );
+    }
+
+    #[test]
+    fn branch_merge_failure_status_recognizes_local_merge_conflict() {
+        let error = anyhow::anyhow!("merge conflict in src/api/example.ts");
+
+        assert_eq!(
+            branch_merge_failure_status(&error),
+            ("merge_conflict", "存在合并冲突")
+        );
+    }
+
+    #[test]
+    fn branch_merge_failure_status_does_not_treat_mr_number_as_http_status() {
+        let conflict = anyhow::anyhow!("合并 MR 失败: cannot_be_merged（存在合并冲突）（MR !403）");
+        let forbidden = anyhow::anyhow!("合并 MR 失败: HTTP 403 Forbidden（MR !12）");
+
+        assert_eq!(
+            branch_merge_failure_status(&conflict),
+            ("merge_conflict", "存在合并冲突")
+        );
+        assert_eq!(
+            branch_merge_failure_status(&forbidden),
+            ("gitlab_forbidden", "GitLab 权限不足")
+        );
     }
 }

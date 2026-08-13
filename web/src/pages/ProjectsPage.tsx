@@ -60,7 +60,9 @@ import type {
   SaveProjectRuntimeLaunchProfileResponse,
 } from "../app-types";
 import type { AppStyleMode } from "../theme";
+import { translateBuildDetail } from "../lib/buildPresentation";
 import {
+  ActionIcon,
   ActivityIcon,
   AppWindowIcon,
   CheckIcon,
@@ -88,6 +90,10 @@ import { AppActionDialog } from "../components/AppActionDialog";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import { AppListEndState } from "../components/AppListEndState";
 import { RuntimeContextCard } from "../components/RuntimeContextCard";
+import {
+  ResourceActionDialog,
+  type ResourceActionDialogTarget,
+} from "../components/ResourceActionDialog";
 import { RuntimeStartPromptModeControl } from "../components/ProjectRuntimeStartDialog";
 import {
   LinkPlanDialog,
@@ -139,6 +145,8 @@ import {
   runtimeValueSourceLabel,
 } from "../lib/runtimeContext";
 import { useI18n, type AppLanguage, type Translate } from "../i18n";
+import { translateAppMessage } from "../i18n/appMessages";
+import { translateInternalMessage } from "../i18n/internalMessages";
 
 type FinderType = "项目" | "网站" | "目录" | "工具";
 type ProjectsPageMode = "projectManagement" | "resources";
@@ -328,6 +336,12 @@ type RuntimeLaunchProfileSaveDialogState = {
   mode: "create" | "update";
   profileKey: string;
   label: string;
+};
+
+type ResourceActionDialogState = {
+  target: ResourceActionDialogTarget;
+  item: FinderShortcutItem;
+  shortcutKey: string;
 };
 
 function parseRuntimeEnvText(text: string, t: Translate): RuntimeEnvParseResult {
@@ -1043,8 +1057,11 @@ function FinderEntryIcon({ kind, entry }: { kind: string; entry?: FinderEntry })
   }
 }
 
-function finderEntryActionIcon(kind: string) {
-  switch (kind) {
+function finderEntryActionIcon(entry: FinderEntry) {
+  if (isResourceActionToolEntry(entry)) {
+    return <ActionIcon fontSize="small" />;
+  }
+  switch (entry.kind) {
     case "app":
     case "script":
     case "tool":
@@ -1105,6 +1122,10 @@ function buildFinderEntryDetails(item: FinderShortcutItem, t: Translate): string
 
 function isLinkToolEntry(entry: FinderEntry): boolean {
   return entry.kind === "tool" && (entry.tool ?? "link").toLowerCase() === "link";
+}
+
+function isResourceActionToolEntry(entry: FinderEntry): boolean {
+  return entry.kind === "tool" && entry.tool?.trim().toLowerCase() === "action";
 }
 
 function linkToolKey(entry: FinderEntry): string {
@@ -1528,6 +1549,8 @@ export function ProjectsPage({
   const [shortcutMenuKey, setShortcutMenuKey] = useState("");
   const [shortcutRuntimePanelItem, setShortcutRuntimePanelItem] =
     useState<FinderShortcutItem | null>(null);
+  const [resourceActionDialog, setResourceActionDialog] =
+    useState<ResourceActionDialogState | null>(null);
   const [shortcutPanelTab, setShortcutPanelTab] =
     useState<RuntimePanelTab>("webActions");
   const [shortcutRuntimeSaving, setShortcutRuntimeSaving] = useState(false);
@@ -3195,6 +3218,23 @@ export function ProjectsPage({
 
   async function handleOpenShortcut(item: FinderShortcutItem, shortcutKey: string) {
     try {
+      if (isResourceActionToolEntry(item.entry)) {
+        const actionKey = item.entry.toolKey?.trim();
+        if (!actionKey) {
+          return;
+        }
+        setResourceActionDialog({
+          target: {
+            key: actionKey,
+            sourceId: item.sourceId ?? null,
+            entryName: item.entry.name,
+            mode: item.entry.toolAction === "inspect" ? "inspect" : "run",
+          },
+          item,
+          shortcutKey,
+        });
+        return;
+      }
       if (isLinkToolEntry(item.entry)) {
         const opened = await openLinkPlan(item.entry);
         if (!opened) {
@@ -3209,19 +3249,23 @@ export function ProjectsPage({
         return;
       }
       onMarkShortcutUsed(item);
-      setConfirmedShortcutKey(shortcutKey);
-      if (confirmTimerRef.current != null) {
-        window.clearTimeout(confirmTimerRef.current);
-      }
-      confirmTimerRef.current = window.setTimeout(() => {
-        setConfirmedShortcutKey((current) =>
-          current === shortcutKey ? null : current,
-        );
-        confirmTimerRef.current = null;
-      }, SHORTCUT_CONFIRM_MS);
+      showShortcutConfirmation(shortcutKey);
     } catch {
       // The module already reports the failure; no success checkmark is shown.
     }
+  }
+
+  function showShortcutConfirmation(shortcutKey: string) {
+    setConfirmedShortcutKey(shortcutKey);
+    if (confirmTimerRef.current != null) {
+      window.clearTimeout(confirmTimerRef.current);
+    }
+    confirmTimerRef.current = window.setTimeout(() => {
+      setConfirmedShortcutKey((current) =>
+        current === shortcutKey ? null : current,
+      );
+      confirmTimerRef.current = null;
+    }, SHORTCUT_CONFIRM_MS);
   }
 
   function projectWorkflowActionAvailable(
@@ -4215,7 +4259,10 @@ export function ProjectsPage({
                     <>
                       <Chip
                         size="small"
-                        label={detailsProjectEntry.statusLabel}
+                        label={translateInternalMessage(
+                          detailsProjectEntry.statusLabel,
+                          t,
+                        )}
                         sx={{
                           bgcolor: buildStatusPalette(
                             detailsProjectEntry.statusKey,
@@ -4372,7 +4419,11 @@ export function ProjectsPage({
                                         label={
                                           runtimePreflight.loading
                                             ? t("检查中")
-                                            : preflight?.statusLabel ||
+                                            : translateAppMessage(
+                                                preflight?.statusMessage,
+                                                preflight?.statusLabel ?? "",
+                                                t,
+                                              ) ||
                                               (runtimePreflight.error
                                                 ? t("异常")
                                                 : t("未检查"))
@@ -4493,7 +4544,11 @@ export function ProjectsPage({
                                               flex: 1,
                                             }}
                                           >
-                                            {check.title}
+                                            {translateAppMessage(
+                                              check.titleMessage,
+                                              check.title,
+                                              t,
+                                            )}
                                           </Typography>
                                           <Typography
                                             variant="caption"
@@ -4505,7 +4560,11 @@ export function ProjectsPage({
                                               lineHeight: 1.45,
                                             }}
                                           >
-                                            {check.detail}
+                                            {translateAppMessage(
+                                              check.detailMessage,
+                                              check.detail,
+                                              t,
+                                            )}
                                           </Typography>
                                         </Box>
                                         <Stack
@@ -4521,7 +4580,11 @@ export function ProjectsPage({
                                               fontWeight: 780,
                                             }}
                                           >
-                                            {check.statusLabel}
+                                            {translateAppMessage(
+                                              check.statusMessage,
+                                              check.statusLabel,
+                                              t,
+                                            )}
                                           </Typography>
                                           <Box
                                             sx={{
@@ -4606,7 +4669,10 @@ export function ProjectsPage({
                                   ],
                                   [
                                     t("构建详情"),
-                                    detailsProjectEntry.buildDetail || t("无"),
+                                    translateBuildDetail(
+                                      detailsProjectEntry.buildDetail || "",
+                                      t,
+                                    ) || t("无"),
                                     false,
                                   ],
                                   [
@@ -5059,7 +5125,11 @@ export function ProjectsPage({
                                     label={
                                       runtimePreflight.loading
                                         ? t("检查中")
-                                        : runtimePreflight.response?.statusLabel ||
+                                        : translateAppMessage(
+                                            runtimePreflight.response?.statusMessage,
+                                            runtimePreflight.response?.statusLabel ?? "",
+                                            t,
+                                          ) ||
                                           t("待检查")
                                     }
                                     color={
@@ -5569,7 +5639,11 @@ export function ProjectsPage({
                                   overflowWrap: "anywhere",
                                 }}
                               >
-                                {runtimePreflight.response?.summary ||
+                                {translateAppMessage(
+                                  runtimePreflight.response?.summaryMessage,
+                                  runtimePreflight.response?.summary ?? "",
+                                  t,
+                                ) ||
                                   t("启动前检查未通过，请先修复配置。")}
                               </Typography>
                             ) : null}
@@ -6087,7 +6161,10 @@ export function ProjectsPage({
                           >
                             <Chip
                               size="small"
-                              label={runtimeLog.readySummary.statusLabel}
+                              label={translateInternalMessage(
+                                runtimeLog.readySummary.statusLabel,
+                                t,
+                              )}
                               sx={{
                                 height: 22,
                                 bgcolor: runtimeLog.readySummary.ready
@@ -6234,10 +6311,14 @@ export function ProjectsPage({
                                       : webChecks
                                           .map(
                                             (check) =>
-                                              `${check.title}: ${check.statusLabel}`,
+                                              `${translateAppMessage(check.titleMessage, check.title, t)}: ${translateAppMessage(check.statusMessage, check.statusLabel, t)}`,
                                           )
                                           .join(" · ") ||
-                                        preflight?.summary ||
+                                        translateAppMessage(
+                                          preflight?.summaryMessage,
+                                          preflight?.summary ?? "",
+                                          t,
+                                        ) ||
                                         t("未检查")}
                                   </Typography>
                                   <IconButton
@@ -7517,7 +7598,7 @@ export function ProjectsPage({
                                   void handleOpenShortcut(item, shortcutKey);
                                 }}
                               >
-                                {finderEntryActionIcon(item.entry.kind)}
+                                {finderEntryActionIcon(item.entry)}
                               </IconButton>
                             </Tooltip>
                             <Tooltip title={t("更多操作")}>
@@ -7606,7 +7687,9 @@ export function ProjectsPage({
                   }}
                 >
                   <ListItemIcon sx={{ minWidth: 30, color: "inherit" }}>
-                    {shortcutMenuItem && isLinkToolEntry(shortcutMenuItem.entry) ? (
+                    {shortcutMenuItem &&
+                    (isLinkToolEntry(shortcutMenuItem.entry) ||
+                      isResourceActionToolEntry(shortcutMenuItem.entry)) ? (
                       <WorkflowIcon fontSize="small" />
                     ) : (
                       <OpenExternalIcon fontSize="small" />
@@ -7616,7 +7699,9 @@ export function ProjectsPage({
                     primary={
                       shortcutMenuItem && isLinkToolEntry(shortcutMenuItem.entry)
                         ? t("查看计划")
-                        : t("打开入口")
+                        : shortcutMenuItem && isResourceActionToolEntry(shortcutMenuItem.entry)
+                          ? t("执行动作")
+                          : t("打开入口")
                     }
                     primaryTypographyProps={{
                       fontSize: "0.82rem",
@@ -7680,7 +7765,19 @@ export function ProjectsPage({
                   />
                 </MenuItem>
               </Menu>
-	              <WorkflowRulesConfigDialog
+              <ResourceActionDialog
+                open={Boolean(resourceActionDialog)}
+                target={resourceActionDialog?.target ?? null}
+                onClose={() => setResourceActionDialog(null)}
+                onSucceeded={() => {
+                  if (!resourceActionDialog) return;
+                  onMarkShortcutUsed(resourceActionDialog.item);
+                  showShortcutConfirmation(resourceActionDialog.shortcutKey);
+                }}
+                recordActivity={recordActivity}
+                updateActivity={updateActivity}
+              />
+              <WorkflowRulesConfigDialog
                 open={workflowOpen}
                 title={t("联动配置")}
                 context={

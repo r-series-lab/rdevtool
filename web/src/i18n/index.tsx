@@ -4,9 +4,12 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
+  type Context,
   type ReactNode,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { EN_PROXY_MESSAGES } from "./enProxy";
 import { EN_RESOURCES_MESSAGES } from "./enResources";
 import { EN_BUILD_MESSAGES } from "./enBuild";
@@ -33,6 +36,15 @@ export type TranslationParams = Record<string, string | number>;
 export type Translate = (message: string, params?: TranslationParams) => string;
 
 export const APP_LANGUAGE_STORAGE_KEY = "rdevtool.language";
+export const APP_LANGUAGE_CHANGE_EVENT = "rdevtool:language-preference-changed";
+const APP_LANGUAGE_CACHE_UPDATED_AT_KEY = "rdevtool.language.updatedAt";
+const APP_LANGUAGE_PREFERENCE_SCHEMA_VERSION = 1;
+
+export type AppLanguagePreferenceRecord = {
+  schemaVersion: number;
+  preference: AppLanguagePreference;
+  updatedAtMs: number;
+};
 
 const EN_MESSAGES: Record<string, string> = {
   ...EN_PROXY_MESSAGES,
@@ -107,6 +119,45 @@ const EN_MESSAGES: Record<string, string> = {
   "收起导航栏": "Collapse Navigation",
   "活动": "Activity",
   "活动中心": "Activity Center",
+  "运行与活动": "Runtime & Activity",
+  "运行与活动中心": "Runtime & Activity Center",
+  "运行与活动视图": "Runtime & Activity View",
+  "管理当前会话与操作记录": "Manage current sessions and operation history",
+  "刷新运行状态": "Refresh Runtime Status",
+  "收起运行与活动中心": "Collapse Runtime & Activity Center",
+  "运行中 {count}": "Running {count}",
+  "活动记录 {count}": "Activity {count}",
+  "项目服务": "Project Service",
+  "项目会话": "Project Sessions",
+  "共享服务": "Shared Services",
+  "正在读取运行状态": "Loading Runtime Status",
+  "当前没有运行中的资源": "No Resources Running",
+  "项目服务、本地构建、Action 和代理启动后会出现在这里。":
+    "Project services, local builds, Actions, and proxies appear here after they start.",
+  "部分运行状态暂不可用": "Some Runtime Status Is Unavailable",
+  "{count} 个运行资源": "{count} Running Resources",
+  "{count} 个活跃端口": "{count} Active Ports",
+  "其他工作区": "Other Workspaces",
+  "刚刚更新": "Updated just now",
+  "{count} 秒前更新": "Updated {count} seconds ago",
+  "{count} 分钟前更新": "Updated {count} minutes ago",
+  "本次 {count} 个请求": "{count} requests this session",
+  "{count} 个异常": "{count} errors",
+  "认领并纳入管理": "Claim and Manage",
+  "已纳入 rDevTool 管理": "Claimed by rDevTool",
+  "运行资源已停止": "Running resource stopped",
+  "Action 已请求停止": "Action stop requested",
+  "操作未完成，请查看活动记录或页面提示。":
+    "The action did not complete. Check Activity or the page message.",
+  "外部进程": "External Process",
+  "已运行 {duration}": "Running for {duration}",
+  "打开日志": "Open Log",
+  "查看详情": "View Details",
+  "停止运行资源？": "Stop Running Resource?",
+  "停止后，对应的本地服务或任务将立即中断。":
+    "The corresponding local service or task will stop immediately.",
+  "关闭运行与活动中心": "Close Runtime & Activity Center",
+  "打开运行与活动中心": "Open Runtime & Activity Center",
   "管理和跟踪所有活动": "Manage and track all activity",
   "全部来源": "All Sources",
   "托盘": "Tray",
@@ -392,6 +443,7 @@ const EN_MESSAGES: Record<string, string> = {
     "Search pages, projects, quick access, or actions",
   "没有匹配命令": "No matching commands",
   "换个关键词试试。": "Try another keyword.",
+  "没有更多了": "No more items",
   "项目目录": "Project Directory",
   "运行 dev 服务": "Run development service",
   "停止 dev 服务": "Stop development service",
@@ -438,13 +490,32 @@ type I18nProviderProps = {
   systemLanguageOverride?: string;
 };
 
-const I18nContext = createContext<I18nContextValue | null>(null);
+function bridgeLanguagePreference(preference: AppLanguagePreference) {
+  if (typeof window === "undefined") {
+    return;
+  }
+  window.dispatchEvent(
+    new CustomEvent(APP_LANGUAGE_CHANGE_EVENT, { detail: preference }),
+  );
+}
+
 const DEFAULT_I18N_CONTEXT: I18nContextValue = {
   language: "zh-CN",
   preference: "system",
-  setPreference: () => undefined,
+  // Also works when a Vite HMR boundary temporarily retains an older provider.
+  setPreference: bridgeLanguagePreference,
   t: (message, params) => translateMessage("zh-CN", message, params),
 };
+
+type I18nGlobal = typeof globalThis & {
+  __RDEVTOOL_I18N_CONTEXT__?: Context<I18nContextValue | null>;
+};
+
+const i18nGlobal = globalThis as I18nGlobal;
+const I18nContext =
+  i18nGlobal.__RDEVTOOL_I18N_CONTEXT__ ??
+  (i18nGlobal.__RDEVTOOL_I18N_CONTEXT__ =
+    createContext<I18nContextValue | null>(null));
 
 export function normalizeLanguagePreference(
   value: unknown,
@@ -507,30 +578,224 @@ export function readStoredLanguagePreference(): AppLanguagePreference {
   }
 }
 
+function normalizeLanguagePreferenceRecord(
+  value: unknown,
+): AppLanguagePreferenceRecord | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+  const record = value as Partial<AppLanguagePreferenceRecord>;
+  if (
+    record.schemaVersion !== APP_LANGUAGE_PREFERENCE_SCHEMA_VERSION ||
+    (record.preference !== "system" &&
+      record.preference !== "zh-CN" &&
+      record.preference !== "en-US") ||
+    typeof record.updatedAtMs !== "number" ||
+    !Number.isFinite(record.updatedAtMs) ||
+    record.updatedAtMs < 0
+  ) {
+    return null;
+  }
+  return {
+    schemaVersion: APP_LANGUAGE_PREFERENCE_SCHEMA_VERSION,
+    preference: record.preference,
+    updatedAtMs: Math.floor(record.updatedAtMs),
+  };
+}
+
+export function resolveLanguagePreferenceRecord(
+  cached: AppLanguagePreferenceRecord,
+  persisted: AppLanguagePreferenceRecord | null,
+  nowMs: number,
+): { record: AppLanguagePreferenceRecord; shouldPersist: boolean } {
+  if (!persisted) {
+    return {
+      record: {
+        ...cached,
+        updatedAtMs: cached.updatedAtMs || nowMs,
+      },
+      shouldPersist: true,
+    };
+  }
+  if (cached.updatedAtMs > persisted.updatedAtMs) {
+    return { record: cached, shouldPersist: true };
+  }
+  return { record: persisted, shouldPersist: false };
+}
+
+function readCachedLanguagePreferenceRecord(): AppLanguagePreferenceRecord {
+  let updatedAtMs = 0;
+  try {
+    const storedUpdatedAt = Number(
+      window.localStorage.getItem(APP_LANGUAGE_CACHE_UPDATED_AT_KEY),
+    );
+    if (Number.isFinite(storedUpdatedAt) && storedUpdatedAt > 0) {
+      updatedAtMs = Math.floor(storedUpdatedAt);
+    }
+  } catch {
+    // The legacy language value remains a usable startup fallback.
+  }
+  return {
+    schemaVersion: APP_LANGUAGE_PREFERENCE_SCHEMA_VERSION,
+    preference: readStoredLanguagePreference(),
+    updatedAtMs,
+  };
+}
+
+function writeLanguagePreferenceCache(record: AppLanguagePreferenceRecord) {
+  try {
+    window.localStorage.setItem(APP_LANGUAGE_STORAGE_KEY, record.preference);
+    window.localStorage.setItem(
+      APP_LANGUAGE_CACHE_UPDATED_AT_KEY,
+      String(record.updatedAtMs),
+    );
+  } catch {
+    // SQLite remains durable when WebView storage is unavailable.
+  }
+}
+
+async function loadPersistedLanguagePreference() {
+  const value = await invoke<unknown | null>("get_app_language_preference");
+  return normalizeLanguagePreferenceRecord(value);
+}
+
+async function persistLanguagePreference(record: AppLanguagePreferenceRecord) {
+  const value = await invoke<unknown>("save_app_language_preference", {
+    record,
+  });
+  const persisted = normalizeLanguagePreferenceRecord(value);
+  if (!persisted) {
+    throw new Error("Invalid language preference returned by storage");
+  }
+  return persisted;
+}
+
 export function I18nProvider({
   children,
   systemLanguageOverride,
 }: I18nProviderProps) {
   const [preference, setPreferenceState] =
     useState<AppLanguagePreference>(readStoredLanguagePreference);
+  const preferenceRevisionRef = useRef(0);
+  const preferenceTimestampRef = useRef(0);
   const [browserLanguage, setBrowserLanguage] = useState(() =>
     systemLanguageOverride ??
       (typeof window === "undefined" ? "" : navigator.language),
   );
   const language = resolveLanguage(preference, browserLanguage);
 
-  const setPreference = useCallback(
-    (nextPreference: AppLanguagePreference) => {
-      const normalized = normalizeLanguagePreference(nextPreference);
-      setPreferenceState(normalized);
-      try {
-        window.localStorage.setItem(APP_LANGUAGE_STORAGE_KEY, normalized);
-      } catch {
-        // The in-memory setting still works when local storage is unavailable.
+  const applyLanguagePreferenceRecord = useCallback(
+    (record: AppLanguagePreferenceRecord, broadcast: boolean) => {
+      preferenceTimestampRef.current = Math.max(
+        preferenceTimestampRef.current,
+        record.updatedAtMs,
+      );
+      setPreferenceState(record.preference);
+      writeLanguagePreferenceCache(record);
+      if (broadcast) {
+        window.dispatchEvent(
+          new CustomEvent(APP_LANGUAGE_CHANGE_EVENT, { detail: record }),
+        );
       }
     },
     [],
   );
+
+  const setPreference = useCallback(
+    (nextPreference: AppLanguagePreference) => {
+      const normalized = normalizeLanguagePreference(nextPreference);
+      const record: AppLanguagePreferenceRecord = {
+        schemaVersion: APP_LANGUAGE_PREFERENCE_SCHEMA_VERSION,
+        preference: normalized,
+        updatedAtMs: Math.max(Date.now(), preferenceTimestampRef.current + 1),
+      };
+      preferenceRevisionRef.current += 1;
+      applyLanguagePreferenceRecord(record, true);
+      void persistLanguagePreference(record).catch((reason) => {
+        console.warn("[i18n] failed to persist language preference", reason);
+      });
+    },
+    [applyLanguagePreferenceRecord],
+  );
+
+  useEffect(() => {
+    const syncStoredPreference = () => {
+      const cached = readCachedLanguagePreferenceRecord();
+      preferenceTimestampRef.current = Math.max(
+        preferenceTimestampRef.current,
+        cached.updatedAtMs,
+      );
+      setPreferenceState(cached.preference);
+    };
+    const syncChangedPreference = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      const record = normalizeLanguagePreferenceRecord(detail);
+      if (record) {
+        setPreferenceState(record.preference);
+        return;
+      }
+
+      // Bridges a setter retained by a pre-migration Vite HMR context.
+      const migratedRecord: AppLanguagePreferenceRecord = {
+        schemaVersion: APP_LANGUAGE_PREFERENCE_SCHEMA_VERSION,
+        preference: normalizeLanguagePreference(detail),
+        updatedAtMs: Math.max(Date.now(), preferenceTimestampRef.current + 1),
+      };
+      preferenceRevisionRef.current += 1;
+      applyLanguagePreferenceRecord(migratedRecord, false);
+      void persistLanguagePreference(migratedRecord).catch((reason) => {
+        console.warn("[i18n] failed to migrate language preference", reason);
+      });
+    };
+    const syncStoragePreference = (event: StorageEvent) => {
+      if (
+        event.key === null ||
+        event.key === APP_LANGUAGE_STORAGE_KEY ||
+        event.key === APP_LANGUAGE_CACHE_UPDATED_AT_KEY
+      ) {
+        syncStoredPreference();
+      }
+    };
+
+    // Keeps multiple WebViews and stale Vite HMR contexts on one preference.
+    syncStoredPreference();
+    window.addEventListener(APP_LANGUAGE_CHANGE_EVENT, syncChangedPreference);
+    window.addEventListener("storage", syncStoragePreference);
+    return () => {
+      window.removeEventListener(APP_LANGUAGE_CHANGE_EVENT, syncChangedPreference);
+      window.removeEventListener("storage", syncStoragePreference);
+    };
+  }, [applyLanguagePreferenceRecord]);
+
+  useEffect(() => {
+    let disposed = false;
+    const revisionAtStart = preferenceRevisionRef.current;
+    const cached = readCachedLanguagePreferenceRecord();
+
+    void loadPersistedLanguagePreference()
+      .then((persisted) => {
+        if (disposed || preferenceRevisionRef.current !== revisionAtStart) {
+          return;
+        }
+
+        const resolved = resolveLanguagePreferenceRecord(
+          cached,
+          persisted,
+          Date.now(),
+        );
+        applyLanguagePreferenceRecord(resolved.record, true);
+        if (resolved.shouldPersist) {
+          return persistLanguagePreference(resolved.record);
+        }
+      })
+      .catch((reason) => {
+        console.warn("[i18n] failed to hydrate language preference", reason);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [applyLanguagePreferenceRecord]);
 
   useEffect(() => {
     if (systemLanguageOverride !== undefined) {

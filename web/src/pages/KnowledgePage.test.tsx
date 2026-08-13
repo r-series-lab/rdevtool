@@ -8,8 +8,8 @@ describe("KnowledgePage", () => {
   it("renders a lightweight Markdown knowledge workbench", () => {
     const html = renderToStaticMarkup(
       <KnowledgePage
-        projects={[{ key: "imop-admin", name: "智能营销" }]}
-        selectedProject="imop-admin"
+        projects={[{ key: "demo-console", name: "示例控制台" }]}
+        selectedProject="demo-console"
       />,
     );
 
@@ -27,8 +27,8 @@ describe("KnowledgePage", () => {
     const html = renderToStaticMarkup(
       <I18nProvider systemLanguageOverride="en-US">
         <KnowledgePage
-          projects={[{ key: "imop-admin", name: "Smart Marketing" }]}
-          selectedProject="imop-admin"
+          projects={[{ key: "demo-console", name: "Demo Console" }]}
+          selectedProject="demo-console"
         />
       </I18nProvider>,
     );

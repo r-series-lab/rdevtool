@@ -748,9 +748,9 @@ mod tests {
                         "workspaceKey": "feature-a",
                         "payload": {
                             "sourceId": "workspace-link",
-                            "linkKey": "cooperation-debug"
+                            "linkKey": "demo-debug"
                         },
-                        "dedupeKey": "link.run:cooperation-debug"
+                        "dedupeKey": "link.run:demo-debug"
                     }
                 }
             ]
@@ -790,7 +790,7 @@ mod tests {
                 "--source",
                 "workspace-link",
                 "run",
-                "cooperation-debug"
+                "demo-debug"
             ]
         );
     }

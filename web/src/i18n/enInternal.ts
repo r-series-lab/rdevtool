@@ -1,4 +1,17 @@
 export const EN_INTERNAL_MESSAGES: Record<string, string> = {
+  "Action 实时输出已隐藏": "Live Action output is hidden",
+  "等待 Action 输出": "Waiting for Action output",
+  "工作区配置已变更": "Workspace configuration changed",
+  "项目配置已变更": "Project configuration changed",
+  "项目工作区配置已变更": "Project workspace configuration changed",
+  "工作区相关配置已变更": "Related workspace configuration changed",
+  "检测到外部修改": "External changes detected",
+  "检测到外部修改，请重新加载最新配置":
+    "External changes detected. Reload the latest configuration.",
+  "重新加载": "Reload",
+  "打开配置位置": "Open Configuration Location",
+  "项目工作区": "Project Workspaces",
+  "影响：{scopes}": "Affected: {scopes}",
   "当前工作区中未找到要启动的项目":
     "No project to start was found in the current workspace",
   "当前配置源不支持运行环境模板覆盖。":

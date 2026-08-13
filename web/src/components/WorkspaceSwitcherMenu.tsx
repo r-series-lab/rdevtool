@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { InputBase, Menu, MenuItem } from "@mui/material";
 import type { ProjectWorkspaceSummary } from "../app-types";
 import { useI18n } from "../i18n";
+import { workspaceDisplayName } from "../lib/workspacePresentation";
 import {
   AppWindowIcon,
   CheckIcon,
@@ -22,20 +23,13 @@ type WorkspaceSwitcherMenuProps = {
   onManage: () => void;
 };
 
-export function workspaceDisplayName(workspace: ProjectWorkspaceSummary | null) {
-  if (!workspace) {
-    return "工作区";
-  }
-  return workspace.system ? "全局" : workspace.name;
-}
-
 function matchesWorkspace(
   workspace: ProjectWorkspaceSummary,
   query: string,
   translatedSystemName: string,
 ) {
   const haystack = [
-    workspaceDisplayName(workspace),
+    workspace.system ? translatedSystemName : workspace.name,
     workspace.system ? translatedSystemName : "",
     workspace.name,
     workspace.key,

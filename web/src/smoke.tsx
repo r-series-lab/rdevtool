@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import ReactDOM from "react-dom/client";
 import { Box, Button, CssBaseline, ThemeProvider } from "@mui/material";
 import { mockIPC } from "@tauri-apps/api/mocks";
+import { emit } from "@tauri-apps/api/event";
 import type { PageKey } from "./app-shell";
 import type {
   ConfigSource,
@@ -10,7 +11,11 @@ import type {
   ConfigSourceCopyResult,
   ConfigSourceFileInspection,
   ConfigSourceInspection,
+  FinderShortcutItem,
+  BranchTaskHistoryEntry,
+  BuildHistoryEntry,
   BranchWorktreeSummary,
+  ManagedArtifactCleanupPlanResponse,
   ManagedArtifactInventoryResponse,
   ProjectConfigEditorState,
   DeployTargetConfigSummary,
@@ -18,6 +23,7 @@ import type {
   ProjectRuntimeContextSnapshot,
   ProjectRuntimeEntry,
   ProjectRuntimePreflightResponse,
+  ProxyDashboard,
   SaveProjectRuntimeLaunchProfileResponse,
   ProjectWorkspaceSummary,
   WorkspaceConfigFocusRequest,
@@ -26,11 +32,35 @@ import { AppShellLayout } from "./components/AppShellLayout";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { useAppConfirmDialog } from "./components/AppConfirmDialog";
 import { ConfigSourceManagerDialog } from "./components/ConfigSourceManagerDialog";
+import { ResourceActionDialog } from "./components/ResourceActionDialog";
+import { HistoryCard } from "./components/AppCards";
+import {
+  FolderIcon,
+  OpenExternalIcon,
+  PackageIcon,
+  SettingsIcon,
+  TerminalIcon,
+  WorkflowIcon,
+} from "./components/AppIcons";
+import { BranchHistoryPanel } from "./components/branch/BranchHistoryPanel";
+import {
+  WorkspacePageToolbar,
+  WorkspacePageToolbarAction,
+} from "./components/WorkspacePageToolbar";
 import { useActivityPreferences } from "./hooks/useActivityPreferences";
-import { WorktreeSelector } from "./pages/MergePage";
+import { MergePage, WorktreeSelector } from "./pages/MergePage";
+import {
+  BuildPage,
+  BuildHistoryRecordDetail,
+  BuildHistoryMoreMenu,
+  BuildHistoryRunTimeline,
+  type BuildHistoryParamEntry,
+} from "./pages/BuildPage";
+import type { BuildTargetMeta } from "./hooks/useBuildContext";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { OverviewPage } from "./pages/OverviewPage";
 import { KnowledgePage } from "./pages/KnowledgePage";
+import { ProxyPage } from "./pages/ProxyPage";
 import {
   activityRequiresAttention,
   createActivityEntry,
@@ -43,7 +73,7 @@ import type {
   WorkspaceWorkflowRunState,
 } from "./lib/workflowChains";
 import { createAppTheme, type AppStyleMode } from "./theme";
-import { I18nProvider } from "./i18n";
+import { I18nProvider, useI18n } from "./i18n";
 import "./styles.css";
 
 const visibleNavItems: Array<{
@@ -52,7 +82,6 @@ const visibleNavItems: Array<{
   shortLabel: string;
 }> = [
   { key: "overview", label: "总览", shortLabel: "总览" },
-  { key: "knowledge", label: "知识库", shortLabel: "知识库" },
   {
     key: "projectManagement",
     label: "项目管理",
@@ -60,6 +89,7 @@ const visibleNavItems: Array<{
   },
   { key: "resources", label: "资源管理", shortLabel: "资源管理" },
   { key: "proxy", label: "代理配置", shortLabel: "代理配置" },
+  { key: "knowledge", label: "知识库", shortLabel: "知识库" },
 ];
 
 const projectManagementContent: Record<ProjectManagementViewKey, string> = {
@@ -68,15 +98,307 @@ const projectManagementContent: Record<ProjectManagementViewKey, string> = {
   git: "Git 内容",
 };
 
+const smokeBranchHistory: BranchTaskHistoryEntry[] = [
+  {
+    id: "branch-history-batch-latest",
+    createdAt: "2026-08-07 09:04",
+    workspaceKey: "demo-workspace",
+    taskKind: "sync",
+    success: true,
+    summary: "3 succeeded",
+    detail: "",
+    replay: {
+      command: "execute_branch_sync_task",
+      busyText: "正在重新合并分支",
+      request: {
+        projects: ["demo-portal", "demo-mobile", "demo-console", "demo-service"],
+        sourceBranch: "release_demo_202608",
+        targetBranch: "main",
+      },
+    },
+    items: [
+      ["demo-portal", "示例门户", "release_demo_202608", "main"],
+      [
+        "demo-mobile",
+        "示例移动端",
+        "feature_demo_mobile_release_candidate",
+        "env_demo_pre",
+      ],
+      ["demo-console", "示例控制台", "release_demo_202608", "main"],
+      ["demo-service", "示例服务", "release_demo_202608", "main"],
+    ].map(([projectKey, projectName, sourceBranch, targetBranch]) => ({
+      projectKey,
+      projectName,
+      sourceBranch,
+      targetBranch,
+      outputPath: null,
+      success: true,
+      statusKey: "merged",
+      statusLabel: "已合并",
+      summary: "已合并",
+      detail: `已通过 GitLab API 合并到 ${targetBranch}`,
+      remote: true,
+      commit: null,
+    })),
+  },
+  {
+    id: "branch-history-permission-failed",
+    createdAt: "2026-08-06 16:49",
+    workspaceKey: "demo-workspace",
+    taskKind: "sync",
+    success: false,
+    summary: "0 succeeded / 1 failed",
+    detail: "",
+    replay: {
+      command: "execute_branch_sync_task",
+      busyText: "正在重新合并分支",
+      request: {
+        projects: ["demo-mobile"],
+        sourceBranch: "feature_demo_mobile",
+        targetBranch: "env_demo_pre",
+      },
+    },
+    items: [
+      {
+        projectKey: "demo-mobile",
+        projectName: "示例移动端",
+        sourceBranch: "feature_demo_mobile",
+        targetBranch: "env_demo_pre",
+        outputPath: null,
+        success: false,
+        statusKey: "gitlab_forbidden",
+        statusLabel: "合并失败",
+        summary: "合并失败",
+        detail: "合并 MR 失败: HTTP 403 Forbidden",
+        remote: true,
+        commit: null,
+      },
+    ],
+  },
+  ...["2026-08-05 11:22", "2026-08-04 18:36"].map(
+    (createdAt, index): BranchTaskHistoryEntry => ({
+      id: `branch-history-single-${index}`,
+      createdAt,
+      workspaceKey: "demo-workspace",
+      taskKind: "sync",
+      success: true,
+      summary: "1 succeeded",
+      detail: "",
+      replay: null,
+      items: [
+        {
+          projectKey: "demo-console",
+          projectName: "示例控制台",
+          sourceBranch: index === 0 ? "release_demo_202607" : "release_demo_202606",
+          targetBranch: "main",
+          outputPath: null,
+          success: true,
+          statusKey: "merged",
+          statusLabel: "已合并",
+          summary: "已合并",
+          detail: "已通过 GitLab API 合并到 main",
+          remote: true,
+          commit: null,
+        },
+      ],
+    }),
+  ),
+];
+
+const smokeBuildParamEntries: BuildHistoryParamEntry[] = [
+  {
+    key: "IS_BUILD_ADMIN",
+    label: "IS_BUILD_ADMIN",
+    valueLabel: "是",
+    defaultValueLabel: "否",
+    hidden: false,
+    changed: true,
+    defaultKnown: true,
+  },
+  {
+    key: "IS_BUILD_MOBILE",
+    label: "IS_BUILD_MOBILE",
+    valueLabel: "是",
+    defaultValueLabel: "否",
+    hidden: false,
+    changed: true,
+    defaultKnown: true,
+  },
+  {
+    key: "IS_GRAY",
+    label: "IS_GRAY",
+    valueLabel: "否",
+    defaultValueLabel: "是",
+    hidden: false,
+    changed: true,
+    defaultKnown: true,
+  },
+  {
+    key: "CHANNEL",
+    label: "CHANNEL",
+    valueLabel: "pre",
+    defaultValueLabel: "uat",
+    hidden: false,
+    changed: true,
+    defaultKnown: true,
+  },
+  {
+    key: "CACHE_MODE",
+    label: "CACHE_MODE",
+    valueLabel: "incremental",
+    defaultValueLabel: "incremental",
+    hidden: false,
+    changed: false,
+    defaultKnown: true,
+  },
+  {
+    key: "JENKINS_TOKEN",
+    label: "JENKINS_TOKEN",
+    valueLabel: "已配置",
+    defaultValueLabel: "未配置",
+    hidden: true,
+    changed: true,
+    defaultKnown: true,
+  },
+];
+
+const smokeBuildTimeline: BuildHistoryEntry[] = [
+  ["build-run-latest", "构建成功", "构建 #858 当前结果：SUCCESS", "2026-08-05 14:13"],
+  ["build-run-second", "构建失败", "构建 #857 当前结果：FAILURE", "2026-08-05 14:02"],
+  ["build-run-third", "构建成功", "构建 #856 当前结果：SUCCESS", "2026-08-05 13:48"],
+].map(([historyKey, stateLabel, detail, updatedAt], index) => ({
+  historyKey,
+  workspaceKey: "demo-workspace",
+  projectKey: "demo-portal",
+  projectName: "示例门户",
+  mode: "vke",
+  env: "uat3",
+  branch: "feature_demo_mobile",
+  stateKey: index === 1 ? "failed" : "success",
+  stateLabel,
+  detail,
+  queueUrl: null,
+  buildUrl: `https://ci.example.test/job/demo-portal/${858 - index}`,
+  params: {},
+  createdAt: updatedAt,
+  updatedAt,
+}));
+
+function BuildRecordSmokePanel() {
+  const { t } = useI18n();
+  const localizedParamEntries = smokeBuildParamEntries.map((entry) =>
+    entry.hidden
+      ? {
+          ...entry,
+          valueLabel: t("已配置"),
+          defaultValueLabel: t("未配置"),
+        }
+      : entry,
+  );
+
+  return (
+    <Box className="workflow-panel workflow-history-panel">
+      <Box
+        sx={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          minHeight: 30,
+          pb: 0.75,
+          mb: 0.8,
+          borderBottom: "1px solid",
+          borderColor: "divider",
+        }}
+      >
+        <Box component="h2" sx={{ m: 0, fontSize: "1.12rem" }}>
+          Record
+        </Box>
+      </Box>
+      <Box className="workflow-history-content">
+        <Box className="module-list-scroll">
+          <Box sx={{ display: "grid", gap: 1.25 }}>
+            <HistoryCard
+              title="示例控制台 / standard"
+              subtitle="构建成功 · 2026-08-10 14:48"
+              accent="success"
+              badge={
+                <BuildHistoryMoreMenu
+                  actions={[
+                    {
+                      key: "record",
+                      label: t("打开记录"),
+                      icon: <OpenExternalIcon fontSize="small" />,
+                      onClick: () => undefined,
+                    },
+                    {
+                      key: "workflow",
+                      label: t("配置联动"),
+                      icon: <WorkflowIcon fontSize="small" />,
+                      onClick: () => undefined,
+                      active: true,
+                    },
+                  ]}
+                />
+              }
+              detail={
+                <BuildHistoryRecordDetail
+                  detail="构建 #908 当前结果：SUCCESS"
+                  paramEntries={localizedParamEntries}
+                />
+              }
+              meta={["pre", "feature_demo_console"]}
+            />
+            <HistoryCard
+              title="示例移动端 / standard"
+              subtitle="构建失败 · 2026-08-10 14:32"
+              accent="danger"
+              detail={
+                <BuildHistoryRecordDetail
+                  danger
+                  detail={[
+                    "Jenkins rejected the build request (HTTP 403). The configured credential cannot trigger this job.",
+                    "Check the Jenkins token permission, job membership, and CSRF crumb configuration before retrying.",
+                  ].join("\n")}
+                  paramEntries={localizedParamEntries.slice(0, 2)}
+                />
+              }
+              meta={["pre", "feature_demo_mobile"]}
+            />
+            <HistoryCard
+              title="示例门户 / VKE"
+              subtitle="构建成功 · 2026-08-05 14:13"
+              accent="success"
+              pinned
+              detail={
+                <BuildHistoryRecordDetail
+                  detail="构建 #858 当前结果：SUCCESS"
+                  paramEntries={[]}
+                />
+              }
+              meta={[t("连续 {count} 次", { count: 3 }), "uat3"]}
+            >
+              <BuildHistoryRunTimeline
+                items={smokeBuildTimeline}
+                formatRelativeTime={(value) => value ?? ""}
+              />
+            </HistoryCard>
+          </Box>
+        </Box>
+      </Box>
+    </Box>
+  );
+}
+
 const smokeKnowledgeDocuments = [
   {
     source: "file",
     scope: "project",
     projectKey: "demo",
     title: "本地代理排障",
-    summary: "遇到接口 500 时，先确认代理监听、匹配规则和下一跳。",
+    summary:
+      "最后验证：2026-07-29。适用项目：示例控制台 demo-console。适用环境：以 env_demo_pre 为例，其他内网环境按相同拓扑替换环境标识与上游地址。",
     path: "/mock/notes/projects/demo/proxy-debug.md",
-    relativePath: "projects/demo/proxy-debug.md",
+    relativePath: "projects/demo-console/internal-network-local-debug.md",
     updatedAtMs: Date.parse("2026-07-29T08:20:00+08:00"),
     score: 8,
   },
@@ -146,7 +468,10 @@ const smokeKnowledgeContent: Record<string, string> = {
   ].join("\n"),
 };
 
+let pendingResourceActionCancellation: (() => void) | null = null;
+
 let smokeKnowledgeReadCount = 0;
+let smokeDoctorCheckCount = 0;
 
 function createSmokeWorkspace(
   workspace: Pick<ProjectWorkspaceSummary, "key" | "name" | "projectCount"> &
@@ -197,25 +522,26 @@ const smokeWorkspaces: ProjectWorkspaceSummary[] = [
     projectCount: 6,
   }),
   createSmokeWorkspace({
-    key: "feature_cr2605096894",
-    name: "CR2605096894 履约邮礼",
+    key: "feature_demo_alpha",
+    name: "示例需求 A",
     projectCount: 1,
     workspaceKind: "directory",
   }),
   createSmokeWorkspace({
-    key: "feature_cr2606117424_exchange",
-    name: "CR2606117424 全流量权益兑换流程优化V1.1",
+    key: "feature_demo_exchange",
+    name: "REQ-1234 全流量权益兑换流程优化V1.1",
     projectCount: 1,
     workspaceType: "business",
     workspaceKind: "directory",
   }),
   createSmokeWorkspace({
-    key: "feature_cr2606150041_ykd_car",
-    name: "CR2606150041 优客贷车后消费场景引流",
+    key: "feature_demo_checkout",
+    name: "示例需求工作区",
     projectCount: 2,
     workspaceKind: "directory",
   }),
   createSmokeWorkspace({ key: "r-series", name: "R系列", projectCount: 11 }),
+  createSmokeWorkspace({ key: "demo-workspace", name: "示例工作区", projectCount: 10 }),
   createSmokeWorkspace({
     key: "t",
     name: "t",
@@ -223,6 +549,565 @@ const smokeWorkspaces: ProjectWorkspaceSummary[] = [
     workspaceType: "business",
   }),
 ];
+
+const documentationProjects = [
+  { key: "demo-console", name: "示例控制台" },
+  { key: "demo-mobile", name: "示例移动端" },
+  { key: "demo-portal", name: "示例门户" },
+  { key: "demo-service", name: "示例服务" },
+  { key: "demo-admin", name: "示例管理台" },
+  { key: "demo-catalog", name: "示例目录" },
+  { key: "demo-data", name: "示例数据台" },
+  { key: "demo-monitor", name: "示例监控台" },
+  { key: "demo-client", name: "示例客户端" },
+  { key: "demo-api", name: "示例接口服务" },
+];
+
+const documentationWorktrees: BranchWorktreeSummary[] = [
+  {
+    projectKey: "demo-console",
+    projectName: "示例控制台",
+    repoPath: "/mock/demo-workspace/demo-console",
+    label: "默认工作副本",
+    currentBranch: "release_demo_202608",
+    detached: false,
+    clean: false,
+    ahead: 1,
+    behind: 0,
+    isDefault: true,
+    isGitWorktree: true,
+    isWorkspaceInstance: true,
+    managed: true,
+    statusKey: "changed",
+    statusLabel: "有变更",
+    detail: "1 个文件待提交",
+    latestCommit: null,
+  },
+  {
+    projectKey: "demo-mobile",
+    projectName: "示例移动端",
+    repoPath: "/mock/demo-workspace/demo-mobile",
+    label: "需求工作副本",
+    currentBranch: "feature_demo_mobile",
+    detached: false,
+    clean: true,
+    ahead: 0,
+    behind: 0,
+    isDefault: false,
+    isGitWorktree: true,
+    isWorkspaceInstance: true,
+    managed: true,
+    statusKey: "ready",
+    statusLabel: "可用",
+    detail: "工作副本状态正常",
+    latestCommit: null,
+  },
+  {
+    projectKey: "demo-portal",
+    projectName: "示例门户",
+    repoPath: "/mock/demo-workspace/demo-portal",
+    label: "默认工作副本",
+    currentBranch: "main",
+    detached: false,
+    clean: true,
+    ahead: 0,
+    behind: 0,
+    isDefault: true,
+    isGitWorktree: true,
+    isWorkspaceInstance: true,
+    managed: true,
+    statusKey: "ready",
+    statusLabel: "可用",
+    detail: "工作副本状态正常",
+    latestCommit: null,
+  },
+];
+
+const documentationBranchEntries = [
+  "release_demo_202608",
+  "feature_demo_mobile",
+  "env_demo_pre",
+  "main",
+].map((name, index) => ({
+  name,
+  updatedAt: `2026-08-${String(10 - index).padStart(2, "0")} 10:30`,
+  updatedTs: Date.parse(`2026-08-${String(10 - index).padStart(2, "0")}T10:30:00+08:00`),
+  commit: null,
+}));
+
+const documentationBuildTargets = [
+  {
+    key: "standard",
+    label: "标准",
+    adapter: "jenkins",
+    actionKind: "build",
+    jobName: "Front.jenkins.pipeline/standard",
+  },
+  {
+    key: "vke",
+    label: "VKE",
+    adapter: "jenkins",
+    actionKind: "deploy",
+    jobName: "Front.jenkins.pipeline/vke",
+  },
+];
+
+const documentationBuildProjects = documentationProjects.slice(0, 4).map((project) => ({
+  ...project,
+  deployTargets:
+    project.key === "demo-console"
+      ? documentationBuildTargets
+      : documentationBuildTargets.slice(0, 1),
+}));
+
+const documentationBuildTargetMeta: BuildTargetMeta = {
+  targets: documentationBuildTargets,
+  selectedTarget: "standard",
+  params: [
+    {
+      key: "BRANCH",
+      label: "分支",
+      kind: "branch",
+      defaultValue: "release_demo_202608",
+      configuredDefault: null,
+      defaultSource: "currentBranch",
+      options: documentationBranchEntries.map((entry) => entry.name),
+      required: true,
+      trueValue: "",
+      falseValue: "",
+    },
+    {
+      key: "ENV_PROFILE",
+      label: "部署环境",
+      kind: "select",
+      defaultValue: "pre",
+      configuredDefault: "pre",
+      defaultSource: "projectDefault",
+      options: ["pre", "uat3"],
+      required: true,
+      trueValue: "",
+      falseValue: "",
+    },
+    {
+      key: "IS_BUILD_ADMIN",
+      label: "构建管理端",
+      kind: "boolean",
+      defaultValue: "是",
+      configuredDefault: "是",
+      defaultSource: "projectDefault",
+      options: [],
+      required: false,
+      trueValue: "是",
+      falseValue: "否",
+    },
+    {
+      key: "IS_BUILD_MOBILE",
+      label: "构建移动端",
+      kind: "boolean",
+      defaultValue: "是",
+      configuredDefault: "是",
+      defaultSource: "projectDefault",
+      options: [],
+      required: false,
+      trueValue: "是",
+      falseValue: "否",
+    },
+    {
+      key: "IS_GRAY",
+      label: "灰度构建",
+      kind: "boolean",
+      defaultValue: "否",
+      configuredDefault: "否",
+      defaultSource: "booleanFalseValue",
+      options: [],
+      required: false,
+      trueValue: "是",
+      falseValue: "否",
+    },
+    {
+      key: "JENKINS_TOKEN",
+      label: "JENKINS_TOKEN",
+      kind: "hidden",
+      defaultValue: "",
+      configuredDefault: null,
+      defaultSource: "none",
+      options: [],
+      required: false,
+      trueValue: "",
+      falseValue: "",
+    },
+  ],
+};
+
+const documentationBuildParamValues = {
+  BRANCH: "release_demo_202608",
+  ENV_PROFILE: "pre",
+  IS_BUILD_ADMIN: "是",
+  IS_BUILD_MOBILE: "是",
+  IS_GRAY: "否",
+  JENKINS_TOKEN: "configured",
+};
+
+const documentationBuildHistory: BuildHistoryEntry[] = [
+  {
+    historyKey: "docs-build-success",
+    workspaceKey: "demo-workspace",
+    projectKey: "demo-console",
+    projectName: "示例控制台",
+    mode: "standard",
+    env: "pre",
+    branch: "release_demo_202608",
+    stateKey: "success",
+    stateLabel: "构建成功",
+    detail: "构建 #908 当前结果：SUCCESS",
+    queueUrl: null,
+    buildUrl: "https://ci.example.test/job/demo-console/908",
+    params: documentationBuildParamValues,
+    createdAt: "2026-08-10 14:48",
+    updatedAt: "2026-08-10 14:48",
+  },
+  {
+    historyKey: "docs-build-failed",
+    workspaceKey: "demo-workspace",
+    projectKey: "demo-mobile",
+    projectName: "示例移动端",
+    mode: "standard",
+    env: "pre",
+    branch: "feature_demo_mobile",
+    stateKey: "failed",
+    stateLabel: "构建失败",
+    detail:
+      "Jenkins rejected the build request (HTTP 403). Check the token permission, job membership, and CSRF crumb configuration before retrying.",
+    queueUrl: null,
+    buildUrl: null,
+    params: {
+      BRANCH: "feature_demo_mobile",
+      ENV_PROFILE: "pre",
+      IS_BUILD_MOBILE: "是",
+    },
+    createdAt: "2026-08-10 14:32",
+    updatedAt: "2026-08-10 14:32",
+  },
+  ...smokeBuildTimeline,
+];
+
+function DocumentationProjectToolbar({ view }: { view: "build" | "git" }) {
+  const metrics =
+    view === "git"
+      ? [
+          { key: "projects", label: "项目", value: 10, icon: <PackageIcon fontSize="small" />, tone: "blue" as const },
+          { key: "worktrees", label: "工作副本", value: 3, icon: <FolderIcon fontSize="small" />, tone: "cyan" as const },
+          { key: "changed", label: "有变更", value: 1, tone: "violet" as const },
+        ]
+      : [
+          { key: "projects", label: "项目", value: 4, icon: <PackageIcon fontSize="small" />, tone: "blue" as const },
+          { key: "targets", label: "构建目标", value: 5, icon: <TerminalIcon fontSize="small" />, tone: "violet" as const },
+          { key: "records", label: "构建记录", value: documentationBuildHistory.length, tone: "cyan" as const },
+        ];
+
+  return (
+    <WorkspacePageToolbar
+      className={`project-management-toolbar project-management-toolbar--${view}`}
+      ariaLabel={view === "git" ? "项目 Git 概览与配置" : "项目构建概览与配置"}
+      metrics={metrics}
+      actions={
+        <WorkspacePageToolbarAction
+          startIcon={<SettingsIcon sx={{ fontSize: 14 }} />}
+          onClick={() => undefined}
+        >
+          {view === "git" ? "Git 配置" : "构建配置"}
+        </WorkspacePageToolbarAction>
+      }
+    />
+  );
+}
+
+function DocumentationGitPage() {
+  return (
+    <Box className="project-management-page" aria-label="Git 文档截图页面">
+      <DocumentationProjectToolbar view="git" />
+      <Box className="project-management-view">
+        <MergePage
+          projects={documentationProjects}
+          activeWorkspace={
+            smokeWorkspaces.find((workspace) => workspace.key === "demo-workspace") ?? null
+          }
+          selectedProject="demo-console"
+          onProjectChange={() => undefined}
+          mode="sync"
+          onModeChange={() => undefined}
+          syncProjects={["demo-console"]}
+          onSyncProjectsChange={() => undefined}
+          syncSource="release_demo_202608"
+          onSyncSourceChange={() => undefined}
+          onClearSyncSource={() => undefined}
+          syncTargets={["main"]}
+          onSyncTargetsChange={() => undefined}
+          createProjects={["demo-console"]}
+          onCreateProjectsChange={() => undefined}
+          createSource="release_demo_202608"
+          onCreateSourceChange={() => undefined}
+          onClearCreateSource={() => undefined}
+          createTarget="feature_demo_mobile"
+          onCreateTargetChange={() => undefined}
+          onClearCreateTarget={() => undefined}
+          checkoutSource="release_demo_202608"
+          onCheckoutSourceChange={() => undefined}
+          onClearCheckoutSource={() => undefined}
+          checkoutDestinationDir="/mock/demo-workspace/demo-console"
+          onCheckoutDestinationChange={() => undefined}
+          onClearCheckoutDestination={() => undefined}
+          onChooseCheckoutDirectory={() => undefined}
+          switchTarget="main"
+          onSwitchTargetChange={() => undefined}
+          onClearSwitchTarget={() => undefined}
+          pushAction="commitAndPush"
+          onPushActionChange={() => undefined}
+          pushCommitMessage="docs: refresh interface guide"
+          onPushCommitMessageChange={() => undefined}
+          pushSelectedPaths={[]}
+          onPushSelectedPathsChange={() => undefined}
+          pushStatus={null}
+          pushStatusLoading={false}
+          pushStatusError=""
+          pushStatusUpdatedAtMs={Date.now()}
+          worktrees={documentationWorktrees}
+          worktreesLoading={false}
+          worktreesError=""
+          selectedWorktreePath={documentationWorktrees[0].repoPath}
+          onWorktreePathChange={() => undefined}
+          onChooseWorktreeDirectory={() => undefined}
+          onRepairWorktree={() => undefined}
+          onRefreshWorktrees={() => undefined}
+          onRefreshPushStatus={() => undefined}
+          onSyncBranches={() => undefined}
+          sourceBranchEntries={documentationBranchEntries}
+          targetBranchEntries={documentationBranchEntries}
+          sourceBranchOptions={documentationBranchEntries.map((entry) => entry.name)}
+          targetBranchOptions={documentationBranchEntries.map((entry) => entry.name)}
+          busy=""
+          currentBranchTaskHistoryId="branch-history-batch-latest"
+          currentBranchTask={null}
+          branchTaskHistory={smokeBranchHistory}
+          onPlanSync={async () => null}
+          onExecuteSync={() => undefined}
+          onExecuteCreate={() => undefined}
+          onExecuteCheckout={() => undefined}
+          onExecuteSwitch={() => undefined}
+          onExecutePush={() => undefined}
+          onReplayBranchTaskHistory={() => undefined}
+          workflowReceiveRules={[]}
+          workflowBroadcastRules={[]}
+          workflowReceiveSignalIdsForBranchReplay={() => []}
+          workflowBroadcastSignalIdsForBranchReplay={() => []}
+          workflowSignalOptions={[]}
+          workflowSignalSummaries={[]}
+          onWorkflowBranchReplayRulesChange={() => undefined}
+          onWorkflowReceiveRulesEnabledChange={() => undefined}
+          onWorkflowReceiveRulesDelete={() => undefined}
+          onWorkflowBroadcastRulesEnabledChange={() => undefined}
+          onWorkflowBroadcastRulesDelete={() => undefined}
+          onWorkflowSignalDelete={() => undefined}
+          onWorkflowSignalsClear={() => undefined}
+          onRefreshBranchTaskHistory={() => undefined}
+          onClearBranchTaskHistory={() => undefined}
+          onOpenTaskOutput={() => undefined}
+          formatRelativeTime={(value) => value ?? ""}
+        />
+      </Box>
+    </Box>
+  );
+}
+
+function DocumentationBuildPage() {
+  return (
+    <Box className="project-management-page" aria-label="Build 文档截图页面">
+      <DocumentationProjectToolbar view="build" />
+      <Box className="project-management-view">
+        <BuildPage
+          projects={documentationBuildProjects}
+          activeWorkspaceKey="demo-workspace"
+          selectedProject="demo-console"
+          onProjectChange={() => undefined}
+          target="standard"
+          onTargetChange={() => undefined}
+          targetMeta={documentationBuildTargetMeta}
+          paramValues={documentationBuildParamValues}
+          defaultParamValues={documentationBuildParamValues}
+          onParamChange={() => undefined}
+          contextLoading={false}
+          contextError={false}
+          contextErrorText=""
+          onSyncBranches={() => undefined}
+          sourceBranchEntries={documentationBranchEntries}
+          sourceBranchOptions={documentationBranchEntries.map((entry) => entry.name)}
+          branchSyncText="分支已同步"
+          busy=""
+          onTriggerBuild={() => undefined}
+          plan={null}
+          buildResult={null}
+          buildResultUpdatedAtMs={0}
+          currentBuildHistoryKey=""
+          onRefreshBuild={() => undefined}
+          onOpenBuildRecord={() => undefined}
+          onOpenBuildUrl={() => undefined}
+          buildHistory={documentationBuildHistory}
+          onReplayBuildHistory={() => undefined}
+          workflowReceiveRules={[]}
+          workflowSignalIdsForBuildReplay={() => []}
+          workflowSignalOptions={[]}
+          workflowSignalSummaries={[]}
+          onWorkflowBuildReplayReceiversChange={() => undefined}
+          onWorkflowReceiveRulesEnabledChange={() => undefined}
+          onWorkflowReceiveRulesDelete={() => undefined}
+          onWorkflowSignalDelete={() => undefined}
+          onWorkflowSignalsClear={() => undefined}
+          onRefreshBuildHistory={() => undefined}
+          onClearBuildHistory={() => undefined}
+          formatRelativeTime={(value) => value ?? ""}
+        />
+      </Box>
+    </Box>
+  );
+}
+
+function DocumentationProjectsPage() {
+  return (
+    <Box aria-label="项目列表文档截图页面" sx={{ height: "100%", minHeight: 0 }}>
+      <ProjectsPage
+        mode="projectManagement"
+        finderTypeOptions={["项目", "网站", "目录", "工具"]}
+        finderType="项目"
+        finderTypeCounts={{ 项目: documentationProjectRuntimeEntries.length, 网站: 0, 目录: 0, 工具: 0 }}
+        onFinderTypeChange={() => undefined}
+        finderCategories={["全部", "前端", "后端"]}
+        finderCategory="全部"
+        finderCategoryCounts={{ 全部: documentationProjectRuntimeEntries.length, 前端: 3, 后端: 1 }}
+        onFinderCategoryChange={() => undefined}
+        finderQuery=""
+        onFinderQueryChange={() => undefined}
+        runtimeEntries={documentationProjectRuntimeEntries}
+        filteredRuntimeEntries={documentationProjectRuntimeEntries}
+        shortcutEntries={[]}
+        filteredShortcutEntries={[]}
+        favoriteProjectKeys={["demo-console"]}
+        recentProjectKeys={["demo-console", "demo-mobile"]}
+        favoriteShortcutKeys={[]}
+        recentShortcutKeys={[]}
+        selectedDebugProfileKeys={{ "demo-console": "uat3-vke", "demo-mobile": "env_demo_pre" }}
+        runtimeStartPromptMode="auto"
+        workflowReceiveRules={[]}
+        workflowBroadcastRules={[]}
+        workflowSignalOptions={[]}
+        workflowSignalSummaries={[]}
+        workflowReceiveSignalIdsForProjectReplay={() => []}
+        workflowBroadcastSignalIdsForProjectReplay={() => []}
+        onWorkflowProjectReplayRulesChange={() => undefined}
+        onWorkflowReceiveRulesEnabledChange={() => undefined}
+        onWorkflowReceiveRulesDelete={() => undefined}
+        onWorkflowBroadcastRulesEnabledChange={() => undefined}
+        onWorkflowBroadcastRulesDelete={() => undefined}
+        onWorkflowSignalDelete={() => undefined}
+        onWorkflowSignalsClear={() => undefined}
+        onToggleProjectFavorite={() => undefined}
+        onToggleShortcutFavorite={() => undefined}
+        onProjectDebugProfileChange={() => undefined}
+        onRuntimeStartPromptModeChange={() => undefined}
+        onMarkShortcutUsed={() => undefined}
+        onRefresh={() => undefined}
+        onOpenFinderEntry={() => false}
+        onStartRuntime={() => undefined}
+        onStopRuntime={() => undefined}
+        onAdoptRuntime={() => undefined}
+        onOpenBuildOutput={() => undefined}
+        onFocusRuntime={() => undefined}
+        onOpenProjectDirectory={() => undefined}
+        configWorkspaceKey="demo-workspace"
+        projectConfigPanel={{
+          styleMode: "mono",
+          onStyleModeChange: () => undefined,
+          exitRuntimePolicy: "ask",
+          onExitRuntimePolicyChange: () => undefined,
+          selectedProjectKey: "demo-console",
+          onOpenConfigDir: () => undefined,
+          onOpenConfigFile: () => undefined,
+          onOpenProjectWorkspacesDir: () => undefined,
+          onOpenNavigationConfigFile: () => undefined,
+          onCreateProjectWorkspace: () => undefined,
+          projectWorkspaces: smokeWorkspaces,
+          activeProjectWorkspaceKey: "demo-workspace",
+          activePage: "projectManagement",
+          enabledPages: ["overview", "knowledge", "projectManagement", "resources", "proxy"],
+          onEnabledPagesChange: () => undefined,
+          defaultPage: "overview",
+          onDefaultPageChange: () => undefined,
+          onProjectConfigSaved: () => undefined,
+        }}
+      />
+    </Box>
+  );
+}
+
+function DocumentationResourcesPage() {
+  const toolEntries = documentationResourceEntries.filter(
+    (item) => item.entry.kind === "tool",
+  );
+  return (
+    <Box aria-label="资源入口文档截图页面" sx={{ height: "100%", minHeight: 0 }}>
+      <ProjectsPage
+        mode="resources"
+        finderTypeOptions={["网站", "目录", "工具"]}
+        finderType="工具"
+        finderTypeCounts={{ 项目: 0, 网站: 2, 目录: 1, 工具: toolEntries.length }}
+        onFinderTypeChange={() => undefined}
+        finderCategories={["全部", "项目入口", "自动化", "外部系统"]}
+        finderCategory="全部"
+        finderCategoryCounts={{ 全部: documentationResourceEntries.length, 项目入口: 2, 自动化: 2, 外部系统: 1 }}
+        onFinderCategoryChange={() => undefined}
+        finderQuery=""
+        onFinderQueryChange={() => undefined}
+        runtimeEntries={[]}
+        filteredRuntimeEntries={[]}
+        shortcutEntries={documentationResourceEntries}
+        filteredShortcutEntries={toolEntries}
+        favoriteProjectKeys={[]}
+        recentProjectKeys={[]}
+        favoriteShortcutKeys={[]}
+        recentShortcutKeys={[]}
+        selectedDebugProfileKeys={{}}
+        runtimeStartPromptMode="auto"
+        workflowReceiveRules={[]}
+        workflowBroadcastRules={[]}
+        workflowSignalOptions={[]}
+        workflowSignalSummaries={[]}
+        workflowReceiveSignalIdsForProjectReplay={() => []}
+        workflowBroadcastSignalIdsForProjectReplay={() => []}
+        onWorkflowProjectReplayRulesChange={() => undefined}
+        onWorkflowReceiveRulesEnabledChange={() => undefined}
+        onWorkflowReceiveRulesDelete={() => undefined}
+        onWorkflowBroadcastRulesEnabledChange={() => undefined}
+        onWorkflowBroadcastRulesDelete={() => undefined}
+        onWorkflowSignalDelete={() => undefined}
+        onWorkflowSignalsClear={() => undefined}
+        onToggleProjectFavorite={() => undefined}
+        onToggleShortcutFavorite={() => undefined}
+        onProjectDebugProfileChange={() => undefined}
+        onRuntimeStartPromptModeChange={() => undefined}
+        onMarkShortcutUsed={() => undefined}
+        onRefresh={() => undefined}
+        onOpenFinderEntry={() => false}
+        onStartRuntime={() => undefined}
+        onStopRuntime={() => undefined}
+        onAdoptRuntime={() => undefined}
+        onOpenBuildOutput={() => undefined}
+        onFocusRuntime={() => undefined}
+        onOpenProjectDirectory={() => undefined}
+        onOpenResourceConfig={() => undefined}
+        configWorkspaceKey="demo-workspace"
+      />
+    </Box>
+  );
+}
 
 const smokeArchivedWorkspaces: ProjectWorkspaceSummary[] = [
   createSmokeWorkspace({
@@ -300,7 +1185,7 @@ let projectEditorState: ProjectConfigEditorState = {
 
 const runtimeSmokeEntry: ProjectRuntimeEntry = {
   key: "demo",
-  name: "智能营销",
+  name: "示例控制台",
   category: "工作",
   repoPath: "/mock/workspaces/feature/demo",
   command: "npm run dev -- --mode uat3-vke",
@@ -375,21 +1260,163 @@ const runtimeSmokeEntry: ProjectRuntimeEntry = {
 };
 runtimeSmokeEntry.debugProfiles.push({
   ...runtimeSmokeEntry.debugProfiles[0],
-  key: "dc2-vke",
+  key: "env_demo_pre",
   label: "DC2 VKE",
-  command: "npm run dev -- --mode dc2-vke",
+  command: "npm run dev -- --mode env_demo_pre",
   expectedPort: 5174,
   focusUrl: "http://127.0.0.1:5174/",
   env: {
-    APP_ENV: "dc2-vke",
+    APP_ENV: "env_demo_pre",
     API_REGION: "dc2",
   },
 });
 
+const documentationProjectRuntimeEntries: ProjectRuntimeEntry[] = [
+  {
+    ...runtimeSmokeEntry,
+    key: "demo-console",
+    name: "示例控制台",
+    category: "前端",
+    repoPath: "/mock/demo-workspace/demo-console",
+    cwd: "/mock/demo-workspace/demo-console",
+    statusKey: "running",
+    statusLabel: "运行中",
+    detail: "http://127.0.0.1:5173 已通过 HTTP 验证",
+    pid: 42180,
+    startedAtMs: Date.now() - 42 * 60_000,
+    canStart: false,
+    canStop: true,
+    canFocusRuntime: true,
+    buildStatusKey: "succeeded",
+    buildStatusLabel: "构建完成",
+    buildDetail: "dist 已生成",
+  },
+  {
+    ...runtimeSmokeEntry,
+    key: "demo-mobile",
+    name: "示例移动端",
+    category: "前端",
+    repoPath: "/mock/demo-workspace/demo-mobile",
+    cwd: "/mock/demo-workspace/demo-mobile",
+    command: "pnpm dev --host 127.0.0.1",
+    focusUrl: "http://127.0.0.1:5174/",
+    statusKey: "stopped",
+    statusLabel: "未启动",
+    detail: "选择 UAT3 VKE 启动档案后可启动",
+    buildStatusKey: "idle",
+    buildStatusLabel: "待构建",
+    buildDetail: "尚未执行构建",
+  },
+  {
+    ...runtimeSmokeEntry,
+    key: "demo-service",
+    name: "示例服务",
+    category: "后端",
+    repoPath: "/mock/demo-workspace/demo-service",
+    cwd: "/mock/demo-workspace/demo-service",
+    command: "npm run start:dev",
+    focusUrl: "http://127.0.0.1:8080/",
+    statusKey: "external",
+    statusLabel: "运行中（外部）",
+    detail: "端口 8080 由外部进程监听，可先检查归属",
+    pid: 42201,
+    canStart: false,
+    canStop: false,
+    canAdopt: true,
+    canFocusRuntime: true,
+  },
+  {
+    ...runtimeSmokeEntry,
+    key: "demo-admin",
+    name: "示例管理台",
+    category: "前端",
+    repoPath: "/mock/demo-workspace/demo-admin",
+    cwd: "/mock/demo-workspace/demo-admin",
+    command: "",
+    focusUrl: "",
+    statusKey: "notConfigured",
+    statusLabel: "待配置",
+    detail: "缺少启动命令，先进入项目配置补齐",
+    canStart: false,
+    canStop: false,
+    canFocusRuntime: false,
+  },
+];
+
+const documentationResourceEntries: FinderShortcutItem[] = [
+  {
+    categoryTitle: "项目入口",
+    categoryLabel: "网站",
+    sourceId: "default",
+    entry: {
+      name: "示例控制台 Pre",
+      kind: "url",
+      targetLabel: "预发环境",
+      url: "https://demo.example.test/console",
+      browser: "Google Chrome",
+      browserProfile: "Default",
+      runtimeProfile: "browser-proxy",
+      note: "打开预发控制台并使用共享浏览器代理。",
+    },
+  },
+  {
+    categoryTitle: "项目入口",
+    categoryLabel: "目录",
+    sourceId: "default",
+    entry: {
+      name: "需求资料目录",
+      kind: "directory",
+      targetLabel: "工作区资料",
+      path: "/mock/demo-workspace/resources",
+      note: "需求文档、工作日志和联调材料。",
+    },
+  },
+  {
+    categoryTitle: "自动化",
+    categoryLabel: "工具",
+    sourceId: "default",
+    entry: {
+      name: "批量部署 Pre",
+      kind: "tool",
+      targetLabel: "部署动作",
+      tool: "action",
+      toolKey: "batch-deploy-pre",
+      toolAction: "run",
+      note: "选择项目和分支，检查计划后执行。",
+    },
+  },
+  {
+    categoryTitle: "自动化",
+    categoryLabel: "工具",
+    sourceId: "default",
+    entry: {
+      name: "示例联调链路",
+      kind: "tool",
+      targetLabel: "Link",
+      tool: "link",
+      toolKey: "demo-debug",
+      toolAction: "run",
+      note: "按顺序启动代理、Runtime 并打开页面。",
+    },
+  },
+  {
+    categoryTitle: "外部系统",
+    categoryLabel: "网站",
+    sourceId: "default",
+    entry: {
+      name: "Jenkins 示例 Job",
+      kind: "url",
+      targetLabel: "CI",
+      url: "https://ci.example.test/job/demo-console",
+      note: "打开项目构建任务。",
+    },
+  },
+];
+
 const smokeWorkspacePushAction: TrayPinnedAction = {
   kind: "branch.replay",
   label: "推送功能分支",
-  workspaceKey: "feature_cr2606150041_ykd_car",
+  workspaceKey: "feature_demo_checkout",
   projectKey: "demo",
   payload: {
     command: "execute_branch_push_task",
@@ -405,12 +1432,12 @@ const smokeWorkspacePushAction: TrayPinnedAction = {
 const smokeWorkspaceBuildAction: TrayPinnedAction = {
   kind: "build.replay",
   label: "构建 VKE",
-  workspaceKey: "feature_cr2606150041_ykd_car",
+  workspaceKey: "feature_demo_checkout",
   projectKey: "demo",
   payload: {
     project: "demo",
     target: "vke",
-    params: { BRANCH: "feature/CR2606150041" },
+    params: { BRANCH: "feature/REQ-1234" },
   },
   dedupeKey: "build:demo:vke",
   updatedAtMs: Date.parse("2026-07-29T09:32:00+08:00"),
@@ -418,7 +1445,7 @@ const smokeWorkspaceBuildAction: TrayPinnedAction = {
 
 const smokeWorkspaceWorkflowChain: WorkspaceWorkflowChain = {
   id: "smoke-delivery",
-  workspaceKey: "feature_cr2606150041_ykd_car",
+  workspaceKey: "feature_demo_checkout",
   name: "推送并构建",
   enabled: true,
   steps: [
@@ -448,10 +1475,203 @@ const smokeWorkspaceWorkflowRunState: WorkspaceWorkflowRunState = {
   updatedAt: "2026-07-29T01:33:00.000Z",
 };
 
+function createWorkspaceIndexOverviewFixture({
+  key,
+  name,
+  description,
+  workspaceType,
+  workspaceTypeLabel,
+  projectCount,
+  entryCount,
+  actionCount,
+}: {
+  key: string;
+  name: string;
+  description: string;
+  workspaceType: string;
+  workspaceTypeLabel: string;
+  projectCount: number;
+  entryCount: number;
+  actionCount: number;
+}) {
+  return {
+    key,
+    name,
+    description,
+    system: false,
+    runtimeConfigSourceId: `workspace-${key}`,
+    runtimeConfigSourceName: `${name}运行配置`,
+    runtimeConfigSourceKind: "workspace",
+    runtimeConfigPath: `/mock/workspaces/${key}/runtime_overrides.toml`,
+    runtimeProfileScope: "workspaceOverride",
+    rootDir: `/mock/workspaces/${key}`,
+    resourceDir: `/mock/workspaces/${key}/resources`,
+    worklogPath: `/mock/workspaces/${key}/resources/WORKLOG.md`,
+    worklogExists: true,
+    worklogAutoRecord: true,
+    workspaceKind: "directory",
+    workspaceType,
+    workspaceTypeLabel,
+    projectCount,
+    entryCount,
+    actionCount,
+    proxyProfileCount: 0,
+    resources: [],
+    projectDirectories: [],
+    proxyProfiles: [],
+    actions: [],
+  };
+}
+
 const workspaceRuntimeOverview = [
   {
-    key: "feature_cr2606150041_ykd_car",
-    name: "CR2606150041 优客贷车后消费场景引流",
+    key: "system",
+    name: "系统工作区",
+    description: "显示全部工作区、项目和自动化入口。",
+    system: true,
+    runtimeConfigSourceId: "global",
+    runtimeConfigSourceName: "全局配置",
+    runtimeConfigSourceKind: "global",
+    runtimeConfigPath: "/mock/config.toml",
+    runtimeProfileScope: "global",
+    rootDir: null,
+    resourceDir: null,
+    worklogPath: null,
+    worklogExists: false,
+    worklogAutoRecord: false,
+    workspaceKind: "global",
+    workspaceType: "system",
+    workspaceTypeLabel: "全局",
+    projectCount: 22,
+    entryCount: 90,
+    actionCount: 8,
+    proxyProfileCount: 4,
+    resources: [
+      {
+        key: "global-rdevtool-app",
+        workspaceKey: "r-series",
+        configSourceId: "global",
+        category: "开发资源",
+        label: "rDevTool App",
+        kind: "directory",
+        kindLabel: "目录",
+        value: "/mock/r-series/rdevtool",
+        detail: "R系列开发",
+        openKind: "localPath",
+        openable: true,
+      },
+      {
+        key: "global-automation-docs",
+        workspaceKey: "feature_demo_exchange",
+        configSourceId: "global",
+        category: "项目资料",
+        label: "自动化知识库",
+        kind: "url",
+        kindLabel: "网站",
+        value: "http://127.0.0.1:8888/",
+        detail: "权益兑换工作区",
+        openKind: "url",
+        openable: true,
+      },
+      {
+        key: "global-release-port-tool",
+        workspaceKey: "r-series",
+        configSourceId: "global",
+        toolConfigSourceId: "global",
+        category: "工具",
+        label: "释放本地端口",
+        kind: "tool",
+        kindLabel: "工具",
+        value: "release-local-port",
+        detail: "清理被占用的本地开发端口",
+        tool: "action",
+        toolKey: "release-local-port",
+        toolAction: "run",
+        openKind: null,
+        openable: false,
+      },
+    ],
+    projectDirectories: [
+      {
+        projectKey: "pending-directory",
+        projectName: "待配置项目",
+        mode: "default",
+        modeLabel: "项目目录",
+        path: null,
+        managed: false,
+        statusKey: "missing",
+        statusLabel: "目录待配置",
+        running: false,
+        canStart: false,
+        canStop: false,
+        canFocusRuntime: false,
+      },
+      {
+        projectKey: "demo",
+        projectName: "示例控制台",
+        mode: "default",
+        modeLabel: "全局项目",
+        path: "/mock/demo",
+        managed: false,
+        statusKey: "stopped",
+        statusLabel: "未启动",
+        running: false,
+        canStart: true,
+        canStop: false,
+        canFocusRuntime: false,
+      },
+    ],
+    proxyProfiles: [
+      {
+        configSourceId: "global",
+        id: "global-local-debug",
+        name: "全局本地联调代理",
+        listenHost: "127.0.0.1",
+        listenPort: 8787,
+        listenUrl: "http://127.0.0.1:8787",
+        workspaceKey: null,
+        workspaceLabel: "全局",
+        ruleCount: 34,
+        running: false,
+        startedAt: null,
+      },
+    ],
+    actions: [],
+  },
+  createWorkspaceIndexOverviewFixture({
+    key: "feature_demo_exchange",
+    name: "REQ-1234 全流量权益兑换流程优化V1.1",
+    description:
+      "REQ-1234 全流量权益兑换流程优化V1.1 专用工作区；关联分支 feature_demo_WORKSPACE。",
+    workspaceType: "business",
+    workspaceTypeLabel: "业务",
+    projectCount: 1,
+    entryCount: 10,
+    actionCount: 3,
+  }),
+  createWorkspaceIndexOverviewFixture({
+    key: "r-series",
+    name: "R系列",
+    description: "R 系列工具开发工作区，只显示当前工具家族相关项目和少量通用入口。",
+    workspaceType: "custom",
+    workspaceTypeLabel: "未分类",
+    projectCount: 11,
+    entryCount: 4,
+    actionCount: 1,
+  }),
+  createWorkspaceIndexOverviewFixture({
+    key: "release-20260716",
+    name: "工作项目",
+    description: "非 R 系列工作项目。",
+    workspaceType: "custom",
+    workspaceTypeLabel: "未分类",
+    projectCount: 11,
+    entryCount: 3,
+    actionCount: 0,
+  }),
+  {
+    key: "feature_demo_checkout",
+    name: "示例需求工作区",
     description: "工作区运行来源烟雾测试",
     system: false,
     runtimeConfigSourceId: "workspace-feature",
@@ -468,14 +1688,32 @@ const workspaceRuntimeOverview = [
     workspaceType: "business",
     workspaceTypeLabel: "业务",
     projectCount: 1,
-    entryCount: 0,
+    entryCount: 1,
     actionCount: 2,
     proxyProfileCount: 0,
-    resources: [],
+    resources: [
+      {
+        key: "feature-resource-action-batch-deploy-pre",
+        workspaceKey: "feature_demo_checkout",
+        configSourceId: "workspace-feature",
+        toolConfigSourceId: "workspace-feature",
+        category: "工具",
+        label: "批量部署 Pre",
+        kind: "tool",
+        kindLabel: "工具",
+        value: "batch-deploy-pre",
+        detail: "选择项目和分支，检查计划后执行",
+        tool: "action",
+        toolKey: "batch-deploy-pre",
+        toolAction: "run",
+        openKind: null,
+        openable: false,
+      },
+    ],
     projectDirectories: [
       {
         projectKey: "demo",
-        projectName: "智能营销",
+        projectName: "示例控制台",
         mode: "managed",
         modeLabel: "工作区副本",
         path: "/mock/workspaces/feature/demo",
@@ -506,7 +1744,7 @@ const workspaceRuntimeOverview = [
         label: smokeWorkspaceBuildAction.label,
         detail: "demo · vke",
         projectKey: "demo",
-        params: [{ label: "BRANCH", value: "feature/CR2606150041" }],
+        params: [{ label: "BRANCH", value: "feature/REQ-1234" }],
         confirmRequired: true,
         updatedAtMs: smokeWorkspaceBuildAction.updatedAtMs,
       },
@@ -516,8 +1754,8 @@ const workspaceRuntimeOverview = [
 
 const workspaceRuntimeEditor = {
   workspace: {
-    key: "feature_cr2606150041_ykd_car",
-    name: "CR2606150041 优客贷车后消费场景引流",
+    key: "feature_demo_checkout",
+    name: "示例需求工作区",
     description: "工作区运行来源烟雾测试",
     system: false,
     workspaceType: "business",
@@ -543,7 +1781,7 @@ const workspaceRuntimeEditor = {
   projects: [
     {
       key: "demo",
-      name: "智能营销",
+      name: "示例控制台",
       category: "工作",
       repoPath: "/mock/demo",
       selected: true,
@@ -556,12 +1794,12 @@ const workspaceRuntimeEditor = {
 const runtimeSmokeContext: ProjectRuntimeContextSnapshot = {
   schemaVersion: 2,
   workspace: {
-    key: "feature_cr2606150041_ykd_car",
-    name: "CR2606150041 优客贷车后消费场景引流",
+    key: "feature_demo_checkout",
+    name: "示例需求工作区",
     system: false,
     projectInstancePath: "/mock/workspaces/feature/demo",
     projectInstanceManaged: true,
-    runtimeConfigSourceId: "workspace-feature_cr2606150041_ykd_car",
+    runtimeConfigSourceId: "workspace-feature_demo_checkout",
     runtimeConfigSourceName: "优客贷车后场景配置",
     runtimeConfigSourceKind: "workspace",
     runtimeConfigPath: "/mock/workspaces/feature/runtime_overrides.toml",
@@ -630,7 +1868,7 @@ const runtimeSmokeContext: ProjectRuntimeContextSnapshot = {
 
 const runtimeSmokePreflight: ProjectRuntimePreflightResponse = {
   projectKey: "demo",
-  projectName: "智能营销",
+  projectName: "示例控制台",
   debugProfileKey: "uat3-vke",
   debugProfileLabel: "UAT3 VKE",
   runtimeProfileKey: "browser-proxy",
@@ -684,6 +1922,7 @@ let runtimePreflightMockCount = 0;
 let runtimeSmokeProxyRunning = false;
 let runtimeSmokePortConflict = false;
 let runtimeSmokeProfileRepairMode: "" | "create" | "reset" = "";
+let workspaceInstanceRepairMode = false;
 
 const configFileDefinitions = [
   {
@@ -691,6 +1930,12 @@ const configFileDefinitions = [
     label: "资源入口",
     capability: "resource",
     fileName: "navigation.toml",
+  },
+  {
+    key: "actions",
+    label: "参数化 Action",
+    capability: "resource",
+    fileName: "actions.toml",
   },
   { key: "links", label: "链路", capability: "link", fileName: "links.toml" },
   { key: "proxy", label: "代理", capability: "proxy", fileName: "proxy.toml" },
@@ -705,6 +1950,7 @@ const configFileDefinitions = [
 function configSourceFiles(baseDir: string): ConfigSource["files"] {
   return {
     navigation: `${baseDir}/navigation.toml`,
+    actions: `${baseDir}/actions.toml`,
     links: `${baseDir}/links.toml`,
     proxy: `${baseDir}/proxy.toml`,
     runtimeOverrides: `${baseDir}/runtime_overrides.toml`,
@@ -745,6 +1991,81 @@ let mockSources: ConfigSource[] = [
     isDefault: false,
   },
 ];
+
+const smokeProxyDashboard: ProxyDashboard = {
+  configPath: "/mock/default/proxy.toml",
+  config: {
+    profiles: [
+      {
+        id: "smoke-proxy",
+        workspaceKey: "feature_demo_checkout",
+        name: "示例本地代理",
+        listenHost: "127.0.0.1",
+        listenPort: 8791,
+        upstreamBaseUrl: "",
+        upstreamProxy: "",
+        captureBody: true,
+        maxBodyBytes: 262_144,
+      },
+    ],
+    rules: [
+      {
+        id: "smoke-rule-orders",
+        profileId: "smoke-proxy",
+        enabled: true,
+        name: "订单查询 Mock",
+        priority: 10,
+        method: "GET",
+        urlContains: "",
+        pathPrefix: "/api/orders",
+        headerName: "",
+        headerContains: "",
+        action: {
+          kind: "mock",
+          status: 200,
+          contentType: "application/json; charset=utf-8",
+          body: '{"ok":true}',
+          headers: {},
+          delayMs: 0,
+        },
+      },
+      {
+        id: "smoke-rule-profile",
+        profileId: "smoke-proxy",
+        enabled: false,
+        name: "用户资料 Mock",
+        priority: 20,
+        method: "ANY",
+        urlContains: "",
+        pathPrefix: "/api/profile",
+        headerName: "",
+        headerContains: "",
+        action: {
+          kind: "mock",
+          status: 200,
+          contentType: "application/json; charset=utf-8",
+          body: '{"name":"demo"}',
+          headers: {},
+          delayMs: 0,
+        },
+      },
+    ],
+  },
+  statuses: [
+    {
+      profileId: "smoke-proxy",
+      running: true,
+      managed: false,
+      versionCompatible: false,
+      listenUrl: "http://127.0.0.1:8791",
+      pid: null,
+      startedAt: null,
+      owner: "node (PID 42194)",
+      detail: "port is listening but is not owned by rDevTool daemon",
+    },
+  ],
+  events: [],
+};
 
 const managedArtifactInventory: ManagedArtifactInventoryResponse = {
   schemaVersion: 1,
@@ -803,6 +2124,106 @@ const managedArtifactInventory: ManagedArtifactInventoryResponse = {
       lifecycle: "proxySession",
     },
   ],
+  recommendedActions: [],
+};
+
+const managedWorkspaceInstanceInventory: ManagedArtifactInventoryResponse = {
+  ...managedArtifactInventory,
+  requested: {
+    workspace: "feature_demo_checkout",
+    allWorkspaces: false,
+    project: "demo",
+    kinds: ["workspaceProjectInstance"],
+  },
+  effective: {
+    ...managedArtifactInventory.effective,
+    workspaceKeys: ["feature_demo_checkout"],
+    project: "demo",
+    kinds: ["workspaceProjectInstance"],
+  },
+  observed: {
+    artifacts: [
+      {
+        id: "artifact-smoke-workspace-instance",
+        source: "workspaceConfig",
+        artifact: {
+          kind: "workspaceProjectInstance",
+          path: "/mock/workspaces/feature/demo",
+          ownership: "rdevtool",
+          lifecycle: "workspace",
+        },
+        workspaceKey: "feature_demo_checkout",
+        projectKey: "demo",
+        runId: null,
+        scopePath: "/mock/workspaces/feature/demo",
+        exists: true,
+        objectType: "directory",
+        active: false,
+        ownershipVerified: true,
+        detail: "工作区项目实例显式记录 managed=true",
+      },
+    ],
+    references: [],
+    summary: {
+      artifactCount: 1,
+      existingCount: 1,
+      missingCount: 0,
+      activeCount: 0,
+      referenceCount: 0,
+    },
+  },
+  managedArtifacts: [
+    {
+      kind: "workspaceProjectInstance",
+      path: "/mock/workspaces/feature/demo",
+      ownership: "rdevtool",
+      lifecycle: "workspace",
+    },
+  ],
+};
+
+const managedArtifactCleanupPlan: ManagedArtifactCleanupPlanResponse = {
+  schemaVersion: 1,
+  requested: {
+    workspace: null,
+    allWorkspaces: true,
+    project: null,
+    kinds: [],
+    artifactIds: [],
+  },
+  effective: {
+    workspaceKeys: smokeWorkspaces.map((workspace) => workspace.key),
+    selectedArtifactIds: ["artifact-smoke-proxy"],
+    missingArtifactIds: [],
+    executionSupported: false,
+  },
+  observed: {
+    actions: [
+      {
+        artifactId: "artifact-smoke-proxy",
+        kind: "proxyState",
+        path: "/mock/proxy-runtime/proxy-smoke.json",
+        action: "removeFile",
+        eligibility: "eligible",
+        destructive: true,
+        reason: "路径位于 rDevTool 受管目录且当前未活动",
+        prerequisites: ["执行前重新读取当前观测"],
+      },
+    ],
+    eligibleCount: 1,
+    reviewRequiredCount: 0,
+    blockedCount: 0,
+  },
+  status: {
+    key: "planned",
+    label: "清理评估已生成",
+    success: true,
+    terminal: true,
+    detail: "已生成 1 条只读清理评估",
+  },
+  evidence: [],
+  risks: [],
+  managedArtifacts: managedArtifactInventory.managedArtifacts,
   recommendedActions: [],
 };
 
@@ -868,8 +2289,8 @@ function compareMockSources(
     right: { id: right.id, name: right.name, kind: right.kind },
     identical: false,
     summary: {
-      total: 4,
-      matching: 3,
+      total: configFileDefinitions.length,
+      matching: configFileDefinitions.length - 1,
       differing: 1,
       missingLeft: 0,
       missingRight: 0,
@@ -930,20 +2351,481 @@ function copyMockSource(
   };
 }
 
+function smokeHealthSnapshot() {
+  return {
+    schemaVersion: 1,
+    generatedAtMs: Date.now(),
+    statusKey: "warning",
+    statusLabel: "需要关注",
+    summary: "发现 1 个需要关注的问题",
+    identity: {
+      executablePath: "/Applications/rDevTool.app/Contents/MacOS/rdevtool",
+      installKind: "app",
+      version: "0.1.0",
+      buildCommit: "019facef1234",
+      buildDirty: false,
+      buildProfile: "release",
+      currentSourceCommit: "019facef1234",
+      currentSourceDirty: false,
+      sourceCommitMatchesBuild: true,
+    },
+    storageTotalBytes: 2_621_440,
+    storage: [
+      {
+        key: "notes",
+        label: "知识笔记",
+        path: "/mock/notes",
+        exists: true,
+        objectType: "directory",
+        sizeBytes: 16_384,
+        fileCount: 3,
+        largestFilePath: "/mock/notes/project.md",
+        largestFileBytes: 8_192,
+        statusKey: "ok",
+        detail: "3 个文件",
+      },
+    ],
+    risks: [
+      {
+        code: "runtimeLogOversized",
+        severity: "warning",
+        summary: "存在超过轮转阈值的运行日志",
+        detail: "/mock/runtime-logs/demo.log 将在对应项目下次启动或重启时轮转",
+      },
+    ],
+    recommendedActions: [
+      {
+        command: "rdevtool --json artifacts cleanup-plan --kind runtimeLog",
+        reason: "先查看日志归属与活动状态，再决定是否清理",
+        risk: "readOnly",
+      },
+    ],
+  };
+}
+
 mockIPC(
   (command, payload) => {
     const args = payload as Record<string, unknown> | undefined;
     switch (command) {
+      case "plugin:dialog|open": {
+        const options = args?.options as { title?: string } | undefined;
+        return options?.title?.includes("配置包") ? "/mock/team.rdtpack" : null;
+      }
+      case "plugin:dialog|save": {
+        const options = args?.options as { title?: string } | undefined;
+        return options?.title?.includes("配置包") ? "/mock/export.rdtpack" : null;
+      }
       case "storage_get_json":
       case "storage_set_json":
       case "storage_delete_json":
+      case "open_local_path":
         return null;
+      case "get_app_language_preference":
+        return null;
+      case "save_app_language_preference":
+        return args?.record ?? null;
       case "storage_prepend_json_array":
         return [args?.value];
       case "list_operation_event_history":
         return [];
       case "list_config_sources":
         return mockSources;
+      case "get_config_pack_inventory":
+        return {
+          projects: [
+            { key: "demo", name: "示例控制台", detail: "本地项目" },
+            { key: "portal", name: "示例门户", detail: "Web" },
+          ],
+          workspaces: [
+            { key: "feature-a", name: "Feature A", detail: "需求工作区" },
+          ],
+          configSources: [
+            {
+              key: "default",
+              name: "默认配置",
+              detail: "resource, link, proxy, runtime",
+            },
+            {
+              key: "team",
+              name: "团队配置",
+              detail: "resource, link, proxy, runtime",
+            },
+          ],
+        };
+      case "export_config_pack_file":
+        return {
+          outputPath: "/mock/export.rdtpack",
+          sizeBytes: 4096,
+        };
+      case "inspect_config_pack_file":
+        return {
+          path: "/mock/team.rdtpack",
+          sizeBytes: 4096,
+          sha256: "pack-sha256",
+          valid: true,
+          manifest: {
+            packId: "pack-smoke",
+            name: "Team Development Baseline",
+            createdAt: "2026-08-13T12:00:00Z",
+            schemaVersion: 1,
+            modules: [
+              { key: "projects", itemCount: 2 },
+              { key: "workspaces", itemCount: 1 },
+              { key: "config_sources", itemCount: 2 },
+            ],
+            security: {
+              sensitiveValuesRemoved: 2,
+              requiredEnvironment: ["JENKINS_PASSWORD", "GITLAB_TOKEN"],
+              portablePathCount: 5,
+            },
+          },
+          projectKeys: ["demo", "portal"],
+          workspaceKeys: ["feature-a"],
+          configSourceIds: ["default", "team"],
+          issues: [],
+        };
+      case "plan_config_pack_import_file": {
+        const request = args?.request as {
+          projectRootMappings?: Record<string, string>;
+        };
+        const mapped = Boolean(request?.projectRootMappings?.demo);
+        return {
+          planHash: mapped ? "rdtpack-ready-plan" : "rdtpack-blocked-plan",
+          expiresAt: "2026-08-14T12:00:00Z",
+          operations: [
+            {
+              module: "projects",
+              key: "demo",
+              action: "merge",
+              target: "/mock/config/projects.toml",
+              summary: "merge project demo",
+            },
+            {
+              module: "workspaces",
+              key: "feature-a",
+              action: "add",
+              target: "/mock/config/workspaces/feature-a.toml",
+              summary: "add workspace feature-a",
+            },
+          ],
+          issues: mapped
+            ? [
+                {
+                  severity: "warning",
+                  code: "secret_omitted",
+                  module: "security",
+                  path: "projects.demo.env.API_TOKEN",
+                  message: "敏感值已省略，可在导入后配置。",
+                },
+              ]
+            : [
+                {
+                  severity: "error",
+                  code: "path_mapping_required",
+                  module: "projects",
+                  path: "projects.demo.repo_path",
+                  message: "项目 demo 需要本机路径映射。",
+                },
+              ],
+          requiredMappings: mapped
+            ? []
+            : [
+                {
+                  kind: "project",
+                  key: "demo",
+                  placeholder: "${PROJECT_ROOT:demo}",
+                  suggestedPath: "/mock/projects/demo",
+                },
+              ],
+          requiredEnvironment: ["JENKINS_PASSWORD", "GITLAB_TOKEN"],
+          blockerCount: mapped ? 0 : 1,
+          changeCount: 2,
+          skipCount: 0,
+        };
+      }
+      case "apply_config_pack_import_plan":
+        return {
+          planHash: String(args?.planHash ?? ""),
+          transactionId: "20260813T120000Z-123456789abc",
+          backupDir: "/mock/config/config-pack-backups/20260813T120000Z-123456789abc",
+          changedPaths: [
+            "/mock/config/projects.toml",
+            "/mock/config/workspaces/feature-a.toml",
+          ],
+          appliedCount: 2,
+          skippedCount: 0,
+        };
+      case "rollback_config_pack_import_transaction":
+        return {
+          transactionId: String(args?.transactionId ?? ""),
+          restoredPaths: [
+            "/mock/config/projects.toml",
+            "/mock/config/workspaces/feature-a.toml",
+          ],
+        };
+      case "list_resource_actions":
+        return {
+          configPath: "/mock/actions.toml",
+          schemaVersion: 1,
+          actions: [
+            {
+              key: "batch-deploy-pre",
+              name: "批量部署 Pre",
+              description: "按各项目标准配置检查部署计划，全部通过后逐个触发 pre 环境部署。",
+              effect: "remote_write",
+              executionMode: "plan_apply",
+              runnerKind: "process",
+              paramCount: 6,
+            },
+          ],
+        };
+      case "get_resource_action":
+        if (args?.key === "refresh-deploy-cache") {
+          return {
+            configPath: "/mock/actions.toml",
+            key: "refresh-deploy-cache",
+            name: "刷新部署缓存",
+            description: "无参数 Action 使用同一执行面板。",
+            effect: "read",
+            execution: {
+              mode: "direct",
+              planTtlSeconds: 300,
+            },
+            runner: {
+              kind: "process",
+              program: "/bin/zsh",
+              args: ["scripts/refresh-deploy-cache.sh"],
+              cwd: "/mock",
+              input: "json_stdin",
+              output: "structured_json",
+              timeoutSeconds: 60,
+            },
+            params: [],
+          };
+        }
+        return {
+          configPath: "/mock/actions.toml",
+          key: "batch-deploy-pre",
+          name: "批量部署 Pre",
+          description: "按各项目标准配置检查部署计划，全部通过后逐个触发 pre 环境部署。",
+          effect: "remote_write",
+          execution: {
+            mode: "plan_apply",
+            planTtlSeconds: 300,
+          },
+          runner: {
+            kind: "process",
+            program: "/bin/zsh",
+            args: ["scripts/preview-deploy.sh"],
+            cwd: "/mock",
+            input: "json_stdin",
+            output: "structured_json",
+            timeoutSeconds: 900,
+          },
+          params: [
+            {
+              key: "projects",
+              label: "项目",
+              kind: "project_multi",
+              required: true,
+              options: [
+                { value: "demo-console", label: "示例控制台" },
+                { value: "demo-portal", label: "示例门户" },
+                { value: "demo-mobile", label: "示例移动端" },
+              ],
+            },
+            {
+              key: "branchOverride",
+              label: "统一分支覆盖",
+              kind: "branch",
+              description: "仅覆盖声明了分支参数的项目；留空则沿用项目配置。",
+              required: false,
+              options: [],
+            },
+            {
+              key: "planOnly",
+              label: "仅检查计划",
+              kind: "boolean",
+              defaultValue: true,
+              required: false,
+              role: "dry_run",
+              options: [],
+            },
+            {
+              key: "workspace",
+              label: "工作区",
+              kind: "hidden",
+              defaultValue: "demo-workspace",
+              required: false,
+              options: [],
+            },
+            {
+              key: "target",
+              label: "部署目标",
+              kind: "hidden",
+              defaultValue: "standard",
+              required: false,
+              options: [],
+            },
+            {
+              key: "environment",
+              label: "部署环境",
+              kind: "hidden",
+              defaultValue: "pre",
+              required: false,
+              options: [],
+            },
+          ],
+        };
+      case "plan_resource_action":
+        {
+          const request = args?.request as
+            | { params?: { projects?: string[] } }
+            | undefined;
+          const projects = request?.params?.projects ?? [];
+          const labels = new Map([
+            ["demo-console", "示例控制台"],
+            ["demo-portal", "示例门户"],
+            ["demo-mobile", "示例移动端"],
+          ]);
+          return {
+            schemaVersion: 1,
+            planId: "action-plan-smoke",
+            actionKey: "batch-deploy-pre",
+            actionName: "批量部署 Pre",
+            effect: "remote_write",
+            workspaceKey: "demo-workspace",
+            configPath: "/mock/actions.toml",
+            configFingerprint: "sha256:config",
+            paramsFingerprint: "sha256:params",
+            effectiveParams: request?.params ?? {},
+            secretParams: [],
+            planOperationId: "action-plan-operation-smoke",
+            planResult: {
+              schemaVersion: 1,
+              summary: "已识别即将提交的实际部署目标",
+              items: projects.map((project) => ({
+                key: project,
+                label: labels.get(project) ?? project,
+                status: "warning",
+                summary: "等待确认提交部署任务",
+                detail: "计划已固化工作区、环境与分支。",
+                parameters: [
+                  { key: "environment", label: "环境", value: "pre" },
+                  { key: "branch", label: "分支", value: "feature/shared" },
+                ],
+              })),
+            },
+            createdAt: new Date().toISOString(),
+            expiresAt: new Date(Date.now() + 300_000).toISOString(),
+            consumedAt: null,
+          };
+        }
+      case "run_resource_action":
+      case "apply_resource_action_plan":
+        {
+          const request = args?.request as
+            | {
+                operationId?: string;
+                params?: {
+                  projects?: string[];
+                  planOnly?: boolean;
+                  branchOverride?: string;
+                };
+              }
+            | undefined;
+          if (request?.params?.branchOverride === "simulate-action-error") {
+            throw new Error("模拟 Action 执行失败");
+          }
+          const projects = request?.params?.projects ?? [];
+          const failedProjects =
+            projects.length > 1 && projects.includes("demo-portal")
+              ? ["demo-portal"]
+              : [];
+          const labels = new Map([
+            ["demo-console", "示例控制台"],
+            ["demo-portal", "示例门户"],
+            ["demo-mobile", "示例移动端"],
+          ]);
+          const items = projects.map((project) => ({
+            key: project,
+            label: labels.get(project) ?? project,
+            status: failedProjects.includes(project) ? "failed" : "success",
+            summary: failedProjects.includes(project) ? "计划被阻断" : "计划可以执行",
+            detail: failedProjects.includes(project) ? "缺少必要部署参数" : "参数解析完成",
+            url: `https://jenkins.example.test/job/${project}`,
+            parameters: [
+              { key: "environment", label: "环境", value: "pre" },
+              { key: "branch", label: "分支", value: "feature/shared" },
+            ],
+          }));
+          const operationId = request?.operationId ?? "action-smoke";
+          const result = {
+            operationId,
+            key: "batch-deploy-pre",
+            name: "批量部署 Pre",
+            success: failedProjects.length === 0,
+            exitCode: failedProjects.length === 0 ? 0 : 1,
+            timedOut: false,
+            cancelled: false,
+            stdout: "",
+            stderr: "",
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            structuredResult: {
+              schemaVersion: 1,
+              summary:
+                failedProjects.length === 0
+                  ? request?.params?.planOnly === false
+                    ? "部署任务已提交"
+                    : "计划检查完成"
+                  : "部分项目计划未通过",
+              items,
+              retry:
+                failedProjects.length > 0
+                  ? { param: "projects", values: failedProjects }
+                  : null,
+            },
+            startedAt: new Date().toISOString(),
+            finishedAt: new Date().toISOString(),
+            durationMs: 120,
+          };
+          if (request?.params?.branchOverride === "simulate-action-running") {
+            window.setTimeout(() => {
+              void emit("rdevtool://resource-action-progress", {
+                operationId,
+                sequence: 1,
+                stream: "stderr",
+                chunk: "checking plan: demo / standard / pre\n",
+                outputSuppressed: false,
+                occurredAt: new Date().toISOString(),
+              });
+            }, 30);
+            return new Promise((resolve) => {
+              pendingResourceActionCancellation = () => {
+                pendingResourceActionCancellation = null;
+                resolve({
+                  ...result,
+                  success: false,
+                  exitCode: null,
+                  cancelled: true,
+                  structuredResult: null,
+                  stderr: "checking plan: demo / standard / pre\n",
+                  finishedAt: new Date().toISOString(),
+                });
+              };
+            });
+          }
+          return result;
+        }
+      case "cancel_resource_action": {
+        const accepted = pendingResourceActionCancellation !== null;
+        pendingResourceActionCancellation?.();
+        return {
+          operationId: String(args?.operationId ?? ""),
+          accepted,
+        };
+      }
       case "get_config_source_preference":
         return "default";
       case "preflight_project_runtime":
@@ -972,7 +2854,7 @@ mockIPC(
                     "继承项目基础命令，仅固定已检测的本地端口 5173。",
                   confirmationRequired: true,
                   profileKey: "demo-local",
-                  profileLabel: "智能营销 本地启动",
+                  profileLabel: "示例控制台 本地启动",
                   command: "npm run dev",
                   cwd: "/mock/projects/demo",
                   focusUrl: "http://127.0.0.1:5173",
@@ -1125,11 +3007,41 @@ mockIPC(
             },
           ],
         };
+      case "list_links":
+        return [
+          {
+            key: "demo-debug",
+            name: "示例联调链路",
+            kind: "debug",
+            uiProfile: "resource-basic",
+            schemaVersion: 1,
+            workspaceKey: "demo-workspace",
+            project: "示例控制台",
+            stepCount: 3,
+            proxyProfiles: [
+              {
+                id: "smoke-proxy",
+                name: "本地联调代理",
+                listenUrl: "http://127.0.0.1:8791",
+              },
+            ],
+            runtime: {
+              status: "planned",
+              label: "可启动",
+              runningSteps: 0,
+              controllableSteps: 3,
+              blockedSteps: 0,
+              canRun: true,
+              canStop: false,
+            },
+            warnings: [],
+          },
+        ];
       case "list_web_action_navigation_targets":
         return [
           {
             id: "runtime-smoke-page",
-            title: "智能营销",
+            title: "示例控制台",
             url: "http://127.0.0.1:5173/",
             type: "page",
             webSocketDebuggerUrl: "ws://127.0.0.1/mock-runtime",
@@ -1154,6 +3066,57 @@ mockIPC(
       }
       case "get_project_workspace_editor":
         return workspaceRuntimeEditor;
+      case "list_project_workspace_instance_statuses":
+        return [
+          workspaceInstanceRepairMode
+            ? {
+                projectKey: "demo",
+                projectName: "示例控制台",
+                path: "/mock/workspaces/feature/demo",
+                managed: true,
+                statusKey: "missing",
+                statusLabel: "目录缺失",
+                detail:
+                  "目录已被删除，但 Git 仍保留工作副本登记；可按原路径和分支修复",
+                exists: false,
+                canOpen: false,
+                repositoryRoot: null,
+                remoteMatches: null,
+                observedRemoteCount: 0,
+                repairSupported: true,
+                repairBranch: "feature/REQ-1234",
+              }
+            : {
+                projectKey: "demo",
+                projectName: "示例控制台",
+                path: "/mock/workspaces/feature/demo",
+                managed: true,
+                statusKey: "healthy",
+                statusLabel: "正常",
+                detail: "Git 仓库根目录与 Remote 已验证",
+                exists: true,
+                canOpen: true,
+                repositoryRoot: "/mock/workspaces/feature/demo",
+                remoteMatches: true,
+                observedRemoteCount: 1,
+                repairSupported: false,
+                repairBranch: null,
+              },
+        ];
+      case "repair_project_workspace_project_instance":
+        workspaceInstanceRepairMode = false;
+        return workspaceRuntimeEditor;
+      case "inspect_project_workspace_project_directory":
+        return {
+          projectKey: String(args?.project ?? "demo"),
+          requestedPath: String(args?.path ?? ""),
+          effectivePath: String(args?.path ?? ""),
+          repositoryRoot: String(args?.path ?? ""),
+          configuredRemote: "example.com/team/demo",
+          observedRemoteCount: 1,
+          remoteMatches: true,
+          requiresRemoteMismatchConfirmation: false,
+        };
       case "plan_project_workspace_archive": {
         const workspaceKey = String(args?.workspaceKey ?? "");
         const workspace =
@@ -1199,7 +3162,59 @@ mockIPC(
       case "copy_config_source":
         return copyMockSource(args?.request as ConfigSourceCopyRequest);
       case "list_managed_artifacts":
-        return managedArtifactInventory;
+        return args?.project === "demo" &&
+          Array.isArray(args?.kinds) &&
+          args.kinds.includes("workspaceProjectInstance")
+          ? managedWorkspaceInstanceInventory
+          : managedArtifactInventory;
+      case "plan_managed_artifact_cleanup": {
+        const artifactIds = Array.isArray(args?.artifactIds)
+          ? args.artifactIds.map(String)
+          : [];
+        const workspaceInstanceSelected = artifactIds.includes(
+          "artifact-smoke-workspace-instance",
+        );
+        return {
+          ...managedArtifactCleanupPlan,
+          requested: {
+            workspace: args?.workspace ?? null,
+            allWorkspaces: Boolean(args?.allWorkspaces),
+            project: args?.project ?? null,
+            kinds: Array.isArray(args?.kinds) ? args.kinds.map(String) : [],
+            artifactIds,
+          },
+          effective: {
+            ...managedArtifactCleanupPlan.effective,
+            selectedArtifactIds:
+              artifactIds.length > 0
+                ? artifactIds
+                  : managedArtifactCleanupPlan.effective.selectedArtifactIds,
+          },
+          observed: workspaceInstanceSelected
+            ? {
+                actions: [
+                  {
+                    artifactId: "artifact-smoke-workspace-instance",
+                    kind: "workspaceProjectInstance",
+                    path: "/mock/workspaces/feature/demo",
+                    action: "removeWorkspaceProjectInstance",
+                    eligibility: "eligible",
+                    destructive: true,
+                    reason:
+                      "项目实例归属已验证，位于工作区直属目录且 Git 工作树干净",
+                    prerequisites: [
+                      "再次确认分支不再需要",
+                      "移除工作区绑定后使用 Git-aware 清理",
+                    ],
+                  },
+                ],
+                eligibleCount: 1,
+                reviewRequiredCount: 0,
+                blockedCount: 0,
+              }
+            : managedArtifactCleanupPlan.observed,
+        };
+      }
       case "get_project_config_editor":
         return projectEditorState;
       case "get_notes_file_index": {
@@ -1296,70 +3311,101 @@ mockIPC(
           },
         };
       }
-      case "get_health_snapshot":
+      case "get_doctor_snapshot": {
+        smokeDoctorCheckCount += 1;
+        const rechecked = smokeDoctorCheckCount > 1;
         return {
           schemaVersion: 1,
-          generatedAtMs: Date.now(),
-          statusKey: "ok",
-          statusLabel: "正常",
-          summary: "rDevTool 本机状态正常。",
-          identity: {
-            executablePath: "/Applications/rDevTool.app/Contents/MacOS/rdevtool",
-            installKind: "app",
-            version: "0.1.0",
-            buildCommit: "019facef1234",
-            buildDirty: false,
-            buildProfile: "release",
-            currentSourceCommit: "019facef1234",
-            currentSourceDirty: false,
-            sourceCommitMatchesBuild: true,
+          status: "warning",
+          errorCount: 0,
+          warningCount: 2,
+          paths: {
+            configDir: "/mock/config",
+            projects: "/mock/config/projects.toml",
+            workspace: "/mock/config/workspace.toml",
+            workspacesDir: "/mock/config/workspaces",
+            navigation: "/mock/config/navigation.toml",
+            proxy: "/mock/config/proxy.toml",
+            configSources: "/mock/config/config-sources.toml",
+            proxyActive: "/mock/config/proxy.toml",
+            webActions: "/mock/config/web-actions.toml",
+            storage: "/mock/data/rdevtool.db",
           },
-          storageTotalBytes: 2_621_440,
-          storage: [
+          health: smokeHealthSnapshot(),
+          activeWorkspace: {
+            key: String(args?.workspace ?? "system"),
+            name: "系统工作区",
+            system: true,
+            projectCount: 21,
+            includeAllProjects: true,
+            includeAllNavigation: true,
+          },
+          checks: [
             {
-              key: "notes",
-              label: "知识笔记",
-              path: "/mock/notes",
-              exists: true,
-              objectType: "directory",
-              sizeBytes: 16_384,
-              fileCount: 3,
-              largestFileBytes: 8_192,
-              statusKey: "ok",
-              detail: "3 个文件",
+              status: rechecked ? "ok" : "warning",
+              code: "project_repo_paths",
+              message: rechecked
+                ? "configured repo paths exist"
+                : "1 project repository path needs attention",
+              detail: rechecked ? null : "demo: /mock/projects/demo is missing",
+            },
+            {
+              status: "warning",
+              code: "proxy_workspaces",
+              message: "1 proxy workspace reference needs attention",
+              detail: "legacy-workspace is not in the workspace catalog",
+            },
+            ...(rechecked
+              ? [
+                  {
+                    status: "warning",
+                    code: "proxy_ports",
+                    message: "1 proxy listen port is occupied",
+                    detail: "127.0.0.1:8791 is owned by another process",
+                  },
+                ]
+              : []),
+            {
+              status: "ok",
+              code: "storage",
+              message: "storage is available",
+              detail: "/mock/data/rdevtool.db",
             },
           ],
-          risks: [],
         };
+      }
+      case "get_health_snapshot":
+        return smokeHealthSnapshot();
       case "get_proxy_dashboard":
-        return {
-          configPath: "/mock/proxy.toml",
-          config: {
-            profiles: [
-              {
-                id: "smoke-proxy",
-                workspaceKey: "feature_cr2606150041_ykd_car",
-                name: "优客贷车后本地代理",
-                listenHost: "127.0.0.1",
-                listenPort: 8791,
-                upstreamBaseUrl: "",
-                upstreamProxy: "",
-                captureBody: true,
-                maxBodyBytes: 262_144,
-              },
-            ],
-            rules: [],
-          },
-          statuses: [
+        return smokeProxyDashboard;
+      case "list_controlled_browser_sessions":
+        return [{
+          id: "browser:9223",
+          port: 9223,
+          endpoint: "http://127.0.0.1:9223",
+          browserName: "Chrome",
+          browserVersion: "139.0.7258.67",
+          protocolVersion: "1.3",
+          pageCount: 3,
+          pages: [
             {
-              profileId: "smoke-proxy",
-              running: true,
-              listenUrl: "http://127.0.0.1:8791",
-              startedAt: "2026-07-27T10:00:00+08:00",
+              id: "page-portal",
+              title: "Portal Dashboard",
+              url: "http://127.0.0.1:1420/dashboard",
+            },
+            {
+              id: "page-docs",
+              title: "API Documentation",
+              url: "https://docs.example.com/api",
             },
           ],
-          events: [],
-        };
+          runtimeProfileKeys: ["web-cdp"],
+          activeProjects: [{ key: "rdevtool", name: "rDevTool" }],
+          configuredProjects: [
+            { key: "rdevtool", name: "rDevTool" },
+            { key: "portal", name: "Portal" },
+          ],
+        }];
       case "save_project_deploy_targets": {
         const request = args?.request as {
           projectKey: string;
@@ -1431,15 +3477,54 @@ function ConfirmationSmokeHarness() {
 }
 
 function SidebarSmokeHarness() {
-  const [activePage, setActivePage] = useState<PageKey>("overview");
+  const smokeParams = new URLSearchParams(window.location.search);
+  const documentationScreenshot = smokeParams.get("docsScreenshot");
+  const documentationActionScreenshot = documentationScreenshot === "action";
+  const documentationGitScreenshot = documentationScreenshot === "git";
+  const documentationBuildScreenshot = documentationScreenshot === "build";
+  const documentationProjectsScreenshot = documentationScreenshot === "projects";
+  const documentationResourcesScreenshot = documentationScreenshot === "resources";
+  const documentationProxyScreenshot = documentationScreenshot === "proxy";
+  const documentationKnowledgeScreenshot = documentationScreenshot === "knowledge";
+  const documentationProjectScreenshot =
+    documentationGitScreenshot || documentationBuildScreenshot || documentationProjectsScreenshot;
+  const [activePage, setActivePage] = useState<PageKey>(
+    documentationProjectScreenshot
+      ? "projectManagement"
+      : documentationResourcesScreenshot
+        ? "resources"
+        : documentationProxyScreenshot
+          ? "proxy"
+          : documentationKnowledgeScreenshot
+            ? "knowledge"
+            : "overview",
+  );
   const [projectManagementView, setProjectManagementView] =
-    useState<ProjectManagementViewKey>("projects");
+    useState<ProjectManagementViewKey>(
+      documentationBuildScreenshot
+        ? "build"
+        : documentationGitScreenshot
+          ? "git"
+          : "projects",
+    );
   const [styleMode, setStyleMode] = useState<AppStyleMode>(() =>
-    new URLSearchParams(window.location.search).get("style") === "mono"
+    documentationScreenshot || smokeParams.get("style") === "mono"
       ? "mono"
       : "light",
   );
-  const [activeWorkspaceKey, setActiveWorkspaceKey] = useState("system");
+  const [activeWorkspaceKey, setActiveWorkspaceKey] = useState(
+    documentationActionScreenshot
+      ? "r-series"
+      : documentationProjectScreenshot
+        ? "demo-workspace"
+        : documentationResourcesScreenshot
+          ? "demo-workspace"
+          : documentationProxyScreenshot
+            ? "system"
+            : documentationKnowledgeScreenshot
+              ? "demo-workspace"
+        : "system",
+  );
   const [exitRuntimePolicy, setExitRuntimePolicy] = useState<
     "ask" | "keep" | "stop"
   >("ask");
@@ -1447,13 +3532,26 @@ function SidebarSmokeHarness() {
     visibleNavItems.map((item) => item.key),
   );
   const [defaultPage, setDefaultPage] = useState<PageKey>("overview");
+  const [selectedProxyProfileId, setSelectedProxyProfileId] =
+    useState("smoke-proxy");
   const [configSourceManagerOpen, setConfigSourceManagerOpen] = useState(false);
   const [configSourceCompareOnOpen, setConfigSourceCompareOnOpen] =
     useState(false);
   const [projectBuildConfigOpen, setProjectBuildConfigOpen] = useState(false);
   const [runtimeConfigSmokeOpen, setRuntimeConfigSmokeOpen] = useState(false);
-  const [workspaceRuntimeSmokeOpen, setWorkspaceRuntimeSmokeOpen] =
-    useState(false);
+  const [resourceActionSmokeTarget, setResourceActionSmokeTarget] = useState<{
+    key: string;
+    entryName: string;
+  } | null>(
+    documentationActionScreenshot
+      ? { key: "batch-deploy-pre", entryName: "批量部署 Pre" }
+      : null,
+  );
+  const [branchHistorySmokeOpen, setBranchHistorySmokeOpen] = useState(false);
+  const [buildHistorySmokeOpen, setBuildHistorySmokeOpen] = useState(false);
+  const [workspaceRuntimeSmokeOpen, setWorkspaceRuntimeSmokeOpen] = useState(
+    documentationActionScreenshot,
+  );
   const [workspaceConfigFocusRequest, setWorkspaceConfigFocusRequest] =
     useState<WorkspaceConfigFocusRequest | null>(null);
   const [workspaceRuntimeStartState, setWorkspaceRuntimeStartState] =
@@ -1539,23 +3637,23 @@ function SidebarSmokeHarness() {
       title: "触发部署",
       summary: "构建成功 · 构建 #4118 当前结果：SUCCESS",
       detail:
-        "http://10.192.165.3:8080/job/Marketing/job/imp-admin-front-web-vke/4118/",
-      executionKey: "build:smart-marketing:vke:smoke",
-      projectKey: "smart-marketing",
-      projectName: "智能营销",
+        "https://ci.example.test/job/demo-console/4118/",
+      executionKey: "build:demo-console:vke:smoke",
+      projectKey: "demo-console",
+      projectName: "示例控制台",
       parameters: [
         { key: "target", label: "目标", value: "vke" },
         { key: "environment", label: "环境", value: "dc2" },
-        { key: "branch", label: "分支", value: "env-dc2-vke" },
+        { key: "branch", label: "分支", value: "env_demo_pre" },
         { key: "IS_GRAY", label: "灰度", value: "false" },
         { key: "API_TOKEN", label: "令牌", value: "已配置", masked: true },
       ],
-      target: { page: "build", projectKey: "smart-marketing" },
+      target: { page: "build", projectKey: "demo-console" },
       resource: {
         kind: "url",
         label: "打开构建记录",
         value:
-          "http://10.192.165.3:8080/job/Marketing/job/imp-admin-front-web-vke/4118/",
+          "https://ci.example.test/job/demo-console/4118/",
       },
       createdAt: "2026-07-21T07:05:00.000Z",
       updatedAt: "2026-07-21T07:05:00.000Z",
@@ -1566,10 +3664,10 @@ function SidebarSmokeHarness() {
       origin: "tray",
       status: "running",
       title: "触发部署（进行中测试）",
-      summary: "智能营销 · vke 正在构建",
-      executionKey: "build:smart-marketing:vke:running-smoke",
-      projectKey: "smart-marketing",
-      projectName: "智能营销",
+      summary: "示例控制台 · vke 正在构建",
+      executionKey: "build:demo-console:vke:running-smoke",
+      projectKey: "demo-console",
+      projectName: "示例控制台",
       parameters: [
         { key: "target", label: "目标", value: "vke" },
         { key: "environment", label: "环境", value: "dc2" },
@@ -1585,23 +3683,23 @@ function SidebarSmokeHarness() {
       title: "触发部署",
       summary: "部署触发失败",
       detail: "构建计划已阻断：目标分支 feature/missing 不存在",
-      executionKey: "build:smart-marketing:vke:failed-smoke",
-      projectKey: "smart-marketing",
-      projectName: "智能营销",
+      executionKey: "build:demo-console:vke:failed-smoke",
+      projectKey: "demo-console",
+      projectName: "示例控制台",
       parameters: [
         { key: "target", label: "目标", value: "vke" },
         { key: "environment", label: "环境", value: "dc2" },
         { key: "branch", label: "分支", value: "feature/missing" },
       ],
-      target: { page: "build", projectKey: "smart-marketing" },
+      target: { page: "build", projectKey: "demo-console" },
       action: {
         kind: "buildRecover",
         label: "重新规划并重试部署",
-        projectKey: "smart-marketing",
-        projectName: "智能营销",
+        projectKey: "demo-console",
+        projectName: "示例控制台",
         workspaceKey: "system",
         request: {
-          project: "smart-marketing",
+          project: "demo-console",
           target: "vke",
           env: "dc2",
           branch: "feature/missing",
@@ -1651,10 +3749,10 @@ function SidebarSmokeHarness() {
       origin: "tray",
       status: "failed",
       title: "启动联调链路",
-      summary: "合作渠道联调 · 完成 1 / 失败 1 / 跳过 0",
+      summary: "示例联调 · 完成 1 / 失败 1 / 跳过 0",
       detail: "启动代理：端口已被占用",
-      executionKey: "link:run:cooperation-debug",
-      projectKey: "cooperation-admin",
+      executionKey: "link:run:demo-debug",
+      projectKey: "demo-service",
       diagnostics: [
         {
           id: "proxy",
@@ -1674,12 +3772,12 @@ function SidebarSmokeHarness() {
         },
       ],
       warnings: ["请先确认本地代理端口的归属"],
-      target: { page: "overview", projectKey: "cooperation-admin" },
+      target: { page: "overview", projectKey: "demo-service" },
       action: {
         kind: "linkRecover",
         label: "检查并重新启动",
-        linkKey: "cooperation-debug",
-        linkName: "合作渠道联调",
+        linkKey: "demo-debug",
+        linkName: "示例联调",
         sourceId: "workspace-links",
         replayAction: "run",
       },
@@ -1833,8 +3931,177 @@ function SidebarSmokeHarness() {
         activityAlertCount={
           visibleActivityItems.filter(activityRequiresAttention).length
         }
+        activeSessions={[
+          {
+            id: "runtime:rdevtool",
+            kind: "runtime",
+            scope: "current",
+            name: "rDevTool",
+            statusKey: "running",
+            statusLabel: "运行中",
+            detail: "dev 服务正在监听",
+            projectKey: "rdevtool",
+            endpoint: "http://127.0.0.1:1420",
+            port: 1420,
+            pid: 42180,
+            startedAtMs: Date.now() - 48 * 60_000,
+            observedAtMs: Date.now(),
+            logPath: "/tmp/rdevtool-runtime.log",
+            directoryPath: "/workspace/rdevtool",
+            managed: true,
+            external: false,
+            canAdopt: false,
+            canFocus: true,
+            canStop: true,
+            canOpenLog: true,
+            canOpenDirectory: true,
+            canOpenOutput: false,
+          },
+          {
+            id: "runtime:legacy-portal",
+            kind: "runtime",
+            scope: "current",
+            name: "Legacy Portal",
+            statusKey: "external",
+            statusLabel: "运行中（外部）",
+            detail: "检测到可认领的外部 dev 服务",
+            projectKey: "legacy-portal",
+            endpoint: "http://127.0.0.1:1420",
+            port: 1420,
+            pid: 42201,
+            startedAtMs: null,
+            observedAtMs: Date.now(),
+            directoryPath: "/workspace/legacy-portal",
+            managed: false,
+            external: true,
+            canAdopt: true,
+            canFocus: true,
+            canStop: false,
+            canOpenLog: false,
+            canOpenDirectory: true,
+            canOpenOutput: false,
+          },
+          {
+            id: "proxy:default:local-api",
+            kind: "proxy",
+            scope: "shared",
+            name: "Local API",
+            statusKey: "running",
+            statusLabel: "运行中",
+            detail: "http://127.0.0.1:8791",
+            proxyProfileId: "local-api",
+            proxySourceId: "default",
+            endpoint: "http://127.0.0.1:8791",
+            port: 8791,
+            pid: 42194,
+            startedAtMs: Date.now() - 26 * 60_000,
+            observedAtMs: Date.now(),
+            managed: true,
+            external: false,
+            canAdopt: false,
+            canFocus: false,
+            canStop: true,
+            canOpenLog: false,
+            canOpenDirectory: false,
+            canOpenOutput: false,
+            proxyActivity: {
+              requestCount: 12,
+              errorCount: 1,
+              lastRequestAtMs: Date.now() - 34_000,
+              lastRequestMethod: "GET",
+              lastRequestPath: "/api/orders",
+              lastRequestStatus: 200,
+            },
+          },
+          {
+            id: "browser:9223",
+            kind: "browser",
+            scope: "shared",
+            name: "Chrome",
+            statusKey: "connected",
+            statusLabel: "CDP 已连接",
+            detail: "",
+            endpoint: "http://127.0.0.1:9223",
+            port: 9223,
+            observedAtMs: Date.now(),
+            managed: false,
+            external: false,
+            canAdopt: false,
+            canFocus: false,
+            canStop: false,
+            canOpenLog: false,
+            canOpenDirectory: false,
+            canOpenOutput: false,
+            browserInfo: {
+              id: "browser:9223",
+              port: 9223,
+              endpoint: "http://127.0.0.1:9223",
+              browserName: "Chrome",
+              browserVersion: "139.0.7258.67",
+              protocolVersion: "1.3",
+              pageCount: 3,
+              pages: [
+                {
+                  id: "page-portal",
+                  title: "Portal Dashboard",
+                  url: "http://127.0.0.1:1420/dashboard",
+                },
+                {
+                  id: "page-docs",
+                  title: "API Documentation",
+                  url: "https://docs.example.com/api",
+                },
+              ],
+              runtimeProfileKeys: ["web-cdp"],
+              activeProjects: [{ key: "rdevtool", name: "rDevTool" }],
+              configuredProjects: [
+                { key: "rdevtool", name: "rDevTool" },
+                { key: "portal", name: "Portal" },
+              ],
+            },
+          },
+        ]}
+        activeSessionsLoading={false}
+        activeSessionsError=""
         onOpenActivityEntry={() => undefined}
         onOpenActivityResource={() => undefined}
+        onRefreshActiveSessions={() => undefined}
+        onRunActiveSessionAction={(session, action) => ({
+          ok: true,
+          inspection:
+            action === "inspect"
+              ? {
+                  port: session.port ?? 1420,
+                  inspectedAtMs: Date.now(),
+                  platformSupported: true,
+                  listening: true,
+                  ownershipKey:
+                    session.id === "runtime:rdevtool" ? "expectedPid" : "mismatch",
+                  ownershipVerified: session.id === "runtime:rdevtool",
+                  expectedPid: session.pid ?? null,
+                  expectedDirectoryPath: session.directoryPath ?? null,
+                  listeners: [
+                    {
+                      pid: 42180,
+                      ppid: 42000,
+                      pgid: 42180,
+                      name: "node",
+                      command: "node ./node_modules/vite/bin/vite.js --port 1420",
+                      cwd: "/workspace/rdevtool",
+                      startedAt: "Sun Aug 3 10:12:00 2026",
+                      matchesExpectedPid: session.id === "runtime:rdevtool",
+                      matchesExpectedDirectory: session.id === "runtime:rdevtool",
+                    },
+                  ],
+                }
+              : null,
+          message:
+            action === "stop"
+              ? "运行资源已停止"
+              : action === "adopt"
+                ? "已纳入 rDevTool 管理"
+                : null,
+        })}
         onRunActivityAction={(entry) => {
           if (entry.action?.kind === "linkRecover") {
             const checkedAt = new Date().toISOString();
@@ -2005,9 +4272,41 @@ function SidebarSmokeHarness() {
             selectedProject="demo"
           />
         ) : null}
+        {activePage === "proxy" ? (
+          <ProxyPage
+            dashboard={smokeProxyDashboard}
+            activeProjectWorkspaceKey={activeWorkspaceKey}
+            selectedProfileId={selectedProxyProfileId}
+            loading={false}
+            busy=""
+            error=""
+            onSelectedProfileChange={setSelectedProxyProfileId}
+            onRefresh={() => undefined}
+            onSaveProfile={async () => smokeProxyDashboard}
+            onDeleteProfile={async () => smokeProxyDashboard}
+            onSaveRule={async () => smokeProxyDashboard}
+            onDeleteRule={async () => smokeProxyDashboard}
+            onStartProfile={async () => smokeProxyDashboard}
+            onStopProfile={async () => smokeProxyDashboard}
+            onClearEvents={async () => smokeProxyDashboard}
+            onExportProfilePack={async () => smokeProxyDashboard}
+            onImportProfilePack={async () => smokeProxyDashboard}
+            onDiagnoseRequest={async () => {
+              throw new Error("Smoke 中未执行请求诊断");
+            }}
+          />
+        ) : null}
+        {documentationGitScreenshot ? <DocumentationGitPage /> : null}
+        {documentationBuildScreenshot ? <DocumentationBuildPage /> : null}
+        {documentationProjectsScreenshot ? <DocumentationProjectsPage /> : null}
+        {documentationResourcesScreenshot ? <DocumentationResourcesPage /> : null}
         <section
           aria-label="烟雾测试内容"
-          hidden={activePage === "knowledge"}
+          hidden={
+            Boolean(documentationScreenshot) ||
+            activePage === "knowledge" ||
+            activePage === "proxy"
+          }
         >
           <h1>{content}</h1>
           <output data-testid="active-state">
@@ -2052,17 +4351,62 @@ function SidebarSmokeHarness() {
           </Button>
           <Button
             variant="outlined"
+            onClick={() =>
+              setResourceActionSmokeTarget({
+                key: "batch-deploy-pre",
+                entryName: "批量部署 Pre",
+              })
+            }
+          >
+            打开参数化 Action 测试
+          </Button>
+          <Button
+            variant="outlined"
+            onClick={() =>
+              setResourceActionSmokeTarget({
+                key: "refresh-deploy-cache",
+                entryName: "刷新部署缓存",
+              })
+            }
+          >
+            打开无参数 Action 测试
+          </Button>
+          <Button
+            variant="outlined"
+            onClick={() => setBranchHistorySmokeOpen(true)}
+          >
+            打开分支 Record 测试
+          </Button>
+          <Button
+            variant="outlined"
+            onClick={() => setBuildHistorySmokeOpen(true)}
+          >
+            打开 Build Record 测试
+          </Button>
+          <Button
+            variant="outlined"
             onClick={() => {
               setWorkspaceConfigFocusRequest(null);
               runtimeSmokeProxyRunning = false;
               runtimeSmokePortConflict = false;
               runtimeSmokeProfileRepairMode = "";
+              workspaceInstanceRepairMode = false;
               setWorkspaceRuntimeProxyState("");
               setWorkspaceRuntimeSelectedProfile("");
               setWorkspaceRuntimeSmokeOpen(true);
             }}
           >
             打开工作区运行来源测试
+          </Button>
+          <Button
+            variant="outlined"
+            onClick={() => {
+              setWorkspaceConfigFocusRequest(null);
+              workspaceInstanceRepairMode = true;
+              setWorkspaceRuntimeSmokeOpen(true);
+            }}
+          >
+            打开工作区副本修复测试
           </Button>
           <Button
             variant="outlined"
@@ -2114,30 +4458,105 @@ function SidebarSmokeHarness() {
           >
             打开失效档案修复测试
           </Button>
-          {workspaceRuntimeSmokeOpen ? (
+          {branchHistorySmokeOpen ? (
             <Box
-              aria-label="工作区运行来源测试"
+              aria-label="分支 Record 测试"
               sx={{
                 position: "fixed",
                 inset: 0,
                 zIndex: 1100,
                 bgcolor: "background.default",
-                overflow: "auto",
-                p: 1,
+                overflow: "hidden",
+                p: 1.5,
               }}
             >
+              <Box className="workspace workspace--workflow" sx={{ height: "100%" }}>
+                <BranchHistoryPanel
+                  expanded
+                  history={smokeBranchHistory}
+                  currentHistoryId="branch-history-batch-latest"
+                  currentTask={null}
+                  busy=""
+                  workflowGroupCount={0}
+                  workflowSignalIdsForBranchReplay={() => []}
+                  onToggleExpanded={() => undefined}
+                  onOpenWorkflowList={() => undefined}
+                  onRefreshHistory={() => undefined}
+                  onClearHistory={() => undefined}
+                  onReplayHistory={() => undefined}
+                  onConfigureWorkflow={() => undefined}
+                  onOpenTaskOutput={() => undefined}
+                  formatRelativeTime={(value) => value ?? ""}
+                />
+              </Box>
               <Button
                 size="small"
                 variant="outlined"
-                onClick={() => setWorkspaceRuntimeSmokeOpen(false)}
-                sx={{ position: "fixed", right: 12, bottom: 12, zIndex: 2 }}
+                onClick={() => setBranchHistorySmokeOpen(false)}
+                sx={{ position: "fixed", right: 22, bottom: 18, zIndex: 2 }}
               >
-                关闭工作区运行来源测试
+                关闭分支 Record 测试
               </Button>
+            </Box>
+          ) : null}
+          {buildHistorySmokeOpen ? (
+            <Box
+              aria-label="Build Record 测试"
+              sx={{
+                position: "fixed",
+                inset: 0,
+                zIndex: 1100,
+                bgcolor: "background.default",
+                overflow: "hidden",
+                p: 1.5,
+              }}
+            >
+              <Box className="workspace workspace--workflow" sx={{ height: "100%" }}>
+                <BuildRecordSmokePanel />
+              </Box>
+              <Button
+                size="small"
+                variant="outlined"
+                onClick={() => setBuildHistorySmokeOpen(false)}
+                sx={{ position: "fixed", right: 22, bottom: 18, zIndex: 2 }}
+              >
+                关闭 Build Record 测试
+              </Button>
+            </Box>
+          ) : null}
+          {workspaceRuntimeSmokeOpen ? (
+            <Box
+              aria-label="工作区运行来源测试"
+              sx={{
+                position: documentationActionScreenshot ? "relative" : "fixed",
+                inset: documentationActionScreenshot ? "auto" : 0,
+                zIndex: documentationActionScreenshot ? "auto" : 1100,
+                bgcolor: "background.default",
+                overflow: "auto",
+                p: documentationActionScreenshot ? 0 : 1,
+              }}
+            >
+              {documentationActionScreenshot ? null : (
+                <Button
+                  size="small"
+                  variant="outlined"
+                  onClick={() => setWorkspaceRuntimeSmokeOpen(false)}
+                  sx={{ position: "fixed", right: 12, bottom: 12, zIndex: 2 }}
+                >
+                  关闭工作区运行来源测试
+                </Button>
+              )}
               <OverviewPage
                 projectWorkspaces={smokeWorkspaces}
                 archivedProjectWorkspaces={smokeArchivedWorkspaces}
-                activeProjectWorkspaceKey="feature_cr2606150041_ykd_car"
+                activeProjectWorkspaceKey={
+                  smokeWorkspaces.some(
+                    (workspace) =>
+                      workspace.key === smokeParams.get("overviewWorkspace"),
+                  )
+                    ? (smokeParams.get("overviewWorkspace") as string)
+                    : "feature_demo_checkout"
+                }
                 onProjectWorkspaceChange={() => undefined}
                 onNavigateToPage={() => undefined}
                 onProjectManagementViewChange={() => undefined}
@@ -2151,22 +4570,22 @@ function SidebarSmokeHarness() {
                 }}
                 onCreateProjectWorkspace={() => undefined}
                 onInitDemandWorkspace={() => ({
-                  key: "feature_cr2606150041_ykd_car",
+                  key: "feature_demo_checkout",
                   name: "需求工作区",
-                  demandId: "CR2606150041",
+                  demandId: "REQ-1234",
                   project: {
                     key: "demo",
-                    name: "智能营销",
+                    name: "示例控制台",
                     repoPath: "/mock/workspaces/feature/demo",
                   },
                   requirementEntry: {
                     category: "需求",
-                    shortLabel: "CR2606150041",
+                    shortLabel: "REQ-1234",
                     name: "需求记录",
                     path: "/mock/workspaces/feature/resources/WORKLOG.md",
                   },
                   resources: {
-                    workspaceKey: "feature_cr2606150041_ykd_car",
+                    workspaceKey: "feature_demo_checkout",
                     workspaceName: "需求工作区",
                     resourceDir: "/mock/workspaces/feature/resources",
                     worklogFile: "WORKLOG.md",
@@ -2177,8 +4596,8 @@ function SidebarSmokeHarness() {
                     autoRecordEnabled: true,
                   },
                   branch: {
-                    expected: "feature/CR2606150041",
-                    current: "feature/CR2606150041",
+                    expected: "feature/REQ-1234",
+                    current: "feature/REQ-1234",
                     matches: true,
                   },
                   metadata: {},
@@ -2322,7 +4741,7 @@ function SidebarSmokeHarness() {
                 onOpenBuildOutput={() => undefined}
                 onFocusRuntime={() => undefined}
                 onOpenProjectDirectory={() => undefined}
-                configWorkspaceKey="feature_cr2606150041_ykd_car"
+                configWorkspaceKey="feature_demo_checkout"
                 projectConfigPanel={{
                   styleMode,
                   onStyleModeChange: setStyleMode,
@@ -2335,7 +4754,7 @@ function SidebarSmokeHarness() {
                   onOpenNavigationConfigFile: () => undefined,
                   onCreateProjectWorkspace: () => undefined,
                   projectWorkspaces: smokeWorkspaces,
-                  activeProjectWorkspaceKey: "feature_cr2606150041_ykd_car",
+                  activeProjectWorkspaceKey: "feature_demo_checkout",
                   activePage,
                   enabledPages,
                   onEnabledPagesChange: setEnabledPages,
@@ -2371,6 +4790,20 @@ function SidebarSmokeHarness() {
               onClose={() => setProjectBuildConfigOpen(false)}
             />
           ) : null}
+          <ResourceActionDialog
+            open={Boolean(resourceActionSmokeTarget)}
+            target={
+              resourceActionSmokeTarget
+                ? {
+                    key: resourceActionSmokeTarget.key,
+                    sourceId: "default",
+                    entryName: resourceActionSmokeTarget.entryName,
+                    mode: "run",
+                  }
+                : null
+            }
+            onClose={() => setResourceActionSmokeTarget(null)}
+          />
           <section
             aria-label="工作副本恢复测试"
             style={{ maxWidth: 760, marginTop: 16 }}

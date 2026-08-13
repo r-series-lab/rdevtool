@@ -1,6 +1,7 @@
 import { renderToString } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { AppEmptyState } from "../components/AppEmptyState";
+import { AppListEndState } from "../components/AppListEndState";
 import { I18nProvider, translateNode } from "./index";
 
 describe("i18n component boundaries", () => {
@@ -22,6 +23,18 @@ describe("i18n component boundaries", () => {
 
     expect(html).toContain("设置");
     expect(html).toContain("应用偏好与行为");
+  });
+
+  it("translates the shared list end state", () => {
+    const html = renderToString(
+      <I18nProvider systemLanguageOverride="en-US">
+        <AppListEndState />
+      </I18nProvider>,
+    );
+
+    expect(html).toContain("No more items");
+    expect(html).toContain('aria-label="No more items"');
+    expect(html).not.toContain("没有更多了");
   });
 
   it("does not alter non-string React nodes", () => {

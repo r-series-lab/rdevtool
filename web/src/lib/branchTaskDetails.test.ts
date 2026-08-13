@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import type { BranchTaskItemResult } from "../app-types";
 import {
   branchTaskDisplayDetail,
+  branchTaskFailureExplanation,
   branchTaskFailureReplay,
   humanizeBranchTaskFailure,
+  middleTruncateBranch,
 } from "./branchTaskDetails";
 
 function branchItem(
@@ -27,6 +29,13 @@ function branchItem(
 }
 
 describe("branch task details", () => {
+  it("keeps both ends of an overlong branch name", () => {
+    expect(
+      middleTruncateBranch("feature_demo_mobile-release-candidate", 30),
+    ).toBe("feature_demo_mob...e-candidate");
+    expect(middleTruncateBranch("master", 30)).toBe("master");
+  });
+
   it("turns GitLab authentication failures into an actionable reason", () => {
     expect(
       humanizeBranchTaskFailure(
@@ -45,8 +54,65 @@ describe("branch task details", () => {
       }),
     ).toBe(
       "消息中心: release-20260716 -> master [合并失败]\n" +
-        "原因：GitLab 身份验证失败（HTTP 401），请检查访问令牌是否有效或已过期。",
+        "原因：GitLab 身份验证失败（HTTP 401），请检查访问令牌是否有效或已过期。\n" +
+        "建议：更新或重新配置有效的 GitLab 访问令牌后重试。",
     );
+  });
+
+  it("exposes failure guidance without repeating the project heading", () => {
+    const explanation = branchTaskFailureExplanation(branchItem());
+    expect(explanation).toContain("原因：GitLab 身份验证失败");
+    expect(explanation).toContain("建议：更新或重新配置有效的 GitLab 访问令牌后重试。");
+    expect(explanation).not.toContain("消息中心:");
+  });
+
+  it("does not mistake merge request !403 for HTTP 403", () => {
+    const detail =
+      "合并 MR 失败: cannot_be_merged（存在合并冲突）（MR !403: " +
+      "http://gitlab.example.test/group/project/-/merge_requests/403）";
+
+    expect(humanizeBranchTaskFailure(detail)).toBe(
+      "分支存在合并冲突，请先处理冲突后重试。",
+    );
+    expect(
+      branchTaskDisplayDetail({
+        detail,
+        items: [
+          branchItem({
+            projectKey: "demo-service",
+            projectName: "示例渠道",
+            sourceBranch: "feature_demo_mobile",
+            targetBranch: "env_demo_uat",
+            statusKey: "merge_conflict",
+            summary: "存在合并冲突",
+            detail,
+          }),
+        ],
+      }),
+    ).toBe(
+      "示例渠道: feature_demo_mobile -> env_demo_uat [存在合并冲突]\n" +
+        "原因：分支存在合并冲突，请先处理冲突后重试。\n" +
+        "GitLab 状态：cannot_be_merged\n" +
+        "MR：!403\n" +
+        "链接：http://gitlab.example.test/group/project/-/merge_requests/403\n" +
+        "建议：先解决 feature_demo_mobile -> env_demo_uat 的合并冲突后重试。",
+    );
+  });
+
+  it("still recognizes a real HTTP 403 permission failure", () => {
+    expect(
+      humanizeBranchTaskFailure(
+        '合并 MR 失败: HTTP 403 Forbidden {"message":"403 Forbidden"}（MR !12）',
+      ),
+    ).toBe(
+      "GitLab 拒绝了本次操作（HTTP 403），请检查访问令牌权限和项目成员权限。",
+    );
+  });
+
+  it("uses the structured status key for pipeline blocks", () => {
+    expect(
+      humanizeBranchTaskFailure("合并 MR 失败", "merge_pipeline_blocked"),
+    ).toBe("GitLab 流水线尚未通过，当前不能合并。");
   });
 
   it("keeps successful aggregate details unchanged", () => {

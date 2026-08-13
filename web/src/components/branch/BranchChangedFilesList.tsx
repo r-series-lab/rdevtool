@@ -22,6 +22,7 @@ import type {
   BranchPushStatus,
 } from "../../app-types";
 import { useI18n } from "../../i18n";
+import { translateInternalMessage } from "../../i18n/internalMessages";
 import { CopyIcon } from "../AppIcons";
 
 const BRANCH_CHANGED_FILE_VISIBLE_ROWS = 10;
@@ -575,7 +576,7 @@ function BranchFileDiffPreview({
         }}
       >
         <Typography variant="caption" color="error" sx={{ overflowWrap: "anywhere" }}>
-          {state.message}
+          {translateInternalMessage(state.message, t)}
         </Typography>
       </Box>
     );

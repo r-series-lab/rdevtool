@@ -12,6 +12,7 @@ import { useEffect, useState } from "react";
 import type { BuildResult } from "../../hooks/useBuildHistory";
 import { useI18n } from "../../i18n";
 import { translateInternalMessage } from "../../i18n/internalMessages";
+import { translateBuildDetail } from "../../lib/buildPresentation";
 import { isOperationActiveState } from "../../lib/operationLifecycle";
 import {
   CheckIcon,
@@ -263,7 +264,7 @@ export function BuildResultPanel({
               <BuildResultRow
                 label={t("说明")}
                 value={buildResult.detail}
-                displayValue={translateInternalMessage(buildResult.detail ?? "", t)}
+                displayValue={translateBuildDetail(buildResult.detail ?? "", t)}
                 copyKey="detail"
                 copied={copiedField === "detail"}
                 onCopy={onCopy}

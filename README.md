@@ -15,21 +15,40 @@
 ### 界面与功能
 
 - **工作台**：按工作区聚合项目、入口、代理、Link、构建、Git 和最近活动；支持 `system` 全局视图和普通需求工作区，并对外部配置变化执行增量刷新。
-- **资源入口**：统一管理项目、网站、目录、应用和脚本入口，支持搜索、收藏、最近使用和工作区过滤。
+- **资源入口**：统一管理项目、网站、目录、应用、脚本和参数化 Action，支持搜索、收藏、最近使用和工作区过滤。
+- **参数化 Action**：由 `actions.toml` Schema 生成通用弹窗，支持完整可见的项目多选、固定上下文、plan/apply、实时日志、取消、后台运行、失败项重试和统一操作历史。
+- **CLI 桥接**：App 打包同版本 `rdevtool` sidecar，Action 脚本通过 `RDEVTOOL_CLI` 复用现有构建、Jenkins 与工作区能力。
 - **配置源**：资源、Link、代理和运行配置可以按工作区分别选择来源；支持来源比较、独立复制、能力范围控制和外部文件变更提醒。
+- **配置迁移**：按项目、工作区和配置源导出 `.rdtpack`；导入前生成路径与冲突计划，执行时校验包和目标状态、建立整批备份，并支持事务回滚。
 - **Link 联调链**：把本地文件检查、代理启动/检查、Runtime 启停和页面聚焦组合成可预览、检查、执行、停止并挂载到工作区的快捷链路。
-- **Git 工作流**：查看分支、同步多目标分支、创建分支、切换分支、检出到目录、合并预览、合并、推送前检查和推送。
-- **构建任务**：从项目配置生成构建计划，支持 Jenkins、本地命令和 R 系列桌面应用打包 adapter，并保留构建历史与重放入口。
+- **Git 工作流**：查看分支、同步多目标分支、创建分支、切换分支、检出到目录、合并预览、合并、推送前检查和推送；批量记录按项目分行，并明确显示 403、合并冲突等错误及处理建议。
+- **构建任务**：从项目配置生成构建计划，支持 Jenkins、本地命令和 R 系列桌面应用打包 adapter；Build Record 优先显示参数差异、默认值、失败原因和连续运行时间线。
 - **本地代理**：维护代理 profile、规则、Mock、转发、阻断和导入导出，可绑定到运行时 profile。
 - **项目运行时**：检查、预检、启动、查看、停止、重启和诊断由 App 与 CLI 共享 daemon 托管的项目运行时；项目详情和 Link 计划/检查会直接展示有效运行目标与当前 daemon 观测，支持状态恢复、外部进程检测、受限认领评估、进程归属校验、聚焦页面与读取运行日志。
 - **托管产物**：按工作区和项目盘点 rDevTool 明确拥有的工作区实例、Runtime 状态与日志，并把仅被配置引用的路径单独列出；可生成带活动状态、Git 工作树和目录边界检查的只读清理计划。
 - **知识库**：按收件箱、项目、通用手册和环境约定检索 Markdown 长期知识；支持正文预览、范围筛选、模板新建和外部编辑，Markdown 文件始终是事实源。
 - **系统诊断**：在设置中只读查看当前可执行文件/源码身份、受管存储占用与健康风险。
-- **活动中心**：集中显示构建、Git、Runtime、代理、Link 和外部配置变更；连续执行按最新一次结果呈现外层状态，同时保留每次明细、结构化诊断和“检查并重试”入口。
+- **活动中心**：集中显示 Action、构建、Git、Runtime、代理、Link 和外部配置变更；连续执行按最新一次结果呈现外层状态，同时保留每次明细、结构化诊断和“检查并重试”入口。
 - **系统托盘**：以工作区作为一级菜单，按入口、项目、代理、Link、构建和 Git 组织二级/三级快捷动作；支持打开工作区、固定动作和重复上次操作。
 - **命令面板**：使用 `Cmd/Ctrl + K` 快速搜索项目、入口和常用动作。
 - **工作流信号**：把分支、构建、运行时等动作串起来，用规则接收或广播可重放的工作流。
 - **AI / CLI**：关键读取和动作命令都提供稳定 JSON 输出，AI Agent 应优先走 CLI 而不是 GUI 自动化。
+
+### 界面预览
+
+Workspace 图展示当前暗色界面；操作图使用仓库内置 mock 数据按应用默认窗口比例生成。所有公开图片均不包含凭据。完整交互说明见 [界面功能指南](docs/interface-guide.md)。
+
+<p align="center">
+  <img src="docs/assets/screenshots/workspace-overview.png" alt="暗色模式下的 R系列 Workspace 首页" width="99%">
+</p>
+
+<p align="center">
+  <img src="docs/assets/screenshots/action-batch-deploy-pre.png" alt="批量部署 Pre 通用 Action 弹窗" width="49%">
+  <img src="docs/assets/screenshots/build-record-details.png" alt="项目管理构建参数区与 Build Record" width="49%">
+</p>
+<p align="center">
+  <img src="docs/assets/screenshots/branch-record-summary.png" alt="项目管理 Git 操作区与 Branch Record" width="99%">
+</p>
 
 ### 快速开始
 
@@ -84,6 +103,9 @@ rdevtool --json projects list
 rdevtool --json navigation search Jenkins
 rdevtool --json config-source list
 rdevtool --json config-source compare default default
+rdevtool --workspace <key> --json action validate
+rdevtool --workspace <key> --json action plan <action-key> --set projects='["demo"]'
+rdevtool --workspace <key> --json action apply --plan-id <plan-id> --yes
 rdevtool --json link list
 rdevtool --json link plan <link-key>
 rdevtool --json proxy list
@@ -95,8 +117,15 @@ rdevtool --json runtime log --project <project> --tail 300 --errors-only
 rdevtool --json runtime wait --project <project> --run-id <run-id> --until http-verified
 rdevtool --workspace <key> --json doctor --project <project> --debug-profile <profile>
 rdevtool --workspace <key> --json notes file-search "代理" --project <project>
+rdevtool --json history operations --domain action --limit 24
 rdevtool --json history replay-plan <action-id>
+rdevtool --workspace <key> --json workflow chain list
 ```
+
+`workspace init-demand` 在 `worktree` / `clone` 模式下默认使用
+`--dependency-mode auto-link`：仅当源目录已有 `node_modules` 且源、目标锁文件内容一致时
+创建本地依赖链接；否则保留工作区并返回明确告警。需要完全隔离安装时可传
+`--dependency-mode none`。Runtime 启动预检会阻止缺少本地 Node 启动入口的命令继续执行。
 
 高风险动作先预览再执行：
 
@@ -104,6 +133,7 @@ rdevtool --json history replay-plan <action-id>
 rdevtool --json build plan <project> --target <target> --env <env> --branch <branch>
 rdevtool --json git overview --project <project> --source <source> --target <target>
 rdevtool --json git push-status --project <project>
+rdevtool --workspace <key> --json action plan <action-key> --params-file ./params.json
 ```
 
 完整命令见 [docs/cli.md](docs/cli.md)。
@@ -128,6 +158,7 @@ SQLite 使用 `PRAGMA user_version` 执行只向前迁移；新版本不会尝�
 | `config_sources.toml` | 自建配置源及资源、链路、代理、运行配置文件映射 |
 | `sources/workspaces/<key>/` | 工作区自动生成的独立配置目录 |
 | `navigation.toml` | 网站、目录、应用、脚本入口 |
+| `actions.toml` | 参数化 Action、通用参数 Schema 与受控进程执行配置 |
 | `links.toml` | 可组合的本地联调链路及执行步骤 |
 | `proxy.toml` | 本地代理 profile、规则和工作区归属 |
 | `runtime_overrides.toml` | 配置源提供的 Runtime profile 覆盖 |
@@ -145,6 +176,7 @@ SQLite 使用 `PRAGMA user_version` 执行只向前迁移；新版本不会尝�
 - **Navigation Entry**：URL、目录、应用或脚本入口。
 - **Proxy Profile**：本地转发、Mock、阻断和诊断规则集合。
 - **Config Source**：为资源、Link、代理和 Runtime 能力提供可切换、可比较和可复制的文件来源。
+- **Resource Action**：由参数 Schema、受控 Runner、effect 和执行模式组成的可复用动作；远程写入优先使用 plan/apply。
 - **Link**：由本地文件、代理、Runtime 和页面动作组成的可复用联调链路。
 
 ### AI 使用
@@ -168,7 +200,10 @@ rdevtool --json agent context --limit 6
 ### 文档
 
 - [docs/cli.md](docs/cli.md)：CLI 命令、JSON 契约和示例。
+- [docs/interface-guide.md](docs/interface-guide.md)：工作区、通用 Action、Build Record 与 Branch Record 界面说明。
 - [docs/config.md](docs/config.md)：本地配置文件和工作区模型。
+- [docs/configuration-packs.md](docs/configuration-packs.md)：项目、工作区与资源配置的安全导入、导出和回滚。
+- [docs/resource-actions.md](docs/resource-actions.md)：参数化 Action、脚本输入协议与安全边界。
 - [docs/r-series-apps.md](docs/r-series-apps.md)：R 系列应用开发配置范式。
 - [docs/ai-agent.md](docs/ai-agent.md)：AI Agent 使用方式和安全规则。
 - [docs/architecture.md](docs/architecture.md)：共享 Core、领域边界与渐进拆分路线。
@@ -196,6 +231,7 @@ npm run web:dev            # 仅启动前端
 npm run web:build          # 前端构建
 npm run web:test           # 前端单元测试
 npm run web:test:e2e       # 浏览器流程测试
+npm run docs:screenshots   # 用 mock smoke 场景更新公开界面截图
 npm run rust-check         # Rust/Tauri 检查
 npm run rust-test          # Core 与 Tauri 测试
 npm run manifest:check     # 产品、版本、文档与安全契约

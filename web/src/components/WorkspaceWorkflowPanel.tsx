@@ -13,6 +13,7 @@ import {
 } from "@mui/material";
 import type { TrayPinnedAction } from "../lib/trayPins";
 import { useI18n, type Translate } from "../i18n";
+import { translateInternalMessage } from "../i18n/internalMessages";
 import {
   suggestedWorkspaceWorkflowSteps,
   validateWorkspaceWorkflowChain,
@@ -52,6 +53,8 @@ type WorkspaceWorkflowPanelProps = {
   ) => Promise<void> | void;
   onRun: (chain: WorkspaceWorkflowChain) => Promise<void> | void;
   onCancelRun: (run: WorkspaceWorkflowRunState) => Promise<void> | void;
+  collapsed?: boolean;
+  onCollapsedChange?: () => void;
 };
 
 function chainId(workspaceKey: string) {
@@ -114,6 +117,8 @@ export function WorkspaceWorkflowPanel({
   onEnabledChange,
   onRun,
   onCancelRun,
+  collapsed = false,
+  onCollapsedChange,
 }: WorkspaceWorkflowPanelProps) {
   const { t } = useI18n();
   const [editorOpen, setEditorOpen] = useState(false);
@@ -234,7 +239,10 @@ export function WorkspaceWorkflowPanel({
   }
 
   return (
-    <div className="overview-workflow-panel">
+    <div
+      className={`overview-workflow-panel${collapsed ? " is-collapsed" : ""}`}
+      data-overview-module="workflow"
+    >
       <div className="overview-section-heading">
         <div className="overview-section-heading-copy">
           <Typography className="overview-section-label">{t("联动操作")}</Typography>
@@ -244,28 +252,50 @@ export function WorkspaceWorkflowPanel({
             label={chains.length}
           />
         </div>
-        <Tooltip
-          title={
-            actions.length >= 2
-              ? t("新建联动流程")
-              : t("至少标记两个可执行动作后才能创建")
-          }
-        >
-          <span>
-            <IconButton
-              size="small"
-              className="overview-section-action-button"
-              onClick={openCreate}
-              disabled={actions.length < 2}
-              aria-label={t("新建联动流程")}
-            >
-              <PlusIcon fontSize="small" />
-            </IconButton>
-          </span>
-        </Tooltip>
+        <div className="overview-section-actions">
+          <Tooltip
+            title={
+              actions.length >= 2
+                ? t("新建联动流程")
+                : t("至少标记两个可执行动作后才能创建")
+            }
+          >
+            <span>
+              <IconButton
+                size="small"
+                className="overview-section-action-button"
+                onClick={openCreate}
+                disabled={actions.length < 2}
+                aria-label={t("新建联动流程")}
+              >
+                <PlusIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+          {onCollapsedChange ? (
+            <Tooltip title={t(collapsed ? "展开" : "收起")}>
+              <IconButton
+                size="small"
+                className="overview-section-action-button overview-section-collapse-button"
+                onClick={onCollapsedChange}
+                aria-label={t(
+                  collapsed ? "展开 {name}" : "收起 {name}",
+                  { name: t("联动操作") },
+                )}
+                aria-expanded={!collapsed}
+              >
+                {collapsed ? (
+                  <ExpandIcon fontSize="small" />
+                ) : (
+                  <CollapseIcon fontSize="small" />
+                )}
+              </IconButton>
+            </Tooltip>
+          ) : null}
+        </div>
       </div>
 
-      {chains.length === 0 ? (
+      {!collapsed && chains.length === 0 ? (
         <div className="overview-workflow-empty">
           <WorkflowIcon fontSize="small" />
           <span>
@@ -274,17 +304,20 @@ export function WorkspaceWorkflowPanel({
               : t("标记可执行动作后可创建联动流程")}
           </span>
         </div>
-      ) : (
+      ) : !collapsed ? (
         <div className="overview-workflow-list">
           {chains.map((chain) => {
             const run = runStateByChainId.get(chain.id);
             const starting = runningChainId === chain.id;
             const running = starting || run?.status === "running";
+            const displayName = translateInternalMessage(chain.name, t);
             const runDetail =
               run?.status === "running"
-                ? t("当前：{step}", { step: run.activeStepLabel })
+                ? t("当前：{step}", {
+                    step: translateInternalMessage(run.activeStepLabel, t),
+                  })
                 : run?.status === "failed" || run?.status === "cancelled"
-                  ? run.detail
+                  ? translateInternalMessage(run.detail, t)
                   : "";
             return (
               <div
@@ -293,7 +326,7 @@ export function WorkspaceWorkflowPanel({
               >
                 <div className="overview-workflow-copy">
                   <div className="overview-workflow-title">
-                    <strong>{chain.name}</strong>
+                    <strong>{displayName}</strong>
                     {run ? (
                       <span
                         className={`overview-workflow-state is-${run.status}`}
@@ -309,7 +342,7 @@ export function WorkspaceWorkflowPanel({
                         {index > 0 ? (
                           <span className="overview-workflow-arrow">›</span>
                         ) : null}
-                        <span>{step.label}</span>
+                        <span>{translateInternalMessage(step.label, t)}</span>
                       </span>
                     ))}
                   </div>
@@ -339,7 +372,7 @@ export function WorkspaceWorkflowPanel({
                       size="small"
                       disabled={running}
                       onClick={() => openEdit(chain)}
-                      aria-label={t("编辑 {name}", { name: chain.name })}
+                      aria-label={t("编辑 {name}", { name: displayName })}
                     >
                       <EditIcon fontSize="small" />
                     </IconButton>
@@ -349,7 +382,7 @@ export function WorkspaceWorkflowPanel({
                       size="small"
                       disabled={running}
                       onClick={() => void onDelete(chain.id)}
-                      aria-label={t("删除 {name}", { name: chain.name })}
+                      aria-label={t("删除 {name}", { name: displayName })}
                     >
                       <TrashIcon fontSize="small" />
                     </IconButton>
@@ -360,7 +393,7 @@ export function WorkspaceWorkflowPanel({
                         size="small"
                         className="overview-workflow-stop"
                         onClick={() => void onCancelRun(run)}
-                        aria-label={t("停止 {name} 的后续步骤", { name: chain.name })}
+                        aria-label={t("停止 {name} 的后续步骤", { name: displayName })}
                       >
                         <StopIcon fontSize="small" />
                       </IconButton>
@@ -381,7 +414,7 @@ export function WorkspaceWorkflowPanel({
                           className="overview-workflow-run"
                           disabled={!chain.enabled || hasActiveRun}
                           onClick={() => void onRun(chain)}
-                          aria-label={t("运行 {name}", { name: chain.name })}
+                          aria-label={t("运行 {name}", { name: displayName })}
                         >
                           {starting ? (
                             <CircularProgress size={14} thickness={5} />
@@ -397,7 +430,7 @@ export function WorkspaceWorkflowPanel({
             );
           })}
         </div>
-      )}
+      ) : null}
 
       <AppActionDialog
         open={editorOpen}
@@ -464,7 +497,7 @@ export function WorkspaceWorkflowPanel({
                         option.action.dedupeKey !== key
                       }
                     >
-                      {option.kindLabel} · {option.label}
+                      {option.kindLabel} · {translateInternalMessage(option.label, t)}
                     </MenuItem>
                   ))}
                 </TextField>

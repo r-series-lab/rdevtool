@@ -3,9 +3,39 @@ import type { Translate } from "./index";
 const EXACT_INTERNAL_MESSAGE_KEYS = new Set([
   "App",
   "CLI",
+  "CDP 已连接",
+  "正常",
+  "目录缺失",
+  "Remote 不匹配",
+  "仓库无效",
+  "项目配置缺失",
+  "Git 仓库根目录与 Remote 已验证",
+  "项目实例目录不存在，可以解除关联后重新绑定",
+  "目录已被删除，但 Git 仍保留工作副本登记；可按原路径和分支修复",
+  "目录 Git Remote 与项目配置不一致",
+  "目录不是可验证的 Git 仓库根目录",
+  "实例引用的项目已不在当前配置中",
   "GitLab 身份验证失败（HTTP 401），请检查访问令牌是否有效或已过期。",
   "GitLab 拒绝了本次操作（HTTP 403），请检查访问令牌权限和项目成员权限。",
   "分支存在合并冲突（HTTP 409），请先处理冲突后重试。",
+  "分支存在合并冲突，请先处理冲突后重试。",
+  "GitLab 流水线尚未通过，当前不能合并。",
+  "GitLab 合并请求仍有未解决的讨论，当前不能合并。",
+  "GitLab 合并请求尚未满足审批条件，当前不能合并。",
+  "GitLab 当前暂不可合并，请检查合并请求状态。",
+  "存在合并冲突",
+  "GitLab 身份验证失败",
+  "GitLab 权限不足",
+  "流水线阻止合并",
+  "讨论未解决",
+  "审批条件未满足",
+  "GitLab 暂不可合并",
+  "更新或重新配置有效的 GitLab 访问令牌后重试。",
+  "检查访问令牌 API 权限、项目成员角色和目标分支保护规则后重试。",
+  "等待流水线通过或修复失败任务后重试。",
+  "解决合并请求中的未解决讨论后重试。",
+  "完成合并请求要求的审批后重试。",
+  "打开合并请求检查详细合并状态后重试。",
   "dev 服务启动成功",
   "当前工作区中未找到要启动的项目",
   "当前配置源不支持运行环境模板覆盖。",
@@ -22,6 +52,17 @@ const EXACT_INTERNAL_MESSAGE_KEYS = new Set([
   "同步中",
   "同步失败",
   "合并分支",
+  "提交推送",
+  "工作区联动",
+  "工作区配置已变更",
+  "项目配置已变更",
+  "项目工作区配置已变更",
+  "工作区相关配置已变更",
+  "检测到外部修改",
+  "检测到外部修改，请重新加载最新配置",
+  "重新加载",
+  "打开配置位置",
+  "推送、合并并构建",
   "合并并推送成功",
   "合并成功",
   "配置更新",
@@ -83,6 +124,8 @@ const EXACT_INTERNAL_MESSAGE_KEYS = new Set([
   "触发部署失败",
   "该记录缺少明确的构建目标，无法安全重放；请打开构建页重新选择目标。",
   "运行中",
+  "Action 实时输出已隐藏",
+  "等待 Action 输出",
   "运行环境",
   "配置",
   "部署",
@@ -99,6 +142,13 @@ const EXACT_INTERNAL_MESSAGE_KEYS = new Set([
   "切换分支失败",
   "切换成功",
   "当前批次包含同一项目的部分成功结果，请打开 Git 页面核对后按剩余目标执行。",
+  "配置源已变更",
+  "配置源列表已变更",
+  "检测到配置源列表发生外部修改",
+  "检测到配置源文件发生外部修改",
+  "比较配置源",
+  "合并失败",
+  "已合并",
   "环境",
   "分支",
   "标记已处理",
@@ -193,6 +243,42 @@ function translateInternalMessageCore(message: string, t: Translate): string {
       .join("\n");
   }
 
+  const branchActionMatch = message.match(/^分支[：:]\s*(.+?)\s+\/\s+(.+)$/);
+  if (branchActionMatch) {
+    return t("分支：{action} / {project}", {
+      action: translateInternalMessage(branchActionMatch[1], t),
+      project: branchActionMatch[2],
+    });
+  }
+
+  const deployActionMatch = message.match(/^部署[：:]\s*(.+?)\s+\/\s+(.+)$/);
+  if (deployActionMatch) {
+    return t("部署：{project} / {target}", {
+      project: deployActionMatch[1],
+      target: deployActionMatch[2],
+    });
+  }
+
+  const linkStepCountMatch = message.match(/^(\d+)\s+步$/);
+  if (linkStepCountMatch) {
+    return t("{count} 步", { count: linkStepCountMatch[1] });
+  }
+
+  const linkProjectMatch = message.match(/^项目\s+(.+)$/);
+  if (linkProjectMatch) {
+    return t("项目 {name}", { name: linkProjectMatch[1] });
+  }
+
+  const linkProxyMatch = message.match(/^代理\s+(.+)$/);
+  if (linkProxyMatch) {
+    return t("代理 {name}", { name: linkProxyMatch[1] });
+  }
+
+  const linkWarningCountMatch = message.match(/^(\d+)\s+条提示$/);
+  if (linkWarningCountMatch) {
+    return t("{count} 条提示", { count: linkWarningCountMatch[1] });
+  }
+
   const buildResultMatch = message.match(/^构建\s+#(\S+)\s+当前结果[：:]\s*(.+)$/);
   if (buildResultMatch) {
     return t("构建 #{id} 当前结果：{result}", {
@@ -205,6 +291,38 @@ function translateInternalMessageCore(message: string, t: Translate): string {
   if (reasonMatch) {
     return t("原因：{reason}", {
       reason: translateInternalMessage(reasonMatch[1], t),
+    });
+  }
+
+  const gitlabStatusMatch = message.match(/^GitLab 状态[：:]\s*(.+)$/);
+  if (gitlabStatusMatch) {
+    return t("GitLab 状态：{status}", { status: gitlabStatusMatch[1] });
+  }
+
+  const mergeRequestMatch = message.match(/^MR[：:]\s*!([0-9]+)$/);
+  if (mergeRequestMatch) {
+    return t("MR：!{iid}", { iid: mergeRequestMatch[1] });
+  }
+
+  const linkMatch = message.match(/^链接[：:]\s*(.+)$/);
+  if (linkMatch) {
+    return t("链接：{url}", { url: linkMatch[1] });
+  }
+
+  const suggestionMatch = message.match(/^建议[：:]\s*(.+)$/);
+  if (suggestionMatch) {
+    return t("建议：{suggestion}", {
+      suggestion: translateInternalMessage(suggestionMatch[1], t),
+    });
+  }
+
+  const mergeConflictSuggestionMatch = message.match(
+    /^先解决\s+(.+?)\s+->\s+(.+?)\s+的合并冲突后重试。$/,
+  );
+  if (mergeConflictSuggestionMatch) {
+    return t("先解决 {source} -> {target} 的合并冲突后重试。", {
+      source: mergeConflictSuggestionMatch[1],
+      target: mergeConflictSuggestionMatch[2],
     });
   }
 
@@ -264,6 +382,22 @@ function translateInternalMessageCore(message: string, t: Translate): string {
     return t("已恢复工作区：{name}", {
       name: restoredWorkspaceMatch[1],
     });
+  }
+
+  const configSourceChangedMatch = message.match(/^配置源[“\"](.+)[”\"]已变更$/);
+  if (configSourceChangedMatch) {
+    return t("配置源“{name}”已变更", {
+      name: configSourceChangedMatch[1],
+    });
+  }
+
+  const affectedConfigScopesMatch = message.match(/^影响[：:]\s*(.+)$/);
+  if (affectedConfigScopesMatch) {
+    const scopes = affectedConfigScopesMatch[1]
+      .split("、")
+      .map((scope) => t(scope.trim()))
+      .join(", ");
+    return t("影响：{scopes}", { scopes });
   }
 
   const linkActionTitleMatch = message.match(/^(启动|停止)联调链路$/);
@@ -571,6 +705,104 @@ function translateInternalMessageCore(message: string, t: Translate): string {
     });
   }
 
+  const healthIssueCountMatch = message.match(
+    /^发现\s+(\d+)\s+个需要关注的问题$/,
+  );
+  if (healthIssueCountMatch) {
+    return t("发现 {count} 个需要关注的问题", {
+      count: healthIssueCountMatch[1],
+    });
+  }
+
+  const healthStorageFailureMatch = message.match(/^无法完整统计(.+)$/);
+  if (healthStorageFailureMatch) {
+    return t("无法完整统计{label}", {
+      label: translateInternalMessage(healthStorageFailureMatch[1], t),
+    });
+  }
+
+  const fileBytesMatch = message.match(/^(\d+)\s+个文件，共\s+(\d+)\s+字节$/);
+  if (fileBytesMatch) {
+    return t("{count} 个文件，共 {bytes} 字节", {
+      count: fileBytesMatch[1],
+      bytes: fileBytesMatch[2],
+    });
+  }
+
+  const missingManagedArtifactsMatch = message.match(
+    /^(\d+)\s+条托管记录指向当前不存在的路径$/,
+  );
+  if (missingManagedArtifactsMatch) {
+    return t("{count} 条托管记录指向当前不存在的路径", {
+      count: missingManagedArtifactsMatch[1],
+    });
+  }
+
+  const unverifiedArtifactsMatch = message.match(
+    /^(\d+)\s+条候选记录未通过最终归属验证$/,
+  );
+  if (unverifiedArtifactsMatch) {
+    return t("{count} 条候选记录未通过最终归属验证", {
+      count: unverifiedArtifactsMatch[1],
+    });
+  }
+
+  const unmanagedReferencesMatch = message.match(
+    /^(\d+)\s+条路径仅被配置引用，未声明为 rDevTool 托管产物$/,
+  );
+  if (unmanagedReferencesMatch) {
+    return t("{count} 条路径仅被配置引用，未声明为 rDevTool 托管产物", {
+      count: unmanagedReferencesMatch[1],
+    });
+  }
+
+  const externalRuntimeMatch = message.match(
+    /^检测到 PID (\d+) 正在监听端口 (\d+)，认领后可由 rDevTool 管理$/,
+  );
+  if (externalRuntimeMatch) {
+    return t("检测到 PID {pid} 正在监听端口 {port}，认领后可由 rDevTool 管理", {
+      pid: externalRuntimeMatch[1],
+      port: externalRuntimeMatch[2],
+    });
+  }
+
+  const buildExitCodeMatch = message.match(/^打包命令已失败，退出码\s+(.+)$/);
+  if (buildExitCodeMatch) {
+    return t("打包命令已失败，退出码 {code}", {
+      code: buildExitCodeMatch[1],
+    });
+  }
+
+  const recentBuildExitCodeMatch = message.match(
+    /^最近一次打包任务失败，退出码\s+(.+)$/,
+  );
+  if (recentBuildExitCodeMatch) {
+    return t("最近一次打包任务失败，退出码 {code}", {
+      code: recentBuildExitCodeMatch[1],
+    });
+  }
+
+  const matchedProxyRuleMatch = message.match(
+    /^请求会命中规则 (.+)，但代理端口当前未监听$/,
+  );
+  if (matchedProxyRuleMatch) {
+    return t("请求会命中规则 {name}，但代理端口当前未监听", {
+      name: matchedProxyRuleMatch[1],
+    });
+  }
+
+  const listeningProxyRuleMatch = message.match(/^请求会命中规则 (.+)$/);
+  if (listeningProxyRuleMatch) {
+    return t("请求会命中规则 {name}", {
+      name: listeningProxyRuleMatch[1],
+    });
+  }
+
+  const proxyNotListeningMatch = message.match(/^(.+) 当前没有监听$/);
+  if (proxyNotListeningMatch) {
+    return t("{url} 当前没有监听", { url: proxyNotListeningMatch[1] });
+  }
+
   const bracketStatusMatch = message.match(/^(.*\S)(\s*)\[([^\]]+)\]$/);
   if (bracketStatusMatch) {
     const translatedLabel = translateExactInternalMessage(bracketStatusMatch[3], t);
@@ -586,7 +818,7 @@ function translateInternalMessageCore(message: string, t: Translate): string {
       .join(" · ");
   }
 
-  return message;
+  return t(message);
 }
 
 export function translateInternalMessage(message: string, t: Translate): string {

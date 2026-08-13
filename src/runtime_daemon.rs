@@ -1824,7 +1824,7 @@ pub fn inspect_process_identity(pid: u32) -> Result<RuntimeProcessIdentity> {
     }
 }
 
-pub fn listening_process(port: u16) -> Result<Option<RuntimeProcessIdentity>> {
+pub fn listening_processes(port: u16) -> Result<Vec<RuntimeProcessIdentity>> {
     #[cfg(unix)]
     {
         let output = Command::new("lsof")
@@ -1832,7 +1832,7 @@ pub fn listening_process(port: u16) -> Result<Option<RuntimeProcessIdentity>> {
             .output()
             .with_context(|| format!("failed to inspect listener on port {port}"))?;
         if !output.status.success() && output.stdout.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let mut pids = String::from_utf8_lossy(&output.stdout)
             .lines()
@@ -1841,22 +1841,28 @@ pub fn listening_process(port: u16) -> Result<Option<RuntimeProcessIdentity>> {
             .collect::<Vec<_>>();
         pids.sort_unstable();
         pids.dedup();
-        match pids.as_slice() {
-            [] => Ok(None),
-            [pid] => inspect_process_identity(*pid).map(Some),
-            _ => bail!(
-                "multiple processes are listening on port {port}: {}",
-                pids.iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }
+        pids.into_iter().map(inspect_process_identity).collect()
     }
     #[cfg(not(unix))]
     {
         let _ = port;
-        Ok(None)
+        Ok(Vec::new())
+    }
+}
+
+pub fn listening_process(port: u16) -> Result<Option<RuntimeProcessIdentity>> {
+    let processes = listening_processes(port)?;
+    match processes.as_slice() {
+        [] => Ok(None),
+        [process] => Ok(Some(process.clone())),
+        _ => bail!(
+            "multiple processes are listening on port {port}: {}",
+            processes
+                .iter()
+                .map(|process| process.pid.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
     }
 }
 

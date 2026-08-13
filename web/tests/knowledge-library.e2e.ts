@@ -4,7 +4,7 @@ test.beforeEach(async ({ page }) => {
   await page.goto("/smoke.html");
   await page
     .getByRole("navigation", { name: "主菜单" })
-    .getByRole("button", { name: "知识", exact: true })
+    .getByRole("button", { name: "知识库", exact: true })
     .click();
 });
 
@@ -20,6 +20,9 @@ test("knowledge library searches scopes and previews Markdown", async ({
     page.getByRole("heading", { name: "本地代理排障", level: 1 }),
   ).toBeVisible();
   await expect(page.getByText("127.0.0.1:8791")).toBeVisible();
+  await expect(
+    page.locator(".knowledge-document-list-end"),
+  ).toHaveAccessibleName("没有更多了");
 
   await page.getByRole("button", { name: "手册", exact: true }).click();
   await expect(
@@ -94,7 +97,8 @@ test("system health is available from settings diagnostics", async ({ page }) =>
   await expect(
     page.locator('[data-system-diagnostics="read-only"]'),
   ).toBeVisible();
-  await expect(page.getByText("rDevTool 本机状态正常。")).toBeVisible();
+  await expect(page.getByText("发现 2 个需要关注的环境检查")).toBeVisible();
+  await page.getByRole("button", { name: "展开技术详情" }).click();
   await expect(page.getByText("知识笔记", { exact: true })).toBeVisible();
 });
 
@@ -107,6 +111,46 @@ test("knowledge workbench stays within a compact viewport", async ({ page }) => 
   expect(bounds!.y).toBeGreaterThanOrEqual(0);
   expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(820);
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(640);
+
+  const [contentBounds, cardBounds, readerBounds] = await Promise.all([
+    page.locator(".content--knowledge").boundingBox(),
+    page.locator(".knowledge-document-item").first().boundingBox(),
+    page.locator(".knowledge-reader").boundingBox(),
+  ]);
+  expect(contentBounds).not.toBeNull();
+  expect(cardBounds).not.toBeNull();
+  expect(readerBounds).not.toBeNull();
+  expect(cardBounds!.x - contentBounds!.x).toBeLessThanOrEqual(12);
+  expect(readerBounds!.x - (cardBounds!.x + cardBounds!.width)).toBeLessThanOrEqual(14);
+
+  const scrollbarWidths = await page.evaluate(() => ({
+    list: Number.parseFloat(
+      getComputedStyle(
+        document.querySelector(".knowledge-document-list")!,
+        "::-webkit-scrollbar",
+      ).width,
+    ),
+    reader: Number.parseFloat(
+      getComputedStyle(
+        document.querySelector(".knowledge-reader-scroll")!,
+        "::-webkit-scrollbar",
+      ).width,
+    ),
+  }));
+  expect(scrollbarWidths.list).toBeLessThanOrEqual(6);
+  expect(scrollbarWidths.reader).toBeLessThanOrEqual(6);
+
+  const listEnd = await page
+    .locator(".knowledge-document-list-end")
+    .evaluate((element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        height: rect.height,
+        flexGrow: getComputedStyle(element).flexGrow,
+      };
+    });
+  expect(listEnd.height).toBeGreaterThanOrEqual(64);
+  expect(listEnd.flexGrow).toBe("1");
 });
 
 test("knowledge workbench remains usable at the narrow fallback", async ({
@@ -120,4 +164,37 @@ test("knowledge workbench remains usable at the narrow fallback", async ({
   expect(reader).not.toBeNull();
   expect(reader!.width).toBeGreaterThan(300);
   expect(reader!.height).toBeGreaterThan(300);
+
+  const card = page.locator(".knowledge-document-item").first();
+  const [cardBounds, summaryBounds, pathBounds] = await Promise.all([
+    card.boundingBox(),
+    card.locator(".knowledge-document-summary").boundingBox(),
+    card.locator(".knowledge-document-path").boundingBox(),
+  ]);
+  expect(cardBounds).not.toBeNull();
+  expect(summaryBounds).not.toBeNull();
+  expect(pathBounds).not.toBeNull();
+  expect(summaryBounds!.y + summaryBounds!.height).toBeLessThanOrEqual(
+    pathBounds!.y,
+  );
+  expect(pathBounds!.y + pathBounds!.height).toBeLessThanOrEqual(
+    cardBounds!.y + cardBounds!.height,
+  );
+
+  const documentWidths = await page.evaluate(() => ({
+    client: document.documentElement.clientWidth,
+    scroll: document.documentElement.scrollWidth,
+  }));
+  expect(documentWidths.scroll).toBe(documentWidths.client);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const [brandBounds, navigationBounds] = await Promise.all([
+    page.locator(".shell-brand").boundingBox(),
+    page.locator(".nav-stack").boundingBox(),
+  ]);
+  expect(brandBounds).not.toBeNull();
+  expect(navigationBounds).not.toBeNull();
+  expect(brandBounds!.x + brandBounds!.width).toBeLessThanOrEqual(
+    navigationBounds!.x,
+  );
 });

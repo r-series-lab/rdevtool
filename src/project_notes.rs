@@ -1001,16 +1001,16 @@ mod tests {
     #[test]
     fn project_notes_init_is_idempotent_and_does_not_overwrite_index() {
         let root = test_root();
-        let first = init_project_notes_in(&root, "imop-admin", "智能营销").expect("first init");
+        let first = init_project_notes_in(&root, "demo-console", "示例控制台").expect("first init");
         assert!(first.created);
         assert!(first.info.index_exists);
         assert_eq!(
             first.info.project_dir,
-            root.join("notes").join("projects").join("imop-admin")
+            root.join("notes").join("projects").join("demo-console")
         );
 
         fs::write(&first.info.index_path, "custom content").expect("write custom index");
-        let second = init_project_notes_in(&root, "imop-admin", "智能营销").expect("second init");
+        let second = init_project_notes_in(&root, "demo-console", "示例控制台").expect("second init");
         assert!(!second.created);
         assert_eq!(
             fs::read_to_string(&second.info.index_path).expect("read index"),
@@ -1029,10 +1029,10 @@ mod tests {
     #[test]
     fn file_index_searches_project_and_shared_notes_with_bounded_summaries() {
         let root = test_root();
-        init_project_notes_in(&root, "imop-admin", "智能营销").expect("init project notes");
+        init_project_notes_in(&root, "demo-console", "示例控制台").expect("init project notes");
         init_project_notes_in(&root, "other", "其他项目").expect("init other project notes");
         fs::write(
-            root.join("notes/projects/imop-admin/proxy-debug.md"),
+            root.join("notes/projects/demo-console/proxy-debug.md"),
             "# 本地代理排障\n\n遇到接口 500 时先确认代理监听和下一跳。",
         )
         .expect("write project note");
@@ -1052,14 +1052,14 @@ mod tests {
         )
         .expect("write inbox note");
 
-        let index = search_note_documents_in(&root, Some("imop-admin"), Some("代理"), 10)
+        let index = search_note_documents_in(&root, Some("demo-console"), Some("代理"), 10)
             .expect("search notes");
         assert_eq!(index.matched_count, 3);
         assert!(
             index
                 .documents
                 .iter()
-                .any(|note| note.project_key.as_deref() == Some("imop-admin"))
+                .any(|note| note.project_key.as_deref() == Some("demo-console"))
         );
         assert!(index.documents.iter().any(|note| note.scope == "playbook"));
         assert!(index.documents.iter().any(|note| note.scope == "inbox"));
@@ -1144,8 +1144,8 @@ mod tests {
             &root,
             CreateNoteDocumentRequest {
                 scope: "project".to_string(),
-                project_key: Some("imop-admin".to_string()),
-                project_name: Some("智能营销".to_string()),
+                project_key: Some("demo-console".to_string()),
+                project_name: Some("示例控制台".to_string()),
                 title: "代理排障".to_string(),
             },
         )
@@ -1154,8 +1154,8 @@ mod tests {
             &root,
             CreateNoteDocumentRequest {
                 scope: "project".to_string(),
-                project_key: Some("imop-admin".to_string()),
-                project_name: Some("智能营销".to_string()),
+                project_key: Some("demo-console".to_string()),
+                project_name: Some("示例控制台".to_string()),
                 title: "代理排障".to_string(),
             },
         )
@@ -1166,13 +1166,13 @@ mod tests {
             "new notes must never overwrite an existing Markdown file"
         );
         assert_eq!(first.document.summary.scope, "project");
-        assert!(first.document.content.contains("适用项目：`imop-admin`"));
+        assert!(first.document.content.contains("适用项目：`demo-console`"));
         let reread =
             read_note_document_in(&root, &first.document.summary.path).expect("read created note");
         assert_eq!(reread.summary.title, "代理排障");
 
         let project_index =
-            search_note_documents_scoped_in(&root, Some("imop-admin"), Some("project"), None, 24)
+            search_note_documents_scoped_in(&root, Some("demo-console"), Some("project"), None, 24)
                 .expect("index project notes");
         assert_eq!(
             project_index

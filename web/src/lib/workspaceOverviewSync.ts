@@ -19,6 +19,70 @@ export type WorkspaceOverviewPatchResult<TOverview> = {
   missingWorkspaceKeys: string[];
 };
 
+export type WorkspaceOverviewScope<TOverview> = {
+  activeGroup: TOverview | null;
+  systemScope: boolean;
+  workspaceIndexGroups: TOverview[];
+};
+
+export const WORKSPACE_ACTION_PREVIEW_LIMIT = 4;
+
+export function workspaceActionPreview<T>(
+  actions: T[],
+  expanded: boolean,
+  limit = WORKSPACE_ACTION_PREVIEW_LIMIT,
+) {
+  const normalizedLimit = Math.max(0, limit);
+  const items = expanded ? actions : actions.slice(0, normalizedLimit);
+  return {
+    items,
+    hiddenCount: Math.max(0, actions.length - items.length),
+    expandable: actions.length > normalizedLimit,
+  };
+}
+
+function resolveActiveWorkspaceOverview<
+  TOverview extends { key: string; system?: boolean },
+>(groups: TOverview[], activeWorkspaceKey: string): TOverview | null {
+  return (
+    groups.find((group) => group.key === activeWorkspaceKey) ??
+    groups.find((group) => group.system) ??
+    groups[0] ??
+    null
+  );
+}
+
+export function resolveWorkspaceOverviewScope<
+  TOverview extends { key: string; system: boolean },
+>(
+  groups: TOverview[],
+  activeWorkspaceKey: string,
+): WorkspaceOverviewScope<TOverview> {
+  const activeGroup = resolveActiveWorkspaceOverview(
+    groups,
+    activeWorkspaceKey,
+  );
+  const systemScope = activeGroup?.system ?? activeWorkspaceKey === "system";
+
+  return {
+    activeGroup,
+    systemScope,
+    workspaceIndexGroups: systemScope
+      ? groups.filter((group) => !group.system)
+      : [],
+  };
+}
+
+export function workspaceOverviewDetailKeys<
+  TOverview extends { key: string; system?: boolean },
+>(groups: TOverview[], activeWorkspaceKey: string): string[] {
+  const activeGroup = resolveActiveWorkspaceOverview(
+    groups,
+    activeWorkspaceKey,
+  );
+  return activeGroup ? [activeGroup.key] : [];
+}
+
 export function mergeWorkspaceActionPatches<
   TOverview extends WorkspaceActionsOverview,
 >(

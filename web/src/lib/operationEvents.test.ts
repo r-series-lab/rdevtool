@@ -3,6 +3,7 @@ import type { OperationEventEntry } from "../app-types";
 import {
   activityFromLifecycleOperationEvent,
   activityFromOperationEvent,
+  activityFromResourceActionOperationEvent,
   buildHistoryFromOperationEvent,
   buildReplayRequestFromOperationEvent,
   isOperationEventEntry,
@@ -81,6 +82,63 @@ describe("operation events", () => {
 
   it("rejects an event without a stable version", () => {
     expect(isOperationEventEntry({ ...event(), version: 2 })).toBe(false);
+  });
+
+  it("restores a durable resource Action activity without secret values", () => {
+    const value: OperationEventEntry = {
+      ...event(),
+      id: "action-123",
+      domain: "action",
+      action: "run",
+      state: "failed",
+      title: "执行参数化 Action",
+      summary: "部分部署任务未能提交",
+      detail: "示例控制台: failed",
+      payload: {
+        actionKey: "batch-deploy-pre",
+        effect: "remote_write",
+        configPath: "/tmp/actions.toml",
+        params: { projects: ["demo-console"], planOnly: false },
+        providedSecretParams: ["token"],
+        sideEffectOccurred: null,
+        result: {
+          structuredResult: {
+            items: [
+              {
+                key: "demo-console",
+                label: "示例控制台",
+                status: "failed",
+                summary: "部署触发失败",
+                detail: "HTTP 403",
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    expect(activityFromResourceActionOperationEvent(value)).toMatchObject({
+      id: "action-123",
+      kind: "shortcut",
+      status: "failed",
+      executionKey: "action-123",
+      parameters: [
+        { key: "projects", value: "demo-console", masked: false },
+        { key: "planOnly", value: "否", masked: false },
+        { key: "token", value: "已提供", masked: true },
+      ],
+      diagnostics: [
+        {
+          id: "action:demo-console",
+          status: "failed",
+          summary: "部署触发失败",
+          risks: ["HTTP 403"],
+        },
+      ],
+      warnings: ["远程写入结果不明确，请先检查目标系统和运行日志，不要直接重试。"],
+      resource: { value: "/tmp/actions.toml" },
+      target: { page: "resources" },
+    });
   });
 
   it("accepts an active build event and restores its compatibility history", () => {
@@ -302,11 +360,11 @@ describe("operation events", () => {
       action: "run",
       state: "failed",
       title: "启动联调链路",
-      summary: "合作渠道联调 · 完成 1 / 失败 1 / 跳过 0",
+      summary: "示例联调 · 完成 1 / 失败 1 / 跳过 0",
       detail: "启动代理：端口已被占用",
       payload: {
-        linkKey: "cooperation-debug",
-        linkName: "合作渠道联调",
+        linkKey: "demo-debug",
+        linkName: "示例联调",
         mode: "run",
         sourceId: "workspace-links",
         proxySourceId: "workspace-proxy",
@@ -330,7 +388,7 @@ describe("operation events", () => {
       kind: "link",
       origin: "tray",
       status: "failed",
-      executionKey: "link:run:cooperation-debug",
+      executionKey: "link:run:demo-debug",
       detail: "启动代理：端口已被占用",
       diagnostics: [
         expect.objectContaining({
@@ -343,8 +401,8 @@ describe("operation events", () => {
       action: {
         kind: "linkRecover",
         label: "检查并重新启动",
-        linkKey: "cooperation-debug",
-        linkName: "合作渠道联调",
+        linkKey: "demo-debug",
+        linkName: "示例联调",
         sourceId: "workspace-links",
         proxySourceId: "workspace-proxy",
         runtimeSourceId: "workspace-runtime",

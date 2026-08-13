@@ -18,6 +18,8 @@ import { PageErrorBoundary } from "./components/PageErrorBoundary";
 import { useAppShell } from "./hooks/useAppShell";
 import { useActivityCenter } from "./hooks/useActivityCenter";
 import { useActivityPreferences } from "./hooks/useActivityPreferences";
+import { useActiveSessions } from "./hooks/useActiveSessions";
+import { useActiveSessionEvents } from "./hooks/useActiveSessionEvents";
 import { useAppBootstrap } from "./hooks/useAppBootstrap";
 import { useBranchContext } from "./hooks/useBranchContext";
 import { useMergeSelection } from "./hooks/useMergeSelection";
@@ -39,6 +41,12 @@ import type {
   WorkspaceConfigFocusRequest,
 } from "./app-types";
 import type { ActivityEntry } from "./lib/activityCenter";
+import type {
+  ActiveSession,
+  ActiveSessionAction,
+  ActiveSessionActionResult,
+  ActiveSessionPortInspection,
+} from "./lib/activeSessions";
 import {
   linkActivityDraft,
   linkActivityFailurePatch,
@@ -64,6 +72,11 @@ type AppInfo = {
   workspacesPath?: string;
   navigationPath?: string;
   linksPath?: string;
+};
+
+type CancelResourceActionResponse = {
+  operationId: string;
+  accepted: boolean;
 };
 
 const WORKFLOW_AUTO_OPEN_WINDOW_MS = 10 * 60 * 1000;
@@ -266,9 +279,13 @@ function App() {
       ) ?? null,
     [appShell.projects, branchContextProject],
   );
+  const branchContextEnabled =
+    branchEnabled && Boolean(branchContextProjectInfo?.supportsBranch);
   const branchContext = useBranchContext({
-    enabled: branchEnabled,
+    enabled: branchContextEnabled,
+    workspaceKey: appShell.activeProjectWorkspaceKey,
     selectedProject: branchContextProject,
+    repoPath: branchContextProjectInfo?.repoPath,
     branchCache: appShell.branchCache,
     setBranchCache: appShell.setBranchCache,
     projectSelections: appShell.projectSelections,
@@ -281,6 +298,7 @@ function App() {
     selectedProjectInfo: branchContextProjectInfo,
     branchEntries: branchContext.branchEntries,
     branchOptions: branchContext.branchOptions,
+    selectionStorageKey: branchContext.selectionStorageKey,
     selectedProjectSelection: branchContext.selectedProjectSelection,
     setProjectSelections: appShell.setProjectSelections,
   });
@@ -322,7 +340,7 @@ function App() {
     void mergeModule.loadBranchTaskHistory();
   }, [appShell.activeProjectWorkspaceKey, mergeEnabled]);
   const projectsModule = useProjectsModule({
-    enabled: projectsAvailable,
+    enabled: appShell.storageHydrated,
     active: projectsModuleActive,
     activeProjectWorkspaceKey: appShell.activeProjectWorkspaceKey,
     setBusy,
@@ -339,6 +357,25 @@ function App() {
     recordActivity: activityCenter.recordActivity,
     updateActivity: activityCenter.updateActivity,
   });
+  const activeSessions = useActiveSessions({
+    enabled: appShell.storageHydrated,
+    workspaceKey: appShell.activeProjectWorkspaceKey,
+    runtimeEntries: projectsModule.runtimeEntries,
+    activeProjectKeys,
+    includeAllProjects: activeProjectWorkspace?.includeAllProjects ?? true,
+  });
+  const requestActiveSessionsRefresh = useActiveSessionEvents({
+    enabled: appShell.storageHydrated,
+    workspaceKey: appShell.activeProjectWorkspaceKey,
+    refresh: () => refreshActiveSessions({ silent: true }),
+  });
+
+  useEffect(() => {
+    if (!appShell.storageHydrated) {
+      return;
+    }
+    void projectsModule.loadProjectRuntimes();
+  }, [appShell.activeProjectWorkspaceKey, appShell.storageHydrated]);
   const trayDomainActionRunningRef = useRef(false);
   const trayDomainActionHandlerRef = useRef<
     (action: TrayPinnedAction) => Promise<void>
@@ -1071,6 +1108,135 @@ function App() {
     }
   }
 
+  async function refreshActiveSessions(options: { silent?: boolean } = {}) {
+    await Promise.all([
+      projectsModule.loadProjectRuntimes(),
+      activeSessions.refresh(options),
+    ]);
+  }
+
+  async function runActiveSessionAction(
+    session: ActiveSession,
+    action: ActiveSessionAction,
+  ): Promise<ActiveSessionActionResult> {
+    setError("");
+    try {
+      if (action === "inspect") {
+        if (!session.port) {
+          return { ok: false, message: "当前资源没有可诊断的监听端口。" };
+        }
+        const inspection = await invoke<ActiveSessionPortInspection>(
+          "inspect_active_session_port",
+          {
+            port: session.port,
+            projectKey: session.projectKey ?? null,
+            proxySourceId: session.proxySourceId ?? null,
+            proxyProfileId: session.proxyProfileId ?? null,
+          },
+        );
+        return { ok: true, inspection };
+      }
+
+      if (action === "details") {
+        if (session.kind === "action") {
+          appShell.setPage("resources");
+        } else if (
+          session.kind === "proxy" &&
+          session.proxyProfileId &&
+          session.proxySourceId
+        ) {
+          await proxyModule.loadProxyDashboard({
+            sourceId: session.proxySourceId,
+          });
+          proxyModule.setSelectedProfileId(session.proxyProfileId);
+          appShell.setPage("proxy");
+        } else if (session.projectKey) {
+          openProjectManagementTarget(session.projectKey, {
+            kind: "runtimePanel",
+            tab: "overview",
+          });
+        }
+        return { ok: true };
+      }
+
+      if (action === "openLog" && session.logPath) {
+        await invoke("open_external_resource", {
+          kind: "localPath",
+          value: session.logPath,
+        });
+        return { ok: true };
+      }
+
+      let mutationSucceeded = true;
+      if (session.kind === "action") {
+        if (action === "stop" && session.operationId) {
+          const response = await invoke<CancelResourceActionResponse>(
+            "cancel_resource_action",
+            { operationId: session.operationId },
+          );
+          mutationSucceeded = response.accepted;
+        }
+      } else if (session.kind === "proxy") {
+        if (
+          action === "stop" &&
+          session.proxyProfileId &&
+          session.proxySourceId
+        ) {
+          await proxyModule.stopProxyProfile(
+            session.proxyProfileId,
+            session.proxySourceId,
+          );
+        }
+      } else if (session.projectKey) {
+        if (action === "adopt") {
+          mutationSucceeded = await projectsModule.handleAdoptRuntime(
+            session.projectKey,
+          );
+        } else if (action === "focus") {
+          await projectsModule.handleFocusRuntime(session.projectKey);
+        } else if (action === "openDirectory") {
+          await projectsModule.handleOpenProjectDirectory(session.projectKey);
+        } else if (action === "openOutput") {
+          await projectsModule.handleOpenBuildOutput(session.projectKey);
+        } else if (action === "stop") {
+          if (session.kind === "build") {
+            mutationSucceeded = await projectsModule.handleStopBuild(
+              session.projectKey,
+            );
+          } else {
+            mutationSucceeded = await projectsModule.handleStopRuntime(
+              session.projectKey,
+            );
+          }
+        }
+      }
+      return mutationSucceeded
+        ? {
+            ok: true,
+            message:
+              action === "adopt"
+                ? "已纳入 rDevTool 管理"
+                : action === "stop"
+                  ? session.kind === "action"
+                    ? "Action 已请求停止"
+                    : "运行资源已停止"
+                  : null,
+          }
+        : {
+            ok: false,
+            message: "操作未完成，请查看活动记录或页面提示。",
+          };
+    } catch (reason) {
+      const message = String(reason);
+      setError(message);
+      return { ok: false, message };
+    } finally {
+      if (action === "adopt" || action === "stop") {
+        requestActiveSessionsRefresh({ immediate: true });
+      }
+    }
+  }
+
   return (
     <ThemeProvider theme={appTheme}>
       <CssBaseline />
@@ -1102,6 +1268,9 @@ function App() {
         onProjectConfigSaved={reloadProjectsAfterConfigSave}
         activityItems={activityCenter.items}
         activityAlertCount={activityCenter.stats.attention}
+        activeSessions={activeSessions.sessions}
+        activeSessionsLoading={activeSessions.loading}
+        activeSessionsError={activeSessions.error}
         onOpenActivityEntry={openActivityEntry}
         onOpenActivityResource={(entry) => {
           void openActivityResource(entry);
@@ -1119,6 +1288,8 @@ function App() {
             setError(String(reason));
           });
         }}
+        onRefreshActiveSessions={refreshActiveSessions}
+        onRunActiveSessionAction={runActiveSessionAction}
         busy={busy}
         error={error}
       >
@@ -1160,7 +1331,9 @@ function App() {
           await projectsModule.handleStopRuntime(projectKey);
         }}
         onRunBuild={projectsModule.handleRunBuild}
-        onStopBuild={projectsModule.handleStopBuild}
+        onStopBuild={async (projectKey) => {
+          await projectsModule.handleStopBuild(projectKey);
+        }}
         onOpenBuildOutput={projectsModule.handleOpenBuildOutput}
         onFocusRuntime={projectsModule.handleFocusRuntime}
         onOpenProjectDirectory={projectsModule.handleOpenProjectDirectory}

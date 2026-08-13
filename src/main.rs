@@ -1,6 +1,7 @@
 mod desktop;
 mod tui;
 
+mod cli_capabilities;
 mod cli_docs;
 mod cli_operation_context;
 mod cli_output;
@@ -10,6 +11,10 @@ mod cli_workspace_chains;
 
 use anyhow::Result;
 use clap::{Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
+use cli_capabilities::{
+    AgentCompatibilityReport, compatibility_report, enrich_capabilities,
+    retain_context_command_specs,
+};
 use cli_operation_context::save_cli_operation_event;
 use cli_output::BuildStatusField;
 use rdevtool_core::agent::{
@@ -34,12 +39,16 @@ use rdevtool_core::config::{
     load_config, load_project_workspace_by_key, load_project_workspaces, load_workspace_config,
     resolve_config_path, save_config, save_project_workspace_config, save_workspace_config,
 };
+use rdevtool_core::config_pack::{
+    ConfigPackConflictStrategy, ConfigPackExportRequest, ConfigPackImportRequest,
+    apply_config_pack_import, config_pack_inventory, export_config_pack, inspect_config_pack,
+    plan_config_pack_import, rollback_config_pack_import,
+};
 use rdevtool_core::config_sources::{
     ConfigSource, ConfigSourceReference, CopyConfigSourceRequest,
     apply_runtime_overrides_for_source, compare_config_sources, config_source_supports,
-    config_sources_file_path, copy_config_source, list_config_sources,
-    preferred_config_source_id_for_scope, resolve_config_source,
-    resolve_config_source_for_workspace, save_config_source_preference,
+    copy_config_source, list_config_sources, preferred_config_source_id_for_scope,
+    resolve_config_source, resolve_config_source_for_workspace, save_config_source_preference,
 };
 use rdevtool_core::core::{
     self, BranchCheckoutRequest, BranchCommitOverview, BranchCreateRequest, BranchFileDiffRequest,
@@ -49,7 +58,10 @@ use rdevtool_core::core::{
     branch_push_status, checkout_branch_to_directory, execute_branch_create, execute_branch_push,
     execute_branch_switch, execute_branch_sync, parse_extra_params_args, plan_branch_sync,
 };
-use rdevtool_core::health::{HealthSnapshot, collect_health_snapshot};
+use rdevtool_core::doctor::{
+    DoctorCheck, DoctorPaths, DoctorRequest, DoctorStatus, inspect_doctor,
+};
+use rdevtool_core::health::HealthSnapshot;
 use rdevtool_core::link::{
     LinkConfig, LinkExecutionReport, LinkExecutionStepReport, LinkSourceContext, LinkStepConfig,
     LinkWorkspaceAttachRequest, attach_link_to_workspace_from_path, delete_link_from_path,
@@ -77,7 +89,7 @@ use rdevtool_core::project_notes::{
 };
 use rdevtool_core::proxy::{
     PROXY_VERIFY_ID_HEADER, ProxyConfig, ProxyEvent, ProxyOutboundMode, ProxyProfile,
-    ProxyProfilePack, ProxyRequestDiagnosis, ProxyRule, ProxyRuleAction, default_proxy_path,
+    ProxyProfilePack, ProxyRequestDiagnosis, ProxyRule, ProxyRuleAction,
     delete_proxy_profile as core_delete_proxy_profile, delete_proxy_rule as core_delete_proxy_rule,
     diagnose_proxy_request, ensure_proxy_config, export_proxy_profile_pack,
     import_proxy_profile_pack, load_proxy_config, save_proxy_config, upsert_proxy_profile,
@@ -90,6 +102,15 @@ use rdevtool_core::proxy_daemon::{
 use rdevtool_core::replay::{
     ReplayAction, ReplayBranchConflict, build_replay_action, merge_replay_action,
     normalize_build_replay_request, replay_kind_and_history_key,
+};
+use rdevtool_core::resource_actions::{
+    ResourceActionApplyRequest, ResourceActionEffect, ResourceActionExecutionContext,
+    ResourceActionExecutionMode, ResourceActionParamRole, ResourceActionPlan,
+    ResourceActionRunRequest, ResourceActionRunResult, ResourceActionView,
+    apply_resource_action_plan_from_path_with_context, default_resource_actions_path,
+    get_resource_action_plan, plan_resource_action_from_path_with_context,
+    resource_action_catalog_from_path, resource_action_view_from_path_with_context,
+    run_resource_action_from_path_with_context, validate_resource_action_request_from_path,
 };
 use rdevtool_core::runtime::{
     ProjectRuntimeFocusResponse, ProjectRuntimeInspectResponse, ProjectRuntimeLaunchOptions,
@@ -120,6 +141,7 @@ use rdevtool_core::web_actions::{
 };
 use rdevtool_core::workspace_init::{
     InitDemandWorkspaceAction, InitDemandWorkspaceBranch, InitDemandWorkspaceCopyMode,
+    InitDemandWorkspaceDependencyLink, InitDemandWorkspaceDependencyMode,
     InitDemandWorkspaceEffective, InitDemandWorkspaceObserved, InitDemandWorkspaceProject,
     InitDemandWorkspaceRequest, InitDemandWorkspaceRequested, InitDemandWorkspaceRequirementEntry,
     InitDemandWorkspaceResult, init_demand_workspace,
@@ -133,12 +155,12 @@ use rdevtool_core::workspace_resources::{
     append_workspace_worklog, initialize_workspace_resources, read_workspace_worklog,
     set_workspace_worklog_auto_record, workspace_resource_status,
 };
+use rdevtool_core::workspace_review::{WorkspaceReviewRequest, review_workspace};
 use serde::Serialize;
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{self, Read};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 
 const BRANCH_WORKFLOW_STORAGE_NAMESPACE: &str = "branch-workflow";
@@ -162,11 +184,12 @@ impl std::error::Error for CliReportedFailure {}
 #[derive(Parser)]
 #[command(name = "rdevtool")]
 #[command(bin_name = "rdevtool")]
-#[command(about = "A lightweight frontend workspace helper.")]
+#[command(version)]
+#[command(about = "A local development workbench for projects, runtimes, builds, and agents.")]
 struct Cli {
-    #[arg(long)]
+    #[arg(long, env = "RDEVTOOL_CONFIG_PATH")]
     config: Option<PathBuf>,
-    #[arg(long = "workspace", value_name = "KEY")]
+    #[arg(long = "workspace", value_name = "KEY", env = "RDEVTOOL_WORKSPACE_KEY")]
     workspace_scope: Option<String>,
     #[arg(long, global = true)]
     json: bool,
@@ -176,9 +199,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Open the native desktop workbench.
     Desktop,
+    /// Show executable identity, paths, active workspace, and credential presence.
     Info,
+    /// Publish machine-readable CLI features and structured command metadata.
     Capabilities,
+    /// Inspect configuration, workspace, runtime, storage, and installation health.
     Doctor {
         #[arg(long)]
         project: Option<String>,
@@ -187,10 +214,13 @@ enum Commands {
         #[arg(long)]
         runtime_profile: Option<String>,
     },
+    /// Generate CLI reference documentation from the current command definitions.
     Docs {
         #[command(subcommand)]
         command: DocsCommands,
     },
+    /// Legacy alias for `agent context`.
+    #[command(hide = true)]
     Context {
         #[arg(long)]
         project: Option<String>,
@@ -199,39 +229,44 @@ enum Commands {
         #[arg(long, default_value_t = 6)]
         limit: usize,
     },
+    /// Read and update application preferences.
     App {
         #[command(subcommand)]
         command: AppCommands,
     },
+    /// Manage global, scoped, and demand workspaces.
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommands,
     },
+    /// Inspect and configure projects, targets, and debug profiles.
     Projects {
         #[command(subcommand)]
         command: ProjectCommands,
     },
+    #[command(hide = true)]
     List,
+    /// Open the terminal user interface.
     Tui,
-    Show {
-        project: String,
-    },
-    Branch {
-        project: String,
-    },
-    Branches {
-        project: String,
-    },
+    #[command(hide = true)]
+    Show { project: String },
+    #[command(hide = true)]
+    Branch { project: String },
+    #[command(hide = true)]
+    Branches { project: String },
+    #[command(hide = true)]
     Envs {
         project: String,
         #[arg(long)]
         target: Option<String>,
     },
+    #[command(hide = true)]
     Options {
         project: String,
         #[arg(long)]
         target: Option<String>,
     },
+    #[command(hide = true)]
     Plan {
         project: String,
         #[arg(long)]
@@ -243,6 +278,7 @@ enum Commands {
         #[arg(long = "set")]
         extra_params: Vec<String>,
     },
+    #[command(hide = true)]
     Trigger {
         project: String,
         #[arg(long)]
@@ -254,30 +290,37 @@ enum Commands {
         #[arg(long = "set")]
         extra_params: Vec<String>,
     },
+    #[command(hide = true)]
     Status {
         #[arg(long)]
         queue_url: Option<String>,
         #[arg(long)]
         build_url: Option<String>,
     },
+    /// Compatibility aliases for the Build domain.
+    #[command(hide = true)]
     Deploy {
         #[command(subcommand)]
         command: DeployCommands,
     },
+    /// Plan, run, follow, and inspect builds.
     Build {
         #[command(subcommand)]
         command: BuildCommands,
     },
+    /// Inspect repositories and run controlled Git workflows.
     Git {
         #[command(subcommand)]
         command: GitCommands,
     },
+    /// Migrate legacy project configuration into the current schema.
     MigrateConfig {
         #[arg(long)]
         input: Option<PathBuf>,
         #[arg(long)]
         output: Option<PathBuf>,
     },
+    #[command(hide = true)]
     MergeOverview {
         project: String,
         #[arg(long)]
@@ -285,6 +328,7 @@ enum Commands {
         #[arg(long)]
         target: String,
     },
+    #[command(hide = true)]
     Merge {
         project: String,
         #[arg(long)]
@@ -292,6 +336,7 @@ enum Commands {
         #[arg(long)]
         target: String,
     },
+    #[command(hide = true)]
     SyncBranches {
         #[arg(long = "project")]
         projects: Vec<String>,
@@ -302,6 +347,7 @@ enum Commands {
         #[arg(long, visible_alias = "dry-run")]
         plan: bool,
     },
+    #[command(hide = true)]
     CreateBranch {
         #[arg(long = "project")]
         projects: Vec<String>,
@@ -310,6 +356,7 @@ enum Commands {
         #[arg(long = "target")]
         target_branch: String,
     },
+    #[command(hide = true)]
     CheckoutBranch {
         #[arg(long)]
         project: String,
@@ -318,66 +365,96 @@ enum Commands {
         #[arg(long)]
         destination: PathBuf,
     },
+    #[command(hide = true)]
     SwitchBranch {
         #[arg(long)]
         project: String,
         #[arg(long = "target")]
         target_branch: String,
     },
+    #[command(hide = true)]
     PushStatus {
         #[arg(long)]
         project: String,
     },
+    #[command(hide = true)]
     PushBranch {
         #[arg(long)]
         project: String,
         #[arg(long)]
         message: Option<String>,
     },
+    /// Search and manage workspace resource entry points.
     Navigation {
         #[command(subcommand)]
         command: NavigationCommands,
     },
+    /// Inspect and run reusable local debugging chains.
     Link {
         #[arg(long, global = true)]
         source: Option<String>,
         #[command(subcommand)]
         command: LinkCommands,
     },
+    /// Compare, copy, and select workspace configuration sources.
     ConfigSource {
         #[command(subcommand)]
         command: ConfigSourceCommands,
     },
+    /// Export, inspect, plan, apply, and roll back portable configuration packs.
+    Pack {
+        #[command(subcommand)]
+        command: PackCommands,
+    },
+    /// Inspect, validate, and run parameterized resource Actions.
+    Action {
+        /// Resource config source ID or workspace key.
+        #[arg(long, global = true)]
+        source: Option<String>,
+        /// Use an Action config file directly instead of a managed config source.
+        #[arg(long, global = true, value_name = "PATH", conflicts_with = "source")]
+        file: Option<PathBuf>,
+        #[command(subcommand)]
+        command: ActionCommands,
+    },
+    /// Configure and operate local proxy profiles and rules.
     Proxy {
         #[arg(long, global = true)]
         source: Option<String>,
         #[command(subcommand)]
         command: ProxyCommands,
     },
+    /// Inspect, start, diagnose, and follow project runtimes.
     Runtime {
         #[command(subcommand)]
         command: RuntimeCommands,
     },
+    /// Inventory managed files and produce safe cleanup plans.
     Artifacts {
         #[command(subcommand)]
         command: ArtifactCommands,
     },
+    /// Run registered browser actions against controlled targets.
     WebActions {
         #[command(subcommand)]
         command: WebActionCommands,
     },
+    /// Search and maintain Markdown project knowledge.
     Notes {
         #[command(subcommand)]
         command: NoteCommands,
     },
+    /// Inspect operation history and safely prepare replays.
     History {
         #[command(subcommand)]
         command: HistoryCommands,
     },
+    /// Plan and execute composed development workflows.
     Workflow {
         #[command(subcommand)]
         command: WorkflowCommands,
     },
+    /// Expose compact context, capabilities, and Skill compatibility for AI agents.
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
@@ -400,6 +477,66 @@ enum AppCommands {
 }
 
 #[derive(Subcommand)]
+enum ActionCommands {
+    /// Print the resolved Action config path.
+    Path,
+    /// List configured Actions.
+    List,
+    /// Show one resolved Action, including runner and parameters.
+    Show { key: String },
+    /// Validate the full Action config or one Action key.
+    Validate { key: Option<String> },
+    /// Generate and persist a trusted plan for a plan/apply Action.
+    Plan {
+        key: String,
+        /// JSON parameter object; use '-' to read from stdin.
+        #[arg(long, value_name = "JSON", conflicts_with = "params_file")]
+        params_json: Option<String>,
+        /// Read the JSON parameter object from a file; use '-' for stdin.
+        #[arg(long, value_name = "PATH")]
+        params_file: Option<PathBuf>,
+        /// Set or override one parameter; JSON values are parsed when possible.
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+    },
+    /// Show a persisted Action plan without executing it.
+    PlanShow { plan_id: String },
+    /// Apply one unexpired, unconsumed Action plan.
+    Apply {
+        #[arg(long)]
+        plan_id: String,
+        /// JSON parameter object; use '-' to read from stdin.
+        #[arg(long, value_name = "JSON", conflicts_with = "params_file")]
+        params_json: Option<String>,
+        /// Read the JSON parameter object from a file; use '-' for stdin.
+        #[arg(long, value_name = "PATH")]
+        params_file: Option<PathBuf>,
+        /// Set or override a planned parameter; secrets must be supplied again.
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        /// Allow applying a plan that can change local or remote state.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Validate parameters and run an Action.
+    Run {
+        key: String,
+        /// JSON parameter object; use '-' to read from stdin.
+        #[arg(long, value_name = "JSON", conflicts_with = "params_file")]
+        params_json: Option<String>,
+        /// Read the JSON parameter object from a file; use '-' for stdin.
+        #[arg(long, value_name = "PATH")]
+        params_file: Option<PathBuf>,
+        /// Set or override one parameter; JSON values are parsed when possible.
+        #[arg(long = "set", value_name = "KEY=VALUE")]
+        set: Vec<String>,
+        /// Allow an Action that can change local or remote state.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum WorkspaceCommands {
     List {
         #[arg(long)]
@@ -411,6 +548,13 @@ enum WorkspaceCommands {
     },
     Show {
         workspace: Option<String>,
+    },
+    Review {
+        workspace: Option<String>,
+        #[arg(long = "base", value_name = "PROJECT=REF")]
+        bases: Vec<String>,
+        #[arg(long = "allow-path", value_name = "PROJECT=PATH")]
+        allowed_paths: Vec<String>,
     },
     Create {
         key: String,
@@ -460,6 +604,8 @@ enum WorkspaceCommands {
         instance_dir: Option<PathBuf>,
         #[arg(long, value_enum, default_value_t = WorkspaceCopyModeArg::Existing)]
         copy_mode: WorkspaceCopyModeArg,
+        #[arg(long, value_enum, default_value_t = WorkspaceDependencyModeArg::AutoLink)]
+        dependency_mode: WorkspaceDependencyModeArg,
         #[arg(long)]
         resource_dir: Option<PathBuf>,
         #[arg(long)]
@@ -566,6 +712,21 @@ enum WorkspaceCopyModeArg {
     Existing,
     Worktree,
     Clone,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum WorkspaceDependencyModeArg {
+    None,
+    AutoLink,
+}
+
+impl From<WorkspaceDependencyModeArg> for InitDemandWorkspaceDependencyMode {
+    fn from(value: WorkspaceDependencyModeArg) -> Self {
+        match value {
+            WorkspaceDependencyModeArg::None => InitDemandWorkspaceDependencyMode::None,
+            WorkspaceDependencyModeArg::AutoLink => InitDemandWorkspaceDependencyMode::AutoLink,
+        }
+    }
 }
 
 impl From<WorkspaceCopyModeArg> for InitDemandWorkspaceCopyMode {
@@ -1559,6 +1720,77 @@ enum ConfigSourceCommands {
 }
 
 #[derive(Subcommand)]
+enum PackCommands {
+    /// List projects, workspaces, and configuration sources available for export.
+    Inventory,
+    /// Export selected configuration modules to a portable .rdtpack archive.
+    Export {
+        output: PathBuf,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long = "project")]
+        projects: Vec<String>,
+        #[arg(long = "workspace")]
+        workspaces: Vec<String>,
+        #[arg(long = "config-source")]
+        config_sources: Vec<String>,
+        #[arg(long)]
+        no_projects: bool,
+        #[arg(long)]
+        no_workspaces: bool,
+        #[arg(long)]
+        preferences: bool,
+        #[arg(long)]
+        include_config_sources: bool,
+        #[arg(long)]
+        no_dependencies: bool,
+    },
+    /// Validate a .rdtpack archive and show its manifest and contents.
+    Inspect { pack: PathBuf },
+    /// Resolve mappings and conflicts, then persist an import plan.
+    ImportPlan {
+        pack: PathBuf,
+        #[arg(long, value_enum, default_value_t = PackConflictArg::Merge)]
+        strategy: PackConflictArg,
+        #[arg(long = "project-root", value_name = "KEY=PATH")]
+        project_roots: Vec<String>,
+        #[arg(long = "workspace-root", value_name = "KEY=PATH")]
+        workspace_roots: Vec<String>,
+        #[arg(long = "config-source-map", value_name = "SOURCE=TARGET")]
+        config_source_mappings: Vec<String>,
+        #[arg(long)]
+        require_secrets: bool,
+    },
+    /// Apply a previously persisted import plan after revalidating its inputs.
+    ImportRun {
+        #[arg(long)]
+        plan_hash: String,
+    },
+    /// Restore every file changed by a completed import transaction.
+    Rollback { transaction_id: String },
+}
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum PackConflictArg {
+    Add,
+    #[default]
+    Merge,
+    Replace,
+    Skip,
+}
+
+impl From<PackConflictArg> for ConfigPackConflictStrategy {
+    fn from(value: PackConflictArg) -> Self {
+        match value {
+            PackConflictArg::Add => Self::Add,
+            PackConflictArg::Merge => Self::Merge,
+            PackConflictArg::Replace => Self::Replace,
+            PackConflictArg::Skip => Self::Skip,
+        }
+    }
+}
+
+#[derive(Subcommand)]
 enum ProxyCommands {
     Path,
     Source {
@@ -2065,6 +2297,12 @@ enum WebActionCommands {
 #[derive(Subcommand)]
 enum AgentCommands {
     Capabilities,
+    /// Verify that the installed CLI satisfies the rDevTool Skill contract.
+    Compatibility {
+        /// Skill manifest path; defaults to the installed rDevTool Skill manifest.
+        #[arg(long)]
+        skill_manifest: Option<PathBuf>,
+    },
     Context {
         #[arg(long)]
         project: Option<String>,
@@ -2387,6 +2625,18 @@ fn run_cli(cli: Cli) -> Result<()> {
             run_link(command, config_override, source.as_deref(), json)
         }
         Commands::ConfigSource { command } => run_config_source(command, json),
+        Commands::Pack { command } => run_pack(command, json),
+        Commands::Action {
+            source,
+            file,
+            command,
+        } => run_action(
+            command,
+            config_override,
+            source.as_deref(),
+            file.as_deref(),
+            json,
+        ),
         Commands::Proxy { source, command } => {
             run_proxy(command, config_override, source.as_deref(), json)
         }
@@ -2420,7 +2670,7 @@ fn run_cli(cli: Cli) -> Result<()> {
         }
         Commands::Agent { command } => {
             let context_input = match &command {
-                AgentCommands::Capabilities => None,
+                AgentCommands::Capabilities | AgentCommands::Compatibility { .. } => None,
                 AgentCommands::Context { .. } => Some(load_cli_context(config_override)?),
             };
             run_agent(context_input.as_ref(), command, json)
@@ -2566,6 +2816,7 @@ struct AppInfo {
     active_workspace: String,
     storage_path: String,
     navigation_file_path: String,
+    resource_actions_file_path: String,
     project_count: usize,
     jenkins_profiles: Vec<JenkinsProfileInfo>,
     gitlab_token_env: String,
@@ -2603,30 +2854,6 @@ struct DoctorReport {
     active_workspace: Option<ProjectWorkspaceCliInfo>,
     runtime_preflight: Option<ProjectRuntimePreflightResponse>,
     checks: Vec<DoctorCheck>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DoctorPaths {
-    config_dir: String,
-    projects: String,
-    workspace: String,
-    workspaces_dir: String,
-    navigation: String,
-    proxy: String,
-    config_sources: String,
-    proxy_active: Option<String>,
-    web_actions: String,
-    storage: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DoctorCheck {
-    status: DoctorStatus,
-    code: String,
-    message: String,
-    detail: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2818,6 +3045,7 @@ struct InitDemandWorkspaceCliInfo {
     schema_version: u32,
     dry_run: bool,
     copy_mode: InitDemandWorkspaceCopyMode,
+    dependency_mode: InitDemandWorkspaceDependencyMode,
     requested: InitDemandWorkspaceRequested,
     effective: InitDemandWorkspaceEffective,
     observed: InitDemandWorkspaceObserved,
@@ -2836,6 +3064,7 @@ struct InitDemandWorkspaceCliInfo {
     warnings: Vec<String>,
     source_repository_validation: Option<WorkspaceProjectInstanceValidation>,
     project_instance_validation: Option<WorkspaceProjectInstanceValidation>,
+    dependency_links: Vec<InitDemandWorkspaceDependencyLink>,
 }
 
 struct WorkspaceScopeUpdate {
@@ -2881,14 +3110,6 @@ struct ProxyRuleCliPatch {
     body: Option<String>,
     headers: Vec<String>,
     delay_ms: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum DoctorStatus {
-    Ok,
-    Warning,
-    Error,
 }
 
 #[derive(Debug, Serialize)]
@@ -3134,6 +3355,7 @@ fn show_info(config: &AppConfig, config_path: &std::path::Path, json_mode: bool)
         active_workspace,
         storage_path: storage::default_storage_path().display().to_string(),
         navigation_file_path: navigation_file_path().to_string(),
+        resource_actions_file_path: default_resource_actions_path().display().to_string(),
         project_count: config.projects.len(),
         jenkins_profiles,
         gitlab_token_env: config.defaults.gitlab_token_env.clone(),
@@ -3153,6 +3375,7 @@ fn show_info(config: &AppConfig, config_path: &std::path::Path, json_mode: bool)
     println!("active workspace : {}", info.active_workspace);
     println!("storage path     : {}", info.storage_path);
     println!("navigation path  : {}", info.navigation_file_path);
+    println!("actions path     : {}", info.resource_actions_file_path);
     println!("project count    : {}", info.project_count);
     println!("jenkins profiles : {}", info.jenkins_profiles.len());
     for profile in &info.jenkins_profiles {
@@ -3171,12 +3394,18 @@ fn show_info(config: &AppConfig, config_path: &std::path::Path, json_mode: bool)
 }
 
 fn run_capabilities(json_mode: bool) -> Result<()> {
-    let value = capabilities();
+    let value = resolved_capabilities();
     if json_mode {
         return print_json_command("capabilities", &value);
     }
     print_agent_capabilities(&value);
     Ok(())
+}
+
+fn resolved_capabilities() -> AgentCapabilities {
+    let mut value = capabilities();
+    enrich_capabilities(&mut value, Cli::command());
+    value
 }
 
 fn run_doctor(
@@ -3186,7 +3415,8 @@ fn run_doctor(
     runtime_profile: Option<String>,
     json_mode: bool,
 ) -> Result<()> {
-    let report = build_doctor_report(config_override, project, debug_profile, runtime_profile)?;
+    let report =
+        build_shared_doctor_report(config_override, project, debug_profile, runtime_profile)?;
     if json_mode {
         return print_json_command("doctor", &report);
     }
@@ -3194,211 +3424,28 @@ fn run_doctor(
     Ok(())
 }
 
-fn run_context(
-    config: &AppConfig,
-    workspace: &ProjectWorkspaceConfig,
-    project: Option<String>,
-    query: Option<String>,
-    limit: usize,
-    json_mode: bool,
-) -> Result<()> {
-    let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
-    let value = context_for_workspace(
-        config,
-        &storage,
-        Some(workspace),
-        project.as_deref(),
-        query.as_deref(),
-        limit,
-    )?;
-    if json_mode {
-        return print_json_command("context", &value);
-    }
-    print_agent_context(&value);
-    Ok(())
-}
-
-fn build_doctor_report(
+fn build_shared_doctor_report(
     config_override: Option<&Path>,
     project: Option<&str>,
     debug_profile: Option<String>,
     runtime_profile: Option<String>,
 ) -> Result<DoctorReport> {
-    let paths = ensure_default_configs()?;
-    let mut checks = Vec::new();
-    let health = collect_health_snapshot();
-    let mut active_workspace = None;
-    let mut active_workspace_config = None;
-    let mut app_workspace_config = None;
-    let mut config_source_workspaces = Vec::new();
-    let mut config_for_workspace = None;
-    let mut known_workspace_keys = BTreeSet::new();
-
-    let config_result = load_cli_effective_config(config_override);
-    let config_path = config_result
-        .as_ref()
-        .map(|(_, path)| path.clone())
-        .unwrap_or_else(|_| paths.projects.clone());
-
-    let mut doctor_paths = DoctorPaths {
-        config_dir: paths.dir.display().to_string(),
-        projects: config_path.display().to_string(),
-        workspace: paths.workspace.display().to_string(),
-        workspaces_dir: paths.project_workspaces.display().to_string(),
-        navigation: navigation_file_path(),
-        proxy: default_proxy_path().display().to_string(),
-        config_sources: config_sources_file_path().display().to_string(),
-        proxy_active: None,
-        web_actions: default_web_actions_path().display().to_string(),
-        storage: storage::default_storage_path().display().to_string(),
+    let inspection = inspect_doctor(DoctorRequest {
+        config_override: config_override.map(Path::to_path_buf),
+        workspace_key: cli_scope::workspace_key(),
+    })?;
+    let mut checks = inspection.snapshot.checks;
+    let health = inspection.snapshot.health;
+    let doctor_paths = inspection.snapshot.paths;
+    let config_for_workspace = inspection.effective_config;
+    let active_workspace = match (inspection.active_workspace, config_for_workspace.as_ref()) {
+        (Some(workspace), Some(config)) => Some(project_workspace_cli_info(
+            workspace,
+            config,
+            &inspection.effective_workspace_key,
+        )),
+        _ => None,
     };
-
-    match config_result {
-        Ok((config, _)) => {
-            push_check(
-                &mut checks,
-                DoctorStatus::Ok,
-                "projects_config",
-                format!("loaded {} projects", config.projects.len()),
-                Some(config_path.display().to_string()),
-            );
-            check_project_config(&mut checks, &config);
-            config_for_workspace = Some(config);
-        }
-        Err(error) => {
-            push_check(
-                &mut checks,
-                DoctorStatus::Error,
-                "projects_config",
-                "failed to load projects config",
-                Some(error.to_string()),
-            );
-        }
-    }
-
-    match load_workspace_config(&paths.workspace) {
-        Ok(workspace_config) => {
-            let configured_active_key = active_project_workspace_key(&workspace_config);
-            let effective_key =
-                cli_scope::workspace_key().unwrap_or_else(|| configured_active_key.clone());
-            app_workspace_config = Some(workspace_config.clone());
-            push_check(
-                &mut checks,
-                DoctorStatus::Ok,
-                "workspace_preferences",
-                if effective_key == configured_active_key {
-                    format!("active workspace is {configured_active_key}")
-                } else {
-                    format!(
-                        "CLI scope is {effective_key}; app active workspace is {configured_active_key}"
-                    )
-                },
-                Some(paths.workspace.display().to_string()),
-            );
-            match load_all_project_workspaces(&paths.project_workspaces) {
-                Ok(all_workspaces) => {
-                    let workspaces = all_workspaces
-                        .iter()
-                        .filter(|workspace| !workspace.is_archived())
-                        .cloned()
-                        .collect::<Vec<_>>();
-                    let workspace_count = workspaces.len();
-                    let archived_count = all_workspaces.len().saturating_sub(workspace_count);
-                    known_workspace_keys = workspaces
-                        .iter()
-                        .map(|workspace| workspace.key.clone())
-                        .collect();
-                    config_source_workspaces = all_workspaces;
-                    push_check(
-                        &mut checks,
-                        DoctorStatus::Ok,
-                        "workspace_catalog",
-                        format!(
-                            "loaded {} workspaces and {} archived workspaces",
-                            workspace_count, archived_count
-                        ),
-                        Some(paths.project_workspaces.display().to_string()),
-                    );
-                }
-                Err(error) => push_check(
-                    &mut checks,
-                    DoctorStatus::Error,
-                    "workspace_catalog",
-                    "failed to load workspaces",
-                    Some(error.to_string()),
-                ),
-            }
-            match cli_scope::load_workspace(&paths) {
-                Ok(workspace) => {
-                    if let Some(config) = &config_for_workspace {
-                        check_workspace_scope(&mut checks, &workspace, config);
-                        active_workspace = Some(project_workspace_cli_info(
-                            workspace.clone(),
-                            config,
-                            &effective_key,
-                        ));
-                    }
-                    check_navigation_config(&mut checks, &workspace);
-                    active_workspace_config = Some(workspace);
-                }
-                Err(error) => push_check(
-                    &mut checks,
-                    DoctorStatus::Error,
-                    "active_workspace",
-                    "failed to load active workspace",
-                    Some(error.to_string()),
-                ),
-            }
-        }
-        Err(error) => push_check(
-            &mut checks,
-            DoctorStatus::Error,
-            "workspace_preferences",
-            "failed to load workspace preferences",
-            Some(error.to_string()),
-        ),
-    }
-
-    let active_proxy_path = check_config_sources(
-        &mut checks,
-        &config_source_workspaces,
-        active_workspace_config.as_ref(),
-        app_workspace_config.as_ref(),
-    )
-    .unwrap_or_else(default_proxy_path);
-    doctor_paths.proxy_active = Some(active_proxy_path.display().to_string());
-    check_proxy_config(&mut checks, &known_workspace_keys, &active_proxy_path);
-    check_storage(&mut checks);
-    check_web_actions(&mut checks);
-    push_check(
-        &mut checks,
-        DoctorStatus::Ok,
-        "self_identity",
-        format!(
-            "{} {} ({})",
-            health.identity.version,
-            health.identity.install_kind,
-            health.identity.executable_path.display()
-        ),
-        health
-            .identity
-            .build_commit
-            .as_deref()
-            .map(|commit| format!("build commit {commit}")),
-    );
-    for risk in &health.risks {
-        push_check(
-            &mut checks,
-            if risk.severity == "error" {
-                DoctorStatus::Error
-            } else {
-                DoctorStatus::Warning
-            },
-            &risk.code,
-            &risk.summary,
-            Some(risk.detail.clone()),
-        );
-    }
     let runtime_preflight =
         match (project, config_for_workspace.as_ref()) {
             (Some(project), Some(config)) => {
@@ -3450,7 +3497,6 @@ fn build_doctor_report(
             }
             _ => None,
         };
-
     let error_count = checks
         .iter()
         .filter(|check| check.status == DoctorStatus::Error)
@@ -3479,420 +3525,44 @@ fn build_doctor_report(
     })
 }
 
-fn check_project_config(checks: &mut Vec<DoctorCheck>, config: &AppConfig) {
-    let mut seen = BTreeSet::new();
-    let mut duplicates = Vec::new();
-    let mut missing_repos = Vec::new();
-
-    for project in &config.projects {
-        if !seen.insert(project.key.clone()) {
-            duplicates.push(project.key.clone());
-        }
-        if let Some(path) = &project.repo_path {
-            if !path.exists() {
-                missing_repos.push(format!("{} -> {}", project.key, path.display()));
-            }
-        }
-    }
-
-    if duplicates.is_empty() {
-        push_check(
-            checks,
-            DoctorStatus::Ok,
-            "project_keys",
-            "project keys are unique",
-            None,
-        );
-    } else {
-        push_check(
-            checks,
-            DoctorStatus::Error,
-            "project_keys",
-            "duplicate project keys found",
-            Some(duplicates.join(", ")),
-        );
-    }
-
-    if missing_repos.is_empty() {
-        push_check(
-            checks,
-            DoctorStatus::Ok,
-            "project_repo_paths",
-            "configured repo paths exist",
-            None,
-        );
-    } else {
-        push_check(
-            checks,
-            DoctorStatus::Warning,
-            "project_repo_paths",
-            format!("{} repo paths do not exist", missing_repos.len()),
-            Some(missing_repos.join("; ")),
-        );
-    }
-}
-
-fn check_workspace_scope(
-    checks: &mut Vec<DoctorCheck>,
-    workspace: &ProjectWorkspaceConfig,
+fn run_context(
     config: &AppConfig,
-) {
-    if workspace.include_all_projects {
-        push_check(
-            checks,
-            DoctorStatus::Ok,
-            "workspace_projects",
-            "active workspace includes all projects",
-            Some(workspace.key.clone()),
-        );
-        return;
+    workspace: &ProjectWorkspaceConfig,
+    project: Option<String>,
+    query: Option<String>,
+    limit: usize,
+    json_mode: bool,
+) -> Result<()> {
+    let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
+    let value = context_for_workspace(
+        config,
+        &storage,
+        Some(workspace),
+        project.as_deref(),
+        query.as_deref(),
+        limit,
+    )?;
+    if json_mode {
+        return print_json_command("context", &value);
     }
-
-    let project_keys = config
-        .projects
-        .iter()
-        .map(|project| project.key.as_str())
-        .collect::<BTreeSet<_>>();
-    let missing = workspace
-        .projects
-        .iter()
-        .filter(|key| !project_keys.contains(key.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    if missing.is_empty() {
-        push_check(
-            checks,
-            DoctorStatus::Ok,
-            "workspace_projects",
-            format!(
-                "active workspace references {} projects",
-                workspace.projects.len()
-            ),
-            Some(workspace.key.clone()),
-        );
-    } else {
-        push_check(
-            checks,
-            DoctorStatus::Warning,
-            "workspace_projects",
-            "active workspace references missing projects",
-            Some(missing.join(", ")),
-        );
-    }
-}
-
-fn check_navigation_config(checks: &mut Vec<DoctorCheck>, workspace: &ProjectWorkspaceConfig) {
-    match list_navigation_entries_for_workspace(workspace, 2000) {
-        Ok(entries) if entries.is_empty() => push_check(
-            checks,
-            DoctorStatus::Warning,
-            "navigation",
-            "navigation has no entries in active workspace",
-            Some(navigation_file_path()),
-        ),
-        Ok(entries) => push_check(
-            checks,
-            DoctorStatus::Ok,
-            "navigation",
-            format!(
-                "loaded {} navigation entries for active workspace",
-                entries.len()
-            ),
-            Some(navigation_file_path()),
-        ),
-        Err(error) => push_check(
-            checks,
-            DoctorStatus::Error,
-            "navigation",
-            "failed to load navigation entries",
-            Some(error.to_string()),
-        ),
-    }
-}
-
-fn check_config_sources(
-    checks: &mut Vec<DoctorCheck>,
-    workspaces: &[ProjectWorkspaceConfig],
-    active_workspace: Option<&ProjectWorkspaceConfig>,
-    app_workspace: Option<&rdevtool_core::config::WorkspaceConfig>,
-) -> Option<PathBuf> {
-    let sources = match list_config_sources(workspaces) {
-        Ok(sources) => sources,
-        Err(error) => {
-            push_check(
-                checks,
-                DoctorStatus::Error,
-                "config_sources",
-                "failed to load config sources",
-                Some(error.to_string()),
-            );
-            return None;
-        }
-    };
-    let capability_summary = ["resource", "link", "proxy", "runtime"]
-        .into_iter()
-        .map(|capability| {
-            let count = sources
-                .iter()
-                .filter(|source| {
-                    source
-                        .capabilities
-                        .iter()
-                        .any(|item| item.eq_ignore_ascii_case(capability))
-                })
-                .count();
-            format!("{capability}={count}")
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    push_check(
-        checks,
-        DoctorStatus::Ok,
-        "config_sources",
-        format!("loaded {} config sources", sources.len()),
-        Some(format!(
-            "{}; {}",
-            config_sources_file_path().display(),
-            capability_summary
-        )),
-    );
-
-    let preferred_source_id = match (active_workspace, app_workspace) {
-        (Some(workspace), Some(app_workspace)) => {
-            preferred_config_source_id_for_scope(workspace, app_workspace, "proxy")
-        }
-        _ => "default".to_string(),
-    };
-    let preferred_normalized = preferred_source_id.replace('_', "-");
-    let preferred_source = sources.iter().find(|source| {
-        source.id == preferred_source_id || source.id.replace('_', "-") == preferred_normalized
-    });
-    let source = preferred_source.or_else(|| sources.iter().find(|source| source.is_default))?;
-    if preferred_source.is_none() {
-        push_check(
-            checks,
-            DoctorStatus::Warning,
-            "proxy_source",
-            "preferred proxy config source no longer exists; using default",
-            Some(preferred_source_id),
-        );
-    }
-    if !source
-        .capabilities
-        .iter()
-        .any(|capability| capability.eq_ignore_ascii_case("proxy"))
-    {
-        push_check(
-            checks,
-            DoctorStatus::Error,
-            "proxy_source",
-            "active config source does not support proxy",
-            Some(format!("{} ({})", source.name, source.id)),
-        );
-        return None;
-    }
-    let path = source.files.proxy.as_deref().map(PathBuf::from);
-    match &path {
-        Some(path) => push_check(
-            checks,
-            DoctorStatus::Ok,
-            "proxy_source",
-            format!("active proxy source is {} ({})", source.name, source.id),
-            Some(path.display().to_string()),
-        ),
-        None => push_check(
-            checks,
-            DoctorStatus::Error,
-            "proxy_source",
-            "active config source has no proxy file mapping",
-            Some(format!("{} ({})", source.name, source.id)),
-        ),
-    }
-    path
-}
-
-fn check_proxy_config(
-    checks: &mut Vec<DoctorCheck>,
-    known_workspace_keys: &BTreeSet<String>,
-    proxy_path: &Path,
-) {
-    if !proxy_path.exists() {
-        push_check(
-            checks,
-            DoctorStatus::Warning,
-            "proxy_config",
-            "active proxy config has not been initialized",
-            Some(proxy_path.display().to_string()),
-        );
-        return;
-    }
-
-    let proxy_config = match load_proxy_config(proxy_path) {
-        Ok(config) => config,
-        Err(error) => {
-            push_check(
-                checks,
-                DoctorStatus::Error,
-                "proxy_config",
-                "failed to load proxy config",
-                Some(error.to_string()),
-            );
-            return;
-        }
-    };
-
-    let mut validation_errors = Vec::new();
-    let mut workspace_warnings = Vec::new();
-    let mut listen_addrs = BTreeSet::new();
-    let mut duplicate_addrs = Vec::new();
-    let mut managed_addrs = Vec::new();
-    let mut outdated_daemons = Vec::new();
-    let mut unavailable_addrs = Vec::new();
-
-    for profile in &proxy_config.profiles {
-        if let Err(error) = validate_proxy_profile(profile) {
-            validation_errors.push(format!("profile {}: {error}", profile.id));
-        }
-        if let Some(workspace_key) = &profile.workspace_key {
-            if !known_workspace_keys.is_empty() && !known_workspace_keys.contains(workspace_key) {
-                workspace_warnings.push(format!("{} -> {}", profile.id, workspace_key));
-            }
-        }
-        let listen_addr = profile.listen_addr();
-        if !listen_addrs.insert(listen_addr.clone()) {
-            duplicate_addrs.push(listen_addr.clone());
-        }
-        if TcpListener::bind(&listen_addr).is_err() {
-            let daemon_status = proxy_daemon_status(&proxy_path, &profile.id).ok();
-            if proxy_listener_is_managed(daemon_status.as_ref()) {
-                if daemon_status
-                    .as_ref()
-                    .is_some_and(|status| !status.version_compatible)
-                {
-                    outdated_daemons.push(format!("{} ({})", profile.id, listen_addr));
-                }
-                managed_addrs.push(listen_addr);
-            } else {
-                unavailable_addrs.push(listen_addr);
-            }
-        }
-    }
-
-    if outdated_daemons.is_empty() {
-        push_check(
-            checks,
-            DoctorStatus::Ok,
-            "proxy_daemon_versions",
-            "running proxy daemons use the current runtime",
-            None,
-        );
-    } else {
-        push_check(
-            checks,
-            DoctorStatus::Warning,
-            "proxy_daemon_versions",
-            "some proxy daemons will be upgraded on next start or restart",
-            Some(outdated_daemons.join(", ")),
-        );
-    }
-
-    for rule in &proxy_config.rules {
-        if let Err(error) = validate_proxy_rule(rule) {
-            validation_errors.push(format!("rule {}: {error}", rule.id));
-        }
-    }
-
-    if validation_errors.is_empty() {
-        push_check(
-            checks,
-            DoctorStatus::Ok,
-            "proxy_config",
-            format!(
-                "loaded {} profiles and {} rules",
-                proxy_config.profiles.len(),
-                proxy_config.rules.len()
-            ),
-            Some(proxy_path.display().to_string()),
-        );
-    } else {
-        push_check(
-            checks,
-            DoctorStatus::Error,
-            "proxy_config",
-            "proxy config contains invalid profiles or rules",
-            Some(validation_errors.join("; ")),
-        );
-    }
-
-    if workspace_warnings.is_empty() {
-        push_check(
-            checks,
-            DoctorStatus::Ok,
-            "proxy_workspaces",
-            "proxy workspace references are valid",
-            None,
-        );
-    } else {
-        push_check(
-            checks,
-            DoctorStatus::Warning,
-            "proxy_workspaces",
-            "proxy profiles reference missing workspaces",
-            Some(workspace_warnings.join("; ")),
-        );
-    }
-
-    if duplicate_addrs.is_empty() && unavailable_addrs.is_empty() {
-        push_check(
-            checks,
-            DoctorStatus::Ok,
-            "proxy_ports",
-            "proxy listen ports look available or managed by rDevTool",
-            (!managed_addrs.is_empty())
-                .then(|| format!("managed by rDevTool: {}", managed_addrs.join(", "))),
-        );
-    } else {
-        let detail = [
-            (!duplicate_addrs.is_empty())
-                .then(|| format!("duplicate: {}", duplicate_addrs.join(", "))),
-            (!unavailable_addrs.is_empty()).then(|| {
-                format!(
-                    "unavailable or already running: {}",
-                    unavailable_addrs.join(", ")
-                )
-            }),
-        ]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join("; ");
-        push_check(
-            checks,
-            DoctorStatus::Warning,
-            "proxy_ports",
-            "some proxy listen addresses need attention",
-            Some(detail),
-        );
-    }
-}
-
-fn proxy_listener_is_managed(status: Option<&ProxyDaemonStatus>) -> bool {
-    status.is_some_and(|status| status.running && status.managed)
+    print_agent_context(&value);
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AgentCommands, AgentContextPresetArg, ArtifactCommands, BuildCommands, Cli,
+        ActionCommands, AgentCommands, AgentContextPresetArg, ArtifactCommands, BuildCommands, Cli,
         CliReportedFailure, Commands, ConfigSourceCommands, GitCommands, HistoryCommands,
-        HistoryOperationCommands, ProjectCommands, ProjectDebugProfilePatch, PromoteCommands,
-        ProxyDaemonStatus, RuntimeCommands, RuntimeWaitUntilArg, WorkflowChainCommands,
-        WorkflowCommands, WorkspaceCommands, WorkspaceCopyModeArg, add_project_debug_profile,
-        classify_error, cli_branch_task_history_entry_with_id, delete_project_debug_profile,
-        finish_branch_task_command, is_terminal_deploy_state, proxy_event_confirms_match,
-        proxy_listener_is_managed, proxy_started_stage, proxy_verification_confirmed,
-        resolve_project_runtime_lookup_cwd, update_project_debug_profile,
+        HistoryOperationCommands, PackCommands, PackConflictArg, ProjectCommands,
+        ProjectDebugProfilePatch, PromoteCommands, ProxyDaemonStatus, RuntimeCommands,
+        RuntimeWaitUntilArg, WorkflowChainCommands, WorkflowCommands, WorkspaceCommands,
+        WorkspaceCopyModeArg, add_project_debug_profile, classify_error,
+        cli_branch_task_history_entry_with_id, delete_project_debug_profile,
+        finish_branch_task_command, is_terminal_deploy_state, parse_resource_action_cli_params,
+        proxy_event_confirms_match, proxy_started_stage, proxy_verification_confirmed,
+        resolve_project_runtime_lookup_cwd, resource_action_remote_write_direct,
+        update_project_debug_profile,
     };
     use clap::Parser;
     use rdevtool_core::config::{
@@ -3900,7 +3570,9 @@ mod tests {
         ProjectDebugProfileConfig, ProjectDebugReadyProbeConfig,
     };
     use rdevtool_core::core::{BranchTaskItemResult, BranchTaskResponse};
+    use rdevtool_core::doctor::proxy_listener_is_managed;
     use rdevtool_core::proxy::ProxyEvent;
+    use rdevtool_core::resource_actions::{ResourceActionEffect, ResourceActionExecutionMode};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
 
@@ -4073,6 +3745,93 @@ mod tests {
         }
     }
 
+    fn parse_action_command(args: &[&str]) -> ActionCommands {
+        let mut values = vec!["rdevtool", "action"];
+        values.extend_from_slice(args);
+        let cli = Cli::try_parse_from(values).unwrap();
+        match cli.command {
+            Commands::Action { command, .. } => command,
+            _ => panic!("expected action command"),
+        }
+    }
+
+    #[test]
+    fn parses_resource_action_run_command() {
+        let command = parse_action_command(&["run", "release-port", "--set", "port=1420", "--yes"]);
+        assert!(matches!(
+            command,
+            ActionCommands::Run {
+                key,
+                set,
+                yes: true,
+                ..
+            } if key == "release-port" && set == ["port=1420"]
+        ));
+    }
+
+    #[test]
+    fn parses_resource_action_plan_and_apply_commands() {
+        let plan = parse_action_command(&["plan", "release-port", "--set", "port=1420"]);
+        assert!(matches!(
+            plan,
+            ActionCommands::Plan { key, set, .. }
+                if key == "release-port" && set == ["port=1420"]
+        ));
+
+        let apply = parse_action_command(&[
+            "apply",
+            "--plan-id",
+            "action-plan-123",
+            "--params-json",
+            r#"{"token":"secret"}"#,
+            "--yes",
+        ]);
+        assert!(matches!(
+            apply,
+            ActionCommands::Apply {
+                plan_id,
+                params_json: Some(params),
+                yes: true,
+                ..
+            } if plan_id == "action-plan-123" && params.contains("token")
+        ));
+
+        assert!(matches!(
+            parse_action_command(&["plan-show", "action-plan-123"]),
+            ActionCommands::PlanShow { plan_id } if plan_id == "action-plan-123"
+        ));
+    }
+
+    #[test]
+    fn action_cli_parameters_merge_json_and_typed_assignments() {
+        let params = parse_resource_action_cli_params(
+            Some(r#"{"name":"demo","enabled":false}"#),
+            None,
+            &["enabled=true".to_string(), "port=1420".to_string()],
+        )
+        .expect("parse Action parameters");
+
+        assert_eq!(params.get("name"), Some(&serde_json::json!("demo")));
+        assert_eq!(params.get("enabled"), Some(&serde_json::json!(true)));
+        assert_eq!(params.get("port"), Some(&serde_json::json!(1420)));
+    }
+
+    #[test]
+    fn remote_write_direct_actions_are_reported_as_risky() {
+        assert!(resource_action_remote_write_direct(
+            ResourceActionEffect::RemoteWrite,
+            ResourceActionExecutionMode::Direct,
+        ));
+        assert!(!resource_action_remote_write_direct(
+            ResourceActionEffect::RemoteWrite,
+            ResourceActionExecutionMode::PlanApply,
+        ));
+        assert!(!resource_action_remote_write_direct(
+            ResourceActionEffect::Read,
+            ResourceActionExecutionMode::Direct,
+        ));
+    }
+
     fn parse_artifact_command(args: &[&str]) -> ArtifactCommands {
         let mut values = vec!["rdevtool", "artifacts"];
         values.extend_from_slice(args);
@@ -4131,6 +3890,45 @@ mod tests {
             Commands::Git { command } => command,
             _ => panic!("expected git command"),
         }
+    }
+
+    fn parse_pack_command(args: &[&str]) -> PackCommands {
+        let mut values = vec!["rdevtool", "pack"];
+        values.extend_from_slice(args);
+        let cli = Cli::try_parse_from(values).unwrap();
+        match cli.command {
+            Commands::Pack { command } => command,
+            _ => panic!("expected pack command"),
+        }
+    }
+
+    #[test]
+    fn parses_config_pack_plan_mappings_and_strategy() {
+        assert!(matches!(
+            parse_pack_command(&[
+                "import-plan",
+                "/tmp/team.rdtpack",
+                "--strategy",
+                "replace",
+                "--project-root",
+                "admin=/work/admin",
+                "--workspace-root",
+                "feature-a=/work/feature-a",
+                "--config-source-map",
+                "team=default",
+            ]),
+            PackCommands::ImportPlan {
+                pack,
+                strategy: PackConflictArg::Replace,
+                project_roots,
+                workspace_roots,
+                config_source_mappings,
+                ..
+            } if pack == PathBuf::from("/tmp/team.rdtpack")
+                && project_roots == vec!["admin=/work/admin"]
+                && workspace_roots == vec!["feature-a=/work/feature-a"]
+                && config_source_mappings == vec!["team=default"]
+        ));
     }
 
     #[test]
@@ -4352,6 +4150,29 @@ mod tests {
         assert!(matches!(
             parse_workspace_command(&["restore", "feature-a"]),
             WorkspaceCommands::Restore { workspace } if workspace == "feature-a"
+        ));
+    }
+
+    #[test]
+    fn parses_workspace_review_bases_and_path_allowlists() {
+        assert!(matches!(
+            parse_workspace_command(&[
+                "review",
+                "feature-a",
+                "--base",
+                "admin=origin/master",
+                "--base",
+                "applet=origin/pre",
+                "--allow-path",
+                "admin=src/**"
+            ]),
+            WorkspaceCommands::Review {
+                workspace: Some(workspace),
+                bases,
+                allowed_paths,
+            } if workspace == "feature-a"
+                && bases == vec!["admin=origin/master", "applet=origin/pre"]
+                && allowed_paths == vec!["admin=src/**"]
         ));
     }
 
@@ -5228,55 +5049,6 @@ mod tests {
     }
 }
 
-fn check_storage(checks: &mut Vec<DoctorCheck>) {
-    match Storage::new_default() {
-        Ok(_) => push_check(
-            checks,
-            DoctorStatus::Ok,
-            "storage",
-            "storage database is available",
-            Some(storage::default_storage_path().display().to_string()),
-        ),
-        Err(error) => push_check(
-            checks,
-            DoctorStatus::Error,
-            "storage",
-            "failed to open storage database",
-            Some(error),
-        ),
-    }
-}
-
-fn check_web_actions(checks: &mut Vec<DoctorCheck>) {
-    let path = default_web_actions_path();
-    if path.exists() {
-        match fs::read_to_string(&path) {
-            Ok(_) => push_check(
-                checks,
-                DoctorStatus::Ok,
-                "web_actions",
-                "web actions config is readable",
-                Some(path.display().to_string()),
-            ),
-            Err(error) => push_check(
-                checks,
-                DoctorStatus::Warning,
-                "web_actions",
-                "web actions config exists but is not readable",
-                Some(error.to_string()),
-            ),
-        }
-    } else {
-        push_check(
-            checks,
-            DoctorStatus::Ok,
-            "web_actions",
-            "web actions config is optional and not initialized",
-            Some(path.display().to_string()),
-        );
-    }
-}
-
 fn push_check(
     checks: &mut Vec<DoctorCheck>,
     status: DoctorStatus,
@@ -5392,6 +5164,72 @@ fn run_workspace(
             print_project_workspace(&info);
             Ok(())
         }
+        WorkspaceCommands::Review {
+            workspace,
+            bases,
+            allowed_paths,
+        } => {
+            let (config, _) = load_cli_config(config_override)?;
+            let paths = ensure_default_configs()?;
+            let key = resolve_workspace_cli_key(&paths, workspace)?;
+            let workspace = load_project_workspace_by_key(&paths.project_workspaces, &key)?;
+            let bases = parse_key_value_map(&bases)?;
+            let allowed_paths = parse_grouped_key_value_map(&allowed_paths)?;
+            validate_workspace_review_projects(&config, &workspace, &bases, &allowed_paths)?;
+            let response = review_workspace(
+                &config,
+                &workspace,
+                WorkspaceReviewRequest {
+                    bases,
+                    allowed_paths,
+                },
+            );
+            if json_mode {
+                return print_json_command("workspace.review", &response);
+            }
+            println!("workspace     : {}", response.workspace_key);
+            println!("status        : {}", response.status.key);
+            println!("projects      : {}", response.summary.project_count);
+            println!("comparable    : {}", response.summary.comparable_count);
+            println!(
+                "diff failures : {}",
+                response.summary.diff_check_failure_count
+            );
+            println!("unexpected    : {}", response.summary.unexpected_path_count);
+            for item in &response.items {
+                println!();
+                println!("[{}] {}", item.project_key, item.status_key);
+                println!(
+                    "  repo        : {}",
+                    item.effective_repo_path.as_deref().unwrap_or("-")
+                );
+                println!(
+                    "  branch/base : {} / {}",
+                    item.current_branch.as_deref().unwrap_or("-"),
+                    item.base_ref.as_deref().unwrap_or("-")
+                );
+                if item.comparable {
+                    println!(
+                        "  ahead/behind: {} / {}",
+                        item.ahead.unwrap_or(0),
+                        item.behind.unwrap_or(0)
+                    );
+                } else {
+                    println!("  ahead/behind: n/a");
+                }
+                println!("  changed     : {}", item.changed_files.len());
+                println!("  conflicts   : {}", item.conflicted_count);
+                println!(
+                    "  diff check  : {}",
+                    match item.diff_check_passed {
+                        Some(true) => "pass",
+                        Some(false) => "fail",
+                        None => "n/a",
+                    }
+                );
+            }
+            Ok(())
+        }
         WorkspaceCommands::Create {
             key,
             name,
@@ -5471,6 +5309,7 @@ fn run_workspace(
             root_dir,
             instance_dir,
             copy_mode,
+            dependency_mode,
             resource_dir,
             worklog_file,
             no_worklog,
@@ -5500,6 +5339,7 @@ fn run_workspace(
                     root_dir,
                     instance_dir,
                     copy_mode: copy_mode.into(),
+                    dependency_mode: dependency_mode.into(),
                     resource_dir: resource_dir.map(normalize_cli_path_buf).transpose()?,
                     worklog_file,
                     create_worklog: !no_worklog,
@@ -6535,6 +6375,7 @@ fn init_demand_workspace_cli_info(
         schema_version: result.schema_version,
         dry_run: result.dry_run,
         copy_mode: result.copy_mode,
+        dependency_mode: result.dependency_mode,
         requested: result.requested,
         effective: result.effective,
         observed: result.observed,
@@ -6553,6 +6394,7 @@ fn init_demand_workspace_cli_info(
         warnings: result.warnings,
         source_repository_validation: result.source_repository_validation,
         project_instance_validation: result.project_instance_validation,
+        dependency_links: result.dependency_links,
     }
 }
 
@@ -7910,6 +7752,7 @@ fn add_project_target_param_config_command(
         target_config.params.push(DeployParamConfig {
             key: key.clone(),
             label: require_non_empty_cli_value("build param label", &label)?,
+            label_key: None,
             kind: kind.into(),
             default: default.and_then(optional_cli_text),
             options: normalize_cli_strings(options),
@@ -12225,6 +12068,563 @@ fn apply_optional_cli_text(target: &mut Option<String>, value: Option<String>) {
     }
 }
 
+fn run_action(
+    command: ActionCommands,
+    config_override: Option<&Path>,
+    source_id: Option<&str>,
+    file: Option<&Path>,
+    json_mode: bool,
+) -> Result<()> {
+    let (actions_path, source) = resolve_cli_action_config(source_id, file)?;
+    match command {
+        ActionCommands::Path => {
+            if json_mode {
+                print_json_command(
+                    "action.path",
+                    &json!({
+                        "path": actions_path,
+                        "source": source,
+                    }),
+                )
+            } else {
+                println!("actions path: {}", actions_path.display());
+                if let Some(source) = source {
+                    println!("source      : {} ({})", source.name, source.id);
+                }
+                Ok(())
+            }
+        }
+        ActionCommands::List => {
+            let catalog = resource_action_catalog_from_path(&actions_path)?;
+            if json_mode {
+                print_json_command("action.list", &catalog)
+            } else {
+                println!("actions path: {}", catalog.config_path);
+                for action in catalog.actions {
+                    println!(
+                        "  {:<28} {:<14} {}",
+                        action.key,
+                        resource_action_effect_key(action.effect),
+                        action.name
+                    );
+                }
+                Ok(())
+            }
+        }
+        ActionCommands::Show { key } => {
+            let (config, config_path) = load_cli_effective_config(config_override)?;
+            let context = cli_resource_action_execution_context(config_path)?;
+            let action = resource_action_view_from_path_with_context(
+                &actions_path,
+                &key,
+                &config,
+                &context,
+            )?;
+            if json_mode {
+                print_json_command("action.show", &action)
+            } else {
+                print_resource_action_view(&action);
+                Ok(())
+            }
+        }
+        ActionCommands::Validate { key } => {
+            let catalog = resource_action_catalog_from_path(&actions_path)?;
+            let (config, config_path) = load_cli_effective_config(config_override)?;
+            let context = cli_resource_action_execution_context(config_path)?;
+            let keys = match key {
+                Some(key) => vec![key],
+                None => catalog
+                    .actions
+                    .iter()
+                    .map(|action| action.key.clone())
+                    .collect(),
+            };
+            let actions = keys
+                .iter()
+                .map(|key| {
+                    resource_action_view_from_path_with_context(
+                        &actions_path,
+                        key,
+                        &config,
+                        &context,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let warnings = resource_action_validation_warnings(&actions);
+            if json_mode {
+                print_json_command(
+                    "action.validate",
+                    &json!({
+                        "configPath": actions_path,
+                        "valid": true,
+                        "actions": actions,
+                        "warnings": warnings,
+                    }),
+                )
+            } else {
+                println!("valid       : yes");
+                println!("actions path: {}", actions_path.display());
+                for action in &actions {
+                    println!("  {} ({})", action.name, action.key);
+                }
+                for warning in warnings {
+                    println!(
+                        "warning     : [{}] {}: {}",
+                        warning.code, warning.action_key, warning.message
+                    );
+                }
+                Ok(())
+            }
+        }
+        ActionCommands::Plan {
+            key,
+            params_json,
+            params_file,
+            set,
+        } => {
+            let (config, config_path) = load_cli_effective_config(config_override)?;
+            let context = cli_resource_action_execution_context(config_path)?;
+            let params = parse_resource_action_cli_params(
+                params_json.as_deref(),
+                params_file.as_deref(),
+                &set,
+            )?;
+            let plan = plan_resource_action_from_path_with_context(
+                &actions_path,
+                ResourceActionRunRequest {
+                    key,
+                    params,
+                    operation_id: None,
+                },
+                &config,
+                &context,
+            )?;
+            finish_resource_action_plan_command("action.plan", &plan, json_mode)
+        }
+        ActionCommands::PlanShow { plan_id } => {
+            let plan = get_resource_action_plan(&plan_id)?;
+            finish_resource_action_plan_command("action.plan-show", &plan, json_mode)
+        }
+        ActionCommands::Apply {
+            plan_id,
+            params_json,
+            params_file,
+            set,
+            yes,
+        } => {
+            let plan = get_resource_action_plan(&plan_id)?;
+            if resource_action_effect_requires_confirmation(plan.effect) && !yes {
+                anyhow::bail!(
+                    "resource action plan {} can change state; inspect it with `action plan-show {}` and rerun with --yes",
+                    plan.plan_id,
+                    plan.plan_id
+                );
+            }
+            let (config, config_path) = load_cli_effective_config(config_override)?;
+            let context = cli_resource_action_execution_context(config_path)?;
+            let params = parse_resource_action_cli_params(
+                params_json.as_deref(),
+                params_file.as_deref(),
+                &set,
+            )?;
+            let result = apply_resource_action_plan_from_path_with_context(
+                &actions_path,
+                ResourceActionApplyRequest {
+                    plan_id,
+                    params,
+                    operation_id: None,
+                },
+                &config,
+                &context,
+            )?;
+            finish_resource_action_command("action.apply", result, json_mode)
+        }
+        ActionCommands::Run {
+            key,
+            params_json,
+            params_file,
+            set,
+            yes,
+        } => {
+            let (config, config_path) = load_cli_effective_config(config_override)?;
+            let context = cli_resource_action_execution_context(config_path)?;
+            let params = parse_resource_action_cli_params(
+                params_json.as_deref(),
+                params_file.as_deref(),
+                &set,
+            )?;
+            let request = ResourceActionRunRequest {
+                key: key.clone(),
+                params,
+                operation_id: None,
+            };
+            let resolved =
+                validate_resource_action_request_from_path(&actions_path, &request, &config)?;
+            let action = resource_action_view_from_path_with_context(
+                &actions_path,
+                &key,
+                &config,
+                &context,
+            )?;
+            if resource_action_cli_requires_confirmation(&action, &resolved) && !yes {
+                anyhow::bail!(
+                    "resource action {} can change state; inspect it with `action show` and rerun with --yes",
+                    action.key
+                );
+            }
+            let result = run_resource_action_from_path_with_context(
+                &actions_path,
+                request,
+                &config,
+                &context,
+            )?;
+            finish_resource_action_command("action.run", result, json_mode)
+        }
+    }
+}
+
+fn resolve_cli_action_config(
+    source_id: Option<&str>,
+    file: Option<&Path>,
+) -> Result<(PathBuf, Option<ConfigSource>)> {
+    if let Some(file) = file {
+        if !file.is_file() {
+            anyhow::bail!(
+                "resource action config file does not exist: {}",
+                file.display()
+            );
+        }
+        return Ok((fs::canonicalize(file)?, None));
+    }
+
+    let paths = ensure_default_configs()?;
+    let workspace = cli_scope::load_workspace(&paths)?;
+    let workspaces = load_all_project_workspaces(&paths.project_workspaces)?;
+    let source = match resolve_config_source_for_workspace(
+        &paths,
+        &workspace,
+        &workspaces,
+        "resource",
+        source_id,
+    ) {
+        Ok(source) => source,
+        Err(primary_error) => {
+            let Some(source_id) = source_id.filter(|value| !value.starts_with("workspace-")) else {
+                return Err(primary_error);
+            };
+            let alias = format!("workspace-{source_id}");
+            resolve_config_source_for_workspace(
+                &paths,
+                &workspace,
+                &workspaces,
+                "resource",
+                Some(&alias),
+            )
+            .map_err(|_| primary_error)?
+        }
+    };
+    Ok((PathBuf::from(&source.files.actions), Some(source)))
+}
+
+fn cli_resource_action_execution_context(
+    config_path: PathBuf,
+) -> Result<ResourceActionExecutionContext> {
+    let paths = ensure_default_configs()?;
+    let workspace = cli_scope::load_workspace(&paths)?;
+    Ok(ResourceActionExecutionContext {
+        rdevtool_cli_path: Some(std::env::current_exe()?),
+        rdevtool_cli_error: None,
+        config_path: Some(config_path),
+        workspace_key: Some(workspace.key),
+        operation_origin: Some(OperationEventOrigin::Cli),
+        operation_storage: match Storage::new_default() {
+            Ok(storage) => Some(storage),
+            Err(error) => {
+                eprintln!("warning: failed to initialize Action operation history: {error}");
+                None
+            }
+        },
+        cancellation_flag: None,
+        progress_reporter: None,
+    })
+}
+
+fn parse_resource_action_cli_params(
+    params_json: Option<&str>,
+    params_file: Option<&Path>,
+    assignments: &[String],
+) -> Result<BTreeMap<String, serde_json::Value>> {
+    if params_json.is_some() && params_file.is_some() {
+        anyhow::bail!("--params-json and --params-file cannot be used together");
+    }
+    let document = match (params_json, params_file) {
+        (Some("-"), None) => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input)?;
+            Some(input)
+        }
+        (None, Some(path)) if path == Path::new("-") => {
+            let mut input = String::new();
+            io::stdin().read_to_string(&mut input)?;
+            Some(input)
+        }
+        (Some(value), None) => Some(value.to_string()),
+        (None, Some(path)) => Some(fs::read_to_string(path)?),
+        (None, None) => None,
+        _ => unreachable!("conflicting parameter inputs were rejected"),
+    };
+
+    let mut params = match document {
+        Some(document) => {
+            let value: serde_json::Value = serde_json::from_str(&document)
+                .map_err(|error| anyhow::anyhow!("invalid Action parameter JSON: {error}"))?;
+            let object = value
+                .as_object()
+                .ok_or_else(|| anyhow::anyhow!("Action parameters must be a JSON object"))?;
+            object
+                .iter()
+                .map(|(key, value)| (key.clone(), value.clone()))
+                .collect::<BTreeMap<_, _>>()
+        }
+        None => BTreeMap::new(),
+    };
+
+    for assignment in assignments {
+        let (key, raw_value) = assignment.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("invalid --set value, expected KEY=VALUE: {assignment}")
+        })?;
+        if key.trim().is_empty() || key != key.trim() {
+            anyhow::bail!("invalid --set parameter key: {key}");
+        }
+        let value = serde_json::from_str(raw_value)
+            .unwrap_or_else(|_| serde_json::Value::String(raw_value.to_string()));
+        params.insert(key.to_string(), value);
+    }
+    Ok(params)
+}
+
+fn resource_action_cli_requires_confirmation(
+    action: &ResourceActionView,
+    resolved: &BTreeMap<String, serde_json::Value>,
+) -> bool {
+    if !resource_action_effect_requires_confirmation(action.effect) {
+        return false;
+    }
+    !action.params.iter().any(|param| {
+        param.role == Some(ResourceActionParamRole::DryRun)
+            && resolved
+                .get(&param.key)
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    })
+}
+
+fn resource_action_effect_requires_confirmation(effect: ResourceActionEffect) -> bool {
+    matches!(
+        effect,
+        ResourceActionEffect::LocalWrite
+            | ResourceActionEffect::RemoteWrite
+            | ResourceActionEffect::Destructive
+    )
+}
+
+fn resource_action_effect_key(effect: ResourceActionEffect) -> &'static str {
+    match effect {
+        ResourceActionEffect::Read => "read",
+        ResourceActionEffect::LocalWrite => "local_write",
+        ResourceActionEffect::RemoteWrite => "remote_write",
+        ResourceActionEffect::Destructive => "destructive",
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceActionValidationWarning {
+    code: &'static str,
+    severity: &'static str,
+    action_key: String,
+    message: &'static str,
+}
+
+fn resource_action_validation_warnings(
+    actions: &[ResourceActionView],
+) -> Vec<ResourceActionValidationWarning> {
+    actions
+        .iter()
+        .filter(|action| {
+            resource_action_remote_write_direct(action.effect, action.execution.mode)
+        })
+        .map(|action| ResourceActionValidationWarning {
+            code: "resource_action.remote_write_direct",
+            severity: "warning",
+            action_key: action.key.clone(),
+            message: "remote_write Action uses direct execution; migrate to plan_apply when practical",
+        })
+        .collect()
+}
+
+fn resource_action_remote_write_direct(
+    effect: ResourceActionEffect,
+    execution_mode: ResourceActionExecutionMode,
+) -> bool {
+    effect == ResourceActionEffect::RemoteWrite
+        && execution_mode == ResourceActionExecutionMode::Direct
+}
+
+fn print_resource_action_view(action: &ResourceActionView) {
+    println!("action      : {} ({})", action.name, action.key);
+    println!(
+        "effect      : {}",
+        resource_action_effect_key(action.effect)
+    );
+    println!(
+        "execution   : {}",
+        match action.execution.mode {
+            ResourceActionExecutionMode::Direct => "direct",
+            ResourceActionExecutionMode::PlanApply => "plan_apply",
+        }
+    );
+    if action.execution.mode == ResourceActionExecutionMode::PlanApply {
+        println!(
+            "plan ttl    : {} seconds",
+            action.execution.plan_ttl_seconds
+        );
+    }
+    println!("config      : {}", action.config_path);
+    println!(
+        "runner      : {} {}",
+        action.runner.program,
+        action.runner.args.join(" ")
+    );
+    println!("cwd         : {}", action.runner.cwd);
+    println!("parameters  :");
+    for param in &action.params {
+        let mut constraints = Vec::new();
+        if let Some(value) = param.min {
+            constraints.push(format!("min={value}"));
+        }
+        if let Some(value) = param.max {
+            constraints.push(format!("max={value}"));
+        }
+        if let Some(value) = param.step {
+            constraints.push(format!("step={value}"));
+        }
+        if let Some(value) = param.min_length {
+            constraints.push(format!("min_length={value}"));
+        }
+        if let Some(value) = param.max_length {
+            constraints.push(format!("max_length={value}"));
+        }
+        if let Some(value) = param.min_items {
+            constraints.push(format!("min_items={value}"));
+        }
+        if let Some(value) = param.max_items {
+            constraints.push(format!("max_items={value}"));
+        }
+        let suffix = (!constraints.is_empty())
+            .then(|| format!(" [{}]", constraints.join(", ")))
+            .unwrap_or_default();
+        println!(
+            "  {:<24} {:?} {}{}",
+            param.key, param.kind, param.label, suffix
+        );
+    }
+}
+
+fn finish_resource_action_plan_command(
+    command: &str,
+    plan: &ResourceActionPlan,
+    json_mode: bool,
+) -> Result<()> {
+    if json_mode {
+        return print_json_command(command, plan);
+    }
+    println!("plan        : {}", plan.plan_id);
+    println!("action      : {} ({})", plan.action_name, plan.action_key);
+    println!(
+        "workspace   : {}",
+        plan.workspace_key.as_deref().unwrap_or("system")
+    );
+    println!("created     : {}", plan.created_at);
+    println!("expires     : {}", plan.expires_at);
+    println!(
+        "consumed    : {}",
+        plan.consumed_at.as_deref().unwrap_or("no")
+    );
+    if let Some(summary) = &plan.plan_result.summary {
+        println!("summary     : {summary}");
+    }
+    for item in &plan.plan_result.items {
+        println!("  [{:?}] {}", item.status, item.label);
+        if let Some(summary) = &item.summary {
+            println!("    {summary}");
+        }
+        for parameter in &item.parameters {
+            println!("    {}: {}", parameter.label, parameter.value);
+        }
+    }
+    Ok(())
+}
+
+fn finish_resource_action_command(
+    command: &str,
+    result: ResourceActionRunResult,
+    json_mode: bool,
+) -> Result<()> {
+    let success = result.success;
+    let failure_message = result
+        .structured_result
+        .as_ref()
+        .and_then(|structured| structured.summary.clone())
+        .or_else(|| (!result.stderr.trim().is_empty()).then(|| result.stderr.trim().to_string()))
+        .unwrap_or_else(|| format!("resource action {} failed", result.key));
+
+    if json_mode {
+        if success {
+            print_json_command(command, &result)?;
+        } else {
+            print_json(&json!({
+                "ok": false,
+                "command": command,
+                "data": result,
+                "error": {
+                    "code": "resource_action_failed",
+                    "message": failure_message,
+                },
+            }))?;
+        }
+    } else {
+        println!("action      : {} ({})", result.name, result.key);
+        println!("success     : {}", result.success);
+        println!("duration    : {} ms", result.duration_ms);
+        if let Some(structured) = &result.structured_result {
+            if let Some(summary) = &structured.summary {
+                println!("summary     : {summary}");
+            }
+            for item in &structured.items {
+                println!("  [{:?}] {}", item.status, item.label);
+                if let Some(summary) = &item.summary {
+                    println!("    {summary}");
+                }
+            }
+        } else if !result.stdout.trim().is_empty() {
+            println!("stdout:\n{}", result.stdout.trim_end());
+        }
+        if !result.stderr.trim().is_empty() {
+            eprintln!("stderr:\n{}", result.stderr.trim_end());
+        }
+    }
+
+    if success {
+        Ok(())
+    } else {
+        Err(anyhow::Error::new(CliReportedFailure {
+            code: "resource_action_failed",
+            message: failure_message,
+        }))
+    }
+}
+
 fn run_config_source(command: ConfigSourceCommands, json_mode: bool) -> Result<()> {
     let paths = ensure_default_configs()?;
     let app_workspace = load_workspace_config(&paths.workspace)?;
@@ -12414,6 +12814,188 @@ fn run_config_source(command: ConfigSourceCommands, json_mode: bool) -> Result<(
             }
         }
     }
+}
+
+fn run_pack(command: PackCommands, json_mode: bool) -> Result<()> {
+    match command {
+        PackCommands::Inventory => {
+            let inventory = config_pack_inventory()?;
+            if json_mode {
+                print_json_command("pack.inventory", &inventory)
+            } else {
+                println!("projects:");
+                for item in inventory.projects {
+                    println!("  {:<24} {}", item.key, item.name);
+                }
+                println!("workspaces:");
+                for item in inventory.workspaces {
+                    println!("  {:<24} {}", item.key, item.name);
+                }
+                println!("config sources:");
+                for item in inventory.config_sources {
+                    println!("  {:<24} {}", item.key, item.name);
+                }
+                Ok(())
+            }
+        }
+        PackCommands::Export {
+            output,
+            name,
+            projects,
+            workspaces,
+            config_sources,
+            no_projects,
+            no_workspaces,
+            preferences,
+            include_config_sources,
+            no_dependencies,
+        } => {
+            let result = export_config_pack(ConfigPackExportRequest {
+                output_path: output,
+                name,
+                include_projects: !no_projects,
+                include_workspaces: !no_workspaces,
+                include_preferences: preferences,
+                include_config_sources: include_config_sources || !config_sources.is_empty(),
+                include_dependencies: !no_dependencies,
+                project_keys: projects,
+                workspace_keys: workspaces,
+                config_source_ids: config_sources,
+            })?;
+            if json_mode {
+                print_json_command("pack.export", &result)
+            } else {
+                println!("pack         : {}", result.output_path);
+                println!("pack id      : {}", result.manifest.pack_id);
+                println!("size         : {} bytes", result.size_bytes);
+                println!("sha256       : {}", result.sha256);
+                println!("modules:");
+                for module in result.manifest.modules {
+                    println!("  {:<20} {} item(s)", module.key, module.item_count);
+                }
+                println!(
+                    "secrets      : {} removed",
+                    result.manifest.security.sensitive_values_removed
+                );
+                Ok(())
+            }
+        }
+        PackCommands::Inspect { pack } => {
+            let inspection = inspect_config_pack(&pack)?;
+            if json_mode {
+                print_json_command("pack.inspect", &inspection)
+            } else {
+                println!("pack         : {}", inspection.path);
+                println!("name         : {}", inspection.manifest.name);
+                println!("pack id      : {}", inspection.manifest.pack_id);
+                println!("schema       : {}", inspection.manifest.schema_version);
+                println!("valid        : {}", inspection.valid);
+                println!("sha256       : {}", inspection.sha256);
+                for module in inspection.manifest.modules {
+                    println!("  {:<20} {} item(s)", module.key, module.item_count);
+                }
+                for issue in inspection.issues {
+                    println!("{} {}: {}", issue.severity, issue.code, issue.message);
+                }
+                Ok(())
+            }
+        }
+        PackCommands::ImportPlan {
+            pack,
+            strategy,
+            project_roots,
+            workspace_roots,
+            config_source_mappings,
+            require_secrets,
+        } => {
+            let plan = plan_config_pack_import(ConfigPackImportRequest {
+                pack_path: pack,
+                strategy: strategy.into(),
+                project_root_mappings: parse_pack_mappings(project_roots, "project-root")?,
+                workspace_root_mappings: parse_pack_mappings(workspace_roots, "workspace-root")?,
+                config_source_mappings: parse_pack_mappings(
+                    config_source_mappings,
+                    "config-source-map",
+                )?,
+                require_secrets,
+            })?;
+            if json_mode {
+                print_json_command("pack.import-plan", &plan)
+            } else {
+                println!("plan hash    : {}", plan.plan_hash);
+                println!("expires      : {}", plan.expires_at);
+                println!("changes      : {}", plan.change_count);
+                println!("skipped      : {}", plan.skip_count);
+                println!("blockers     : {}", plan.blocker_count);
+                for mapping in plan.required_mappings {
+                    println!(
+                        "mapping      : {}={} (suggested {})",
+                        mapping.key, mapping.placeholder, mapping.suggested_path
+                    );
+                }
+                for issue in plan.issues {
+                    println!("{} {}: {}", issue.severity, issue.code, issue.message);
+                }
+                if plan.blocker_count == 0 {
+                    println!(
+                        "next         : rdevtool pack import-run --plan-hash {}",
+                        plan.plan_hash
+                    );
+                }
+                Ok(())
+            }
+        }
+        PackCommands::ImportRun { plan_hash } => {
+            let result = apply_config_pack_import(&plan_hash)?;
+            if json_mode {
+                print_json_command("pack.import-run", &result)
+            } else {
+                println!("transaction  : {}", result.transaction_id);
+                println!("applied      : {}", result.applied_count);
+                println!("skipped      : {}", result.skipped_count);
+                println!("backup       : {}", result.backup_dir);
+                println!(
+                    "rollback      : rdevtool pack rollback {}",
+                    result.transaction_id
+                );
+                Ok(())
+            }
+        }
+        PackCommands::Rollback { transaction_id } => {
+            let result = rollback_config_pack_import(&transaction_id)?;
+            if json_mode {
+                print_json_command("pack.rollback", &result)
+            } else {
+                println!("transaction  : {}", result.transaction_id);
+                println!("restored     : {} file(s)", result.restored_paths.len());
+                for path in result.restored_paths {
+                    println!("  {path}");
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn parse_pack_mappings(values: Vec<String>, flag: &str) -> Result<BTreeMap<String, String>> {
+    let mut mappings = BTreeMap::new();
+    for value in values {
+        let (key, mapped) = value
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("--{flag} must use KEY=VALUE: {value}"))?;
+        let key = key.trim();
+        let mapped = mapped.trim();
+        if key.is_empty() || mapped.is_empty() {
+            anyhow::bail!("--{flag} must use non-empty KEY=VALUE: {value}");
+        }
+        if mappings
+            .insert(key.to_string(), mapped.to_string())
+            .is_some()
+        {
+            anyhow::bail!("duplicate --{flag} mapping: {key}");
+        }
+    }
+    Ok(mappings)
 }
 
 fn run_proxy_lifecycle_action(
@@ -15632,6 +16214,43 @@ fn parse_key_value_map(values: &[String]) -> Result<BTreeMap<String, String>> {
     Ok(parsed)
 }
 
+fn parse_grouped_key_value_map(values: &[String]) -> Result<BTreeMap<String, Vec<String>>> {
+    let mut parsed = BTreeMap::<String, Vec<String>>::new();
+    for value in values {
+        let (key, item_value) = value
+            .split_once('=')
+            .ok_or_else(|| anyhow::anyhow!("expected key=value: {value}"))?;
+        let key = key.trim();
+        let item_value = item_value.trim();
+        if key.is_empty() || item_value.is_empty() {
+            anyhow::bail!("both key and value are required: {value}");
+        }
+        let items = parsed.entry(key.to_string()).or_default();
+        if !items.iter().any(|item| item == item_value) {
+            items.push(item_value.to_string());
+        }
+    }
+    Ok(parsed)
+}
+
+fn validate_workspace_review_projects(
+    config: &AppConfig,
+    workspace: &ProjectWorkspaceConfig,
+    bases: &BTreeMap<String, String>,
+    allowed_paths: &BTreeMap<String, Vec<String>>,
+) -> Result<()> {
+    for project_key in bases.keys().chain(allowed_paths.keys()) {
+        config.find_project(project_key)?;
+        if !workspace.allows_project(project_key) {
+            anyhow::bail!(
+                "project {project_key} is not included in workspace {}",
+                workspace.key
+            );
+        }
+    }
+    Ok(())
+}
+
 fn filter_proxy_config_for_workspace(
     mut config: ProxyConfig,
     workspace: &ProjectWorkspaceConfig,
@@ -16157,11 +16776,20 @@ fn run_agent(
 ) -> Result<()> {
     match command {
         AgentCommands::Capabilities => {
-            let value = capabilities();
+            let value = resolved_capabilities();
             if json_mode {
                 print_json_command("agent.capabilities", &value)
             } else {
                 print_agent_capabilities(&value);
+                Ok(())
+            }
+        }
+        AgentCommands::Compatibility { skill_manifest } => {
+            let value = compatibility_report(Cli::command(), skill_manifest.as_deref())?;
+            if json_mode {
+                print_json_command("agent.compatibility", &value)
+            } else {
+                print_agent_compatibility(&value);
                 Ok(())
             }
         }
@@ -16179,7 +16807,7 @@ fn run_agent(
                 .ok_or_else(|| anyhow::anyhow!("config is required for agent context"))?;
             let storage = Storage::new_default().map_err(anyhow::Error::msg)?;
             let paths = ensure_default_configs()?;
-            let value = context_for_workspace_with_options_and_paths(
+            let mut value = context_for_workspace_with_options_and_paths(
                 config,
                 &storage,
                 Some(workspace),
@@ -16195,6 +16823,8 @@ fn run_agent(
                 },
                 &paths,
             )?;
+            enrich_capabilities(&mut value.app, Cli::command());
+            retain_context_command_specs(&mut value.app);
             if json_mode {
                 print_json_command("agent.context", &value)
             } else {
@@ -16339,6 +16969,11 @@ fn print_navigation_entries(entries: &[NavigationIndexEntry]) {
 fn print_agent_capabilities(value: &AgentCapabilities) {
     println!("app          : {}", value.app_name);
     println!("version      : {}", value.app_version);
+    println!("schema       : {}", value.schema_version);
+    println!(
+        "build commit : {}",
+        value.build_commit.as_deref().unwrap_or("unknown")
+    );
     println!("storage path : {}", value.storage_path);
     println!("features:");
     for feature in &value.features {
@@ -16347,6 +16982,41 @@ fn print_agent_capabilities(value: &AgentCapabilities) {
     println!("commands:");
     for command in &value.commands {
         println!("  - {command}");
+    }
+    println!("structured commands: {}", value.command_specs.len());
+}
+
+fn print_agent_compatibility(value: &AgentCompatibilityReport) {
+    println!("status       : {}", value.status.label);
+    println!("detail       : {}", value.status.detail);
+    println!(
+        "manifest     : {}",
+        value
+            .effective
+            .skill_manifest
+            .as_deref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "not found".to_string())
+    );
+    println!("commands     : {}", value.observed.command_count);
+    println!("features     : {}", value.observed.feature_count);
+    if !value.observed.missing_commands.is_empty() {
+        println!(
+            "missing cmds : {}",
+            value.observed.missing_commands.join(", ")
+        );
+    }
+    if !value.observed.missing_features.is_empty() {
+        println!(
+            "missing feats: {}",
+            value.observed.missing_features.join(", ")
+        );
+    }
+    for risk in &value.risks {
+        println!("risk         : {} ({})", risk.detail, risk.severity);
+    }
+    for action in &value.recommended_actions {
+        println!("next         : {}", action.command);
     }
 }
 
@@ -16577,8 +17247,8 @@ fn print_deploy_options(options: &DeployTargetMeta) {
     println!("parameters:");
     for param in &options.params {
         println!(
-            "  {} ({}) default={}",
-            param.key, param.kind, param.default_value
+            "  {} ({}) default={} source={}",
+            param.key, param.kind, param.default_value, param.default_source
         );
     }
 }
@@ -16616,8 +17286,14 @@ fn print_push_status(status: &BranchPushStatus) {
     if let Some(upstream) = &status.upstream_branch {
         println!("upstream      : {upstream}");
     }
-    println!("ahead         : {}", status.ahead);
-    println!("behind        : {}", status.behind);
+    if status.upstream_comparable {
+        println!("ahead         : {}", status.ahead);
+        println!("behind        : {}", status.behind);
+    } else {
+        println!("ahead         : n/a");
+        println!("behind        : n/a");
+        println!("comparison    : {}", status.comparison_status);
+    }
     println!("clean         : {}", status.clean);
     println!("staged        : {}", status.staged_count);
     println!("unstaged      : {}", status.unstaged_count);

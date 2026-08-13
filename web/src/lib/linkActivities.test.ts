@@ -11,12 +11,12 @@ import {
 
 function report(): LinkExecutionReport {
   return {
-    key: "cooperation-debug",
-    name: "合作渠道联调",
+    key: "demo-debug",
+    name: "示例联调",
     mode: "run",
     plan: {
-      key: "cooperation-debug",
-      name: "合作渠道联调",
+      key: "demo-debug",
+      name: "示例联调",
       kind: null,
       uiProfile: "default",
       schemaVersion: 1,
@@ -52,11 +52,11 @@ function report(): LinkExecutionReport {
 
 describe("Link activities", () => {
   it("creates an immediate App activity with a stable execution key", () => {
-    expect(linkActivityDraft("cooperation-debug", "合作渠道联调", "run")).toMatchObject({
+    expect(linkActivityDraft("demo-debug", "示例联调", "run")).toMatchObject({
       kind: "link",
       origin: "app",
       status: "running",
-      executionKey: "link:run:cooperation-debug",
+      executionKey: "link:run:demo-debug",
       target: { page: "overview" },
     });
   });
@@ -64,7 +64,7 @@ describe("Link activities", () => {
   it("keeps failed step evidence in the terminal patch", () => {
     expect(linkActivityResultPatch(report(), "run", null, "actual-feature")).toMatchObject({
       status: "failed",
-      summary: "合作渠道联调 · 完成 0 / 失败 1 / 跳过 1",
+      summary: "示例联调 · 完成 0 / 失败 1 / 跳过 1",
       detail: expect.stringContaining("启动代理：端口已被占用"),
       projectKey: "admin",
       diagnostics: [
@@ -74,7 +74,7 @@ describe("Link activities", () => {
       warnings: ["请检查本地代理"],
       action: expect.objectContaining({
         kind: "linkRecover",
-        linkKey: "cooperation-debug",
+        linkKey: "demo-debug",
         workspaceKey: "actual-feature",
         replayAction: "run",
       }),
@@ -83,21 +83,21 @@ describe("Link activities", () => {
 
   it("converts invocation errors into a failed terminal patch", () => {
     expect(linkActivityFailurePatch(
-      "cooperation-debug",
-      "合作渠道联调",
+      "demo-debug",
+      "示例联调",
       "stop",
       "workspace-source",
       "守护进程不可用",
       "feature-a",
     )).toMatchObject({
       status: "failed",
-      summary: "合作渠道联调 · 停止失败",
+      summary: "示例联调 · 停止失败",
       detail: "守护进程不可用",
       action: {
         kind: "linkRecover",
         label: "检查并重新停止",
-        linkKey: "cooperation-debug",
-        linkName: "合作渠道联调",
+        linkKey: "demo-debug",
+        linkName: "示例联调",
         sourceId: "workspace-source",
         workspaceKey: "feature-a",
         replayAction: "stop",
@@ -122,11 +122,11 @@ describe("Link activities", () => {
     expect(linkCheckPassed(passed)).toBe(true);
     expect(linkCheckActivityResultPatch(blocked)).toMatchObject({
       status: "failed",
-      summary: "合作渠道联调 · 1 个步骤阻止重试",
+      summary: "示例联调 · 1 个步骤阻止重试",
     });
     expect(linkCheckActivityResultPatch(passed)).toMatchObject({
       status: "success",
-      summary: "合作渠道联调 · 检查通过",
+      summary: "示例联调 · 检查通过",
     });
   });
 
@@ -152,12 +152,12 @@ describe("Link activities", () => {
 
     expect(linkActivityResultPatch(benignReport, "run")).toMatchObject({
       status: "success",
-      summary: "合作渠道联调 · 完成 0 / 失败 0 / 跳过 1",
+      summary: "示例联调 · 完成 0 / 失败 0 / 跳过 1",
       action: null,
     });
     expect(linkActivityResultPatch(riskyReport, "run")).toMatchObject({
       status: "failed",
-      summary: "合作渠道联调 · 完成 0 / 失败 0 / 跳过 1",
+      summary: "示例联调 · 完成 0 / 失败 0 / 跳过 1",
       detail: expect.stringContaining("启动项目：前置步骤失败"),
       diagnostics: [
         expect.objectContaining({ risks: ["运行配置缺少 dev 命令"] }),
