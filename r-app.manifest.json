@@ -389,7 +389,7 @@
             "description": "First-time setup, every main page, workspaces and projects, builds, branches, Actions, proxies, knowledge, diagnostics, Records, and troubleshooting.",
             "group": "User guide",
             "source": "docs/interface-guide_EN.md",
-            "reviewedForVersion": "0.1.0"
+            "reviewedForVersion": "0.1.5"
           },
           {
             "id": "overview",
@@ -397,7 +397,7 @@
             "description": "Understand where rDevTool fits, its main work areas, installation, data boundaries, and common entry points.",
             "group": "Getting started",
             "source": "README_EN.md",
-            "reviewedForVersion": "0.1.0"
+            "reviewedForVersion": "0.1.5"
           },
           {
             "id": "configuration-packs",
@@ -405,7 +405,7 @@
             "description": "Move project, workspace, and resource configuration with .rdtpack planning, validation, transaction backups, and rollback.",
             "group": "User guide",
             "source": "docs/configuration-packs_EN.md",
-            "reviewedForVersion": "0.1.0"
+            "reviewedForVersion": "0.1.5"
           },
           {
             "id": "changelog",
@@ -413,7 +413,7 @@
             "description": "See important features, fixes, and usage changes in each version.",
             "group": "What's new",
             "source": "CHANGELOG_EN.md",
-            "reviewedForVersion": "0.1.0"
+            "reviewedForVersion": "0.1.5"
           }
         ]
       }

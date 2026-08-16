@@ -71,6 +71,7 @@ import {
   WorkflowIcon,
 } from "../components/AppIcons";
 import { WorkspaceConfigSidebar } from "../components/WorkspaceConfigSidebar";
+import { WorkspaceResourceEditor } from "../components/WorkspaceResourceEditor";
 import {
   WorkspaceWorkflowPanel,
   type WorkspaceWorkflowActionOption,
@@ -150,7 +151,6 @@ import {
   resolveWorkspaceOverviewScope,
   workspaceActionPreview,
 } from "../lib/workspaceOverviewSync";
-import { localizedResourceActionText } from "../lib/resourceActions";
 import {
   confirmationEnabled,
   confirmationPreferenceKeyForTrayAction,
@@ -335,6 +335,9 @@ type WorkspaceResourceShortcutItem = {
   key: string;
   workspaceKey: string;
   configSourceId: string;
+  sourceKind?: "workspace" | "configSource" | string;
+  sourceLabel?: string;
+  managed?: boolean;
   toolConfigSourceId?: string | null;
   toolProxySourceId?: string | null;
   toolRuntimeSourceId?: string | null;
@@ -352,16 +355,6 @@ type WorkspaceResourceShortcutItem = {
   openKind?: "url" | "localPath" | string | null;
   openable: boolean;
 };
-
-function resourceActionResourceName(
-  resource: WorkspaceResourceShortcutItem,
-  t: Translate,
-) {
-  const actionKey = resource.toolKey?.trim();
-  return actionKey
-    ? localizedResourceActionText(actionKey, "name", resource.label, t)
-    : resource.label;
-}
 
 function legacyResourceActionNote(resource: WorkspaceResourceShortcutItem) {
   const detail = resource.detail?.trim() ?? "";
@@ -389,18 +382,13 @@ function resourceActionResourceDetail(
 ) {
   const actionKey = resource.toolKey?.trim() ?? "";
   const note = resource.note?.trim() || legacyResourceActionNote(resource);
-  const localizedNote = note
-    ? actionKey
-      ? localizedResourceActionText(actionKey, "resourceNote", note, t)
-      : note
-    : "";
   return [
     resource.tool ? t("工具 {tool}", { tool: resource.tool }) : "",
     actionKey,
     resource.toolAction
       ? t("动作 {action}", { action: resource.toolAction })
       : "",
-    localizedNote,
+    note,
   ]
     .filter(Boolean)
     .join(" · ");
@@ -1544,6 +1532,11 @@ export function OverviewPage({
       ? proxyTotal
       : workspaceDraft.proxyProfiles.length
     : 0;
+  const workspaceOwnedResourceTotal =
+    workspaceDraft?.resourceCategories.reduce(
+      (total, category) => total + category.entries.length,
+      0,
+    ) ?? 0;
   const workspaceScopeReadOnly = Boolean(workspaceDraft?.system);
   const workspaceInstanceByProject = useMemo(
     () =>
@@ -3641,6 +3634,10 @@ export function OverviewPage({
                           resource.category !== resource.label
                             ? resource.category
                             : resource.kindLabel;
+                        const shortcutSource =
+                          resource.sourceKind === "workspace"
+                            ? t("工作区专属")
+                            : "";
                         return (
                           <button
                             key={resource.key}
@@ -3662,7 +3659,11 @@ export function OverviewPage({
                             </span>
                             <span className="overview-shortcut-copy">
                               <strong>{resource.label}</strong>
-                              <small>{shortcutDetail}</small>
+                              <small>
+                                {[shortcutDetail, shortcutSource]
+                                  .filter(Boolean)
+                                  .join(" · ")}
+                              </small>
                             </span>
                             <span
                               className="overview-shortcut-chevron"
@@ -3731,24 +3732,38 @@ export function OverviewPage({
                         const running = runningKey === `tool:${resource.key}`;
                         const canPlan = isLinkToolResource(resource);
                         const isResourceAction = isActionToolResource(resource);
-                        const displayLabel = isResourceAction
-                          ? resourceActionResourceName(resource, t)
-                          : resource.label;
-                        const displayDetail = isResourceAction
+                        const displayLabel = resource.label;
+                        const displayDetailBase = isResourceAction
                           ? resourceActionResourceDetail(resource, t)
                           : resource.detail;
+                        const displayDetail = [
+                          displayDetailBase,
+                          resource.sourceKind === "workspace"
+                            ? t("工作区专属")
+                            : "",
+                        ]
+                          .filter(Boolean)
+                          .join(" · ");
                         const disabled =
                           Boolean(runningKey) ||
                           (!canPlan && !isResourceAction && !resource.openable);
                         if (canPlan) {
                           const runtimeAction = linkRuntimeAction(resource);
-                          const displaySummary = workspaceLinkToolSummary(
+                          const displaySummaryBase = workspaceLinkToolSummary(
                             resource.detail,
                             resource.value ||
                               translateInternalMessage(resource.kindLabel, t),
                             linkRuntimeLabel(resource),
                             t,
                           );
+                          const displaySummary = [
+                            displaySummaryBase,
+                            resource.sourceKind === "workspace"
+                              ? t("工作区专属")
+                              : "",
+                          ]
+                            .filter(Boolean)
+                            .join(" · ");
                           const actionTitle =
                             runtimeAction === "stop"
                               ? t("一键停止")
@@ -5043,7 +5058,7 @@ export function OverviewPage({
             <Box
               sx={{
                 display: "grid",
-                gridTemplateColumns: { xs: "1fr", md: "280px minmax(0, 1fr)" },
+                gridTemplateColumns: { xs: "1fr", md: "246px minmax(0, 1fr)" },
                 gridTemplateRows: {
                   xs: "auto minmax(0, 1fr)",
                   md: "minmax(0, 1fr)",
@@ -5079,8 +5094,8 @@ export function OverviewPage({
 
               <Stack
                 className="overview-workspace-config-main"
-                spacing={0.95}
-                sx={{ minHeight: 0, overflow: "auto", p: 1.05 }}
+                spacing={0.65}
+                sx={{ minHeight: 0, overflow: "auto", p: 0.8 }}
               >
                 {createOpen ? (
                   <Box
@@ -5476,8 +5491,9 @@ export function OverviewPage({
                     className="overview-workspace-config-card overview-workspace-config-detail-card"
                     sx={panelSx}
                   >
-                    <Stack spacing={0.95} sx={{ p: 1 }}>
+                    <Stack spacing={0.65} sx={{ p: 0.75 }}>
                       <Stack
+                        className="overview-workspace-config-metrics"
                         direction="row"
                         justifyContent="flex-end"
                         alignItems="center"
@@ -5510,6 +5526,16 @@ export function OverviewPage({
                               total: proxyTotal,
                             })}
                           />
+                          {!workspaceDraft?.system ? (
+                            <Chip
+                              size="small"
+                              color={workspaceOwnedResourceTotal ? "primary" : "default"}
+                              variant="outlined"
+                              label={t("{count} 个专属资源", {
+                                count: workspaceOwnedResourceTotal,
+                              })}
+                            />
+                          ) : null}
                           {workspaceDraft &&
                           workspaceDraft.projectInstances.length > 0 ? (
                             <Chip
@@ -5725,6 +5751,15 @@ export function OverviewPage({
                                 />
                               </Stack>
                             </>
+                          ) : null}
+                          {!workspaceScopeReadOnly ? (
+                            <WorkspaceResourceEditor
+                              categories={workspaceDraft.resourceCategories}
+                              disabled={workspaceSaving}
+                              onChange={(resourceCategories) =>
+                                updateDraft({ resourceCategories })
+                              }
+                            />
                           ) : null}
                           <Stack
                             className="overview-workspace-project-dir-list"

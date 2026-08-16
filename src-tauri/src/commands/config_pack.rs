@@ -3,7 +3,8 @@ use std::path::Path;
 use rdevtool_core::config_pack::{
     ConfigPackApplyResult, ConfigPackExportRequest, ConfigPackExportResult, ConfigPackImportPlan,
     ConfigPackImportRequest, ConfigPackInspection, ConfigPackInventory, ConfigPackRollbackResult,
-    apply_config_pack_import, config_pack_inventory, export_config_pack, inspect_config_pack,
+    ConfigPackTransactionHistory, apply_config_pack_import, config_pack_inventory,
+    export_config_pack, inspect_config_pack, list_config_pack_import_transactions,
     plan_config_pack_import, rollback_config_pack_import,
 };
 use tauri::{AppHandle, Emitter};
@@ -64,6 +65,16 @@ pub(crate) async fn apply_config_pack_import_plan(
     state.config_state.invalidate()?;
     emit_configuration_changed(&app, "config-pack-import")?;
     Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn list_config_pack_import_history() -> Result<ConfigPackTransactionHistory, String>
+{
+    tauri::async_runtime::spawn_blocking(|| {
+        list_config_pack_import_transactions().map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]

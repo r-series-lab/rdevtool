@@ -32,6 +32,9 @@ provider, which keeps server-rendered tests and optional modules functional.
 - Translate navigation, controls, status labels, empty states, and help text.
 - Do not translate project names, paths, command output, configuration keys, or
   other user data.
+- Treat Action names, descriptions, parameter copy, option labels, and resource
+  notes as configuration data; render them unchanged unless the Action schema
+  gains explicit locale-aware fields.
 - Prefer parameterized messages such as `切换到 {page}` over string
   concatenation.
 - New optional pages should integrate at their own render boundary. The

@@ -49,6 +49,30 @@ test("global workspace keeps aggregate modules separate from the workspace direc
   expect(toolbarLayout.actionHeight).toBe(32);
   expect(toolbarLayout.scrollWidth).toBeLessThanOrEqual(toolbarLayout.clientWidth);
 
+  const globalSurfaceLayout = await page.evaluate(() => {
+    const bounds = (selector: string) => {
+      const element = document.querySelector(selector);
+      const rect = element?.getBoundingClientRect();
+      return rect ? { left: rect.left, right: rect.right } : null;
+    };
+    const overview = document.querySelector(".overview-page.is-global-workspace");
+    return {
+      overview: bounds(".overview-page.is-global-workspace"),
+      toolbar: bounds(".overview-global-toolbar"),
+      filter: bounds(".overview-filter-bar"),
+      workspaceList: bounds(".overview-workspace-list"),
+      paddingLeft: overview ? getComputedStyle(overview).paddingLeft : "",
+    };
+  });
+  expect(globalSurfaceLayout.overview).not.toBeNull();
+  expect(globalSurfaceLayout.toolbar).not.toBeNull();
+  expect(globalSurfaceLayout.filter).not.toBeNull();
+  expect(globalSurfaceLayout.workspaceList).not.toBeNull();
+  expect(globalSurfaceLayout.paddingLeft).toBe("0px");
+  expect(globalSurfaceLayout.toolbar!.left).toBe(globalSurfaceLayout.overview!.left);
+  expect(globalSurfaceLayout.filter!.left).toBe(globalSurfaceLayout.overview!.left);
+  expect(globalSurfaceLayout.workspaceList!.left).toBe(globalSurfaceLayout.overview!.left);
+
   const firstRow = workspaceDirectory
     .locator(".overview-workspace-index-card")
     .first();
@@ -88,6 +112,14 @@ test("global workspace keeps aggregate modules separate from the workspace direc
   await expect(panel.locator('[data-overview-module="resources"]')).toBeVisible();
 
   await page.setViewportSize({ width: 720, height: 800 });
+
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () => document.documentElement.scrollWidth === document.documentElement.clientWidth,
+      ),
+    )
+    .toBe(true);
 
   const layout = await page
     .locator(".overview-workspace-directory-panel .overview-workspace-index-card")

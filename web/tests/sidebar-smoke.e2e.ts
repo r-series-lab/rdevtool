@@ -93,9 +93,9 @@ test("workspace switcher searches, resets and selects a workspace", async ({ pag
     "true",
   );
 
-  await search.fill("优客");
+  await search.fill("全流量");
   await expect(
-    menu.getByRole("menuitemradio", { name: /REQ-1234 优客贷.*2 个项目/ }),
+    menu.getByRole("menuitemradio", { name: /REQ-1234 全流量权益兑换.*1 个项目/ }),
   ).toBeVisible();
   await expect(menu.getByRole("menuitemradio", { name: /R系列/ })).toHaveCount(0);
   await menu.getByRole("button", { name: "查看全部结果", exact: true }).click();

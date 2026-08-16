@@ -24,7 +24,7 @@ test("workspace Action tool opens the shared parameter dialog before execution",
   await expect(dialog.getByRole("button", { name: "检查计划" })).toBeVisible();
 });
 
-test("workspace Action tool localizes its outer card from structured fields", async ({
+test("workspace Action tool preserves configured copy in English", async ({
   page,
 }) => {
   await page.goto("/smoke.html");
@@ -39,15 +39,15 @@ test("workspace Action tool localizes its outer card from structured fields", as
 
   const actionCard = page
     .locator(".overview-shortcut--with-run")
-    .filter({ hasText: "Batch Deploy Pre" });
+    .filter({ hasText: "批量部署 Pre" });
   await expect(actionCard).toContainText(
-    "Tool action · batch-deploy-pre · Action run · Select work projects, validate each project's standard configuration, and trigger its pre deployment.",
+    "Tool action · batch-deploy-pre · Action run · 选择项目和分支，检查计划后执行",
   );
   await expect(
     actionCard.getByRole("button", {
-      name: "Configure and run Batch Deploy Pre",
+      name: "Configure and run 批量部署 Pre",
       exact: true,
     }),
   ).toBeVisible();
-  await expect(actionCard).not.toContainText("批量部署 Pre");
+  await expect(actionCard).not.toContainText("Batch Deploy Pre");
 });

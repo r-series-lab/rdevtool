@@ -25,13 +25,10 @@ import {
   appendResourceActionProgressEvent,
   initialResourceActionValues,
   formatResourceActionParamValue,
-  localizedResourceActionText,
-  localizedResourceActionView,
   resourceActionActivityParameters,
   resourceActionDryRunState,
   resourceActionRequiresPlan,
   resourceActionRetryValues,
-  resourceActionUsesDirectRemoteWrite,
   type ResourceActionValues,
   validateResourceActionValues,
 } from "../lib/resourceActions";
@@ -112,11 +109,6 @@ export function ResourceActionDialog({
   const resultRef = useRef<HTMLDivElement | null>(null);
   const liveLogRef = useRef<HTMLPreElement | null>(null);
   const [confirmAction, confirmDialog] = useAppConfirmDialog();
-
-  const displayAction = useMemo(
-    () => (action ? localizedResourceActionView(action, t) : null),
-    [action, t],
-  );
 
   useEffect(() => {
     if (!open || !target) {
@@ -213,7 +205,7 @@ export function ResourceActionDialog({
   }, [action]);
   const hiddenParamSummaries = useMemo(
     () =>
-      displayAction?.params
+      action?.params
         .filter((param) => param.kind === "hidden")
         .map((param) => ({
           key: param.key,
@@ -221,7 +213,7 @@ export function ResourceActionDialog({
           value: formatActionParamValue(values[param.key], t),
         }))
         .filter((param) => param.value) ?? [],
-    [displayAction, t, values],
+    [action, t, values],
   );
   const visibleParamCount = action?.params.filter((param) => param.kind !== "hidden").length ?? 0;
   const dryRunState = action ? resourceActionDryRunState(action, values) : null;
@@ -258,7 +250,7 @@ export function ResourceActionDialog({
   }
 
   async function runAction(runValues: ResourceActionValues = values) {
-    if (!action || !displayAction || !target || running) return;
+    if (!action || !target || running) return;
     const nextErrors = validateResourceActionValues(action, runValues, t);
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) {
@@ -298,7 +290,7 @@ export function ResourceActionDialog({
 
       const confirmed = await confirmAction({
         title: t("确认执行该计划？"),
-        description: displayAction.name,
+        description: action.name,
         content: <ActionPlanSummary plan={plan} />,
         confirmLabel: t("按计划执行"),
         confirmIcon: <PlayIcon fontSize="small" />,
@@ -312,8 +304,8 @@ export function ResourceActionDialog({
     ) {
       const confirmed = await confirmAction({
         title: t("确认开始执行？"),
-        description: displayAction.name,
-        content: <ActionExecutionSummary action={displayAction} values={runValues} />,
+        description: action.name,
+        content: <ActionExecutionSummary action={action} values={runValues} />,
         confirmLabel: t("开始执行"),
         confirmIcon: <PlayIcon fontSize="small" />,
         tone: action.effect === "destructive" ? "danger" : "warning",
@@ -333,10 +325,10 @@ export function ResourceActionDialog({
         kind: "shortcut",
         status: "running",
         title: t("执行参数化动作"),
-        summary: displayAction.name,
+        summary: action.name,
         detail: commandLabel,
         executionKey: operationId,
-        parameters: resourceActionActivityParameters(displayAction, runValues),
+        parameters: resourceActionActivityParameters(action, runValues),
         target: { page: "resources" },
         resource: {
           kind: "localPath",
@@ -364,10 +356,10 @@ export function ResourceActionDialog({
         updateActivity?.(activityId, {
           status: nextResult.success ? "success" : "failed",
           summary: nextResult.success
-            ? t("{name} 执行完成", { name: displayAction.name })
+            ? t("{name} 执行完成", { name: action.name })
             : nextResult.cancelled
-              ? t("{name} 已取消", { name: displayAction.name })
-              : t("{name} 执行失败", { name: displayAction.name }),
+              ? t("{name} 已取消", { name: action.name })
+              : t("{name} 执行失败", { name: action.name }),
           detail: actionResultDetail(nextResult),
           executionKey: nextResult.operationId,
         });
@@ -383,7 +375,7 @@ export function ResourceActionDialog({
       if (activityId) {
         updateActivity?.(activityId, {
           status: "failed",
-          summary: t("{name} 执行失败", { name: displayAction.name }),
+          summary: t("{name} 执行失败", { name: action.name }),
           detail: message,
         });
       }
@@ -459,18 +451,8 @@ export function ResourceActionDialog({
       <AppActionDialog
         open={open}
         onClose={onClose}
-        title={
-          displayAction?.name ||
-          (target
-            ? localizedResourceActionText(
-                target.key,
-                "name",
-                target.entryName,
-                t,
-              )
-            : t("参数化动作"))
-        }
-        subtitle={displayAction?.description}
+        title={action?.name || target?.entryName || t("参数化动作")}
+        subtitle={action?.description}
         icon={<ActionIcon />}
         tone={
           action?.effect === "destructive"
@@ -569,13 +551,6 @@ export function ResourceActionDialog({
           ) : null}
           {action ? (
             <>
-              {resourceActionUsesDirectRemoteWrite(action) ? (
-                <Alert className="resource-action-direct-warning" severity="warning">
-                  {t(
-                    "该远程写入 Action 采用直接执行；确认前只能核对参数，建议逐步迁移到 plan_apply。",
-                  )}
-                </Alert>
-              ) : null}
               {hiddenParamSummaries.length > 0 ? (
                 <Box className="resource-action-context-section">
                   <Typography
@@ -633,7 +608,7 @@ export function ResourceActionDialog({
                       </Typography>
                     </Stack>
                     <ParameterForm
-                      params={displayAction?.params ?? action.params}
+                      params={action.params}
                       values={values}
                       errors={errors}
                       disabled={running || target?.mode === "inspect"}

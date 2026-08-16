@@ -5,8 +5,11 @@ import {
   Checkbox,
   Chip,
   FormControlLabel,
+  InputAdornment,
   MenuItem,
   Stack,
+  Tab,
+  Tabs,
   TextField,
   Typography,
 } from "@mui/material";
@@ -18,6 +21,7 @@ import {
   FolderIcon,
   RefreshIcon,
   RestoreIcon,
+  SearchIcon,
   UploadIcon,
 } from "./AppIcons";
 import { useAppConfirmDialog } from "./AppConfirmDialog";
@@ -81,15 +85,18 @@ type ImportIssue = {
 };
 
 type ImportOperation = {
+  id: string;
   module: string;
   key: string;
   action: "add" | "merge" | "replace" | "skip";
   target: string;
   summary: string;
+  selected: boolean;
 };
 
 type ImportPlan = {
   planHash: string;
+  packName: string;
   expiresAt: string;
   operations: ImportOperation[];
   issues: ImportIssue[];
@@ -98,6 +105,7 @@ type ImportPlan = {
   blockerCount: number;
   changeCount: number;
   skipCount: number;
+  excludedCount: number;
 };
 
 type ApplyResult = {
@@ -109,7 +117,27 @@ type ApplyResult = {
   skippedCount: number;
 };
 
+type ImportTransaction = {
+  transactionId: string;
+  createdAt: string;
+  packName: string;
+  packPath: string;
+  packSha256: string;
+  planHash: string;
+  changedPaths: string[];
+  appliedCount: number;
+  skippedCount: number;
+  rolledBackAt: string | null;
+  canRollback: boolean;
+};
+
+type ImportTransactionHistory = {
+  transactions: ImportTransaction[];
+  issues: string[];
+};
+
 type ConflictStrategy = "add" | "merge" | "replace" | "skip";
+type TransferMode = "export" | "import" | "history";
 
 export type ConfigPackPanelProps = {
   onApplied?: () => Promise<void> | void;
@@ -134,6 +162,21 @@ function shortHash(value: string) {
   return value.replace(/^rdtpack-/, "").slice(0, 12);
 }
 
+function formatFileSize(bytes: number) {
+  if (bytes < 1024) {
+    return `${bytes} B`;
+  }
+  if (bytes < 1024 * 1024) {
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatCreatedAt(value: string) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+}
+
 const operationActionLabels: Record<ImportOperation["action"], string> = {
   add: "新增",
   merge: "合并",
@@ -141,9 +184,18 @@ const operationActionLabels: Record<ImportOperation["action"], string> = {
   skip: "跳过",
 };
 
+const moduleLabels: Record<string, string> = {
+  projects: "项目配置",
+  workspaces: "工作区配置",
+  preferences: "界面偏好",
+  config_sources: "资源配置",
+  security: "凭据安全",
+};
+
 export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
   const { t } = useI18n();
   const [confirm, confirmDialog] = useAppConfirmDialog();
+  const [mode, setMode] = useState<TransferMode>("export");
   const [inventory, setInventory] = useState<ConfigPackInventory | null>(null);
   const [inventoryLoading, setInventoryLoading] = useState(false);
   const [busy, setBusy] = useState("");
@@ -165,6 +217,13 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
   const [workspaceRoots, setWorkspaceRoots] = useState<Record<string, string>>({});
   const [sourceMappings, setSourceMappings] = useState<Record<string, string>>({});
   const [lastApply, setLastApply] = useState<ApplyResult | null>(null);
+  const [operationQuery, setOperationQuery] = useState("");
+  const [operationModule, setOperationModule] = useState("all");
+  const [operationAction, setOperationAction] = useState("all");
+  const [selectedOperationIds, setSelectedOperationIds] = useState<string[]>([]);
+  const [operationSelectionDirty, setOperationSelectionDirty] = useState(false);
+  const [history, setHistory] = useState<ImportTransactionHistory | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
 
   const selectedModuleCount = useMemo(
     () =>
@@ -182,6 +241,29 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
       selectedWorkspaces.length,
     ],
   );
+
+  const operationModules = useMemo(
+    () => Array.from(new Set(plan?.operations.map((operation) => operation.module) ?? [])),
+    [plan],
+  );
+
+  const filteredOperations = useMemo(() => {
+    const query = operationQuery.trim().toLocaleLowerCase();
+    return (plan?.operations ?? []).filter((operation) => {
+      if (operationModule !== "all" && operation.module !== operationModule) {
+        return false;
+      }
+      if (operationAction !== "all" && operation.action !== operationAction) {
+        return false;
+      }
+      return (
+        !query ||
+        [operation.key, operation.summary, operation.target, operation.module].some((value) =>
+          value.toLocaleLowerCase().includes(query),
+        )
+      );
+    });
+  }, [operationAction, operationModule, operationQuery, plan]);
 
   async function loadInventory() {
     setInventoryLoading(true);
@@ -226,6 +308,25 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
   useEffect(() => {
     void loadInventory();
   }, []);
+
+  async function loadHistory() {
+    setHistoryLoading(true);
+    setError("");
+    try {
+      const next = await invoke<ImportTransactionHistory>("list_config_pack_import_history");
+      setHistory(next);
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setHistoryLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (mode === "history" && !history) {
+      void loadHistory();
+    }
+  }, [history, mode]);
 
   async function handleExport() {
     if (selectedModuleCount === 0) {
@@ -288,6 +389,11 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
     setStatus("");
     setPlan(null);
     setLastApply(null);
+    setSelectedOperationIds([]);
+    setOperationSelectionDirty(false);
+    setOperationQuery("");
+    setOperationModule("all");
+    setOperationAction("all");
     setProjectRoots({});
     setWorkspaceRoots({});
     setSourceMappings({});
@@ -335,9 +441,14 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
           workspaceRootMappings: workspaceRoots,
           configSourceMappings: sourceMappings,
           requireSecrets: false,
+          includedOperationIds: plan ? selectedOperationIds : null,
         },
       });
       setPlan(next);
+      setSelectedOperationIds(
+        next.operations.filter((operation) => operation.selected).map((operation) => operation.id),
+      );
+      setOperationSelectionDirty(false);
       setProjectRoots((current) => ({
         ...Object.fromEntries(
           next.requiredMappings
@@ -367,7 +478,7 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
   }
 
   async function handleApply() {
-    if (!plan || plan.blockerCount > 0) {
+    if (!plan || plan.blockerCount > 0 || plan.changeCount === 0 || operationSelectionDirty) {
       return;
     }
     const confirmed = await confirm({
@@ -391,6 +502,7 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
       setStatus(t("配置已导入，可在当前面板回滚本次事务。"));
       await onApplied?.();
       await loadInventory();
+      await loadHistory();
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -398,13 +510,13 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
     }
   }
 
-  async function handleRollback() {
-    if (!lastApply) {
+  async function handleRollback(transactionId = lastApply?.transactionId) {
+    if (!transactionId) {
       return;
     }
     const confirmed = await confirm({
       title: t("回滚本次配置导入"),
-      description: t("将恢复导入前的全部配置文件。导入后手动做出的相关改动也会被覆盖。"),
+      description: t("仅当相关配置仍保持导入后的状态时执行回滚，避免覆盖后续改动。"),
       confirmLabel: t("回滚"),
       tone: "danger",
       preferenceKey: "configuration.import",
@@ -416,18 +528,32 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
     setError("");
     try {
       await invoke("rollback_config_pack_import_transaction", {
-        transactionId: lastApply.transactionId,
+        transactionId,
       });
-      setLastApply(null);
-      setPlan(null);
+      if (lastApply?.transactionId === transactionId) {
+        setLastApply(null);
+        setPlan(null);
+      }
       setStatus(t("配置导入已回滚。"));
       await onApplied?.();
       await loadInventory();
+      await loadHistory();
     } catch (reason) {
       setError(String(reason));
     } finally {
       setBusy("");
     }
+  }
+
+  function updateOperationSelection(operationIds: string[], selected: boolean) {
+    const candidates = new Set(operationIds);
+    setSelectedOperationIds((current) => {
+      const next = selected
+        ? Array.from(new Set([...current, ...operationIds]))
+        : current.filter((operationId) => !candidates.has(operationId));
+      return next;
+    });
+    setOperationSelectionDirty(true);
   }
 
   function renderScopeList(
@@ -454,7 +580,9 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
               label={
                 <span>
                   <strong>{item.name}</strong>
-                  <small>{item.key}</small>
+                  <small title={`${item.key} · ${item.detail}`}>
+                    {item.key}{item.detail ? ` · ${item.detail}` : ""}
+                  </small>
                 </span>
               }
             />
@@ -467,10 +595,46 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
   }
 
   return (
-    <Stack className="config-pack-panel" spacing={1.4}>
+    <Stack className="config-pack-panel" spacing={1.2}>
+      <div className="config-pack-mode-bar">
+        <Tabs
+          value={mode}
+          onChange={(_, value: TransferMode) => {
+            setMode(value);
+            setError("");
+            setStatus("");
+          }}
+          aria-label={t("配置迁移模式")}
+        >
+          <Tab
+            value="export"
+            icon={<DownloadIcon fontSize="small" />}
+            iconPosition="start"
+            label={t("导出")}
+          />
+          <Tab
+            value="import"
+            icon={<UploadIcon fontSize="small" />}
+            iconPosition="start"
+            label={t("导入")}
+          />
+          <Tab
+            value="history"
+            icon={<RestoreIcon fontSize="small" />}
+            iconPosition="start"
+            label={t("历史")}
+          />
+        </Tabs>
+        <div className="config-pack-format-mark">
+          <span>.rdtpack</span>
+          <code>schema v1</code>
+        </div>
+      </div>
+
       {error ? <Alert severity="error">{error}</Alert> : null}
       {status ? <Alert severity="success">{status}</Alert> : null}
 
+      {mode === "export" ? (
       <section className="config-pack-section" aria-labelledby="config-pack-export-title">
         <header className="config-pack-section-head">
           <div>
@@ -492,100 +656,13 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
           </Button>
         </header>
 
-        <div className="config-pack-export-grid">
-          <div className="config-pack-module-column">
-            <TextField
-              label={t("配置包名称")}
-              size="small"
-              value={packName}
-              onChange={(event) => setPackName(event.target.value)}
-            />
-            <div className="config-pack-module-list">
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={includeProjects}
-                    onChange={(event) => setIncludeProjects(event.target.checked)}
-                  />
-                }
-                label={t("项目、构建、部署与 Git")}
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={includeWorkspaces}
-                    onChange={(event) => setIncludeWorkspaces(event.target.checked)}
-                  />
-                }
-                label={t("工作区与资源范围")}
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={includeConfigSources}
-                    onChange={(event) => setIncludeConfigSources(event.target.checked)}
-                  />
-                }
-                label={t("资源、Action、Link 与代理")}
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={includePreferences}
-                    onChange={(event) => setIncludePreferences(event.target.checked)}
-                  />
-                }
-                label={t("界面偏好（不含当前工作区）")}
-              />
-              <FormControlLabel
-                control={
-                  <Checkbox
-                    size="small"
-                    checked={includeDependencies}
-                    onChange={(event) => setIncludeDependencies(event.target.checked)}
-                  />
-                }
-                label={t("自动包含工作区引用的项目")}
-              />
-            </div>
-          </div>
-
-          <div className="config-pack-scope-column">
-            <div className="config-pack-scope-head">
-              <Typography variant="caption">{t("项目范围")}</Typography>
-              <button type="button" onClick={() => setSelectedProjects(inventory?.projects.map((item) => item.key) ?? [])}>
-                {t("全选")}
-              </button>
-            </div>
-            {renderScopeList(
-              inventory?.projects ?? [],
-              selectedProjects,
-              setSelectedProjects,
-              !includeProjects,
-            )}
-          </div>
-
-          <div className="config-pack-scope-column">
-            <div className="config-pack-scope-head">
-              <Typography variant="caption">{t("工作区范围")}</Typography>
-              <button type="button" onClick={() => setSelectedWorkspaces(inventory?.workspaces.map((item) => item.key) ?? [])}>
-                {t("全选")}
-              </button>
-            </div>
-            {renderScopeList(
-              inventory?.workspaces ?? [],
-              selectedWorkspaces,
-              setSelectedWorkspaces,
-              !includeWorkspaces,
-            )}
-          </div>
-        </div>
-
-        <div className="config-pack-action-row">
+        <div className="config-pack-export-basics">
+          <TextField
+            label={t("配置包名称")}
+            size="small"
+            value={packName}
+            onChange={(event) => setPackName(event.target.value)}
+          />
           <TextField
             select
             size="small"
@@ -616,8 +693,156 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
               </MenuItem>
             ))}
           </TextField>
+        </div>
+
+        <div className="config-pack-module-grid">
+          <div className={includeProjects ? "config-pack-module-option is-active" : "config-pack-module-option"}>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={includeProjects}
+                    onChange={(event) => setIncludeProjects(event.target.checked)}
+                  />
+                }
+                label={t("项目、构建、部署与 Git")}
+              />
+              <span>{selectedProjects.length}/{inventory?.projects.length ?? 0}</span>
+          </div>
+          <div className={includeWorkspaces ? "config-pack-module-option is-active" : "config-pack-module-option"}>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={includeWorkspaces}
+                    onChange={(event) => setIncludeWorkspaces(event.target.checked)}
+                  />
+                }
+                label={t("工作区与资源范围")}
+              />
+              <span>{selectedWorkspaces.length}/{inventory?.workspaces.length ?? 0}</span>
+          </div>
+          <div className={includeConfigSources ? "config-pack-module-option is-active" : "config-pack-module-option"}>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={includeConfigSources}
+                    onChange={(event) => setIncludeConfigSources(event.target.checked)}
+                  />
+                }
+                label={t("资源、Action、Link 与代理")}
+              />
+              <span>{selectedConfigSources.length}/{inventory?.configSources.length ?? 0}</span>
+          </div>
+          <div className={includePreferences ? "config-pack-module-option is-active" : "config-pack-module-option"}>
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={includePreferences}
+                    onChange={(event) => setIncludePreferences(event.target.checked)}
+                  />
+                }
+                label={t("界面偏好（不含当前工作区）")}
+              />
+              <span>{includePreferences ? 1 : 0}/1</span>
+          </div>
+        </div>
+
+        <div className="config-pack-scope-grid">
+          <div className={includeProjects ? "config-pack-scope-column" : "config-pack-scope-column is-disabled"}>
+            <div className="config-pack-scope-head">
+              <div>
+                <Typography variant="subtitle2">{t("项目范围")}</Typography>
+                <Typography variant="caption">
+                  {t("{selected}/{total} 已选", {
+                    selected: selectedProjects.length,
+                    total: inventory?.projects.length ?? 0,
+                  })}
+                </Typography>
+              </div>
+              <div className="config-pack-scope-actions">
+                <button
+                  type="button"
+                  onClick={() => setSelectedProjects(inventory?.projects.map((item) => item.key) ?? [])}
+                  disabled={!includeProjects}
+                >
+                  {t("全选")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedProjects([])}
+                  disabled={!includeProjects || selectedProjects.length === 0}
+                >
+                  {t("清空")}
+                </button>
+              </div>
+            </div>
+            {renderScopeList(
+              inventory?.projects ?? [],
+              selectedProjects,
+              setSelectedProjects,
+              !includeProjects,
+            )}
+          </div>
+
+          <div className={includeWorkspaces ? "config-pack-scope-column" : "config-pack-scope-column is-disabled"}>
+            <div className="config-pack-scope-head">
+              <div>
+                <Typography variant="subtitle2">{t("工作区范围")}</Typography>
+                <Typography variant="caption">
+                  {t("{selected}/{total} 已选", {
+                    selected: selectedWorkspaces.length,
+                    total: inventory?.workspaces.length ?? 0,
+                  })}
+                </Typography>
+              </div>
+              <div className="config-pack-scope-actions">
+                <button
+                  type="button"
+                  onClick={() => setSelectedWorkspaces(inventory?.workspaces.map((item) => item.key) ?? [])}
+                  disabled={!includeWorkspaces}
+                >
+                  {t("全选")}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedWorkspaces([])}
+                  disabled={!includeWorkspaces || selectedWorkspaces.length === 0}
+                >
+                  {t("清空")}
+                </button>
+              </div>
+            </div>
+            {renderScopeList(
+              inventory?.workspaces ?? [],
+              selectedWorkspaces,
+              setSelectedWorkspaces,
+              !includeWorkspaces,
+            )}
+          </div>
+        </div>
+
+        <div className="config-pack-dependency-row">
+              <FormControlLabel
+                control={
+                  <Checkbox
+                    size="small"
+                    checked={includeDependencies}
+                    onChange={(event) => setIncludeDependencies(event.target.checked)}
+                    disabled={!includeWorkspaces || !includeProjects}
+                  />
+                }
+                label={t("自动包含工作区引用的项目")}
+              />
+        </div>
+
+        <div className="config-pack-action-row">
           <Typography variant="caption">
-            {t("敏感值不会写入包内；本机绝对路径会转换为可映射占位符。")}
+            {t("已选择 {count} 个配置模块；敏感值不会写入包内。", {
+              count: selectedModuleCount,
+            })}
           </Typography>
           <Button
             variant="contained"
@@ -629,7 +854,9 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
           </Button>
         </div>
       </section>
+      ) : null}
 
+      {mode === "import" ? (
       <section className="config-pack-section" aria-labelledby="config-pack-import-title">
         <header className="config-pack-section-head">
           <div>
@@ -654,20 +881,33 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
         {inspection ? (
           <>
             <div className="config-pack-file-summary">
-              <div>
-                <Typography variant="subtitle2">{inspection.manifest.name}</Typography>
+              <div className="config-pack-file-copy">
+                <div className="config-pack-file-title-row">
+                  <Typography variant="subtitle2">{inspection.manifest.name}</Typography>
+                  <Chip
+                    size="small"
+                    color={inspection.valid ? "success" : "error"}
+                    variant="outlined"
+                    label={t(inspection.valid ? "校验通过" : "校验失败")}
+                  />
+                </div>
                 <Typography variant="caption" title={inspection.path}>
                   {inspection.path}
                 </Typography>
+                <div className="config-pack-file-meta">
+                  <span>{formatFileSize(inspection.sizeBytes)}</span>
+                  <span>{formatCreatedAt(inspection.manifest.createdAt)}</span>
+                  <code>{shortHash(inspection.sha256)}</code>
+                </div>
               </div>
-              <Stack direction="row" spacing={0.6} useFlexGap flexWrap="wrap">
+              <Stack className="config-pack-module-chips" direction="row" spacing={0.6} useFlexGap flexWrap="wrap">
                 <Chip size="small" label={`v${inspection.manifest.schemaVersion}`} />
                 {inspection.manifest.modules.map((module) => (
                   <Chip
                     key={module.key}
                     size="small"
                     variant="outlined"
-                    label={`${module.key} ${module.itemCount}`}
+                    label={`${t(moduleLabels[module.key] ?? module.key)} ${module.itemCount}`}
                   />
                 ))}
                 {inspection.manifest.security.sensitiveValuesRemoved ? (
@@ -702,6 +942,8 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
                 onChange={(event) => {
                   setStrategy(event.target.value as ConflictStrategy);
                   setPlan(null);
+                  setSelectedOperationIds([]);
+                  setOperationSelectionDirty(false);
                 }}
               >
                 <MenuItem value="merge">{t("合并（推荐）")}</MenuItem>
@@ -724,6 +966,8 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
                           [sourceId]: event.target.value,
                         }));
                         setPlan(null);
+                        setSelectedOperationIds([]);
+                        setOperationSelectionDirty(false);
                       }}
                     >
                       {(inventory?.configSources ?? []).map((source) => (
@@ -745,7 +989,15 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
                   inspection.configSourceIds.some((sourceId) => !sourceMappings[sourceId])
                 }
               >
-                {busy === "plan" ? t("正在生成计划") : t(plan ? "重新检查计划" : "生成导入计划")}
+                {busy === "plan"
+                  ? t("正在生成计划")
+                  : t(
+                      operationSelectionDirty
+                        ? "更新导入计划"
+                        : plan
+                          ? "重新检查计划"
+                          : "生成导入计划",
+                    )}
               </Button>
             </div>
 
@@ -787,11 +1039,17 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
                 <div className="config-pack-plan-metrics">
                   <span><strong>{plan.changeCount}</strong>{t("变更")}</span>
                   <span><strong>{plan.skipCount}</strong>{t("跳过")}</span>
+                  <span><strong>{plan.excludedCount}</strong>{t("已排除")}</span>
                   <span className={plan.blockerCount ? "is-blocked" : ""}>
                     <strong>{plan.blockerCount}</strong>{t("阻断")}
                   </span>
                   <code>{shortHash(plan.planHash)}</code>
                 </div>
+                {operationSelectionDirty ? (
+                  <Alert severity="warning">
+                    {t("操作选择已更改，请更新计划后再执行导入。")}
+                  </Alert>
+                ) : null}
                 {plan.issues.length ? (
                   <div className="config-pack-issues">
                     {plan.issues.slice(0, 8).map((issue, index) => (
@@ -801,18 +1059,126 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
                     ))}
                   </div>
                 ) : null}
+                <div className="config-pack-operation-tools">
+                  <TextField
+                    size="small"
+                    placeholder={t("搜索配置项或目标路径")}
+                    value={operationQuery}
+                    onChange={(event) => setOperationQuery(event.target.value)}
+                    slotProps={{
+                      input: {
+                        startAdornment: (
+                          <InputAdornment position="start">
+                            <SearchIcon fontSize="small" />
+                          </InputAdornment>
+                        ),
+                      },
+                    }}
+                  />
+                  <TextField
+                    select
+                    size="small"
+                    label={t("模块")}
+                    value={operationModule}
+                    onChange={(event) => setOperationModule(event.target.value)}
+                  >
+                    <MenuItem value="all">{t("全部模块")}</MenuItem>
+                    {operationModules.map((module) => (
+                      <MenuItem key={module} value={module}>
+                        {t(moduleLabels[module] ?? module)}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+                  <TextField
+                    select
+                    size="small"
+                    label={t("操作")}
+                    value={operationAction}
+                    onChange={(event) => setOperationAction(event.target.value)}
+                  >
+                    <MenuItem value="all">{t("全部操作")}</MenuItem>
+                    {Object.entries(operationActionLabels).map(([action, label]) => (
+                      <MenuItem key={action} value={action}>{t(label)}</MenuItem>
+                    ))}
+                  </TextField>
+                  <div className="config-pack-operation-selection-actions">
+                    <Button
+                      size="small"
+                      color="inherit"
+                      onClick={() =>
+                        updateOperationSelection(
+                          filteredOperations
+                            .filter((operation) => operation.action !== "skip")
+                            .map((operation) => operation.id),
+                          true,
+                        )
+                      }
+                    >
+                      {t("选择当前结果")}
+                    </Button>
+                    <Button
+                      size="small"
+                      color="inherit"
+                      onClick={() =>
+                        updateOperationSelection(
+                          filteredOperations
+                            .filter((operation) => operation.action !== "skip")
+                            .map((operation) => operation.id),
+                          false,
+                        )
+                      }
+                    >
+                      {t("排除当前结果")}
+                    </Button>
+                  </div>
+                </div>
                 <div className="config-pack-operation-list">
-                  {plan.operations.slice(0, 12).map((operation) => (
-                    <div key={`${operation.module}:${operation.key}:${operation.target}`}>
-                      <Chip size="small" label={t(operationActionLabels[operation.action])} />
-                      <span>{operation.module}</span>
+                  <div className="config-pack-operation-head" aria-hidden="true">
+                    <span>{t("选择与操作")}</span>
+                    <span>{t("模块")}</span>
+                    <span>{t("配置项")}</span>
+                    <span>{t("目标")}</span>
+                  </div>
+                  {filteredOperations.map((operation) => (
+                    <div
+                      className={`config-pack-operation-row${selectedOperationIds.includes(operation.id) ? "" : " is-excluded"}`}
+                      key={operation.id}
+                    >
+                      <div className="config-pack-operation-action">
+                        <Checkbox
+                          size="small"
+                          checked={selectedOperationIds.includes(operation.id)}
+                          disabled={operation.action === "skip"}
+                          onChange={(event) =>
+                            updateOperationSelection([operation.id], event.target.checked)
+                          }
+                          inputProps={{
+                            "aria-label": t("选择配置项 {key}", { key: operation.key }),
+                          }}
+                        />
+                        <Chip
+                          size="small"
+                          variant="outlined"
+                          color={
+                            operation.action === "add"
+                              ? "success"
+                              : operation.action === "replace"
+                                ? "warning"
+                                : operation.action === "merge"
+                                  ? "info"
+                                  : "default"
+                          }
+                          label={t(operationActionLabels[operation.action])}
+                        />
+                      </div>
+                      <span>{t(moduleLabels[operation.module] ?? operation.module)}</span>
                       <strong>{operation.key}</strong>
                       <small title={operation.target}>{operation.target}</small>
                     </div>
                   ))}
-                  {plan.operations.length > 12 ? (
-                    <Typography variant="caption">
-                      {t("另有 {count} 项变更未展开", { count: plan.operations.length - 12 })}
+                  {!filteredOperations.length ? (
+                    <Typography className="config-pack-operation-empty" variant="caption">
+                      {t("没有符合当前筛选条件的配置项。")}
                     </Typography>
                   ) : null}
                 </div>
@@ -826,7 +1192,12 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
                     variant="contained"
                     startIcon={<UploadIcon fontSize="small" />}
                     onClick={() => void handleApply()}
-                    disabled={Boolean(busy) || plan.blockerCount > 0}
+                    disabled={
+                      Boolean(busy) ||
+                      plan.blockerCount > 0 ||
+                      plan.changeCount === 0 ||
+                      operationSelectionDirty
+                    }
                   >
                     {busy === "apply" ? t("正在导入") : t("执行导入")}
                   </Button>
@@ -866,6 +1237,93 @@ export function ConfigPackPanel({ onApplied }: ConfigPackPanelProps) {
           </div>
         )}
       </section>
+      ) : null}
+
+      {mode === "history" ? (
+        <section className="config-pack-section" aria-labelledby="config-pack-history-title">
+          <header className="config-pack-section-head">
+            <div>
+              <Typography id="config-pack-history-title" variant="subtitle2">
+                {t("迁移历史")}
+              </Typography>
+              <Typography variant="caption">
+                {t("查看已执行的配置导入事务，并在配置未发生后续变化时安全回滚。")}
+              </Typography>
+            </div>
+            <Button
+              size="small"
+              color="inherit"
+              startIcon={<RefreshIcon fontSize="small" />}
+              onClick={() => void loadHistory()}
+              disabled={historyLoading || Boolean(busy)}
+            >
+              {historyLoading ? t("正在刷新") : t("刷新历史")}
+            </Button>
+          </header>
+
+          {history?.issues.length ? (
+            <div className="config-pack-issues config-pack-history-issues">
+              {history.issues.map((issue) => (
+                <Alert key={issue} severity="warning">{issue}</Alert>
+              ))}
+            </div>
+          ) : null}
+
+          {history?.transactions.length ? (
+            <div className="config-pack-history-list">
+              {history.transactions.map((transaction) => (
+                <article className="config-pack-history-row" key={transaction.transactionId}>
+                  <div className="config-pack-history-main">
+                    <div className="config-pack-history-title-row">
+                      <Typography variant="subtitle2">
+                        {transaction.packName || t("未命名配置包")}
+                      </Typography>
+                      <Chip
+                        size="small"
+                        variant="outlined"
+                        color={transaction.canRollback ? "success" : "default"}
+                        label={t(transaction.canRollback ? "可回滚" : "已回滚")}
+                      />
+                    </div>
+                    <Typography variant="caption" title={transaction.packPath}>
+                      {transaction.packPath || transaction.transactionId}
+                    </Typography>
+                    <div className="config-pack-history-meta">
+                      <span>{formatCreatedAt(transaction.createdAt)}</span>
+                      <code>{shortHash(transaction.planHash)}</code>
+                      <span>{t("{count} 个文件", { count: transaction.changedPaths.length })}</span>
+                    </div>
+                  </div>
+                  <div className="config-pack-history-result">
+                    <span><strong>{transaction.appliedCount}</strong>{t("已应用")}</span>
+                    <span><strong>{transaction.skippedCount}</strong>{t("未应用")}</span>
+                  </div>
+                  <Button
+                    size="small"
+                    color="inherit"
+                    variant="outlined"
+                    startIcon={<RestoreIcon fontSize="small" />}
+                    onClick={() => void handleRollback(transaction.transactionId)}
+                    disabled={!transaction.canRollback || Boolean(busy)}
+                  >
+                    {busy === "rollback" ? t("正在回滚") : t("回滚")}
+                  </Button>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="config-pack-empty">
+              <RestoreIcon />
+              <Typography variant="subtitle2">
+                {historyLoading ? t("正在读取迁移历史") : t("暂无迁移历史")}
+              </Typography>
+              <Typography variant="caption">
+                {t("执行配置导入后，事务记录和回滚状态会显示在这里。")}
+              </Typography>
+            </div>
+          )}
+        </section>
+      ) : null}
       {confirmDialog}
     </Stack>
   );

@@ -304,6 +304,8 @@ export const EN_SETTINGS_MESSAGES: Record<string, string> = {
   "无参数": "No Parameters",
   "原始配置": "Raw Configuration",
   "配置迁移": "Configuration Transfer",
+  "配置迁移模式": "Configuration Transfer Mode",
+  "历史": "History",
   "导出配置包": "Export Configuration Pack",
   "导入配置包": "Import Configuration Pack",
   "按模块和范围生成可审查、可迁移的 .rdtpack 文件。":
@@ -320,6 +322,8 @@ export const EN_SETTINGS_MESSAGES: Record<string, string> = {
   "项目范围": "Project Scope",
   "工作区范围": "Workspace Scope",
   "全选": "Select All",
+  "清空": "Clear",
+  "{selected}/{total} 已选": "{selected}/{total} selected",
   "暂无可导出项": "No Exportable Items",
   "资源配置源": "Resource Configuration Source",
   "资源配置源（可多选）": "Resource Configuration Sources (multiple)",
@@ -329,6 +333,8 @@ export const EN_SETTINGS_MESSAGES: Record<string, string> = {
   "正在导出": "Exporting",
   "至少选择一个有内容的配置模块。": "Select at least one non-empty configuration module.",
   "配置包已导出：{path}": "Configuration pack exported: {path}",
+  "已选择 {count} 个配置模块；敏感值不会写入包内。":
+    "{count} configuration modules selected; sensitive values are excluded.",
   "选择配置包": "Choose Configuration Pack",
   "正在检查": "Inspecting",
   "配置包校验通过，可以生成导入计划。":
@@ -336,6 +342,13 @@ export const EN_SETTINGS_MESSAGES: Record<string, string> = {
   "配置包校验未通过，请查看问题后更换配置包。":
     "The configuration pack is invalid. Review the issues and choose another pack.",
   "已移除 {count} 个敏感值": "{count} sensitive values removed",
+  "校验通过": "Validated",
+  "校验失败": "Validation Failed",
+  "项目配置": "Project Configuration",
+  "工作区配置": "Workspace Configuration",
+  "资源配置": "Resource Configuration",
+  "界面偏好": "Interface Preferences",
+  "凭据安全": "Credential Security",
   "冲突策略": "Conflict Strategy",
   "合并（推荐）": "Merge (Recommended)",
   "仅新增": "Add Only",
@@ -357,7 +370,23 @@ export const EN_SETTINGS_MESSAGES: Record<string, string> = {
   "合并": "Merge",
   "替换": "Replace",
   "跳过": "Skipped",
+  "已排除": "Excluded",
   "阻断": "Blockers",
+  "操作选择已更改，请更新计划后再执行导入。":
+    "Operation selection changed. Update the plan before applying the import.",
+  "搜索配置项或目标路径": "Search configuration items or target paths",
+  "全部模块": "All Modules",
+  "全部操作": "All Actions",
+  "选择当前结果": "Select Current Results",
+  "排除当前结果": "Exclude Current Results",
+  "选择与操作": "Selection and Action",
+  "选择配置项 {key}": "Select Configuration Item {key}",
+  "没有符合当前筛选条件的配置项。": "No configuration items match the current filters.",
+  "更新导入计划": "Update Import Plan",
+  "操作": "Action",
+  "模块": "Module",
+  "配置项": "Configuration Item",
+  "目标": "Target",
   "另有 {count} 项变更未展开": "{count} additional changes are collapsed",
   "解决阻断项并重新检查后才能执行。": "Resolve blockers and recheck before applying.",
   "执行前会再次校验配置状态与包校验和。":
@@ -370,12 +399,28 @@ export const EN_SETTINGS_MESSAGES: Record<string, string> = {
   "配置已导入，可在当前面板回滚本次事务。":
     "Configuration imported. This transaction can be rolled back from this panel.",
   "回滚本次配置导入": "Roll Back This Configuration Import",
+  "仅当相关配置仍保持导入后的状态时执行回滚，避免覆盖后续改动。":
+    "Roll back only when the related configuration still matches the imported state, preventing later changes from being overwritten.",
   "将恢复导入前的全部配置文件。导入后手动做出的相关改动也会被覆盖。":
     "Restore all pre-import configuration files. Related manual changes made afterward will also be overwritten.",
   "回滚": "Roll Back",
   "回滚本次导入": "Roll Back This Import",
   "正在回滚": "Rolling Back",
   "配置导入已回滚。": "Configuration import rolled back.",
+  "迁移历史": "Transfer History",
+  "查看已执行的配置导入事务，并在配置未发生后续变化时安全回滚。":
+    "Review completed configuration import transactions and roll them back safely when no later changes exist.",
+  "正在刷新": "Refreshing",
+  "刷新历史": "Refresh History",
+  "未命名配置包": "Unnamed Configuration Pack",
+  "可回滚": "Available for Rollback",
+  "已回滚": "Rolled Back",
+  "已应用": "Applied",
+  "未应用": "Not Applied",
+  "正在读取迁移历史": "Loading Transfer History",
+  "暂无迁移历史": "No Transfer History",
+  "执行配置导入后，事务记录和回滚状态会显示在这里。":
+    "Import transactions and rollback status appear here after a configuration import.",
   "事务 {id} 已完成，备份保存在 {path}":
     "Transaction {id} completed. Backup stored at {path}",
   "尚未选择配置包": "No Configuration Pack Selected",

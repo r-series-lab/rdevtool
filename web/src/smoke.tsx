@@ -1777,6 +1777,46 @@ const workspaceRuntimeEditor = {
         managed: true,
       },
     ],
+    resourceCategories: [
+      {
+        title: "工作区资料",
+        shortLabel: "资料",
+        entries: [
+          {
+            name: "资料目录",
+            kind: "directory",
+            path: "/mock/workspaces/feature/resources",
+            note: "工作区文档、附件、脚本和软链接",
+          },
+          {
+            name: "工作日志",
+            kind: "file",
+            path: "/mock/workspaces/feature/resources/WORKLOG.md",
+            note: "需求优化、问题修复和关键决策记录",
+          },
+        ],
+      },
+      {
+        title: "联调入口",
+        shortLabel: "联调",
+        entries: [
+          {
+            name: "玩法规则联调页",
+            kind: "url",
+            url: "http://127.0.0.1:4173/#/debug/gameplay-rules",
+            browser: "current_chrome",
+            note: "工作区专属的玩法规则预览页",
+          },
+          {
+            name: "活动规则联调页",
+            kind: "url",
+            url: "http://127.0.0.1:4173/#/debug/activity-rules",
+            browser: "current_chrome",
+            note: "工作区专属的活动规则预览页",
+          },
+        ],
+      },
+    ],
   },
   projects: [
     {
@@ -2403,6 +2443,69 @@ function smokeHealthSnapshot() {
   };
 }
 
+const mockRolledBackConfigPackTransactions = new Set<string>([
+  "20260810T090000Z-oldbaseline",
+]);
+let mockConfigPackApplied = false;
+
+function getMockConfigPackHistory() {
+  const transactions = [
+    ...(mockConfigPackApplied
+      ? [
+          {
+            transactionId: "20260813T120000Z-123456789abc",
+            createdAt: "2026-08-13T12:00:00Z",
+            packName: "Team Development Baseline",
+            packPath: "/mock/team.rdtpack",
+            packSha256: "pack-sha256",
+            planHash: "rdtpack-ready-plan",
+            changedPaths: [
+              "/mock/config/projects.toml",
+              "/mock/config/workspaces/feature-a.toml",
+            ],
+            appliedCount: 2,
+            skippedCount: 0,
+            rolledBackAt: null,
+          },
+        ]
+      : []),
+    {
+      transactionId: "20260812T103000Z-activebaseline",
+      createdAt: "2026-08-12T10:30:00Z",
+      packName: "Local Workbench Baseline",
+      packPath: "/mock/local-workbench.rdtpack",
+      packSha256: "local-pack-sha256",
+      planHash: "rdtpack-local-plan",
+      changedPaths: ["/mock/config/projects.toml"],
+      appliedCount: 3,
+      skippedCount: 1,
+      rolledBackAt: null,
+    },
+    {
+      transactionId: "20260810T090000Z-oldbaseline",
+      createdAt: "2026-08-10T09:00:00Z",
+      packName: "Previous Baseline",
+      packPath: "/mock/previous.rdtpack",
+      packSha256: "previous-pack-sha256",
+      planHash: "rdtpack-previous-plan",
+      changedPaths: ["/mock/config/workspace.toml"],
+      appliedCount: 1,
+      skippedCount: 0,
+      rolledBackAt: "2026-08-10T09:15:00Z",
+    },
+  ];
+  return {
+    transactions: transactions.map((transaction) => ({
+      ...transaction,
+      rolledBackAt: mockRolledBackConfigPackTransactions.has(transaction.transactionId)
+        ? (transaction.rolledBackAt ?? "2026-08-13T12:30:00Z")
+        : transaction.rolledBackAt,
+      canRollback: !mockRolledBackConfigPackTransactions.has(transaction.transactionId),
+    })),
+    issues: [],
+  };
+}
+
 mockIPC(
   (command, payload) => {
     const args = payload as Record<string, unknown> | undefined;
@@ -2487,27 +2590,39 @@ mockIPC(
       case "plan_config_pack_import_file": {
         const request = args?.request as {
           projectRootMappings?: Record<string, string>;
+          includedOperationIds?: string[] | null;
         };
-        const mapped = Boolean(request?.projectRootMappings?.demo);
+        const operationIds = request?.includedOperationIds ?? [
+          "projects:demo",
+          "workspaces:feature-a",
+        ];
+        const demoSelected = operationIds.includes("projects:demo");
+        const mapped = !demoSelected || Boolean(request?.projectRootMappings?.demo);
+        const operations = [
+          {
+            id: "projects:demo",
+            module: "projects",
+            key: "demo",
+            action: "merge",
+            target: "/mock/config/projects.toml",
+            summary: "merge project demo",
+            selected: demoSelected,
+          },
+          {
+            id: "workspaces:feature-a",
+            module: "workspaces",
+            key: "feature-a",
+            action: "add",
+            target: "/mock/config/workspaces/feature-a.toml",
+            summary: "add workspace feature-a",
+            selected: operationIds.includes("workspaces:feature-a"),
+          },
+        ];
         return {
           planHash: mapped ? "rdtpack-ready-plan" : "rdtpack-blocked-plan",
+          packName: "Team Development Baseline",
           expiresAt: "2026-08-14T12:00:00Z",
-          operations: [
-            {
-              module: "projects",
-              key: "demo",
-              action: "merge",
-              target: "/mock/config/projects.toml",
-              summary: "merge project demo",
-            },
-            {
-              module: "workspaces",
-              key: "feature-a",
-              action: "add",
-              target: "/mock/config/workspaces/feature-a.toml",
-              summary: "add workspace feature-a",
-            },
-          ],
+          operations,
           issues: mapped
             ? [
                 {
@@ -2539,11 +2654,15 @@ mockIPC(
               ],
           requiredEnvironment: ["JENKINS_PASSWORD", "GITLAB_TOKEN"],
           blockerCount: mapped ? 0 : 1,
-          changeCount: 2,
+          changeCount: operations.filter(
+            (operation) => operation.selected && operation.action !== "skip",
+          ).length,
           skipCount: 0,
+          excludedCount: operations.filter((operation) => !operation.selected).length,
         };
       }
       case "apply_config_pack_import_plan":
+        mockConfigPackApplied = true;
         return {
           planHash: String(args?.planHash ?? ""),
           transactionId: "20260813T120000Z-123456789abc",
@@ -2555,7 +2674,10 @@ mockIPC(
           appliedCount: 2,
           skippedCount: 0,
         };
+      case "list_config_pack_import_history":
+        return getMockConfigPackHistory();
       case "rollback_config_pack_import_transaction":
+        mockRolledBackConfigPackTransactions.add(String(args?.transactionId ?? ""));
         return {
           transactionId: String(args?.transactionId ?? ""),
           restoredPaths: [
@@ -3066,6 +3188,14 @@ mockIPC(
       }
       case "get_project_workspace_editor":
         return workspaceRuntimeEditor;
+      case "save_project_workspace_editor":
+        return {
+          ...workspaceRuntimeEditor,
+          workspace: {
+            ...workspaceRuntimeEditor.workspace,
+            ...((args?.draft as Record<string, unknown> | undefined) ?? {}),
+          },
+        };
       case "list_project_workspace_instance_statuses":
         return [
           workspaceInstanceRepairMode

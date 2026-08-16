@@ -829,12 +829,12 @@ fn navigation_entry_config_from_editor_entry(
             }
         }
         "tool" => {}
-        "directory" => {
+        "directory" | "file" => {
             let Some(value) = path.as_deref() else {
-                anyhow::bail!("目录入口需要填写目录路径");
+                anyhow::bail!("目录或文件入口需要填写路径");
             };
             if !PathBuf::from(value).is_absolute() {
-                anyhow::bail!("目录入口需要使用绝对路径");
+                anyhow::bail!("目录或文件入口需要使用绝对路径");
             }
         }
         _ => unreachable!("entry kind was normalized"),
@@ -1706,6 +1706,36 @@ fn entry_kind(entry: &NavigationEntry) -> Result<NavigationEntryKind> {
         "directory" | "dir" | "folder" => Ok(NavigationEntryKind::Directory),
         "file" | "document" => Ok(NavigationEntryKind::File),
         other => Err(anyhow!("unsupported navigation entry kind: {}", other)),
+    }
+}
+
+#[cfg(test)]
+mod editor_tests {
+    use super::*;
+
+    #[test]
+    fn editor_accepts_file_entries() {
+        let config = navigation_entry_config_from_editor_entry(NavigationEditorEntry {
+            name: "工作日志".to_string(),
+            kind: "file".to_string(),
+            url: None,
+            browser: None,
+            browser_profile: None,
+            runtime_profile: None,
+            bundle_id: None,
+            app_name: None,
+            script: None,
+            tool: None,
+            tool_key: None,
+            tool_action: None,
+            path: Some("/tmp/WORKLOG.md".to_string()),
+            cwd: None,
+            note: None,
+        })
+        .expect("file entry should be valid");
+
+        assert_eq!(config.kind.as_deref(), Some("file"));
+        assert_eq!(config.path.as_deref(), Some("/tmp/WORKLOG.md"));
     }
 }
 

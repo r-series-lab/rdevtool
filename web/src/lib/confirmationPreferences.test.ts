@@ -6,6 +6,7 @@ import {
   confirmationPreferencesWithMode,
   confirmationPreferencesWithOverride,
   normalizeConfirmationPreferences,
+  resolveConfirmationDecision,
 } from "./confirmationPreferences";
 
 describe("confirmation preferences", () => {
@@ -31,6 +32,31 @@ describe("confirmation preferences", () => {
       true,
     );
     expect(confirmationEnabled(confirmationPreferencesWithMode("fast"), "build.run")).toBe(false);
+  });
+
+  it("explains whether a decision comes from a guardrail, preset, or override", () => {
+    expect(
+      resolveConfirmationDecision(
+        confirmationPreferencesWithMode("fast"),
+        "deploy.run",
+      ),
+    ).toEqual({ required: true, canDisable: false, source: "guardrail" });
+    expect(
+      resolveConfirmationDecision(
+        confirmationPreferencesWithMode("balanced"),
+        "network.change",
+      ),
+    ).toEqual({ required: false, canDisable: true, source: "balanced" });
+    expect(
+      resolveConfirmationDecision(
+        confirmationPreferencesWithOverride(
+          DEFAULT_CONFIRMATION_PREFERENCES,
+          "build.run",
+          false,
+        ),
+        "build.run",
+      ),
+    ).toEqual({ required: false, canDisable: true, source: "override" });
   });
 
   it("switches to a complete custom policy when one category changes", () => {

@@ -32,6 +32,7 @@ const MAX_PACK_SIZE_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_ENTRY_SIZE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ENTRY_COUNT: usize = 64;
 const PLAN_TTL_HOURS: i64 = 24;
+const MAX_TRANSACTION_HISTORY: usize = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,6 +206,8 @@ pub struct ConfigPackImportRequest {
     pub config_source_mappings: BTreeMap<String, String>,
     #[serde(default)]
     pub require_secrets: bool,
+    #[serde(default)]
+    pub included_operation_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +216,7 @@ pub struct ConfigPackImportPlan {
     pub plan_hash: String,
     pub created_at: String,
     pub expires_at: String,
+    pub pack_name: String,
     pub pack_path: String,
     pub pack_sha256: String,
     pub strategy: ConfigPackConflictStrategy,
@@ -223,16 +227,19 @@ pub struct ConfigPackImportPlan {
     pub blocker_count: usize,
     pub change_count: usize,
     pub skip_count: usize,
+    pub excluded_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigPackOperation {
+    pub id: String,
     pub module: String,
     pub key: String,
     pub action: String,
     pub target: String,
     pub summary: String,
+    pub selected: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -274,6 +281,29 @@ pub struct ConfigPackRollbackResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConfigPackTransactionHistory {
+    pub transactions: Vec<ConfigPackTransactionSummary>,
+    pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigPackTransactionSummary {
+    pub transaction_id: String,
+    pub created_at: String,
+    pub pack_name: String,
+    pub pack_path: String,
+    pub pack_sha256: String,
+    pub plan_hash: String,
+    pub changed_paths: Vec<String>,
+    pub applied_count: usize,
+    pub skipped_count: usize,
+    pub rolled_back_at: Option<String>,
+    pub can_rollback: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct StoredImportPlan {
     plan_hash: String,
     created_at: String,
@@ -289,6 +319,16 @@ struct ConfigPackTransaction {
     transaction_id: String,
     created_at: String,
     plan_hash: String,
+    #[serde(default)]
+    pack_name: String,
+    #[serde(default)]
+    pack_path: String,
+    #[serde(default)]
+    pack_sha256: String,
+    #[serde(default)]
+    applied_count: usize,
+    #[serde(default)]
+    skipped_count: usize,
     files: Vec<ConfigPackTransactionFile>,
     #[serde(default)]
     rolled_back_at: Option<String>,
@@ -300,6 +340,8 @@ struct ConfigPackTransactionFile {
     target_path: String,
     backup_file: Option<String>,
     existed: bool,
+    #[serde(default)]
+    applied_sha256: Option<String>,
 }
 
 #[derive(Debug)]
@@ -744,6 +786,9 @@ pub fn apply_config_pack_import_with_paths(
     if prepared.plan.blocker_count > 0 {
         bail!("import plan has blockers and cannot be applied");
     }
+    if prepared.plan.change_count == 0 {
+        bail!("import plan contains no selected changes");
+    }
 
     let plan_suffix = stored
         .plan_hash
@@ -762,6 +807,11 @@ pub fn apply_config_pack_import_with_paths(
         transaction_id: transaction_id.clone(),
         created_at: Utc::now().to_rfc3339(),
         plan_hash: stored.plan_hash.clone(),
+        pack_name: prepared.plan.pack_name.clone(),
+        pack_path: prepared.plan.pack_path.clone(),
+        pack_sha256: prepared.plan.pack_sha256.clone(),
+        applied_count: prepared.plan.change_count,
+        skipped_count: prepared.plan.skip_count + prepared.plan.excluded_count,
         files: Vec::new(),
         rolled_back_at: None,
     };
@@ -797,6 +847,7 @@ pub fn apply_config_pack_import_with_paths(
                 target_path: write.path.display().to_string(),
                 backup_file,
                 existed: original.is_some(),
+                applied_sha256: Some(sha256(&write.content)),
             });
             originals.push((write.path.clone(), original));
         }
@@ -830,7 +881,94 @@ pub fn apply_config_pack_import_with_paths(
             .map(|write| write.path.display().to_string())
             .collect(),
         applied_count: prepared.plan.change_count,
-        skipped_count: prepared.plan.skip_count,
+        skipped_count: prepared.plan.skip_count + prepared.plan.excluded_count,
+    })
+}
+
+pub fn list_config_pack_import_transactions() -> Result<ConfigPackTransactionHistory> {
+    let paths = ensure_default_configs()?;
+    list_config_pack_import_transactions_with_paths(&paths)
+}
+
+pub fn list_config_pack_import_transactions_with_paths(
+    paths: &ConfigPaths,
+) -> Result<ConfigPackTransactionHistory> {
+    let root = transactions_dir(paths);
+    if !root.exists() {
+        return Ok(ConfigPackTransactionHistory {
+            transactions: Vec::new(),
+            issues: Vec::new(),
+        });
+    }
+
+    let mut transactions = Vec::new();
+    let mut issues = Vec::new();
+    for entry in fs::read_dir(&root)? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                issues.push(format!("failed to read transaction entry: {error}"));
+                continue;
+            }
+        };
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(error) => {
+                issues.push(format!(
+                    "failed to inspect transaction entry {}: {error}",
+                    entry.path().display()
+                ));
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let manifest_path = entry.path().join("transaction.json");
+        let transaction = match fs::read(&manifest_path)
+            .with_context(|| format!("failed to read transaction: {}", manifest_path.display()))
+            .and_then(|bytes| {
+                serde_json::from_slice::<ConfigPackTransaction>(&bytes)
+                    .context("failed to parse transaction manifest")
+            }) {
+            Ok(transaction) => transaction,
+            Err(error) => {
+                issues.push(format!("{}: {error:#}", manifest_path.display()));
+                continue;
+            }
+        };
+        transactions.push(ConfigPackTransactionSummary {
+            transaction_id: transaction.transaction_id,
+            created_at: transaction.created_at,
+            pack_name: transaction.pack_name,
+            pack_path: transaction.pack_path,
+            pack_sha256: transaction.pack_sha256,
+            plan_hash: transaction.plan_hash,
+            changed_paths: transaction
+                .files
+                .iter()
+                .map(|item| item.target_path.clone())
+                .collect(),
+            applied_count: if transaction.applied_count == 0 {
+                transaction.files.len()
+            } else {
+                transaction.applied_count
+            },
+            skipped_count: transaction.skipped_count,
+            can_rollback: transaction.rolled_back_at.is_none(),
+            rolled_back_at: transaction.rolled_back_at,
+        });
+    }
+    transactions.sort_by(|left, right| {
+        right
+            .created_at
+            .cmp(&left.created_at)
+            .then_with(|| right.transaction_id.cmp(&left.transaction_id))
+    });
+    transactions.truncate(MAX_TRANSACTION_HISTORY);
+    Ok(ConfigPackTransactionHistory {
+        transactions,
+        issues,
     })
 }
 
@@ -859,6 +997,24 @@ pub fn rollback_config_pack_import_with_paths(
         .map(|item| PathBuf::from(&item.target_path))
         .collect::<Vec<_>>();
     with_config_file_locks(target_paths.clone(), || {
+        for item in &transaction.files {
+            let Some(expected_sha256) = &item.applied_sha256 else {
+                continue;
+            };
+            let target = PathBuf::from(&item.target_path);
+            let matches_applied_state = target
+                .exists()
+                .then(|| fs::read(&target).map(|bytes| sha256(&bytes)))
+                .transpose()?
+                .as_ref()
+                == Some(expected_sha256);
+            if !matches_applied_state {
+                bail!(
+                    "configuration changed after import; rollback refused for {}",
+                    target.display()
+                );
+            }
+        }
         let before_rollback = target_paths
             .iter()
             .map(|target| {
@@ -917,6 +1073,7 @@ fn prepare_import(
     request: &ConfigPackImportRequest,
 ) -> Result<PreparedImport> {
     let archive = read_pack_archive(&request.pack_path)?;
+    let pack_name = archive.manifest.name.clone();
     if archive.manifest.schema_version > CONFIG_PACK_SCHEMA_VERSION {
         bail!(
             "pack schema {} is newer than supported schema {}",
@@ -931,15 +1088,13 @@ fn prepare_import(
     let mut operations = Vec::new();
     let mut issues = Vec::new();
     let mut required_mappings = Vec::new();
-    let mut required_environment = archive
-        .manifest
-        .security
-        .required_environment
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let mut required_environment = BTreeSet::new();
     let mut writes = Vec::new();
     let mut state_paths = BTreeSet::new();
+    let included_operation_ids = request
+        .included_operation_ids
+        .as_ref()
+        .map(|values| normalized_selection(values));
     for module in archive.manifest.modules.iter().filter(|module| {
         !matches!(
             module.key.as_str(),
@@ -958,22 +1113,61 @@ fn prepare_import(
     if let Some(module) = archive.projects {
         validate_module_schema("projects", module.schema_version)?;
         let mut next_config = current_config.clone();
-        let mut defaults_value = serde_json::to_value(&module.defaults)?;
-        resolve_import_value(
-            &mut defaults_value,
-            request,
-            &current_config,
-            &current_workspaces,
-            &mut required_mappings,
-            &mut required_environment,
-            &mut issues,
-            "projects.defaults",
-        );
-        let current_defaults_value = serde_json::to_value(&current_config.defaults)?;
-        next_config.defaults =
-            serde_json::from_value(deep_merge_json(current_defaults_value, defaults_value))?;
+        let mut project_module_changed = false;
+        let defaults_id = operation_id("projects", "defaults");
+        let defaults_action = if request.strategy == ConfigPackConflictStrategy::Skip {
+            "skip"
+        } else {
+            "merge"
+        };
+        let defaults_selected = operation_is_selected(&included_operation_ids, &defaults_id);
+        operations.push(ConfigPackOperation {
+            id: defaults_id,
+            module: "projects".to_string(),
+            key: "defaults".to_string(),
+            action: defaults_action.to_string(),
+            target: paths.projects.display().to_string(),
+            summary: operation_summary("project defaults", "defaults", defaults_action),
+            selected: defaults_selected,
+        });
+        if defaults_selected && defaults_action != "skip" {
+            let mut defaults_value = serde_json::to_value(&module.defaults)?;
+            resolve_import_value(
+                &mut defaults_value,
+                request,
+                &current_config,
+                &current_workspaces,
+                &mut required_mappings,
+                &mut required_environment,
+                &mut issues,
+                "projects.defaults",
+            );
+            let current_defaults_value = serde_json::to_value(&current_config.defaults)?;
+            next_config.defaults =
+                serde_json::from_value(deep_merge_json(current_defaults_value, defaults_value))?;
+            project_module_changed = true;
+        }
         for project in module.projects {
             let key = project.key.clone();
+            let id = operation_id("projects", &key);
+            let selected = operation_is_selected(&included_operation_ids, &id);
+            let existing_index = next_config
+                .projects
+                .iter()
+                .position(|item| item.key == project.key);
+            let action = conflict_action(existing_index.is_some(), request.strategy);
+            if !selected || action == "skip" {
+                operations.push(ConfigPackOperation {
+                    id,
+                    module: "projects".to_string(),
+                    key: key.clone(),
+                    action: action.to_string(),
+                    target: paths.projects.display().to_string(),
+                    summary: operation_summary("project", &key, action),
+                    selected,
+                });
+                continue;
+            }
             let mut value = serde_json::to_value(project)?;
             resolve_import_value(
                 &mut value,
@@ -997,11 +1191,6 @@ fn prepare_import(
                     continue;
                 }
             };
-            let existing_index = next_config
-                .projects
-                .iter()
-                .position(|item| item.key == incoming.key);
-            let action = conflict_action(existing_index.is_some(), request.strategy);
             match (existing_index, action) {
                 (None, "add") => next_config.projects.push(incoming),
                 (Some(index), "merge") => {
@@ -1013,21 +1202,21 @@ fn prepare_import(
                 (Some(index), "replace") => next_config.projects[index] = incoming,
                 _ => {}
             }
+            project_module_changed = true;
             operations.push(ConfigPackOperation {
+                id,
                 module: "projects".to_string(),
                 key: key.clone(),
                 action: action.to_string(),
                 target: paths.projects.display().to_string(),
                 summary: operation_summary("project", &key, action),
+                selected,
             });
         }
         next_config
             .projects
             .sort_by(|left, right| left.key.cmp(&right.key));
-        if operations
-            .iter()
-            .any(|item| item.module == "projects" && item.action != "skip")
-        {
+        if project_module_changed {
             writes.push(PreparedWrite {
                 path: paths.projects.clone(),
                 content: toml::to_string_pretty(&next_config)?.into_bytes(),
@@ -1039,26 +1228,30 @@ fn prepare_import(
     if let Some(module) = archive.workspaces {
         validate_module_schema("workspaces", module.schema_version)?;
         if let Some(mut preferences) = module.preferences {
-            let current_active = current_workspace.app.active_workspace.clone();
-            preferences.active_workspace = current_active;
-            let incoming = serde_json::to_value(preferences)?;
-            let merged: WorkspaceAppConfig = serde_json::from_value(deep_merge_json(
-                serde_json::to_value(&current_workspace.app)?,
-                incoming,
-            ))?;
+            let id = operation_id("preferences", "app");
             let action = if request.strategy == ConfigPackConflictStrategy::Skip {
                 "skip"
             } else {
                 "merge"
             };
+            let selected = operation_is_selected(&included_operation_ids, &id);
             operations.push(ConfigPackOperation {
+                id,
                 module: "preferences".to_string(),
                 key: "app".to_string(),
                 action: action.to_string(),
                 target: paths.workspace.display().to_string(),
                 summary: operation_summary("preferences", "app", action),
+                selected,
             });
-            if action != "skip" {
+            if selected && action != "skip" {
+                let current_active = current_workspace.app.active_workspace.clone();
+                preferences.active_workspace = current_active;
+                let incoming = serde_json::to_value(preferences)?;
+                let merged: WorkspaceAppConfig = serde_json::from_value(deep_merge_json(
+                    serde_json::to_value(&current_workspace.app)?,
+                    incoming,
+                ))?;
                 writes.push(PreparedWrite {
                     path: paths.workspace.clone(),
                     content: toml::to_string_pretty(&WorkspaceConfig { app: merged })?.into_bytes(),
@@ -1068,6 +1261,22 @@ fn prepare_import(
         }
         for workspace in module.workspaces {
             let key = workspace.key.clone();
+            let id = operation_id("workspaces", &key);
+            let selected = operation_is_selected(&included_operation_ids, &id);
+            let existing = current_workspaces.iter().find(|item| item.key == key);
+            let action = conflict_action(existing.is_some(), request.strategy);
+            if !selected || action == "skip" {
+                operations.push(ConfigPackOperation {
+                    id,
+                    module: "workspaces".to_string(),
+                    key: key.clone(),
+                    action: action.to_string(),
+                    target: paths.project_workspaces.display().to_string(),
+                    summary: operation_summary("workspace", &key, action),
+                    selected,
+                });
+                continue;
+            }
             let mut value = serde_json::to_value(workspace)?;
             resolve_import_value(
                 &mut value,
@@ -1130,21 +1339,25 @@ fn prepare_import(
                 (_, "add" | "replace") => incoming,
                 _ => {
                     operations.push(ConfigPackOperation {
+                        id,
                         module: "workspaces".to_string(),
                         key: key.clone(),
                         action: "skip".to_string(),
                         target: target.display().to_string(),
                         summary: operation_summary("workspace", &key, "skip"),
+                        selected,
                     });
                     continue;
                 }
             };
             operations.push(ConfigPackOperation {
+                id,
                 module: "workspaces".to_string(),
                 key: key.clone(),
                 action: action.to_string(),
                 target: target.display().to_string(),
                 summary: operation_summary("workspace", &key, action),
+                selected,
             });
             writes.push(PreparedWrite {
                 path: target.clone(),
@@ -1163,20 +1376,55 @@ fn prepare_import(
                 .map(String::as_str)
                 .unwrap_or(&source.source_id);
             let target_source =
-                match resolve_config_source_from_sources(Some(target_id), &current_sources) {
-                    Ok(source) => source,
-                    Err(error) => {
-                        issues.push(issue_error(
-                            "config_source_mapping_required",
-                            "config_sources",
-                            &source.source_id,
-                            format!("target config source {target_id} is unavailable: {error}"),
-                        ));
+                resolve_config_source_from_sources(Some(target_id), &current_sources);
+            let source_has_selected_files = source.files.keys().any(|file_key| {
+                operation_is_selected(
+                    &included_operation_ids,
+                    &operation_id(
+                        "config_sources",
+                        &format!("{}.{}", source.source_id, file_key),
+                    ),
+                )
+            });
+            if let Err(error) = &target_source {
+                if source_has_selected_files {
+                    issues.push(issue_error(
+                        "config_source_mapping_required",
+                        "config_sources",
+                        &source.source_id,
+                        format!("target config source {target_id} is unavailable: {error}"),
+                    ));
+                }
+            }
+            for (file_key, mut incoming) in source.files {
+                let key = format!("{}.{}", source.source_id, file_key);
+                let id = operation_id("config_sources", &key);
+                let selected = operation_is_selected(&included_operation_ids, &id);
+                let Some(target_source) = target_source.as_ref().ok() else {
+                    operations.push(ConfigPackOperation {
+                        id,
+                        module: "config_sources".to_string(),
+                        key,
+                        action: "skip".to_string(),
+                        target: target_id.to_string(),
+                        summary: operation_summary("config source file", &file_key, "skip"),
+                        selected,
+                    });
+                    continue;
+                };
+                let Some(target) = config_source_file_path(target_source, &file_key) else {
+                    operations.push(ConfigPackOperation {
+                        id,
+                        module: "config_sources".to_string(),
+                        key,
+                        action: "skip".to_string(),
+                        target: target_id.to_string(),
+                        summary: operation_summary("config source file", &file_key, "skip"),
+                        selected,
+                    });
+                    if !selected {
                         continue;
                     }
-                };
-            for (file_key, mut incoming) in source.files {
-                let Some(target) = config_source_file_path(&target_source, &file_key) else {
                     issues.push(ConfigPackIssue {
                         severity: "warning".to_string(),
                         code: "unsupported_config_source_file".to_string(),
@@ -1186,6 +1434,20 @@ fn prepare_import(
                     });
                     continue;
                 };
+                let exists = target.exists();
+                let action = conflict_action(exists, request.strategy);
+                operations.push(ConfigPackOperation {
+                    id,
+                    module: "config_sources".to_string(),
+                    key,
+                    action: action.to_string(),
+                    target: target.display().to_string(),
+                    summary: operation_summary("config source file", &file_key, action),
+                    selected,
+                });
+                if !selected || action == "skip" {
+                    continue;
+                }
                 resolve_import_value(
                     &mut incoming,
                     request,
@@ -1196,18 +1458,6 @@ fn prepare_import(
                     &mut issues,
                     &format!("config_sources.{}.{}", source.source_id, file_key),
                 );
-                let exists = target.exists();
-                let action = conflict_action(exists, request.strategy);
-                operations.push(ConfigPackOperation {
-                    module: "config_sources".to_string(),
-                    key: format!("{}.{}", source.source_id, file_key),
-                    action: action.to_string(),
-                    target: target.display().to_string(),
-                    summary: operation_summary("config source file", &file_key, action),
-                });
-                if action == "skip" {
-                    continue;
-                }
                 let next = if action == "merge" {
                     let current = read_toml_json(&target)?;
                     deep_merge_json(current, incoming)
@@ -1226,6 +1476,23 @@ fn prepare_import(
         }
     }
 
+    if let Some(included) = &included_operation_ids {
+        let known = operations
+            .iter()
+            .map(|operation| operation.id.as_str())
+            .collect::<BTreeSet<_>>();
+        for unknown in included
+            .iter()
+            .filter(|operation_id| !known.contains(operation_id.as_str()))
+        {
+            issues.push(issue_error(
+                "unknown_operation_selection",
+                "import",
+                unknown,
+                format!("selected import operation is unavailable: {unknown}"),
+            ));
+        }
+    }
     dedupe_required_mappings(&mut required_mappings);
     if request.require_secrets {
         for environment in &required_environment {
@@ -1283,14 +1550,19 @@ fn prepare_import(
         .count();
     let change_count = operations
         .iter()
-        .filter(|item| item.action != "skip")
+        .filter(|item| item.selected && item.action != "skip")
         .count();
-    let skip_count = operations.len().saturating_sub(change_count);
+    let skip_count = operations
+        .iter()
+        .filter(|item| item.selected && item.action == "skip")
+        .count();
+    let excluded_count = operations.iter().filter(|item| !item.selected).count();
     Ok(PreparedImport {
         plan: ConfigPackImportPlan {
             plan_hash,
             created_at: created_at.to_rfc3339(),
             expires_at: expires_at.to_rfc3339(),
+            pack_name,
             pack_path: request.pack_path.display().to_string(),
             pack_sha256: archive.sha256,
             strategy: request.strategy,
@@ -1301,6 +1573,7 @@ fn prepare_import(
             blocker_count,
             change_count,
             skip_count,
+            excluded_count,
         },
         destination_state_sha256,
         writes,
@@ -1779,6 +2052,20 @@ fn conflict_action(exists: bool, strategy: ConfigPackConflictStrategy) -> &'stat
         ConfigPackConflictStrategy::Merge => "merge",
         ConfigPackConflictStrategy::Replace => "replace",
     }
+}
+
+fn operation_id(module: &str, key: &str) -> String {
+    format!("{module}:{key}")
+}
+
+fn operation_is_selected(
+    included_operation_ids: &Option<BTreeSet<String>>,
+    operation_id: &str,
+) -> bool {
+    included_operation_ids
+        .as_ref()
+        .map(|included| included.contains(operation_id))
+        .unwrap_or(true)
 }
 
 fn operation_summary(kind: &str, key: &str, action: &str) -> String {
@@ -2323,6 +2610,7 @@ mod tests {
             workspace_root_mappings: BTreeMap::new(),
             config_source_mappings: BTreeMap::new(),
             require_secrets: false,
+            included_operation_ids: None,
         };
         let blocked = plan_config_pack_import_with_paths(&target, request.clone()).unwrap();
         assert!(blocked.blocker_count > 0);
@@ -2349,6 +2637,133 @@ mod tests {
         assert!(!applied.transaction_id.contains("rdtpack-"));
         rollback_config_pack_import_with_paths(&target, &applied.transaction_id).unwrap();
         assert!(load_config(&target.projects).unwrap().projects.is_empty());
+    }
+
+    #[test]
+    fn selective_import_excludes_operations_and_records_transaction_history() {
+        let source = test_paths("selective-source");
+        seed(&source, &source.dir.join("repos/demo"));
+        let pack = source.dir.join("demo.rdtpack");
+        export_config_pack_with_paths(
+            &source,
+            ConfigPackExportRequest {
+                output_path: pack.clone(),
+                name: Some("Selective baseline".to_string()),
+                include_projects: true,
+                include_workspaces: false,
+                include_preferences: false,
+                include_config_sources: false,
+                include_dependencies: true,
+                project_keys: Vec::new(),
+                workspace_keys: Vec::new(),
+                config_source_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let target = test_paths("selective-target");
+        let target_repo = target.dir.join("existing/demo");
+        seed(&target, &target_repo);
+        let plan = plan_config_pack_import_with_paths(
+            &target,
+            ConfigPackImportRequest {
+                pack_path: pack,
+                strategy: ConfigPackConflictStrategy::Merge,
+                project_root_mappings: BTreeMap::new(),
+                workspace_root_mappings: BTreeMap::new(),
+                config_source_mappings: BTreeMap::new(),
+                require_secrets: false,
+                included_operation_ids: Some(vec!["projects:defaults".to_string()]),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(plan.blocker_count, 0);
+        assert_eq!(plan.change_count, 1);
+        assert_eq!(plan.excluded_count, 1);
+        assert!(
+            plan.operations
+                .iter()
+                .any(|operation| operation.id == "projects:demo" && !operation.selected)
+        );
+        let applied = apply_config_pack_import_with_paths(&target, &plan.plan_hash).unwrap();
+        assert_eq!(
+            load_config(&target.projects).unwrap().projects[0]
+                .repo_path
+                .as_deref(),
+            Some(target_repo.as_path())
+        );
+
+        let history = list_config_pack_import_transactions_with_paths(&target).unwrap();
+        assert!(history.issues.is_empty());
+        assert_eq!(history.transactions.len(), 1);
+        assert_eq!(history.transactions[0].pack_name, "Selective baseline");
+        assert!(history.transactions[0].can_rollback);
+        rollback_config_pack_import_with_paths(&target, &applied.transaction_id).unwrap();
+        let history = list_config_pack_import_transactions_with_paths(&target).unwrap();
+        assert!(!history.transactions[0].can_rollback);
+        assert!(history.transactions[0].rolled_back_at.is_some());
+    }
+
+    #[test]
+    fn rollback_refuses_to_overwrite_changes_made_after_import() {
+        let source = test_paths("rollback-drift-source");
+        seed(&source, &source.dir.join("repos/demo"));
+        let pack = source.dir.join("demo.rdtpack");
+        export_config_pack_with_paths(
+            &source,
+            ConfigPackExportRequest {
+                output_path: pack.clone(),
+                name: None,
+                include_projects: true,
+                include_workspaces: false,
+                include_preferences: false,
+                include_config_sources: false,
+                include_dependencies: true,
+                project_keys: Vec::new(),
+                workspace_keys: Vec::new(),
+                config_source_ids: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let target = test_paths("rollback-drift-target");
+        seed(&target, &target.dir.join("repos/demo"));
+        let mut mappings = BTreeMap::new();
+        mappings.insert(
+            "demo".to_string(),
+            target.dir.join("mapped/demo").display().to_string(),
+        );
+        let plan = plan_config_pack_import_with_paths(
+            &target,
+            ConfigPackImportRequest {
+                pack_path: pack,
+                strategy: ConfigPackConflictStrategy::Merge,
+                project_root_mappings: mappings,
+                workspace_root_mappings: BTreeMap::new(),
+                config_source_mappings: BTreeMap::new(),
+                require_secrets: false,
+                included_operation_ids: None,
+            },
+        )
+        .unwrap();
+        let applied = apply_config_pack_import_with_paths(&target, &plan.plan_hash).unwrap();
+        fs::write(
+            &target.projects,
+            format!(
+                "{}\n# manual edit\n",
+                fs::read_to_string(&target.projects).unwrap()
+            ),
+        )
+        .unwrap();
+
+        let error =
+            rollback_config_pack_import_with_paths(&target, &applied.transaction_id).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("configuration changed after import")
+        );
     }
 
     #[test]
@@ -2442,6 +2857,7 @@ mod tests {
                 workspace_root_mappings: BTreeMap::new(),
                 config_source_mappings: BTreeMap::new(),
                 require_secrets: false,
+                included_operation_ids: None,
             },
         )
         .unwrap();

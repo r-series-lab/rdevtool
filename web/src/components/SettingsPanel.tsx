@@ -7,6 +7,7 @@ import {
   type FocusEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   Alert,
   Button,
@@ -169,7 +170,7 @@ type SettingsConfirmState = {
 
 const SECTION_ITEMS: Array<{ key: SettingsSection; label: string }> = [
   { key: "menu", label: "通用" },
-  { key: "confirmation", label: "操作确认" },
+  { key: "confirmation", label: "操作安全" },
   { key: "access", label: "快捷入口" },
   { key: "portability", label: "配置迁移" },
   { key: "artifacts", label: "受管产物" },
@@ -659,8 +660,8 @@ export function SettingsPanel({
       case "menu":
       case "confirmation":
       case "access":
-      case "portability":
       case "artifacts":
+      case "portability":
       case "diagnostics":
         return section;
       case "general":
@@ -3409,14 +3410,94 @@ export function SettingsPanel({
   }
 
   function renderConfirmationSettingsSection() {
+    const guardrailDefinitions = CONFIRMATION_PREFERENCE_DEFINITIONS.filter(
+      (definition) => definition.required,
+    );
+    const configurableDefinitions = CONFIRMATION_PREFERENCE_DEFINITIONS.filter(
+      (definition) => !definition.required,
+    );
+    const modeSummary =
+      confirmationPreferences.mode === "strict"
+        ? "所有可调整操作均在执行前确认"
+        : confirmationPreferences.mode === "fast"
+          ? "仅安全底线操作需要确认"
+          : confirmationPreferences.mode === "custom"
+            ? "按下方各操作的独立规则执行"
+            : "构建、运行与导入确认，代理启停直接执行";
+
+    const renderPolicyDefinitions = (
+      definitions: typeof CONFIRMATION_PREFERENCE_DEFINITIONS,
+    ) => (
+      <div className="settings-confirmation-list">
+        {definitions.map((definition) => {
+          const enabled = confirmationEnabled(confirmationPreferences, definition.key);
+          return (
+            <div
+              key={definition.key}
+              className="settings-list-row settings-list-row--split settings-confirmation-row"
+            >
+              <div className="settings-overview-copy">
+                <Typography variant="subtitle2">{t(definition.label)}</Typography>
+                <Typography variant="caption">{t(definition.description)}</Typography>
+                {definition.guardrailReason ? (
+                  <Typography className="settings-confirmation-reason" variant="caption">
+                    {t(definition.guardrailReason)}
+                  </Typography>
+                ) : null}
+              </div>
+              {definition.required ? (
+                <div className="settings-confirmation-guardrail">
+                  <Chip size="small" variant="outlined" label={t("安全底线")} />
+                  <Typography variant="caption">{t("始终确认")}</Typography>
+                </div>
+              ) : (
+                <div
+                  className="settings-confirmation-choice"
+                  role="radiogroup"
+                  aria-label={t("{label}执行方式", { label: t(definition.label) })}
+                >
+                  {[
+                    { value: false, label: "直接执行" },
+                    { value: true, label: "执行前确认" },
+                  ].map((option) => (
+                    <button
+                      key={String(option.value)}
+                      type="button"
+                      role="radio"
+                      aria-checked={enabled === option.value}
+                      className={enabled === option.value ? "is-active" : ""}
+                      onClick={() =>
+                        persistConfirmationPreference(
+                          setConfirmationCategoryEnabled(
+                            definition.key as ConfirmationPreferenceKey,
+                            option.value,
+                          ),
+                          t("已更新 {label} 确认策略", {
+                            label: t(definition.label),
+                          }),
+                        )
+                      }
+                      disabled={confirmationPreferencesLoading}
+                    >
+                      {t(option.label)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    );
+
     return renderGlobalSettingsSection(
-      "操作确认",
-      "统一控制不同风险操作的确认方式",
+      "操作安全",
+      "管理高风险操作的确认与执行规则",
       <>
             <div className="settings-list-group-head settings-list-group-head--confirmation">
               <div>
-                <Typography variant="caption">{t("确认策略")}</Typography>
-                <Typography variant="caption">{t("高风险动作始终需要确认")}</Typography>
+                <Typography variant="caption">{t("安全模式")}</Typography>
+                <Typography variant="caption">{t("关键操作始终受安全底线保护")}</Typography>
               </div>
               <Button
                 size="small"
@@ -3424,29 +3505,29 @@ export function SettingsPanel({
                 onClick={() =>
                   persistConfirmationPreference(
                     resetConfirmationPreferences(),
-                    t("已恢复平衡确认策略"),
+                    t("已恢复推荐安全策略"),
                   )
                 }
                 disabled={confirmationPreferencesLoading}
               >
-                {t("恢复平衡")}
+                {t("恢复推荐")}
               </Button>
             </div>
             <div className="settings-list-row settings-list-row--split">
               <div className="settings-overview-copy">
-                <Typography variant="subtitle2">{t("确认策略")}</Typography>
-                <Typography variant="caption">{t("高风险动作始终需要确认。")}</Typography>
+                <Typography variant="subtitle2">{t("安全模式")}</Typography>
+                <Typography variant="caption">{t(modeSummary)}</Typography>
               </div>
               <div
                 className="settings-confirmation-mode"
                 role="radiogroup"
-                aria-label={t("操作确认策略")}
+                aria-label={t("操作安全策略")}
               >
                 {(
                   [
-                    { value: "strict", label: "严格" },
-                    { value: "balanced", label: "平衡" },
-                    { value: "fast", label: "快捷" },
+                    { value: "strict", label: "安全优先" },
+                    { value: "balanced", label: "推荐" },
+                    { value: "fast", label: "高效" },
                   ] as Array<{
                     value: Exclude<ConfirmationMode, "custom">;
                     label: string;
@@ -3463,7 +3544,7 @@ export function SettingsPanel({
                     onClick={() =>
                       persistConfirmationPreference(
                         setConfirmationMode(option.value),
-                        t("已切换为 {mode} 确认策略", {
+                        t("已切换为 {mode} 安全策略", {
                           mode: t(option.label),
                         }),
                       )
@@ -3478,42 +3559,22 @@ export function SettingsPanel({
                 ) : null}
               </div>
             </div>
-            <div className="settings-confirmation-list">
-              {CONFIRMATION_PREFERENCE_DEFINITIONS.map((definition) => (
-                <div
-                  key={definition.key}
-                  className="settings-list-row settings-list-row--split settings-confirmation-row"
-                >
-                  <div className="settings-overview-copy">
-                    <Typography variant="subtitle2">{t(definition.label)}</Typography>
-                    <Typography variant="caption">{t(definition.description)}</Typography>
-                  </div>
-                  {definition.required ? (
-                    <Chip size="small" variant="outlined" label={t("始终确认")} />
-                  ) : (
-                    <Switch
-                      size="small"
-                      checked={confirmationEnabled(confirmationPreferences, definition.key)}
-                      onChange={(event) =>
-                        persistConfirmationPreference(
-                          setConfirmationCategoryEnabled(
-                            definition.key as ConfirmationPreferenceKey,
-                            event.target.checked,
-                          ),
-                          t("已更新 {label} 确认策略", {
-                            label: t(definition.label),
-                          }),
-                        )
-                      }
-                      disabled={confirmationPreferencesLoading}
-                      slotProps={{
-                        input: { "aria-label": t("{label}确认", { label: t(definition.label) }) },
-                      }}
-                    />
-                  )}
-                </div>
-              ))}
+            <div className="settings-list-group-head settings-list-group-head--policy">
+              <div>
+                <Typography variant="caption">{t("安全底线")}</Typography>
+                <Typography variant="caption">{t("关键写入、发布和数据丢失操作不可跳过确认")}</Typography>
+              </div>
+              <Chip size="small" label={t("{count} 项", { count: guardrailDefinitions.length })} />
             </div>
+            {renderPolicyDefinitions(guardrailDefinitions)}
+            <div className="settings-list-group-head settings-list-group-head--policy">
+              <div>
+                <Typography variant="caption">{t("可调整操作")}</Typography>
+                <Typography variant="caption">{t("可按使用习惯选择直接执行或执行前确认")}</Typography>
+              </div>
+              <Chip size="small" label={t("{count} 项", { count: configurableDefinitions.length })} />
+            </div>
+            {renderPolicyDefinitions(configurableDefinitions)}
       </>,
     );
   }
@@ -3588,8 +3649,6 @@ export function SettingsPanel({
         return renderConfirmationSettingsSection();
       case "access":
         return renderAccessSettingsSection();
-      case "portability":
-        return <ConfigPackPanel onApplied={onProjectConfigSaved} />;
       case "artifacts":
         return (
           <ManagedArtifactsPanel
@@ -3600,6 +3659,8 @@ export function SettingsPanel({
             initialFocus={artifactFocus}
           />
         );
+      case "portability":
+        return <ConfigPackPanel onApplied={onProjectConfigSaved} />;
       case "diagnostics":
         return (
           <SystemDiagnosticsPanel
@@ -6384,7 +6445,8 @@ export function SettingsPanel({
     );
   }
 
-  return (
+  return createPortal(
+    (
     <div
       className={`settings-overlay${surface === "projectManagement" ? " settings-overlay--drawer" : ""}`}
       role="presentation"
@@ -6541,5 +6603,7 @@ export function SettingsPanel({
         </div>
       ) : null}
     </div>
+    ),
+    document.body,
   );
 }

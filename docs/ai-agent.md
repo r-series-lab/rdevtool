@@ -52,7 +52,7 @@ manifest 时保持只读并返回 warning，不能据此假定 Skill 中的命�
 显式验证当前源码改动时，可从 `info.identity.sourceInvocation` 取得对应命令，例如：
 
 ```bash
-cd /Users/ikiru/Documents/r-series-public/rdevtool
+cd /Users/demo/Projects/r-series/rdevtool
 cargo run --quiet -- --json agent context --project <project> --for runtime --compact
 ```
 

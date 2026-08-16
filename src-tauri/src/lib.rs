@@ -22,7 +22,8 @@ use rdevtool_core::config::{
     ProjectAuthHelperConfig, ProjectAuthHelperItemConfig, ProjectCommandConfig, ProjectConfig,
     ProjectDebugLocalFileConfig, ProjectDebugProfileConfig, ProjectFocusConfig,
     ProjectLocalProxyConfig, ProjectLocalProxyRouteConfig, ProjectNetworkProxyConfig,
-    ProjectReadyConfig, ProjectWorkspaceConfig, RuntimeProfileConfig, SYSTEM_PROJECT_WORKSPACE_KEY,
+    ProjectReadyConfig, ProjectWorkspaceConfig, ProjectWorkspaceResourceCategoryConfig,
+    ProjectWorkspaceResourceEntryConfig, RuntimeProfileConfig, SYSTEM_PROJECT_WORKSPACE_KEY,
     active_project_workspace_key, apply_project_workspace_context, create_project_workspace,
     default_config_dir, default_project_workspace_root_dir, default_project_workspaces_dir,
     default_projects_path, default_workspace_path, ensure_default_configs,
@@ -79,11 +80,12 @@ use rdevtool_core::link::{
     upsert_link_to_path_with_previous_key as core_upsert_link_to_path_with_previous_key,
 };
 use rdevtool_core::navigation::{
-    NavigationData, NavigationEditorData, NavigationEntry, NavigationOpenResult,
-    load_navigation_data_for_workspace, load_navigation_editor_data,
-    load_navigation_editor_data_from_path, load_navigation_source_data_for_workspace,
-    navigation_file_path, open_navigation_entry_with_runtime_profiles,
-    save_navigation_editor_data_to_path,
+    NavigationData, NavigationEditorCategory, NavigationEditorData, NavigationEditorEntry,
+    NavigationEntry, NavigationOpenResult, load_navigation_data_for_workspace,
+    load_navigation_editor_data, load_navigation_editor_data_from_path,
+    load_navigation_source_data_for_workspace, navigation_file_path,
+    open_navigation_entry_with_runtime_profiles, save_navigation_editor_data_to_path,
+    validate_workspace_resource_entry,
 };
 use rdevtool_core::operation::{
     OperationChainContext, OperationEvent, OperationEventOrigin, OperationEventState,
@@ -342,6 +344,8 @@ struct ProjectWorkspaceEditorDraft {
     proxy_profiles: Vec<String>,
     #[serde(default)]
     project_instances: Vec<ProjectWorkspaceProjectInstanceDraft>,
+    #[serde(default)]
+    resource_categories: Vec<NavigationEditorCategory>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1097,6 +1101,9 @@ struct WorkspaceResourceShortcutItem {
     key: String,
     workspace_key: String,
     config_source_id: String,
+    source_kind: String,
+    source_label: String,
+    managed: bool,
     category: String,
     label: String,
     kind: String,
@@ -1803,6 +1810,112 @@ fn workspace_resource_count(workspace: &ProjectWorkspaceConfig) -> usize {
         .sum()
 }
 
+fn workspace_resource_editor_categories(
+    workspace: &ProjectWorkspaceConfig,
+) -> Vec<NavigationEditorCategory> {
+    workspace
+        .resource_categories
+        .iter()
+        .map(|category| NavigationEditorCategory {
+            title: category.title.trim().to_string(),
+            short_label: category
+                .short_label
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(category.title.trim())
+                .to_string(),
+            entries: category
+                .entries
+                .iter()
+                .map(|entry| NavigationEditorEntry {
+                    name: entry.name.trim().to_string(),
+                    kind: entry.kind.clone().unwrap_or_else(|| "url".to_string()),
+                    url: non_empty_string(entry.url.clone()),
+                    browser: entry.browser.clone(),
+                    browser_profile: entry.browser_profile.clone(),
+                    runtime_profile: entry.runtime_profile.clone(),
+                    bundle_id: entry.bundle_id.clone(),
+                    app_name: entry.app_name.clone(),
+                    script: entry.script.clone(),
+                    tool: entry.tool.clone(),
+                    tool_key: entry.tool_key.clone(),
+                    tool_action: entry.tool_action.clone(),
+                    path: entry.path.clone(),
+                    cwd: entry.cwd.clone(),
+                    note: entry.note.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+fn project_workspace_resource_categories_from_editor(
+    categories: Vec<NavigationEditorCategory>,
+    root_dir: Option<&Path>,
+) -> Result<Vec<ProjectWorkspaceResourceCategoryConfig>, String> {
+    let mut category_names = BTreeSet::new();
+    let mut result = Vec::new();
+
+    for category in categories {
+        let title = category.title.trim().to_string();
+        if title.is_empty() {
+            return Err("工作区专属资源的分类名称不能为空".to_string());
+        }
+        if !category_names.insert(title.clone()) {
+            return Err(format!("工作区专属资源分类重复：{title}"));
+        }
+
+        let mut entry_names = BTreeSet::new();
+        let mut entries = Vec::new();
+        for entry in category.entries {
+            let name = entry.name.trim().to_string();
+            if name.is_empty() {
+                return Err(format!("分类“{title}”中的资源名称不能为空"));
+            }
+            if !entry_names.insert(name.clone()) {
+                return Err(format!("分类“{title}”中的资源名称重复：{name}"));
+            }
+            let resource = ProjectWorkspaceResourceEntryConfig {
+                name: name.clone(),
+                kind: non_empty_string(entry.kind),
+                url: entry.url.and_then(non_empty_string).unwrap_or_default(),
+                browser: entry.browser.and_then(non_empty_string),
+                browser_profile: entry.browser_profile.and_then(non_empty_string),
+                runtime_profile: entry.runtime_profile.and_then(non_empty_string),
+                bundle_id: entry.bundle_id.and_then(non_empty_string),
+                app_name: entry.app_name.and_then(non_empty_string),
+                script: entry.script.and_then(non_empty_string),
+                tool: entry.tool.and_then(non_empty_string),
+                tool_key: entry.tool_key.and_then(non_empty_string),
+                tool_action: entry.tool_action.and_then(non_empty_string),
+                path: entry.path.and_then(non_empty_string),
+                cwd: entry.cwd.and_then(non_empty_string),
+                note: entry.note.and_then(non_empty_string),
+            };
+            validate_workspace_resource_entry(&resource, root_dir)
+                .map_err(|error| format!("资源“{title}/{name}”配置无效：{error}"))?;
+            entries.push(resource);
+        }
+
+        if entries.is_empty() {
+            continue;
+        }
+        result.push(ProjectWorkspaceResourceCategoryConfig {
+            title: title.clone(),
+            short_label: non_empty_string(category.short_label).or_else(|| Some(title.clone())),
+            entries,
+        });
+    }
+
+    Ok(result)
+}
+
+fn non_empty_string(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    (!value.is_empty()).then_some(value)
+}
+
 fn load_project_workspace_for_editor(
     paths: &ConfigPaths,
     workspace_key: Option<String>,
@@ -1828,6 +1941,7 @@ fn project_workspace_editor_state(
     let workspace_key = workspace.key.clone();
     let workspace_type = workspace.workspace_type.clone();
     let workspace_type_label = workspace_type_label(&workspace);
+    let resource_categories = workspace_resource_editor_categories(&workspace);
     let project_keys = workspace.projects.iter().cloned().collect::<BTreeSet<_>>();
     let navigation_category_keys = workspace
         .navigation_categories
@@ -1985,6 +2099,7 @@ fn project_workspace_editor_state(
                     managed: instance.managed,
                 })
                 .collect(),
+            resource_categories,
         },
         projects,
         navigation_categories,
@@ -2066,6 +2181,15 @@ fn save_project_workspace_editor_state(
         return Err("工作区名称不能为空".to_string());
     }
 
+    let root_dir = draft.root_dir.and_then(|value| {
+        let value = value.trim().to_string();
+        (!value.is_empty()).then_some(PathBuf::from(value))
+    });
+    let resource_categories = project_workspace_resource_categories_from_editor(
+        draft.resource_categories,
+        root_dir.as_deref(),
+    )?;
+
     let mut workspace = ProjectWorkspaceConfig {
         key: current_workspace.key.clone(),
         name: name.to_string(),
@@ -2076,10 +2200,7 @@ fn save_project_workspace_editor_state(
         archive: current_workspace.archive,
         workspace_type: draft.workspace_type,
         metadata: current_workspace.metadata,
-        root_dir: draft.root_dir.and_then(|value| {
-            let value = value.trim().to_string();
-            (!value.is_empty()).then_some(PathBuf::from(value))
-        }),
+        root_dir,
         resource_dir: draft.resource_dir.and_then(|value| {
             let value = value.trim().to_string();
             (!value.is_empty()).then_some(PathBuf::from(value))
@@ -2129,7 +2250,7 @@ fn save_project_workspace_editor_state(
                 )
             })
             .collect(),
-        resource_categories: current_workspace.resource_categories,
+        resource_categories,
     }
     .normalized();
 
@@ -9207,6 +9328,20 @@ fn workspace_resource_shortcuts(
 ) -> Vec<WorkspaceResourceShortcutItem> {
     let workspace_key = workspace.key.clone();
     let config_source_id = config_source.id.clone();
+    let config_source_name = config_source.name.clone();
+    let mut workspace_owned_counts = BTreeMap::<String, usize>::new();
+    for category in &workspace.resource_categories {
+        let valid_count = category
+            .entries
+            .iter()
+            .filter(|entry| {
+                validate_workspace_resource_entry(entry, workspace.root_dir.as_deref()).is_ok()
+            })
+            .count();
+        *workspace_owned_counts
+            .entry(category.title.trim().to_string())
+            .or_default() += valid_count;
+    }
     let navigation = if config_source.is_default {
         load_navigation_data_for_workspace(workspace)
     } else {
@@ -9224,6 +9359,11 @@ fn workspace_resource_shortcuts(
                     let category_title = category.title;
                     let workspace_key = workspace_key.clone();
                     let config_source_id = config_source_id.clone();
+                    let config_source_name = config_source_name.clone();
+                    let workspace_owned_count = workspace_owned_counts
+                        .get(&category_title)
+                        .copied()
+                        .unwrap_or_default();
                     category
                         .entries
                         .into_iter()
@@ -9258,10 +9398,25 @@ fn workspace_resource_shortcuts(
                             }
                             .to_string();
                             let openable = kind != "tool" && open_kind.is_some() && value.is_some();
+                            let workspace_owned = index < workspace_owned_count;
+                            let managed = workspace_owned
+                                && category_title == "工作区资料"
+                                && matches!(label.as_str(), "资料目录" | "工作日志");
                             WorkspaceResourceShortcutItem {
                                 key: format!("{}:{}:{}", workspace_key, category_title, index),
                                 workspace_key: workspace_key.clone(),
                                 config_source_id: config_source_id.clone(),
+                                source_kind: if workspace_owned {
+                                    "workspace".to_string()
+                                } else {
+                                    "configSource".to_string()
+                                },
+                                source_label: if workspace_owned {
+                                    "工作区专属".to_string()
+                                } else {
+                                    config_source_name.clone()
+                                },
+                                managed,
                                 category: category_title.clone(),
                                 label,
                                 kind_label: workspace_resource_kind_label(&kind),
@@ -12888,6 +13043,7 @@ pub fn run() {
             commands::config_pack::inspect_config_pack_file,
             commands::config_pack::plan_config_pack_import_file,
             commands::config_pack::apply_config_pack_import_plan,
+            commands::config_pack::list_config_pack_import_history,
             commands::config_pack::rollback_config_pack_import_transaction,
             get_app_language_preference,
             save_app_language_preference,
@@ -13099,6 +13255,67 @@ mod workspace_config_watcher_tests {
             projects: projects.iter().map(|project| project.to_string()).collect(),
             ..ProjectWorkspaceConfig::default()
         }
+    }
+
+    fn resource_entry(name: &str, kind: &str) -> NavigationEditorEntry {
+        NavigationEditorEntry {
+            name: name.to_string(),
+            kind: kind.to_string(),
+            url: (kind == "url").then(|| "https://example.com".to_string()),
+            browser: None,
+            browser_profile: None,
+            runtime_profile: None,
+            bundle_id: None,
+            app_name: None,
+            script: None,
+            tool: None,
+            tool_key: None,
+            tool_action: None,
+            path: None,
+            cwd: None,
+            note: None,
+        }
+    }
+
+    #[test]
+    fn workspace_resource_editor_round_trips_owned_entries() {
+        let categories = vec![NavigationEditorCategory {
+            title: "联调入口".to_string(),
+            short_label: "联调".to_string(),
+            entries: vec![resource_entry("活动规则联调页", "url")],
+        }];
+
+        let saved = project_workspace_resource_categories_from_editor(categories, None)
+            .expect("workspace resources should validate");
+        let workspace = ProjectWorkspaceConfig {
+            resource_categories: saved,
+            ..ProjectWorkspaceConfig::default()
+        };
+        let editor = workspace_resource_editor_categories(&workspace);
+
+        assert_eq!(editor.len(), 1);
+        assert_eq!(editor[0].title, "联调入口");
+        assert_eq!(editor[0].entries[0].name, "活动规则联调页");
+        assert_eq!(
+            editor[0].entries[0].url.as_deref(),
+            Some("https://example.com")
+        );
+    }
+
+    #[test]
+    fn workspace_resource_editor_rejects_duplicate_entry_names() {
+        let categories = vec![NavigationEditorCategory {
+            title: "联调入口".to_string(),
+            short_label: "联调".to_string(),
+            entries: vec![
+                resource_entry("活动规则联调页", "url"),
+                resource_entry("活动规则联调页", "url"),
+            ],
+        }];
+
+        let error = project_workspace_resource_categories_from_editor(categories, None)
+            .expect_err("duplicates should be rejected");
+        assert!(error.contains("资源名称重复"));
     }
 
     fn build_history_request(state_key: &str) -> SaveBuildHistoryRequest {
@@ -13409,6 +13626,9 @@ mod workspace_config_watcher_tests {
             key: format!("{workspace_key}:{name}"),
             workspace_key: workspace_key.to_string(),
             config_source_id: "default".to_string(),
+            source_kind: "configSource".to_string(),
+            source_label: "默认配置".to_string(),
+            managed: false,
             category: "常用".to_string(),
             label: name.to_string(),
             kind: "url".to_string(),
@@ -13437,6 +13657,9 @@ mod workspace_config_watcher_tests {
             key: format!("{workspace_key}:{name}"),
             workspace_key: workspace_key.to_string(),
             config_source_id: "workspace-test".to_string(),
+            source_kind: "configSource".to_string(),
+            source_label: "测试配置".to_string(),
+            managed: false,
             category: "工具".to_string(),
             label: name.to_string(),
             kind: "tool".to_string(),

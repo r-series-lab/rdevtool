@@ -12,6 +12,7 @@ test("parameterized Action validates inputs and renders structured results", asy
     "按各项目标准配置检查部署计划，全部通过后逐个触发 pre 环境部署。",
   );
   await expect(dialog).toContainText("远程写入");
+  await expect(dialog).not.toContainText("建议逐步迁移到 plan_apply");
   await expect(dialog).toContainText("工作区 · demo-workspace");
   await expect(dialog).toContainText("部署目标 · standard");
   await expect(dialog).toContainText("部署环境 · pre");
@@ -28,7 +29,9 @@ test("parameterized Action validates inputs and renders structured results", asy
   await dialog.getByRole("combobox", { name: /项目/ }).click();
   await page.getByRole("option", { name: "示例控制台" }).click();
   await page.keyboard.press("Escape");
-  await expect(dialog).toContainText("已选 1/3");
+  await expect(
+    dialog.getByText("示例控制台 (demo-console)", { exact: true }),
+  ).toBeVisible();
   await dialog.getByRole("combobox", { name: /统一分支覆盖/ }).fill("feature/shared");
   await dialog.getByRole("button", { name: "检查计划", exact: true }).click();
 
@@ -39,7 +42,7 @@ test("parameterized Action validates inputs and renders structured results", asy
   await expect(dialog.getByRole("button", { name: "打开结果" })).toBeVisible();
 });
 
-test("parameterized Action localizes schema-owned copy in English", async ({ page }) => {
+test("parameterized Action preserves configured copy in English", async ({ page }) => {
   await page.evaluate(() =>
     window.dispatchEvent(
       new CustomEvent("rdevtool:language-preference-changed", {
@@ -48,19 +51,17 @@ test("parameterized Action localizes schema-owned copy in English", async ({ pag
     ),
   );
 
-  const dialog = page.getByRole("dialog", { name: "Batch Deploy Pre" });
+  const dialog = page.getByRole("dialog", { name: "批量部署 Pre" });
   await expect(dialog).toContainText(
-    "Validate each project's deployment plan using its standard configuration, then trigger pre deployments one by one after all checks pass.",
+    "按各项目标准配置检查部署计划，全部通过后逐个触发 pre 环境部署。",
   );
-  await expect(dialog).toContainText("Workspace · demo-workspace");
-  await expect(dialog).toContainText("Deployment Target · standard");
-  await expect(dialog).toContainText("Deployment Environment · pre");
-  await expect(
-    dialog.getByRole("combobox", { name: /Unified Branch Override/ }),
-  ).toBeVisible();
-  await expect(dialog.getByRole("switch", { name: "Plan Check Only" })).toBeVisible();
-  await expect(dialog.getByText("执行参数", { exact: true })).toHaveCount(0);
-  await expect(dialog.getByText("统一分支覆盖", { exact: true })).toHaveCount(0);
+  await expect(dialog).toContainText("工作区 · demo-workspace");
+  await expect(dialog).toContainText("部署目标 · standard");
+  await expect(dialog).toContainText("部署环境 · pre");
+  await expect(dialog.getByRole("combobox", { name: /统一分支覆盖/ })).toBeVisible();
+  await expect(dialog.getByRole("switch", { name: "仅检查计划" })).toBeVisible();
+  await expect(dialog.getByText("Execution Parameters", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Check Plan" })).toBeVisible();
 });
 
 test("structured results can retry only the failed selection", async ({ page }) => {
@@ -77,24 +78,41 @@ test("structured results can retry only the failed selection", async ({ page }) 
   await dialog.getByRole("button", { name: "重试失败项（1）" }).click();
 
   await expect(dialog).toContainText("计划检查完成");
-  await expect(dialog).toContainText("已选 1/3");
+  await expect(dialog.getByText("示例门户 (demo-portal)", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: "重试失败项（1）" })).toHaveCount(0);
 });
 
-test("project multi-select keeps every selected project visible", async ({ page }) => {
+test("project multi-select searches and keeps every selected project visible", async ({ page }) => {
   const dialog = page.getByRole("dialog", { name: "批量部署 Pre" });
   const projectSelect = dialog.getByRole("combobox", { name: /项目/ });
 
   await projectSelect.click();
+  const listbox = page.getByRole("listbox");
+  await expect(listbox.getByRole("checkbox")).toHaveCount(0);
+  await projectSelect.fill("门户");
+  await expect(
+    page.getByRole("option", { name: "示例门户 (demo-portal)" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("option", { name: "示例控制台 (demo-console)" }),
+  ).toHaveCount(0);
+  await projectSelect.fill("");
   await page.getByRole("option", { name: "示例控制台" }).click();
   await page.getByRole("option", { name: "示例门户" }).click();
   await page.getByRole("option", { name: "示例移动端" }).click();
   await page.keyboard.press("Escape");
 
-  await expect(projectSelect).toContainText("示例控制台");
-  await expect(projectSelect).toContainText("示例门户");
-  await expect(projectSelect).toContainText("示例移动端");
+  const picker = dialog.locator(".resource-action-multi-select--project");
+  await expect(
+    picker.getByText("示例控制台 (demo-console)", { exact: true }),
+  ).toBeVisible();
+  await expect(picker.getByText("示例门户 (demo-portal)", { exact: true })).toBeVisible();
+  await expect(picker.getByText("示例移动端 (demo-mobile)", { exact: true })).toBeVisible();
   await expect(dialog.getByText("+1", { exact: true })).toHaveCount(0);
+
+  await projectSelect.focus();
+  await page.keyboard.press("Backspace");
+  await expect(picker.getByText("示例移动端 (demo-mobile)", { exact: true })).toHaveCount(0);
 });
 
 test("changing parameters clears a stale result", async ({ page }) => {

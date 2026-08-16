@@ -257,12 +257,12 @@ R 系列本地应用推荐统一注册为两个 build target：
 ```toml
 [projects.dev]
 command = "npm run dev"
-cwd = "/Users/ikiru/Documents/r-series-public/rdevtool"
+cwd = "/Users/demo/Projects/r-series/rdevtool"
 
 [projects.build]
 command = "npm run build"
-cwd = "/Users/ikiru/Documents/r-series-public/rdevtool"
-output_dir = "/Users/ikiru/Documents/r-series-public/rdevtool/target/release/bundle"
+cwd = "/Users/demo/Projects/r-series/rdevtool"
+output_dir = "/Users/demo/Projects/r-series/rdevtool/target/release/bundle"
 
 [[projects.deploy_targets]]
 key = "web"
@@ -272,7 +272,7 @@ action_kind = "build"
 job_name = "npm run web:build"
 
 [projects.deploy_targets.artifact]
-output_dir = "/Users/ikiru/Documents/r-series-public/rdevtool/web/dist"
+output_dir = "/Users/demo/Projects/r-series/rdevtool/web/dist"
 
 [[projects.deploy_targets]]
 key = "package"
@@ -315,7 +315,7 @@ url = "http://127.0.0.1:8080"
 [[categories.entries]]
 name = "项目目录"
 kind = "directory"
-path = "/Users/ikiru/Documents/r-series-public"
+path = "/Users/demo/Projects/r-series"
 ```
 
 工作区可以引用整个分类，也可以引用单个入口。

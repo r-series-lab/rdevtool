@@ -1,7 +1,7 @@
 {
   "name": "rdevtool",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.5",
   "scripts": {
     "dev": "node ./scripts/dev.mjs",
     "prebuild": "npm run clean:build-cache",
@@ -14,6 +14,7 @@
     "prepare:cli-sidecar": "node ./scripts/prepare-cli-sidecar.mjs",
     "manifest:check": "node ./scripts/validate-app-manifest.mjs",
     "manifest:check:json": "node ./scripts/validate-app-manifest.mjs --json",
+    "release:check": "node ./scripts/release-preflight.mjs",
     "ipc:check": "node ./scripts/check-ipc-contract.mjs",
     "ipc:check:json": "node ./scripts/check-ipc-contract.mjs --json",
     "web:install": "npm --prefix web install",

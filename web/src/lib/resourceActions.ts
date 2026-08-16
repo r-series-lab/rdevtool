@@ -14,86 +14,6 @@ export type ResourceActionValues = Record<string, ResourceActionParamValue>;
 
 const MAX_RESOURCE_ACTION_LIVE_LOG_CHARS = 64 * 1024;
 
-function scopedResourceActionTranslation(
-  actionKey: string,
-  field: string,
-  fallback: string,
-  t: Translate,
-) {
-  const translationKey = `resourceAction.${actionKey}.${field}`;
-  const scoped = t(translationKey);
-  if (scoped !== translationKey) {
-    return scoped;
-  }
-  return fallback;
-}
-
-export function localizedResourceActionText(
-  actionKey: string,
-  field: string,
-  fallback: string,
-  t: Translate,
-) {
-  return scopedResourceActionTranslation(actionKey, field, fallback, t);
-}
-
-export function localizedResourceActionView(
-  action: ResourceActionView,
-  t: Translate,
-): ResourceActionView {
-  return {
-    ...action,
-    name: scopedResourceActionTranslation(action.key, "name", action.name, t),
-    description: action.description
-      ? scopedResourceActionTranslation(
-          action.key,
-          "description",
-          action.description,
-          t,
-        )
-      : action.description,
-    params: action.params.map((param) => ({
-      ...param,
-      label: scopedResourceActionTranslation(
-        action.key,
-        `params.${param.key}.label`,
-        param.label,
-        t,
-      ),
-      description: param.description
-        ? scopedResourceActionTranslation(
-            action.key,
-            `params.${param.key}.description`,
-            param.description,
-            t,
-          )
-        : param.description,
-      placeholder: param.placeholder
-        ? scopedResourceActionTranslation(
-            action.key,
-            `params.${param.key}.placeholder`,
-            param.placeholder,
-            t,
-          )
-        : param.placeholder,
-      options:
-        param.kind === "project" ||
-        param.kind === "project_multi" ||
-        param.kind === "branch"
-          ? param.options
-          : param.options.map((option) => ({
-              ...option,
-              label: scopedResourceActionTranslation(
-                action.key,
-                `params.${param.key}.options.${option.value}`,
-                option.label,
-                t,
-              ),
-            })),
-    })),
-  };
-}
-
 export function appendResourceActionProgressEvent(
   current: ResourceActionProgressEvent[],
   event: ResourceActionProgressEvent,
@@ -113,12 +33,6 @@ export function appendResourceActionProgressEvent(
     totalChars -= next.shift()?.chunk.length ?? 0;
   }
   return next;
-}
-
-export function resourceActionUsesDirectRemoteWrite(
-  action: ResourceActionView,
-): boolean {
-  return action.effect === "remote_write" && action.execution.mode === "direct";
 }
 
 export function initialResourceActionValues(

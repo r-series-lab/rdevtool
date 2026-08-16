@@ -128,41 +128,6 @@ export const EN_RESOURCES_MESSAGES: Record<string, string> = {
     "Select a resource on the left to edit its complete configuration here.",
   "参数化 Action": "Parameterized Action",
   "参数化动作": "Parameterized Action",
-  "resourceAction.batch-deploy-pre.name": "Batch Deploy Pre",
-  "resourceAction.batch-deploy-pre.description":
-    "Validate each project's deployment plan using its standard configuration, then trigger pre deployments one by one after all checks pass.",
-  "resourceAction.batch-deploy-pre.resourceNote":
-    "Select work projects, validate each project's standard configuration, and trigger its pre deployment.",
-  "resourceAction.batch-deploy-pre.params.projects.label": "Projects",
-  "resourceAction.batch-deploy-pre.params.branchOverride.label":
-    "Unified Branch Override",
-  "resourceAction.batch-deploy-pre.params.branchOverride.description":
-    "Only overrides projects that declare a branch parameter. Leave blank to use each project's default or current branch.",
-  "resourceAction.batch-deploy-pre.params.branchOverride.placeholder":
-    "Optional, for example feature-CR...",
-  "resourceAction.batch-deploy-pre.params.planOnly.label": "Plan Check Only",
-  "resourceAction.batch-deploy-pre.params.workspace.label": "Workspace",
-  "resourceAction.batch-deploy-pre.params.target.label": "Deployment Target",
-  "resourceAction.batch-deploy-pre.params.environment.label":
-    "Deployment Environment",
-  "resourceAction.preview-deploy.name": "Preview Batch Deploy",
-  "resourceAction.preview-deploy.description":
-    "Select projects and trigger a preview deployment.",
-  "resourceAction.preview-deploy.resourceNote":
-    "Select projects and branches, review the plan, then run the deployment.",
-  "resourceAction.preview-deploy.params.projects.label": "Projects",
-  "resourceAction.preview-deploy.params.branchOverride.label":
-    "Unified Branch Override",
-  "resourceAction.preview-deploy.params.branchOverride.description":
-    "Only overrides projects that declare a branch parameter. Leave blank to use the project configuration.",
-  "resourceAction.preview-deploy.params.planOnly.label": "Plan Check Only",
-  "resourceAction.preview-deploy.params.workspace.label": "Workspace",
-  "resourceAction.preview-deploy.params.target.label": "Deployment Target",
-  "resourceAction.preview-deploy.params.environment.label":
-    "Deployment Environment",
-  "resourceAction.refresh-deploy-cache.name": "Refresh Deployment Cache",
-  "resourceAction.refresh-deploy-cache.description":
-    "Parameterless Actions use the same execution panel.",
   "根据 Action Schema 生成参数表单，并通过受控执行器运行。":
     "Generate a parameter form from the Action schema and run it with the controlled executor.",
   "影响": "Effect",
@@ -190,8 +155,6 @@ export const EN_RESOURCES_MESSAGES: Record<string, string> = {
   "计划有效期至 {time}": "Plan expires at {time}",
   "开始执行": "Start Execution",
   "确认开始执行？": "Start this execution?",
-  "该远程写入 Action 采用直接执行；确认前只能核对参数，建议逐步迁移到 plan_apply。":
-    "This remote-write Action runs directly. Before confirmation, only its parameters can be reviewed; migrate it to plan_apply over time.",
   "重试失败项（{count}）": "Retry Failed ({count})",
   "重试参数已失效，请重新选择后执行。":
     "The retry parameters are stale. Select the targets again before running.",
@@ -216,10 +179,10 @@ export const EN_RESOURCES_MESSAGES: Record<string, string> = {
   "工具 {tool}": "Tool {tool}",
   "动作 {action}": "Action {action}",
   "使用项目配置": "Use Project Configuration",
-  "已选 {selected}/{total}": "Selected {selected}/{total}",
-  "全选": "Select All",
   "搜索并选择项目": "Search and select projects",
-  "请选择项目": "Select projects",
+  "没有匹配的选项": "No matching options",
+  "展开选项": "Open options",
+  "收起选项": "Close options",
   "执行命令": "Command",
   "执行中…": "Running…",
   "执行": "Run",

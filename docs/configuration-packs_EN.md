@@ -23,7 +23,9 @@ Open **Settings -> Configuration Transfer**.
 
 For export, choose modules and exact project/workspace scopes, keep dependency inclusion enabled, choose one or more resource configuration sources, and save the `.rdtpack` file.
 
-For import, select a pack, choose a conflict strategy, map each packed source to a local source, generate a plan, complete required local path mappings, review every blocker and operation, then apply. Same-name sources are mapped automatically. A completed import exposes a one-click transaction rollback.
+For import, select a pack, choose a conflict strategy, map each packed source to a local source, generate a plan, and complete required local path mappings. Search or filter operations by module and action, exclude unwanted items, then update the plan before applying. Same-name sources are mapped automatically.
+
+Each operation has a stable ID. The selected IDs participate in `planHash`, so a changed selection must be replanned and excluded operations do not require unrelated path or secret mappings. The **History** tab reads durable transaction manifests and shows the latest 100 valid imports, their applied/skipped counts, changed files, and rollback state.
 
 ## Conflict Strategies
 
@@ -54,4 +56,6 @@ rdevtool --json pack import-run --plan-hash rdtpack-<sha256>
 rdevtool --json pack rollback <transaction-id>
 ```
 
-Plans expire after 24 hours and include fingerprints for every proposed file. Apply revalidates the pack checksum and destination state, then snapshots and atomically writes targets under one configuration lock set. Every import creates a transaction backup under `config-pack-backups/<transaction-id>/`; failed writes restore the complete original set automatically, while a failed rollback restores the pre-rollback state.
+Plans expire after 24 hours and include fingerprints for every proposed file. Apply revalidates the pack checksum and destination state, then snapshots and atomically writes targets under one configuration lock set. Every import creates a transaction backup under `config-pack-backups/<transaction-id>/`; failed writes restore the complete original set automatically.
+
+Transactions also store fingerprints of the applied files. Rollback verifies those fingerprints under the configuration lock and refuses to overwrite files changed after import. If rollback itself fails partway through, rDevTool restores the pre-rollback state.

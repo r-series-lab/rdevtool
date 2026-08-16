@@ -48,14 +48,14 @@ test("settings controls update the smoke harness state", async ({ page }) => {
   await expect(dialog).toBeVisible();
   const settingsNavigation = dialog.getByRole("tablist", { name: "设置分类" });
   const generalTab = settingsNavigation.getByRole("tab", { name: "通用" });
-  const confirmationTab = settingsNavigation.getByRole("tab", { name: "操作确认" });
+  const confirmationTab = settingsNavigation.getByRole("tab", { name: "操作安全" });
   const accessTab = settingsNavigation.getByRole("tab", { name: "快捷入口" });
   const portabilityTab = settingsNavigation.getByRole("tab", { name: "配置迁移" });
   const artifactsTab = settingsNavigation.getByRole("tab", { name: "受管产物" });
   const diagnosticsTab = settingsNavigation.getByRole("tab", { name: "系统诊断" });
   await expect(settingsNavigation.getByRole("tab")).toHaveText([
     "通用",
-    "操作确认",
+    "操作安全",
     "快捷入口",
     "配置迁移",
     "受管产物",
@@ -91,39 +91,49 @@ test("settings controls update the smoke harness state", async ({ page }) => {
   await confirmationTab.click();
   await expect(confirmationTab).toHaveAttribute("aria-selected", "true");
   await expect(dialog.getByText("展示菜单", { exact: true })).toHaveCount(0);
-  const confirmationMode = dialog.getByRole("radiogroup", { name: "操作确认策略" });
-  await expect(confirmationMode.getByRole("radio", { name: "平衡" })).toHaveAttribute(
+  const confirmationMode = dialog.getByRole("radiogroup", { name: "操作安全策略" });
+  await expect(confirmationMode.getByRole("radio", { name: "推荐" })).toHaveAttribute(
     "aria-checked",
     "true",
   );
-  await expect(dialog.getByRole("checkbox", { name: "构建与构建重放确认" })).toBeChecked();
+  const buildPolicy = dialog.getByRole("radiogroup", {
+    name: "构建与构建重放执行方式",
+  });
+  await expect(buildPolicy.getByRole("radio", { name: "执行前确认" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  const proxyPolicy = dialog.getByRole("radiogroup", {
+    name: "代理与联调启停执行方式",
+  });
   await expect(
-    dialog.getByRole("checkbox", { name: "代理与联调启停确认" }),
-  ).not.toBeChecked();
+    proxyPolicy.getByRole("radio", { name: "直接执行" }),
+  ).toHaveAttribute("aria-checked", "true");
   await expect(
     dialog.locator(".settings-confirmation-row").filter({ hasText: "分支合并与重放" }),
-  ).toContainText("始终确认");
-  await confirmationMode.getByRole("radio", { name: "严格" }).click();
+  ).toContainText("安全底线");
+  await confirmationMode.getByRole("radio", { name: "安全优先" }).click();
   await expect(
-    dialog.getByRole("checkbox", { name: "代理与联调启停确认" }),
-  ).toBeChecked();
-  await confirmationMode.getByRole("radio", { name: "快捷" }).click();
-  const buildConfirmation = dialog.getByRole("checkbox", {
-    name: "构建与构建重放确认",
-  });
-  await expect(buildConfirmation).not.toBeChecked();
-  await buildConfirmation.check();
+    proxyPolicy.getByRole("radio", { name: "执行前确认" }),
+  ).toHaveAttribute("aria-checked", "true");
+  await confirmationMode.getByRole("radio", { name: "高效" }).click();
+  await expect(
+    buildPolicy.getByRole("radio", { name: "直接执行" }),
+  ).toHaveAttribute("aria-checked", "true");
+  await buildPolicy.getByRole("radio", { name: "执行前确认" }).click();
   await expect(confirmationMode.getByText("自定义", { exact: true })).toBeVisible();
 
   await accessTab.click();
   await expect(accessTab).toHaveAttribute("aria-selected", "true");
   await expect(dialog.getByText("命令面板", { exact: true })).toBeVisible();
   await expect(dialog.getByRole("button", { name: /配置文件夹/ })).toBeVisible();
+
   await portabilityTab.click();
   await expect(portabilityTab).toHaveAttribute("aria-selected", "true");
   await expect(dialog.getByText("导出配置包", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("导入配置包", { exact: true })).toHaveCount(0);
+  await dialog.getByRole("tab", { name: "导入", exact: true }).click();
   await expect(dialog.getByText("导入配置包", { exact: true })).toBeVisible();
-
 
   await artifactsTab.click();
   await expect(artifactsTab).toHaveAttribute("aria-selected", "true");
@@ -329,7 +339,7 @@ test("confirmation preferences skip configurable prompts but keep critical promp
   await confirmationHarness.getByRole("button", { name: "测试构建确认" }).click();
   let dialog = page.getByRole("dialog", { name: "确认运行" });
   await expect(dialog).toBeVisible();
-  await dialog.getByRole("checkbox", { name: "以后不再确认此类操作" }).check();
+  await dialog.getByRole("checkbox", { name: "以后直接执行此类操作" }).check();
   await dialog.getByRole("button", { name: "运行", exact: true }).click();
   await expect(page.getByTestId("build-confirmation-runs")).toHaveText("1");
 
@@ -341,7 +351,7 @@ test("confirmation preferences skip configurable prompts but keep critical promp
   dialog = page.getByRole("dialog", { name: "确认运行" });
   await expect(dialog).toBeVisible();
   await expect(
-    dialog.getByRole("checkbox", { name: "以后不再确认此类操作" }),
+    dialog.getByRole("checkbox", { name: "以后直接执行此类操作" }),
   ).toHaveCount(0);
   await dialog.getByRole("button", { name: "取消", exact: true }).click();
   await expect(page.getByTestId("branch-confirmation-runs")).toHaveText("0");
@@ -413,6 +423,48 @@ test("config source manager browsing keeps the workspace preference cache", asyn
       ),
     )
     .toBe("persisted-resource");
+});
+
+test("configuration workbenches share the same content inset model", async ({
+  page,
+}) => {
+  await page.goto("/smoke.html?style=mono");
+  await page.getByRole("button", { name: "打开配置源管理" }).click();
+
+  const sourceDialog = page.getByRole("dialog", { name: /配置源管理/ });
+  const sourceInsets = await sourceDialog.evaluate((element) => {
+    const content = element.querySelector(".config-source-manager-content");
+    const inspection = element.querySelector(".config-source-manager-inspection");
+    return {
+      content: content ? getComputedStyle(content).padding : "",
+      inspection: inspection ? getComputedStyle(inspection).padding : "",
+    };
+  });
+  expect(sourceInsets.content).toBe("8px");
+  expect(sourceInsets.inspection).toBe("12px");
+  await sourceDialog.getByRole("button", { name: "关闭", exact: true }).click();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "打开构建配置测试" }).click();
+  const projectDialog = page.getByRole("dialog", { name: "项目配置" });
+  const projectInsets = await projectDialog.evaluate((element) => {
+    const body = element.querySelector(".settings-panel-body");
+    const saveRow = element.querySelector(".settings-save-row");
+    const input = element.querySelector(".MuiInputBase-input");
+    return {
+      body: body ? getComputedStyle(body).padding : "",
+      saveRow: saveRow ? getComputedStyle(saveRow).padding : "",
+      inputLeft: input ? getComputedStyle(input).paddingLeft : "",
+    };
+  });
+  expect(projectInsets.body).toBe("8px");
+  expect(projectInsets.saveRow).toBe("8px 12px");
+  expect(projectInsets.inputLeft).toBe("12px");
+
+  const projectBounds = await projectDialog.boundingBox();
+  expect(projectBounds).not.toBeNull();
+  expect(projectBounds!.y).toBeGreaterThanOrEqual(7);
+  expect(projectBounds!.y + projectBounds!.height).toBeLessThanOrEqual(838);
 });
 
 test("config change action opens the comparison result directly", async ({ page }) => {

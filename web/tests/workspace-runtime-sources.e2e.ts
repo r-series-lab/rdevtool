@@ -1,5 +1,50 @@
 import { expect, test } from "@playwright/test";
 
+test("workspace-owned resources can be managed from workspace configuration", async ({
+  page,
+}) => {
+  await page.goto("/smoke.html");
+  await page.getByRole("button", { name: "打开工作区运行来源测试" }).click();
+  await page
+    .getByRole("button", { name: "工作区配置", exact: true })
+    .evaluate((button: HTMLButtonElement) => button.click());
+
+  const dialog = page.getByRole("dialog", { name: "工作区配置" });
+  const editor = dialog.locator(".workspace-resource-editor");
+  await expect(editor).toBeVisible();
+  const insets = await dialog.evaluate((element) => {
+    const main = element.querySelector(".overview-workspace-config-main");
+    const detailContent = element.querySelector(
+      ".overview-workspace-config-detail-card > .MuiStack-root",
+    );
+    return {
+      main: main ? getComputedStyle(main).padding : "",
+      detailContent: detailContent ? getComputedStyle(detailContent).padding : "",
+    };
+  });
+  expect(insets.main).toBe("0px");
+  expect(insets.detailContent).toBe("10px 12px 12px");
+  await expect(dialog.getByText("4 个专属资源", { exact: true })).toBeVisible();
+  await expect(editor.getByText("系统生成", { exact: true })).toHaveCount(2);
+
+  const rules = editor
+    .locator(".workspace-resource-row")
+    .filter({ hasText: "玩法规则联调页" });
+  await rules.getByRole("button", { name: "编辑资源 玩法规则联调页" }).click();
+  await expect(rules.getByLabel("名称")).toHaveValue("玩法规则联调页");
+  await expect(rules.getByLabel("URL")).toHaveValue(
+    "http://127.0.0.1:4173/#/debug/gameplay-rules",
+  );
+
+  await rules.getByRole("button", { name: "复制资源 玩法规则联调页" }).click();
+  await expect(editor.getByText("玩法规则联调页 副本", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("5 个专属资源", { exact: true })).toBeVisible();
+
+  await dialog.getByRole("button", { name: "保存", exact: true }).click();
+  await expect(dialog.getByRole("button", { name: "保存", exact: true })).toBeDisabled();
+  await expect(dialog.getByText("5 个专属资源", { exact: true })).toBeVisible();
+});
+
 test("workspace archive deep link opens and locates the archived item", async ({
   page,
 }) => {

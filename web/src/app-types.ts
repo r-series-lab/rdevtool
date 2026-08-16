@@ -431,6 +431,7 @@ export type ProjectWorkspaceEditorDraft = {
   navigationEntries: string[];
   proxyProfiles: string[];
   projectInstances: ProjectWorkspaceProjectInstanceDraft[];
+  resourceCategories: NavigationEditorCategory[];
 };
 
 export type ProjectWorkspaceEditorProject = {

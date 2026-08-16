@@ -1,7 +1,7 @@
 {
   "name": "rdevtool-web",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.5",
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
@@ -18,7 +18,7 @@
     "@mui/material": "^7.3.2",
     "@tauri-apps/api": "^2.10.1",
     "@tauri-apps/plugin-dialog": "^2.7.0",
-    "markdown-it": "^14.1.1",
+    "markdown-it": "^15.0.0",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },
@@ -30,7 +30,7 @@
     "@types/react-dom": "^19.2.2",
     "@vitejs/plugin-react": "^5.1.0",
     "typescript": "^5.9.3",
-    "vite": "^8.0.8",
+    "vite": "^8.2.1",
     "vitest": "^4.1.10"
   }
 }

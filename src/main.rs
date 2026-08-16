@@ -12918,6 +12918,7 @@ fn run_pack(command: PackCommands, json_mode: bool) -> Result<()> {
                     "config-source-map",
                 )?,
                 require_secrets,
+                included_operation_ids: None,
             })?;
             if json_mode {
                 print_json_command("pack.import-plan", &plan)

@@ -16,7 +16,7 @@ describe("build presentation", () => {
       "打包任务正在运行",
       "PID: 84957",
       "命令: npm run build",
-      "目录: /Users/ikiru/Documents/r-series-public/rcodexmanager",
+      "目录: /Users/demo/Projects/r-series/rcodexmanager",
       "产物: /tmp/rCodexManager.dmg",
       "日志: /tmp/rdevtool.log",
     ].join("\n");
@@ -26,7 +26,7 @@ describe("build presentation", () => {
         "The build task is running",
         "PID: 84957",
         "Command: npm run build",
-        "Directory: /Users/ikiru/Documents/r-series-public/rcodexmanager",
+        "Directory: /Users/demo/Projects/r-series/rcodexmanager",
         "Output: /tmp/rCodexManager.dmg",
         "Log: /tmp/rdevtool.log",
       ].join("\n"),

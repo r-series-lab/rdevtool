@@ -1010,7 +1010,8 @@ mod tests {
         );
 
         fs::write(&first.info.index_path, "custom content").expect("write custom index");
-        let second = init_project_notes_in(&root, "demo-console", "示例控制台").expect("second init");
+        let second =
+            init_project_notes_in(&root, "demo-console", "示例控制台").expect("second init");
         assert!(!second.created);
         assert_eq!(
             fs::read_to_string(&second.info.index_path).expect("read index"),

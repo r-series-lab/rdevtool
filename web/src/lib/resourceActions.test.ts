@@ -1,17 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import type { ResourceActionView } from "../app-types";
-import { translateMessage } from "../i18n";
 import {
   appendResourceActionProgressEvent,
   initialResourceActionValues,
-  localizedResourceActionText,
-  localizedResourceActionView,
   resourceActionActivityParameters,
   resourceActionDryRunState,
   resourceActionRequiresPlan,
   resourceActionRetryValues,
-  resourceActionUsesDirectRemoteWrite,
   validateResourceActionValues,
 } from "./resourceActions";
 
@@ -72,17 +68,6 @@ const action: ResourceActionView = {
 };
 
 describe("resource action plan/apply", () => {
-  it("identifies direct remote-write actions for a persistent risk warning", () => {
-    expect(resourceActionUsesDirectRemoteWrite(action)).toBe(true);
-    expect(
-      resourceActionUsesDirectRemoteWrite({
-        ...action,
-        execution: { mode: "plan_apply", planTtlSeconds: 300 },
-      }),
-    ).toBe(false);
-    expect(resourceActionUsesDirectRemoteWrite({ ...action, effect: "read" })).toBe(false);
-  });
-
   it("requires a persisted plan only for non-dry-run plan_apply executions", () => {
     const planApply = {
       ...action,
@@ -137,113 +122,6 @@ const constrainedAction: ResourceActionView = {
 };
 
 describe("resource action parameters", () => {
-  it("localizes the Batch Deploy Pre action contract", () => {
-    const localized = localizedResourceActionView(
-      {
-        ...action,
-        key: "batch-deploy-pre",
-        name: "批量部署 Pre",
-        description:
-          "按各项目自身标准配置检查部署计划，全部通过后再逐个触发 pre 环境部署。",
-        params: [
-          { ...action.params[0], label: "项目" },
-          {
-            ...action.params[1],
-            label: "统一分支覆盖",
-            description:
-              "仅覆盖声明了分支参数的项目；留空则沿用各项目默认值或当前分支。",
-            placeholder: "可选，例如 feature-CR...",
-          },
-          { ...action.params[3], key: "planOnly", label: "仅检查计划" },
-          {
-            key: "workspace",
-            label: "工作区",
-            kind: "hidden",
-            required: false,
-            options: [],
-          },
-          {
-            key: "target",
-            label: "部署目标",
-            kind: "hidden",
-            required: false,
-            options: [],
-          },
-          {
-            key: "environment",
-            label: "部署环境",
-            kind: "hidden",
-            required: false,
-            options: [],
-          },
-        ],
-      },
-      (message, params) => translateMessage("en-US", message, params),
-    );
-
-    expect(localized.name).toBe("Batch Deploy Pre");
-    expect(localized.description).toContain("trigger pre deployments one by one");
-    expect(localized.params.map((param) => param.label)).toEqual([
-      "Projects",
-      "Unified Branch Override",
-      "Plan Check Only",
-      "Workspace",
-      "Deployment Target",
-      "Deployment Environment",
-    ]);
-    expect(localized.params[1].description).toContain("default or current branch");
-    expect(localized.params[1].placeholder).toBe(
-      "Optional, for example feature-CR...",
-    );
-  });
-
-  it("localizes configured copy by action and field while preserving dynamic options", () => {
-    const localized = localizedResourceActionView(
-      {
-        ...action,
-        key: "preview-deploy",
-        name: "预演批量部署",
-        description: "选择项目并触发预演部署。",
-        params: [
-          {
-            ...action.params[0],
-            options: [{ value: "tool-project", label: "工具" }],
-          },
-          {
-            ...action.params[1],
-            description: "仅覆盖声明了分支参数的项目；留空则沿用项目配置。",
-          },
-        ],
-      },
-      (message, params) => translateMessage("en-US", message, params),
-    );
-
-    expect(localized.name).toBe("Preview Batch Deploy");
-    expect(localized.description).toBe(
-      "Select projects and trigger a preview deployment.",
-    );
-    expect(localized.params[0].label).toBe("Projects");
-    expect(localized.params[0].options[0].label).toBe("工具");
-    expect(localized.params[1].label).toBe("Unified Branch Override");
-    expect(localized.params[1].description).toContain("Only overrides projects");
-    expect(
-      localizedResourceActionText(
-        "batch-deploy-pre",
-        "resourceNote",
-        "原始备注",
-        (message, params) => translateMessage("en-US", message, params),
-      ),
-    ).toContain("Select work projects");
-    expect(
-      localizedResourceActionText(
-        "custom-action",
-        "name",
-        "工具",
-        (message, params) => translateMessage("en-US", message, params),
-      ),
-    ).toBe("工具");
-  });
-
   it("orders, deduplicates, and bounds live progress events", () => {
     const event = (sequence: number, chunk: string) => ({
       operationId: "action-live-test",

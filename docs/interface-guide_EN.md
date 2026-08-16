@@ -49,6 +49,24 @@ The Workspace page answers, "What am I working on right now?"
 
 At the start of a requirement, choose its workspace before opening Projects, Git, or Build. Return to `system` when you need to investigate across all projects.
 
+### Workspace-Owned Resources
+
+![Managing workspace-owned resources in Workspace Configuration](assets/screenshots/workspace-resource-editor.png)
+
+Open **Workspace Configuration** to manage resources owned by the selected non-global workspace:
+
+1. Select **Add Category**, then provide a category name and a short label for compact displays.
+2. Add a website, directory, file, app, script, or tool. Tool entries may reference a Link, Action, Workflow, web action, or Runtime.
+3. Use the edit, duplicate, and delete controls on each entry. Changes remain in the dialog draft until you select **Save**.
+4. `Resource Directory` and `Work Log` are marked **Generated**. Their paths are controlled by the resource-directory and worklog settings above and cannot be removed accidentally from the list.
+
+Keep these two scopes distinct:
+
+- **Workspace-owned** entries are stored in the workspace configuration, apply only to that workspace, and can be created, edited, duplicated, or deleted here.
+- **Shared resources** come from the selected resource configuration source and are included through the **Resources** scope below. Clearing the selection removes an entry from this workspace without deleting its source definition.
+
+Save validates duplicate category and resource names together with URL, path, and entry-type requirements. The overview reloads its Resources and Tools sections after saving. Removing an entry that references an Action or Link does not delete the underlying Action or Link definition.
+
 ## Project Management
 
 ### Projects
@@ -143,7 +161,7 @@ Prefer one clear question per note, such as "local proxy troubleshooting", "pre-
 Open **Settings** from the top-right corner for these user-facing areas:
 
 - **General** controls visible menus, the default page, theme, interface language, and shutdown behavior for running services.
-- **Confirmations** controls which high-risk operations require another confirmation. Disabling confirmation reduces protection and is not a fix for a failed operation.
+- **Operation Safety** uses Safety First, Recommended, Efficient, or per-operation rules to control pre-execution confirmation. Branch writes, remote releases, destructive deletion, and discarding unsaved content are safety guardrails that always require confirmation; builds, runtimes, proxies, and configuration imports can run directly or require confirmation. These are local interaction rules and do not replace GitLab, Jenkins, or operating-system permissions.
 - **Shortcuts** opens configuration folders, workspace folders, and related configuration files.
 - **Managed Artifacts** shows workspace instances, runtime state, logs, and referenced paths that rDevTool explicitly manages. Review the read-only plan before cleanup.
 - **System Diagnostics** checks app/CLI identity, configuration health, storage use, and actionable risks.

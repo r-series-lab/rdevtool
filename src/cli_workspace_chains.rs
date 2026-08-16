@@ -785,13 +785,7 @@ mod tests {
         );
         assert_eq!(
             plan.steps[2].command,
-            [
-                "link",
-                "--source",
-                "workspace-link",
-                "run",
-                "demo-debug"
-            ]
+            ["link", "--source", "workspace-link", "run", "demo-debug"]
         );
     }
 }

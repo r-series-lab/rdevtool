@@ -18,6 +18,20 @@ export type ConfirmationPreferenceDefinition = {
   description: string;
   required: boolean;
   balancedDefault: boolean;
+  guardrailReason?: string;
+};
+
+export type ConfirmationDecisionSource =
+  | "guardrail"
+  | "strict"
+  | "balanced"
+  | "fast"
+  | "override";
+
+export type ConfirmationDecision = {
+  required: boolean;
+  canDisable: boolean;
+  source: ConfirmationDecisionSource;
 };
 
 export type ConfirmationPreferences = {
@@ -33,6 +47,7 @@ export const CONFIRMATION_PREFERENCE_DEFINITIONS: ConfirmationPreferenceDefiniti
     description: "合并、批量合并及分支任务重放",
     required: true,
     balancedDefault: true,
+    guardrailReason: "涉及仓库写入或分支历史变更",
   },
   {
     key: "deploy.run",
@@ -40,6 +55,7 @@ export const CONFIRMATION_PREFERENCE_DEFINITIONS: ConfirmationPreferenceDefiniti
     description: "触发远端部署、发布或历史部署重放",
     required: true,
     balancedDefault: true,
+    guardrailReason: "涉及远端环境与发布结果",
   },
   {
     key: "destructive.delete",
@@ -47,6 +63,7 @@ export const CONFIRMATION_PREFERENCE_DEFINITIONS: ConfirmationPreferenceDefiniti
     description: "删除工作区、代理规则或配置源",
     required: true,
     balancedDefault: true,
+    guardrailReason: "可能移除持久化配置或工作区数据",
   },
   {
     key: "configuration.discard",
@@ -54,6 +71,7 @@ export const CONFIRMATION_PREFERENCE_DEFINITIONS: ConfirmationPreferenceDefiniti
     description: "关闭配置时丢弃尚未保存的内容",
     required: true,
     balancedDefault: true,
+    guardrailReason: "未保存内容无法自动恢复",
   },
   {
     key: "build.run",
@@ -126,24 +144,35 @@ export function confirmationEnabled(
   preferences: ConfirmationPreferences,
   key: ConfirmationPreferenceKey,
 ) {
-  const definition = definitionByKey.get(key);
-  if (!definition || definition.required) {
-    return true;
-  }
-  if (preferences.mode === "strict") {
-    return true;
-  }
-  if (preferences.mode === "fast") {
-    return false;
-  }
-  if (preferences.mode === "custom") {
-    return preferences.overrides[key] ?? definition.balancedDefault;
-  }
-  return definition.balancedDefault;
+  return resolveConfirmationDecision(preferences, key).required;
 }
 
-export function confirmationCanBeDisabled(key: ConfirmationPreferenceKey) {
-  return definitionByKey.get(key)?.required === false;
+export function resolveConfirmationDecision(
+  preferences: ConfirmationPreferences,
+  key: ConfirmationPreferenceKey,
+): ConfirmationDecision {
+  const definition = definitionByKey.get(key);
+  if (!definition || definition.required) {
+    return { required: true, canDisable: false, source: "guardrail" };
+  }
+  if (preferences.mode === "strict") {
+    return { required: true, canDisable: false, source: "strict" };
+  }
+  if (preferences.mode === "fast") {
+    return { required: false, canDisable: true, source: "fast" };
+  }
+  if (preferences.mode === "custom") {
+    return {
+      required: preferences.overrides[key] ?? definition.balancedDefault,
+      canDisable: true,
+      source: "override",
+    };
+  }
+  return {
+    required: definition.balancedDefault,
+    canDisable: true,
+    source: "balanced",
+  };
 }
 
 export function confirmationPreferencesWithMode(

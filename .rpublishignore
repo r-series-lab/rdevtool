@@ -1,0 +1,4 @@
+# Local design exploration and generated development sidecars are not release source.
+/design-previews/
+/activity-center-pagination-preview.jpeg
+/src-tauri/binaries/

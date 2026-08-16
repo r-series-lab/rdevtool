@@ -2,6 +2,10 @@
 
 English | [中文](README.md)
 
+[Official website](https://rdt.rurie.top) · [Documentation](https://rdt.rurie.top/en/docs) · [Preview downloads](https://github.com/r-series-lab/rdevtool/releases) · [Issue tracker](https://github.com/r-series-lab/rdevtool/issues)
+
+> The `0.1.x` line is a Public Preview. Packages are not yet notarized with an Apple Developer ID or signed with Windows Authenticode. Read the [release notes](RELEASE_EN.md) and verify the SHA-256 manifest attached to the Release before installing.
+
 `rDevTool` is a local desktop workbench for day-to-day multi-project development. It brings workspaces, resource shortcuts, Git branch workflows, build tasks, local proxy rules, runtime debugging, activity history, and AI-readable context into one Tauri app.
 
 It is not a replacement for GitLab, Jenkins, or a CI/CD platform. It is a local control surface for the questions developers answer constantly: which requirement context am I in, which project should I open, which branch should I inspect or switch, and where should this build run?
@@ -11,10 +15,10 @@ Stack: `Tauri 2 + Rust + React + Vite + TypeScript + Material UI`.
 ## Product Areas
 
 - **Workbench** groups projects, shortcuts, proxy profiles, Links, build and Git actions, and recent activity by workspace.
-- **Resource Finder** manages projects, websites, directories, apps, scripts, and parameterized Actions with search, favorites, recents, and workspace filtering.
+- **Resource Finder** manages projects, websites, directories, apps, scripts, and parameterized Actions with search, favorites, recents, workspace filtering, and UI-based CRUD for workspace-owned resources.
 - **Parameterized Actions** generate a generic dialog from `actions.toml`, with fully visible multi-select values, fixed context, plan/apply, live logs, cancellation, background execution, failed-item retry, and operation history.
 - **CLI Bridge** bundles a version-matched `rdevtool` sidecar and exposes it to Action scripts through `RDEVTOOL_CLI`.
-- **Configuration Transfer** exports projects, workspaces, and resource sources as `.rdtpack` archives, then imports through path mapping, conflict planning, state validation, transaction backup, and rollback.
+- **Configuration Transfer** exports projects, workspaces, and resource sources as `.rdtpack` archives, then imports through filterable per-operation planning, path mapping, state validation, transaction backup, durable history, and guarded rollback.
 - **Configuration Sources** select resource, Link, proxy, and runtime sources independently per workspace, with comparison and external-change detection.
 - **Link Chains** compose local-file checks, proxy lifecycle, runtime lifecycle, and page focus into previewable and runnable workflows.
 - **Git Workflow** covers branch listing, multi-target sync, branch creation, checkout, merge preview, merge, push status, and push. Batch records use one row per project and keep 403 or merge-conflict evidence actionable.

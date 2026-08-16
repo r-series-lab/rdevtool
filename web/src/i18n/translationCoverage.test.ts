@@ -52,6 +52,7 @@ const TRANSLATED_SURFACES = [
   "components/WorkspaceRuntimePreflightFixDialog.tsx",
   "components/WorkspaceProjectRuntimeRow.tsx",
   "components/WorkspaceConfigSidebar.tsx",
+  "components/WorkspaceResourceEditor.tsx",
   "components/WorkspaceSwitcherMenu.tsx",
   "components/WorkspaceTypeSelect.tsx",
   "components/build/BuildResultPanel.tsx",

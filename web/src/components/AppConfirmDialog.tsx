@@ -6,11 +6,10 @@ import {
   Stack,
 } from "@mui/material";
 import {
-  confirmationCanBeDisabled,
-  confirmationEnabled,
   confirmationPreferencesWithOverride,
   getCurrentConfirmationPreferences,
   loadConfirmationPreferences,
+  resolveConfirmationDecision,
   saveConfirmationPreferences,
   type ConfirmationPreferenceKey,
 } from "../lib/confirmationPreferences";
@@ -78,12 +77,11 @@ export function useAppConfirmDialog() {
     let nextAllowDisable = false;
     if (nextOptions.preferenceKey) {
       const preferences = await loadConfirmationPreferences();
-      if (!confirmationEnabled(preferences, nextOptions.preferenceKey)) {
+      const decision = resolveConfirmationDecision(preferences, nextOptions.preferenceKey);
+      if (!decision.required) {
         return true;
       }
-      nextAllowDisable =
-        preferences.mode !== "strict" &&
-        confirmationCanBeDisabled(nextOptions.preferenceKey);
+      nextAllowDisable = decision.canDisable;
     }
     resolverRef.current?.(false);
     return new Promise<boolean>((resolve) => {
@@ -148,7 +146,7 @@ export function useAppConfirmDialog() {
                   onChange={(event) => setDisableFuture(event.target.checked)}
                 />
               }
-              label={t("以后不再确认此类操作")}
+              label={t("以后直接执行此类操作")}
             />
           ) : null}
         </Stack>

@@ -33,11 +33,11 @@ npm run build
 - Rust 格式、Core/Tauri 测试与检查
 - Playwright Chromium 浏览器流程
 
-`.github/workflows/release.yml` 为每个目标生成桌面包、`release-artifacts.json` 与 `SHA256SUMS`，并上传为 workflow artifacts。推送版本 tag 会创建带全部目标制品的 draft GitHub Release。
+`.github/workflows/release.yml` 为每个目标生成桌面包、带目标名的发布清单与 SHA-256 校验文件，并上传为 workflow artifacts。推送版本 tag 会创建带全部目标制品的 draft prerelease。
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.1.5
+git push origin v0.1.5
 ```
 
 ## 版本检查清单

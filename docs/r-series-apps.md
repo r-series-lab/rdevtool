@@ -15,10 +15,10 @@ R 系列应用在 rDevTool 里按“项目事实源 + 工作区引用 + 访达�
 - `package` target：本地桌面打包。
 
 ```bash
-rdevtool --json projects add --key rdevtool --name "rDevTool" --category "R系列" --repo-path /Users/ikiru/Documents/r-series-public/rdevtool
-rdevtool --json projects set-command rdevtool --kind dev --command "npm run dev" --cwd /Users/ikiru/Documents/r-series-public/rdevtool
-rdevtool --json projects set-command rdevtool --kind build --command "npm run build" --cwd /Users/ikiru/Documents/r-series-public/rdevtool --output-dir /Users/ikiru/Documents/r-series-public/rdevtool/target/release/bundle
-rdevtool --json projects build-target-add rdevtool --key web --label "前端构建" --adapter local_command --job "npm run web:build" --output-dir /Users/ikiru/Documents/r-series-public/rdevtool/web/dist
+rdevtool --json projects add --key rdevtool --name "rDevTool" --category "R系列" --repo-path /Users/demo/Projects/r-series/rdevtool
+rdevtool --json projects set-command rdevtool --kind dev --command "npm run dev" --cwd /Users/demo/Projects/r-series/rdevtool
+rdevtool --json projects set-command rdevtool --kind build --command "npm run build" --cwd /Users/demo/Projects/r-series/rdevtool --output-dir /Users/demo/Projects/r-series/rdevtool/target/release/bundle
+rdevtool --json projects build-target-add rdevtool --key web --label "前端构建" --adapter local_command --job "npm run web:build" --output-dir /Users/demo/Projects/r-series/rdevtool/web/dist
 rdevtool --json projects build-target-add rdevtool --key package --label "本地打包" --adapter r_series_package
 ```
 
@@ -53,8 +53,8 @@ rdevtool --json workspace scope r-series \
 目录入口放在 `R系列开发` 分类，项目详情仍由 `projects.toml` 维护。
 
 ```bash
-rdevtool --json navigation add --category "R系列开发" --short-label "R系列" --name "R 系列根目录" --kind directory --path /Users/ikiru/Documents/r-series-public
-rdevtool --json navigation add --category "R系列开发" --short-label "R系列" --name "rDevTool 目录" --kind directory --path /Users/ikiru/Documents/r-series-public/rdevtool
+rdevtool --json navigation add --category "R系列开发" --short-label "R系列" --name "R 系列根目录" --kind directory --path /Users/demo/Projects/r-series
+rdevtool --json navigation add --category "R系列开发" --short-label "R系列" --name "rDevTool 目录" --kind directory --path /Users/demo/Projects/r-series/rdevtool
 rdevtool --json navigation add --category "R系列开发" --short-label "R系列" --name "rDevTool App" --kind app --bundle-id app.rseries.rdevtool
 ```
 

@@ -1007,11 +1007,11 @@ body::-webkit-scrollbar-corner,
 }
 
 .overview-page.is-global-workspace {
-  padding: 12px 18px;
+  padding: 0;
 }
 
 .overview-page.is-global-workspace .overview-page-stack {
-  gap: 12px;
+  gap: 8px;
 }
 
 .overview-workspace-card {
@@ -4909,11 +4909,11 @@ body::-webkit-scrollbar-corner,
   }
 
   .overview-page.is-global-workspace {
-    padding: 6px;
+    padding: 1px;
   }
 
   .overview-page.is-global-workspace .overview-page-stack {
-    gap: 8px;
+    gap: 6px;
   }
 
   .overview-page-stack,
@@ -8526,7 +8526,7 @@ body::-webkit-scrollbar-corner,
 @media (max-width: 720px) {
   .knowledge-workbench {
     grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(172px, 34%) minmax(0, 1fr);
+    grid-template-rows: minmax(148px, 30%) minmax(0, 1fr);
     gap: 10px;
   }
 
@@ -13014,7 +13014,7 @@ body::-webkit-scrollbar-corner,
 }
 
 .resource-action-dialog.app-action-dialog .app-action-dialog-content.MuiDialogContent-root {
-  padding: 22px 24px 20px !important;
+  padding: 16px 20px !important;
 }
 
 .resource-action-content {
@@ -13023,38 +13023,12 @@ body::-webkit-scrollbar-corner,
 }
 
 .resource-action-loading {
-  padding: 18px 2px;
+  padding: 12px 2px;
   font-size: 0.82rem !important;
 }
 
-.resource-action-dialog .resource-action-direct-warning.MuiAlert-root {
-  min-height: 62px;
-  align-items: flex-start;
-  padding: 11px 15px;
-  border: 1px solid color-mix(in srgb, var(--activity-running) 18%, var(--line-soft));
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--activity-running-soft) 72%, var(--panel-strong));
-  color: color-mix(in srgb, var(--text) 84%, var(--activity-running));
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.42),
-    0 8px 22px rgba(52, 127, 211, 0.06);
-}
-
-.resource-action-dialog .resource-action-direct-warning .MuiAlert-icon {
-  margin-right: 11px;
-  padding: 3px 0 0;
-  color: var(--activity-running);
-}
-
-.resource-action-dialog .resource-action-direct-warning .MuiAlert-message {
-  padding: 0;
-  font-size: 0.79rem;
-  font-weight: 650;
-  line-height: 1.62;
-}
-
 .resource-action-context-section {
-  padding: 24px 0 22px;
+  padding: 14px 0 16px;
 }
 
 .resource-action-section-eyebrow.MuiTypography-root {
@@ -13067,11 +13041,11 @@ body::-webkit-scrollbar-corner,
 }
 
 .resource-action-context-list {
-  margin-top: 12px;
+  margin-top: 8px;
 }
 
 .resource-action-context-chip.MuiChip-root {
-  height: 30px;
+  height: 28px;
   max-width: 100%;
   border-color: color-mix(in srgb, var(--line) 84%, transparent);
   border-radius: 8px;
@@ -13122,7 +13096,7 @@ body::-webkit-scrollbar-corner,
 }
 
 .resource-action-parameters-body {
-  padding-top: 22px;
+  padding-top: 16px;
 }
 
 .resource-action-content > .resource-action-parameters-section:first-child
@@ -13135,13 +13109,9 @@ body::-webkit-scrollbar-corner,
   padding-top: 0;
 }
 
-.resource-action-direct-warning + .resource-action-parameters-section {
-  margin-top: 24px;
-}
-
 .resource-action-section-heading {
-  min-height: 24px;
-  margin-bottom: 13px;
+  min-height: 20px;
+  margin-bottom: 10px;
 }
 
 .resource-action-section-title.MuiTypography-root {
@@ -13161,76 +13131,26 @@ body::-webkit-scrollbar-corner,
   min-width: 0;
 }
 
-.resource-action-project-toolbar {
-  min-height: 28px;
-  flex-wrap: wrap;
-}
-
-.resource-action-project-count.MuiChip-root {
-  height: 26px;
-  border-color: color-mix(in srgb, var(--activity-running) 24%, var(--line));
-  background: color-mix(in srgb, var(--activity-running-soft) 64%, transparent);
-  color: color-mix(in srgb, var(--activity-running) 88%, var(--text));
-  font-size: 0.7rem;
-  font-weight: 820;
-}
-
-.resource-action-project-tools {
-  flex-wrap: wrap;
-}
-
-.resource-action-project-tool.MuiButton-root {
-  min-width: 0;
-  min-height: 27px;
-  padding: 2px 8px;
-  color: color-mix(in srgb, var(--text) 72%, var(--muted));
-  font-size: 0.73rem;
-  font-weight: 780;
-}
-
-.resource-action-project-tool.MuiButton-root .MuiButton-startIcon {
-  margin-right: 5px;
-}
-
-.resource-action-project-tool.MuiButton-root .MuiSvgIcon-root {
-  width: 16px;
-  height: 16px;
-}
-
-.resource-action-project-tool.MuiButton-root:first-child:not(.Mui-disabled) {
-  color: var(--activity-running);
-}
-
-.resource-action-project-control .MuiInputLabel-root {
+.resource-action-multi-select .MuiInputLabel-root {
   color: color-mix(in srgb, var(--muted) 88%, var(--text));
   font-size: 0.82rem;
   font-weight: 720;
 }
 
-.resource-action-project-select.MuiOutlinedInput-root {
-  min-height: 64px;
+.resource-action-multi-select .MuiOutlinedInput-root {
+  min-height: 48px;
+  align-items: center;
   border-radius: 9px;
   background: color-mix(in srgb, var(--panel-strong) 62%, transparent);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.34);
 }
 
-.resource-action-project-select .MuiSelect-select {
-  display: flex;
-  min-height: 34px !important;
-  box-sizing: border-box;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 17px 42px 8px 14px !important;
+.resource-action-multi-select .MuiAutocomplete-inputRoot {
+  gap: 5px;
+  padding-block: 7px;
 }
 
-.resource-action-select-placeholder.MuiTypography-root {
-  color: color-mix(in srgb, var(--muted) 58%, transparent);
-  font-size: 0.82rem;
-  font-weight: 620;
-}
-
-.resource-action-project-selection.MuiChip-root {
+.resource-action-multi-select .MuiAutocomplete-tag.MuiChip-root {
   height: 25px;
   max-width: 100%;
   border-radius: 7px;
@@ -13240,9 +13160,9 @@ body::-webkit-scrollbar-corner,
   box-shadow: none;
 }
 
-.resource-action-project-control .MuiFormHelperText-root,
+.resource-action-multi-select .MuiFormHelperText-root,
 .resource-action-secondary-params .MuiFormHelperText-root {
-  margin: 7px 1px 0;
+  margin: 5px 1px 0;
   color: color-mix(in srgb, var(--muted) 84%, transparent);
   font-size: 0.7rem;
   line-height: 1.45;
@@ -13250,20 +13170,21 @@ body::-webkit-scrollbar-corner,
 
 .resource-action-secondary-params {
   min-width: 0;
-  margin-top: 24px;
-  padding: 16px;
-  border: 1px solid color-mix(in srgb, var(--line-soft) 88%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--panel-strong) 58%, transparent);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.38),
-    0 8px 20px rgba(35, 55, 76, 0.035);
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid color-mix(in srgb, var(--line-soft) 72%, transparent);
+}
+
+.resource-action-parameter-form > .resource-action-secondary-params:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
 }
 
 .resource-action-secondary-params > .resource-action-param + .resource-action-param {
-  margin-top: 14px;
-  padding-top: 12px;
-  border-top: 1px solid color-mix(in srgb, var(--line-soft) 66%, transparent);
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid color-mix(in srgb, var(--line-soft) 58%, transparent);
 }
 
 .resource-action-secondary-params .MuiInputLabel-root {
@@ -13272,7 +13193,7 @@ body::-webkit-scrollbar-corner,
 }
 
 .resource-action-boolean-control.MuiFormControlLabel-root {
-  min-height: 34px;
+  min-height: 30px;
   margin: 0;
 }
 
@@ -13290,8 +13211,8 @@ body::-webkit-scrollbar-corner,
 
 .resource-action-execution-details,
 .resource-action-live-log {
-  margin-top: 24px;
-  padding: 14px 2px 0;
+  margin-top: 18px;
+  padding: 10px 2px 0;
   border-top: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
 }
 
@@ -13309,8 +13230,8 @@ body::-webkit-scrollbar-corner,
 }
 
 .resource-action-execution-body {
-  margin-top: 10px;
-  padding: 12px 14px;
+  margin-top: 8px;
+  padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
   border-radius: 8px;
   background: color-mix(in srgb, var(--panel-strong) 52%, transparent);
@@ -13318,43 +13239,28 @@ body::-webkit-scrollbar-corner,
 
 .resource-action-error.MuiAlert-root,
 .resource-action-result {
-  margin-top: 20px;
+  margin-top: 16px;
 }
 
 .resource-action-result-title.MuiTypography-root {
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   color: var(--text);
   font-size: 0.84rem;
   font-weight: 850;
 }
 
-.resource-action-project-menu.MuiPaper-root {
+.resource-action-multi-select-menu.MuiPaper-root {
   border-radius: 10px;
 }
 
-.resource-action-project-menu .MuiList-root {
-  padding: 6px;
-}
-
-.resource-action-project-option.MuiMenuItem-root {
-  min-height: 48px;
-  margin-block: 2px;
-  border-radius: 7px;
-}
-
-.resource-action-project-option .MuiCheckbox-root {
-  margin-right: 4px;
-}
-
-.resource-action-project-option .MuiListItemText-primary {
-  color: var(--text);
+.resource-action-multi-select-options .MuiAutocomplete-option {
+  min-height: 38px;
   font-size: 0.82rem;
   font-weight: 740;
 }
 
-.resource-action-project-option .MuiListItemText-secondary {
-  color: var(--muted);
-  font-size: 0.7rem;
+.resource-action-multi-select-options .MuiAutocomplete-option[aria-selected="true"] {
+  color: var(--text);
 }
 
 .app-action-dialog .app-action-dialog-title.MuiDialogTitle-root {
@@ -13552,31 +13458,17 @@ body::-webkit-scrollbar-corner,
   background: rgba(17, 25, 36, 0.74);
 }
 
-:root[data-style="mono"] .resource-action-direct-warning.MuiAlert-root {
-  border-color: rgba(94, 157, 232, 0.2);
-  background: rgba(47, 101, 164, 0.14);
-  color: rgba(214, 230, 248, 0.88);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.025),
-    0 10px 24px rgba(0, 0, 0, 0.12);
-}
-
 :root[data-style="mono"] .resource-action-context-chip.MuiChip-root,
-:root[data-style="mono"] .resource-action-project-select.MuiOutlinedInput-root,
-:root[data-style="mono"] .resource-action-secondary-params,
+:root[data-style="mono"] .resource-action-multi-select .MuiOutlinedInput-root,
 :root[data-style="mono"] .resource-action-execution-body {
   border-color: rgba(143, 184, 234, 0.1);
   background: rgba(255, 255, 255, 0.025);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
-:root[data-style="mono"] .resource-action-project-selection.MuiChip-root {
+:root[data-style="mono"] .resource-action-multi-select .MuiAutocomplete-tag.MuiChip-root {
   background: rgba(143, 184, 234, 0.1);
   color: rgba(232, 239, 248, 0.82);
-}
-
-:root[data-style="mono"] .resource-action-project-option.MuiMenuItem-root.Mui-selected {
-  background: rgba(126, 180, 244, 0.1);
 }
 
 .project-runtime-start-dialog .app-action-dialog-paper.MuiDialog-paper {
@@ -13973,24 +13865,24 @@ body::-webkit-scrollbar-corner,
 
 @media (max-width: 620px) {
   .resource-action-dialog.app-action-dialog .app-action-dialog-content.MuiDialogContent-root {
-    padding: 18px 16px !important;
+    padding: 14px 16px !important;
   }
 
   .resource-action-context-section {
-    padding-block: 20px 18px;
+    padding-block: 12px 14px;
   }
 
   .resource-action-parameters-body {
-    padding-top: 18px;
+    padding-top: 14px;
   }
 
   .resource-action-secondary-params {
-    margin-top: 20px;
-    padding: 14px;
+    margin-top: 12px;
+    padding-top: 12px;
   }
 
-  .resource-action-project-select.MuiOutlinedInput-root {
-    min-height: 58px;
+  .resource-action-multi-select .MuiOutlinedInput-root {
+    min-height: 46px;
   }
 
   .resource-action-context-chip.MuiChip-root {
@@ -19039,8 +18931,10 @@ body::-webkit-scrollbar-corner,
 
 .proxy-overview-toolbar .workspace-page-toolbar-metric {
   height: 42px;
-  min-width: 118px;
-  gap: 8px;
+  min-width: 126px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) max-content;
+  column-gap: 6px;
   padding: 0 13px;
   border-color: color-mix(in srgb, var(--line-soft) 88%, transparent);
   border-radius: 8px;
@@ -19066,6 +18960,15 @@ body::-webkit-scrollbar-corner,
 
 .proxy-overview-toolbar .workspace-page-toolbar-metric-label {
   font-weight: 740;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.proxy-overview-toolbar .workspace-page-toolbar-metric-value {
+  min-width: 2ch;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .proxy-workspace .proxy-overview-action.workspace-page-toolbar-action.MuiButton-root {
@@ -19478,8 +19381,8 @@ body::-webkit-scrollbar-corner,
   }
 
   .proxy-overview-toolbar .workspace-page-toolbar-metric {
-    min-width: 104px;
-    flex: 0 0 104px;
+    min-width: 126px;
+    flex: 0 0 126px;
     padding-inline: 10px;
   }
 
@@ -25779,7 +25682,8 @@ body::-webkit-scrollbar-corner,
   opacity: 0.76;
 }
 
-.settings-panel--global .settings-list-group-head--confirmation > div {
+.settings-panel--global .settings-list-group-head--confirmation > div,
+.settings-panel--global .settings-list-group-head--policy > div {
   min-width: 0;
   display: flex;
   align-items: baseline;
@@ -25795,10 +25699,23 @@ body::-webkit-scrollbar-corner,
   font-weight: 760;
 }
 
+.settings-panel--global .settings-list-group-head--policy {
+  min-height: 38px;
+  margin-top: 2px;
+}
+
+.settings-panel--global .settings-list-group-head--policy > .MuiChip-root {
+  height: 22px;
+  border-radius: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 760;
+}
+
 .settings-confirmation-mode {
   min-width: 0;
   display: inline-grid;
-  grid-template-columns: repeat(3, minmax(58px, 1fr));
+  grid-template-columns: repeat(3, minmax(72px, 1fr));
   align-items: center;
   justify-self: start;
   gap: 2px;
@@ -25916,12 +25833,79 @@ body::-webkit-scrollbar-corner,
   border-right: 1px solid var(--line-soft);
 }
 
-.settings-confirmation-row > .MuiChip-root {
-  height: 24px;
-  border-radius: 6px;
-  color: var(--muted);
+.settings-confirmation-reason.MuiTypography-root {
+  margin-top: 2px;
+  color: color-mix(in srgb, var(--muted) 76%, var(--text));
   font-size: 10.5px;
-  font-weight: 760;
+}
+
+.settings-confirmation-guardrail {
+  min-width: 76px;
+  display: grid;
+  justify-items: end;
+  gap: 3px;
+}
+
+.settings-confirmation-guardrail > .MuiChip-root {
+  height: 22px;
+  border-radius: 6px;
+  color: color-mix(in srgb, var(--activity-failed) 62%, var(--muted));
+  font-size: 10px;
+  font-weight: 780;
+}
+
+.settings-confirmation-guardrail > .MuiTypography-caption {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 720;
+}
+
+.settings-confirmation-choice {
+  min-width: 0;
+  display: inline-grid;
+  grid-template-columns: repeat(2, minmax(66px, 1fr));
+  justify-self: end;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--side-pane-control) 42%, transparent);
+}
+
+.settings-confirmation-choice button {
+  min-width: 0;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 740;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.settings-confirmation-choice button:hover {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent-soft) 38%, transparent);
+}
+
+.settings-confirmation-choice button.is-active {
+  color: color-mix(in srgb, var(--accent-hover) 88%, var(--text));
+  background: color-mix(in srgb, var(--accent-soft) 66%, var(--panel-strong));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-border) 38%, transparent);
+}
+
+.settings-confirmation-choice button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.settings-confirmation-choice button:disabled {
+  cursor: default;
+  opacity: 0.5;
 }
 
 .settings-confirmation-row > .MuiSwitch-root {
@@ -26553,7 +26537,8 @@ body::-webkit-scrollbar-corner,
   box-shadow: inset 0 0 0 1px rgba(143, 184, 234, 0.06);
 }
 
-:root[data-style="mono"] .settings-confirmation-mode {
+:root[data-style="mono"] .settings-confirmation-mode,
+:root[data-style="mono"] .settings-confirmation-choice {
   border-color: rgba(143, 184, 234, 0.11);
   background: rgba(255, 255, 255, 0.018);
 }
@@ -26563,7 +26548,8 @@ body::-webkit-scrollbar-corner,
   background: rgba(255, 255, 255, 0.018);
 }
 
-:root[data-style="mono"] .settings-confirmation-mode button.is-active {
+:root[data-style="mono"] .settings-confirmation-mode button.is-active,
+:root[data-style="mono"] .settings-confirmation-choice button.is-active {
   color: #9cc7fb;
   background: rgba(79, 126, 190, 0.16);
   box-shadow: inset 0 0 0 1px rgba(143, 184, 234, 0.1);
@@ -26655,6 +26641,20 @@ body::-webkit-scrollbar-corner,
 
   .settings-panel--global .settings-confirmation-row:nth-child(odd) {
     border-right: 0;
+  }
+
+  .settings-confirmation-choice,
+  .settings-confirmation-guardrail {
+    justify-self: start;
+  }
+
+  .settings-panel--global .settings-list-group-head--policy > .MuiChip-root {
+    display: none;
+  }
+
+  .settings-panel--global .settings-list-group-head--policy > div {
+    flex-wrap: wrap;
+    row-gap: 2px;
   }
 
   .settings-panel--global .settings-style-card-icon {
@@ -28781,6 +28781,409 @@ body::-webkit-scrollbar-corner,
   padding: 9px 12px !important;
 }
 
+/* Workspace configuration favors dense scanning over form-scale presentation. */
+.overview-workspace-config-paper.MuiDialog-paper {
+  --config-dialog-title-height: 54px;
+  --config-dialog-actions-height: 46px;
+  width: min(900px, calc(100dvw - 72px)) !important;
+  max-width: calc(100dvw - 72px) !important;
+}
+
+.overview-workspace-config-dialog .MuiDialog-container {
+  padding: 36px;
+}
+
+.overview-workspace-config-title.MuiDialogTitle-root {
+  padding: 9px 14px !important;
+}
+
+.overview-workspace-config-title-icon {
+  width: 28px !important;
+  height: 28px !important;
+  border-radius: 8px !important;
+}
+
+.overview-workspace-config-title .MuiTypography-subtitle1 {
+  font-size: 0.88rem !important;
+  font-weight: 800 !important;
+}
+
+.overview-workspace-config-title .MuiTypography-caption {
+  margin-top: 0;
+  font-size: 0.66rem !important;
+}
+
+.overview-workspace-config-title .MuiIconButton-root {
+  width: 28px;
+  height: 28px;
+}
+
+.overview-workspace-config-content.MuiDialogContent-root {
+  padding: 8px !important;
+}
+
+.overview-workspace-config-content > .MuiBox-root {
+  grid-template-columns: 220px minmax(0, 1fr) !important;
+  gap: 8px;
+}
+
+.overview-workspace-config-sidebar {
+  gap: 6px !important;
+  padding: 7px !important;
+}
+
+.overview-workspace-config-main {
+  gap: 6px !important;
+  padding: 0 !important;
+}
+
+.overview-workspace-config-main > .overview-workspace-config-card {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.overview-workspace-config-main > .overview-workspace-config-card > .MuiStack-root {
+  padding: 10px 12px 12px !important;
+}
+
+.overview-workspace-config-menu-head {
+  min-height: 38px;
+  padding: 3px 3px 4px 5px;
+}
+
+.overview-workspace-config-menu-title.MuiTypography-root {
+  font-size: 0.78rem;
+}
+
+.overview-workspace-config-menu-count.MuiTypography-root {
+  font-size: 0.64rem;
+}
+
+.overview-workspace-config-menu-head .MuiIconButton-root {
+  width: 28px !important;
+  height: 28px !important;
+}
+
+.overview-workspace-config-lifecycle-tabs {
+  padding: 2px;
+}
+
+.overview-workspace-config-lifecycle-tabs .MuiButton-root {
+  min-height: 25px;
+  padding: 2px 6px;
+  font-size: 0.66rem;
+}
+
+.overview-workspace-config-menu-list {
+  padding: 3px !important;
+}
+
+.overview-workspace-config-item {
+  min-height: 50px;
+  padding: 6px 6px 6px 8px;
+}
+
+.overview-workspace-config-item::before {
+  top: 7px;
+  bottom: 7px;
+}
+
+.overview-workspace-config-item-icon {
+  width: 28px;
+  height: 28px;
+  flex-basis: 28px;
+  border-radius: 8px;
+}
+
+.overview-workspace-config-item-icon .MuiSvgIcon-root {
+  width: 15px;
+  height: 15px;
+}
+
+.overview-workspace-config-item-title.MuiTypography-root {
+  font-size: 0.74rem;
+}
+
+.overview-workspace-config-item-meta.MuiTypography-root {
+  margin-top: 0;
+  font-size: 0.62rem;
+}
+
+.overview-workspace-config-count-chip.MuiChip-root {
+  height: 19px;
+  min-width: 19px;
+  font-size: 0.62rem;
+}
+
+.overview-workspace-config-archive.MuiIconButton-root,
+.overview-workspace-config-delete.MuiIconButton-root {
+  width: 23px;
+  height: 23px;
+}
+
+.overview-workspace-config-list-end.app-list-end-state {
+  min-height: 52px;
+  margin: 3px;
+}
+
+.overview-workspace-config-detail-card > .MuiStack-root {
+  gap: 7px !important;
+}
+
+.overview-workspace-config-detail-card > .MuiStack-root > .MuiStack-root:first-child,
+.overview-workspace-config-metrics {
+  min-height: 22px !important;
+}
+
+.overview-workspace-config-detail-card .MuiChip-root {
+  height: 21px;
+  font-size: 0.63rem;
+}
+
+.overview-workspace-config-paper .MuiButton-root {
+  min-height: 28px;
+  padding: 4px 9px;
+  border-radius: 8px;
+  font-size: 0.72rem;
+}
+
+.overview-workspace-config-paper .MuiButton-startIcon {
+  margin-right: 5px;
+}
+
+.overview-workspace-config-paper .MuiButton-startIcon .MuiSvgIcon-root {
+  width: 15px;
+  height: 15px;
+}
+
+.overview-workspace-config-paper .MuiTextField-root .MuiInputBase-root,
+.overview-workspace-config-paper .workspace-type-combo .MuiOutlinedInput-root {
+  min-height: 34px;
+  border-radius: 8px !important;
+}
+
+.overview-workspace-config-paper .MuiInputBase-input {
+  padding: 7px 12px;
+  font-size: 0.76rem;
+}
+
+.overview-workspace-config-paper .MuiSelect-select {
+  padding: 7px 32px 7px 12px !important;
+  font-size: 0.76rem;
+}
+
+.overview-workspace-config-paper .MuiInputAdornment-positionStart {
+  margin-left: 2px;
+}
+
+.overview-workspace-config-paper .MuiInputAdornment-positionEnd {
+  margin-right: 2px;
+}
+
+.overview-workspace-config-paper .MuiInputLabel-root {
+  font-size: 0.7rem;
+}
+
+.overview-workspace-config-paper .MuiInputLabel-root.MuiInputLabel-shrink {
+  padding: 0 3px;
+}
+
+.overview-workspace-config-paper .MuiFormControlLabel-label {
+  font-size: 0.72rem;
+}
+
+.overview-workspace-project-dir-list,
+.overview-workspace-scope-pane {
+  padding: 7px;
+}
+
+.overview-workspace-project-dir-row {
+  min-height: 50px;
+  padding: 6px 8px !important;
+}
+
+.overview-workspace-scope-head {
+  min-height: 36px;
+  padding: 3px 5px 3px 8px !important;
+}
+
+.overview-workspace-config-actions.MuiDialogActions-root {
+  padding: 6px 14px !important;
+}
+
+.overview-workspace-config-actions .MuiButton-root {
+  min-width: 84px;
+  height: 30px;
+  font-size: 0.72rem;
+}
+
+.workspace-resource-editor-head {
+  min-height: 31px;
+  padding: 0;
+}
+
+.workspace-resource-editor-head > .MuiButton-root {
+  min-width: 112px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.workspace-resource-editor {
+  gap: 6px !important;
+}
+
+.workspace-resource-editor-title .MuiTypography-subtitle2 {
+  font-size: 0.76rem;
+}
+
+.workspace-resource-editor-title .MuiTypography-caption {
+  font-size: 0.62rem;
+  line-height: 1.2;
+}
+
+.workspace-resource-count.MuiChip-root,
+.workspace-resource-category-chip.MuiChip-root,
+.workspace-resource-origin-chip.MuiChip-root {
+  height: 18px;
+  border-radius: 6px;
+  font-size: 0.58rem;
+}
+
+.workspace-resource-count .MuiChip-label,
+.workspace-resource-category-chip .MuiChip-label,
+.workspace-resource-origin-chip .MuiChip-label {
+  padding: 0 5px;
+}
+
+.workspace-resource-category {
+  border-color: var(--line) !important;
+  border-radius: 7px !important;
+  background: color-mix(in srgb, var(--panel-strong) 58%, transparent) !important;
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--text) 2.6%, transparent);
+}
+
+.workspace-resource-category-head {
+  min-height: 34px;
+  padding: 4px 10px !important;
+  border-color: var(--line-soft) !important;
+  background: color-mix(in srgb, var(--panel-strong) 78%, transparent) !important;
+}
+
+.workspace-resource-category-copy {
+  overflow: hidden;
+}
+
+.workspace-resource-category-icon {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+}
+
+.workspace-resource-category-icon .MuiSvgIcon-root {
+  width: 13px;
+  height: 13px;
+}
+
+.workspace-resource-category-copy .MuiTypography-subtitle2 {
+  font-size: 0.72rem;
+  font-weight: 720 !important;
+}
+
+.workspace-resource-category-copy .MuiTypography-caption {
+  font-size: 0.6rem;
+}
+
+.workspace-resource-category-chip.MuiChip-root,
+.workspace-resource-origin-chip.MuiChip-root {
+  border: 0;
+  color: color-mix(in srgb, var(--muted) 92%, var(--text));
+  background: color-mix(in srgb, var(--accent-soft) 46%, transparent);
+}
+
+.workspace-resource-category-actions .MuiIconButton-root,
+.workspace-resource-entry-actions .MuiIconButton-root {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: 1px solid transparent !important;
+  color: var(--muted);
+  background: transparent !important;
+  box-shadow: none !important;
+  opacity: 0.72;
+  transition:
+    color 140ms ease,
+    background-color 140ms ease,
+    border-color 140ms ease,
+    opacity 140ms ease;
+}
+
+.workspace-resource-category-actions .MuiIconButton-root:hover,
+.workspace-resource-entry-actions .MuiIconButton-root:hover {
+  border-color: color-mix(in srgb, var(--accent-border) 54%, transparent) !important;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 58%, transparent) !important;
+  opacity: 1;
+}
+
+.workspace-resource-category-actions .MuiIconButton-colorError:not(.Mui-disabled):hover,
+.workspace-resource-entry-actions .MuiIconButton-colorError:not(.Mui-disabled):hover {
+  border-color: color-mix(in srgb, var(--danger) 28%, transparent) !important;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, transparent) !important;
+}
+
+.workspace-resource-category-actions .MuiIconButton-root.Mui-disabled,
+.workspace-resource-entry-actions .MuiIconButton-root.Mui-disabled {
+  opacity: 0.28;
+}
+
+.workspace-resource-category-actions .MuiSvgIcon-root,
+.workspace-resource-entry-actions .MuiSvgIcon-root {
+  width: 15px;
+  height: 15px;
+}
+
+.workspace-resource-row {
+  min-height: 39px;
+  padding-right: 10px !important;
+  padding-left: 10px !important;
+  border-color: var(--line-soft) !important;
+  background: transparent;
+  transition: background-color 140ms ease;
+}
+
+.workspace-resource-row:hover {
+  background: color-mix(in srgb, var(--panel-strong) 48%, transparent);
+}
+
+.workspace-resource-entry-icon .MuiSvgIcon-root {
+  width: 15px;
+  height: 15px;
+}
+
+.workspace-resource-entry-name.MuiTypography-root {
+  font-size: 0.72rem;
+  line-height: 1.2;
+  font-weight: 680 !important;
+}
+
+.workspace-resource-entry-target.MuiTypography-root {
+  font-size: 0.61rem;
+  line-height: 1.25;
+  color: color-mix(in srgb, var(--muted) 90%, var(--text));
+}
+
+.workspace-resource-entry-fields {
+  padding-bottom: 2px;
+}
+
 :root[data-style="mono"] .overview-workspace-config-paper.MuiDialog-paper,
 :root[data-style="mono"] .proxy-config-manager-dialog .MuiDialog-paper {
   --config-dialog-primary: #7eb4f4;
@@ -28793,6 +29196,21 @@ body::-webkit-scrollbar-corner,
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.045),
     0 28px 74px rgba(0, 0, 0, 0.52) !important;
+}
+
+:root[data-style="mono"] .overview-workspace-config-dialog .MuiBackdrop-root,
+:root[data-style="mono"] .proxy-config-manager-dialog .MuiBackdrop-root {
+  background: rgba(3, 7, 12, 0.42);
+  backdrop-filter: blur(4px) saturate(1.04);
+  -webkit-backdrop-filter: blur(4px) saturate(1.04);
+}
+
+:root[data-style="mono"] .overview-workspace-config-title.MuiDialogTitle-root,
+:root[data-style="mono"] .proxy-config-manager-dialog .MuiDialogTitle-root {
+  border-bottom-color: rgba(143, 184, 234, 0.09);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.034), transparent 82%),
+    rgba(17, 25, 36, 0.68);
 }
 
 :root[data-style="mono"] .overview-workspace-config-sidebar,
@@ -28886,6 +29304,189 @@ body::-webkit-scrollbar-corner,
   background: rgba(255, 255, 255, 0.045);
 }
 
+/* Unified configuration workbench surfaces and content insets. */
+.resource-config-dialog-paper.MuiDialog-paper,
+.config-source-manager-paper.MuiDialog-paper,
+.proxy-config-manager-dialog .MuiDialog-paper,
+.overview-workspace-config-paper.MuiDialog-paper,
+.settings-panel--project-config {
+  --config-shell-inset: 8px;
+  --config-content-inset: 12px;
+  --config-row-inset: 10px;
+}
+
+:root:not([data-style="mono"]) .resource-config-dialog-paper.MuiDialog-paper,
+:root:not([data-style="mono"]) .config-source-manager-paper.MuiDialog-paper,
+:root:not([data-style="mono"]) .proxy-config-manager-dialog .MuiDialog-paper,
+:root:not([data-style="mono"]) .overview-workspace-config-paper.MuiDialog-paper,
+:root:not([data-style="mono"]) .settings-panel--project-config {
+  border-color: color-mix(in srgb, var(--line) 90%, transparent) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(247, 250, 254, 0.94)),
+    color-mix(in srgb, var(--panel-strong) 94%, transparent) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.76),
+    0 28px 76px rgba(31, 46, 70, 0.23) !important;
+}
+
+:root:not([data-style="mono"]) .resource-config-dialog .MuiBackdrop-root,
+:root:not([data-style="mono"]) .config-source-manager-dialog .MuiBackdrop-root,
+:root:not([data-style="mono"]) .proxy-config-manager-dialog .MuiBackdrop-root,
+:root:not([data-style="mono"]) .overview-workspace-config-dialog .MuiBackdrop-root,
+:root:not([data-style="mono"]) .settings-overlay--drawer {
+  background: rgba(236, 242, 249, 0.42);
+  backdrop-filter: blur(4px) saturate(1.04);
+  -webkit-backdrop-filter: blur(4px) saturate(1.04);
+}
+
+:root[data-style="mono"] .resource-config-dialog-paper.MuiDialog-paper,
+:root[data-style="mono"] .config-source-manager-paper.MuiDialog-paper,
+:root[data-style="mono"] .proxy-config-manager-dialog .MuiDialog-paper,
+:root[data-style="mono"] .overview-workspace-config-paper.MuiDialog-paper,
+:root[data-style="mono"] .settings-panel--project-config {
+  border-color: rgba(143, 184, 234, 0.14) !important;
+  background:
+    linear-gradient(180deg, rgba(20, 30, 43, 0.99), rgba(10, 16, 25, 0.995)),
+    #0d141f !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.045),
+    0 28px 74px rgba(0, 0, 0, 0.52) !important;
+}
+
+:root[data-style="mono"] .resource-config-dialog .MuiBackdrop-root,
+:root[data-style="mono"] .config-source-manager-dialog .MuiBackdrop-root,
+:root[data-style="mono"] .proxy-config-manager-dialog .MuiBackdrop-root,
+:root[data-style="mono"] .overview-workspace-config-dialog .MuiBackdrop-root,
+:root[data-style="mono"] .settings-overlay--drawer {
+  background: rgba(3, 7, 12, 0.42);
+  backdrop-filter: blur(4px) saturate(1.04);
+  -webkit-backdrop-filter: blur(4px) saturate(1.04);
+}
+
+:root[data-style="mono"] .resource-config-dialog-title.MuiDialogTitle-root,
+:root[data-style="mono"] .config-source-manager-title.MuiDialogTitle-root,
+:root[data-style="mono"] .proxy-config-manager-dialog .MuiDialogTitle-root,
+:root[data-style="mono"] .overview-workspace-config-title.MuiDialogTitle-root,
+:root[data-style="mono"] .settings-panel--project-config .settings-panel-head,
+:root[data-style="mono"] .resource-config-dialog-actions.MuiDialogActions-root,
+:root[data-style="mono"] .config-source-manager-actions.MuiDialogActions-root,
+:root[data-style="mono"] .proxy-config-editor-actions,
+:root[data-style="mono"] .overview-workspace-config-actions.MuiDialogActions-root,
+:root[data-style="mono"] .settings-panel--project-config .settings-save-row {
+  border-color: rgba(143, 184, 234, 0.09);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.034), transparent 82%),
+    rgba(17, 25, 36, 0.68) !important;
+}
+
+.resource-config-dialog-content.MuiDialogContent-root,
+.config-source-manager-content.MuiDialogContent-root {
+  padding: var(--config-shell-inset) !important;
+}
+
+.resource-config-dialog-content.MuiDialogContent-root,
+.resource-config-dialog-content .settings-overview {
+  gap: var(--config-shell-inset) !important;
+}
+
+.resource-config-workspace {
+  gap: var(--config-shell-inset);
+}
+
+.resource-config-source-strip {
+  padding: 8px var(--config-content-inset);
+}
+
+.resource-config-list-panel,
+.resource-config-detail-panel {
+  padding: var(--config-content-inset);
+}
+
+.resource-config-entry-row {
+  padding: 7px var(--config-row-inset);
+}
+
+.config-source-manager-inspection,
+.config-source-manager-editor {
+  padding: var(--config-content-inset);
+}
+
+.config-source-manager-sidebar-head {
+  padding: 9px var(--config-content-inset);
+}
+
+.config-source-manager-list button {
+  padding: 7px var(--config-row-inset);
+}
+
+.proxy-config-source-bar {
+  padding: var(--config-shell-inset) var(--config-shell-inset) 0;
+}
+
+.proxy-config-source-strip.resource-config-source-strip {
+  padding: 8px var(--config-content-inset);
+}
+
+.proxy-config-manager-content {
+  gap: var(--config-shell-inset);
+  padding: var(--config-shell-inset);
+}
+
+.proxy-config-manager-sidebar {
+  padding: var(--config-row-inset);
+}
+
+.proxy-config-manager-detail {
+  padding: 0;
+  overflow: hidden;
+}
+
+.proxy-config-editor-shell {
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.proxy-config-editor-head {
+  padding: 10px var(--config-content-inset);
+}
+
+.proxy-config-editor-body {
+  padding: 10px var(--config-content-inset);
+}
+
+.proxy-config-editor-actions {
+  padding: 8px var(--config-content-inset) 10px !important;
+}
+
+.settings-panel--project-config .settings-panel-body {
+  gap: var(--config-shell-inset);
+  padding: var(--config-shell-inset);
+}
+
+.settings-panel--project-config .settings-save-row {
+  padding: 8px var(--config-content-inset);
+}
+
+.resource-config-dialog .MuiInputBase-input,
+.config-source-manager-dialog .MuiInputBase-input,
+.proxy-config-manager-dialog .MuiInputBase-input,
+.overview-workspace-config-paper .MuiInputBase-input,
+.settings-panel--project-config .MuiInputBase-input {
+  padding-right: var(--config-content-inset) !important;
+  padding-left: var(--config-content-inset) !important;
+}
+
+.resource-config-dialog .MuiSelect-select,
+.config-source-manager-dialog .MuiSelect-select,
+.proxy-config-manager-dialog .MuiSelect-select,
+.overview-workspace-config-paper .MuiSelect-select,
+.settings-panel--project-config .MuiSelect-select {
+  padding-right: 32px !important;
+  padding-left: var(--config-content-inset) !important;
+}
+
 @media (max-width: 760px) {
   .overview-workspace-config-paper.MuiDialog-paper,
   .proxy-config-manager-dialog .MuiDialog-paper {
@@ -28900,10 +29501,29 @@ body::-webkit-scrollbar-corner,
     padding: 8px;
   }
 
+  .resource-config-source-strip,
+  .proxy-config-source-strip.resource-config-source-strip {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .resource-config-source-main,
+  .resource-config-source-main > .MuiStack-root {
+    width: 100%;
+  }
+
+  .resource-config-source-manage-action {
+    margin-left: 0;
+  }
+
   .overview-workspace-config-content > .MuiBox-root,
   .proxy-config-manager-content {
     grid-template-columns: minmax(0, 1fr) !important;
     grid-template-rows: minmax(150px, 30dvh) minmax(0, 1fr);
+  }
+
+  .overview-workspace-config-content > .MuiBox-root {
+    grid-template-rows: minmax(150px, 24dvh) minmax(0, 1fr);
   }
 
   .overview-workspace-config-sidebar,

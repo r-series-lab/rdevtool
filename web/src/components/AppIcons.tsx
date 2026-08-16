@@ -387,6 +387,17 @@ export function FolderIcon(props: SvgIconProps) {
   );
 }
 
+export function FileIcon(props: SvgIconProps) {
+  return (
+    <SvgIcon viewBox="0 0 24 24" {...props}>
+      <path
+        d="M6 3h7l5 5v13H6V3Zm2 2v14h8V9h-4V5H8Zm6 .8V7h1.2L14 5.8Z"
+        fill="currentColor"
+      />
+    </SvgIcon>
+  );
+}
+
 export function KnowledgeIcon(props: SvgIconProps) {
   return (
     <SvgIcon viewBox="0 0 24 24" {...props}>

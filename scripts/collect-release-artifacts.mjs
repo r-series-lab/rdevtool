@@ -27,6 +27,7 @@ async function filesUnder(directory) {
 }
 
 const packageMetadata = JSON.parse(await readFile(path.join(rootDir, "package.json"), "utf8"));
+const evidencePrefix = `rdevtool-${target}`;
 const files = (await filesUnder(bundleDir)).sort((left, right) => left.localeCompare(right));
 if (files.length === 0) throw new Error(`No release artifacts found under ${bundleDir}`);
 
@@ -42,11 +43,11 @@ for (const file of files) {
 
 await mkdir(releaseDir, { recursive: true });
 await writeFile(
-  path.join(releaseDir, "release-artifacts.json"),
+  path.join(releaseDir, `${evidencePrefix}-release-artifacts.json`),
   `${JSON.stringify({ product: "rDevTool", version: packageMetadata.version, target, artifacts }, null, 2)}\n`,
 );
 await writeFile(
-  path.join(releaseDir, "SHA256SUMS"),
+  path.join(releaseDir, `${evidencePrefix}-SHA256SUMS.txt`),
   `${artifacts.map((artifact) => `${artifact.sha256}  ${artifact.path}`).join("\n")}\n`,
 );
 process.stdout.write(`Release evidence written for ${artifacts.length} artifact(s).\n`);
