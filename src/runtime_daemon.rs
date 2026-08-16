@@ -2263,7 +2263,10 @@ mod tests {
             if let Some(identity) = listening_process(port).unwrap() {
                 break identity;
             }
-            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(
+                started.elapsed() < Duration::from_secs(15),
+                "external http.server did not start listening on port {port} within 15 seconds"
+            );
             thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(identity.pid, external_pid);
