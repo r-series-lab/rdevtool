@@ -14,7 +14,7 @@ clap = { version = "4.5.53", features = ["derive", "env"] }
 crossterm = "0.29.0"
 eframe = "0.31.1"
 percent-encoding = "2.3.2"
-ratatui = "0.29.0"
+ratatui = "0.30.2"
 reqwest = { version = "0.12.24", default-features = false, features = ["blocking", "cookies", "json", "rustls-tls", "socks"] }
 rusqlite = { version = "0.37.0", features = ["bundled"] }
 serde = { version = "1.0.228", features = ["derive"] }
