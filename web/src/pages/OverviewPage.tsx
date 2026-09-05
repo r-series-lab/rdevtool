@@ -246,6 +246,9 @@ type WorkspacePinnedActionItem = {
   kindLabel: string;
   label: string;
   detail?: string | null;
+  statusKey?: string | null;
+  statusLabel?: string | null;
+  resultSummary?: string | null;
   projectKey?: string | null;
   params: Array<{
     label: string;
@@ -558,6 +561,66 @@ function actionTone(kindLabel: string): "default" | "primary" | "warning" {
     return "primary";
   }
   return "default";
+}
+
+type WorkspaceActionStatusKey =
+  | "success"
+  | "failed"
+  | "cancelled"
+  | "running"
+  | "queued";
+
+const WORKSPACE_ACTION_STATUS_LABELS: Record<WorkspaceActionStatusKey, string> = {
+  success: "成功",
+  failed: "失败",
+  cancelled: "已取消",
+  running: "运行中",
+  queued: "等待中",
+};
+
+function workspaceActionStatusKey(
+  value?: string | null,
+): WorkspaceActionStatusKey | null {
+  const normalized = value?.trim().toLowerCase();
+  return normalized && normalized in WORKSPACE_ACTION_STATUS_LABELS
+    ? (normalized as WorkspaceActionStatusKey)
+    : null;
+}
+
+function renderJsonPreviewLine(line: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const pattern =
+    /("(?:\\.|[^"\\])*")(?=\s*:)|("(?:\\.|[^"\\])*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|\b(true|false|null)\b/g;
+  let cursor = 0;
+
+  for (const match of line.matchAll(pattern)) {
+    const index = match.index ?? 0;
+    if (index > cursor) {
+      nodes.push(line.slice(cursor, index));
+    }
+    const token = match[0];
+    const tokenKind = match[1]
+      ? "key"
+      : match[2]
+        ? "string"
+        : match[3]
+          ? "number"
+          : "literal";
+    nodes.push(
+      <span
+        key={`${index}:${tokenKind}`}
+        className={`overview-ai-context-token is-${tokenKind}`}
+      >
+        {token}
+      </span>,
+    );
+    cursor = index + token.length;
+  }
+
+  if (cursor < line.length) {
+    nodes.push(line.slice(cursor));
+  }
+  return nodes;
 }
 
 function actionGroupKind(
@@ -1479,6 +1542,10 @@ export function OverviewPage({
   const aiContextPreviewLineCount = aiContextPreviewText
     ? aiContextPreviewText.split("\n").length
     : 0;
+  const aiContextPreviewLines = useMemo(
+    () => (aiContextPreviewText ? aiContextPreviewText.split("\n") : []),
+    [aiContextPreviewText],
+  );
   const selectedAiContextPreset = useMemo(
     () =>
       aiContextPresets.find((preset) => preset.key === aiContextPresetKey) ??
@@ -1537,6 +1604,12 @@ export function OverviewPage({
       (total, category) => total + category.entries.length,
       0,
     ) ?? 0;
+  const hasActiveWorkspaceAction = groups.some((group) =>
+    group.actions.some((action) => {
+      const statusKey = workspaceActionStatusKey(action.statusKey);
+      return statusKey === "running" || statusKey === "queued";
+    }),
+  );
   const workspaceScopeReadOnly = Boolean(workspaceDraft?.system);
   const workspaceInstanceByProject = useMemo(
     () =>
@@ -1579,14 +1652,25 @@ export function OverviewPage({
     workspaceConfigOpenSignal,
   ]);
 
+  useEffect(() => {
+    if (!hasActiveWorkspaceAction) {
+      return;
+    }
+    const timer = window.setInterval(() => {
+      void loadOverview({ silent: true });
+    }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveWorkspaceAction, loadOverview]);
+
   async function executeAction(item: WorkspacePinnedActionItem) {
+    const displayLabel = translateInternalMessage(item.label, t);
     const preferenceKey = confirmationPreferenceKeyForTrayAction(
       item.action.kind,
     );
     if (preferenceKey || item.confirmRequired) {
       const confirmed = await confirm({
         title: t("确认运行"),
-        description: t("确认运行“{label}”？", { label: item.label }),
+        description: t("确认运行“{label}”？", { label: displayLabel }),
         confirmLabel: t("运行"),
         preferenceKey: preferenceKey ?? undefined,
       });
@@ -1600,7 +1684,7 @@ export function OverviewPage({
     try {
       await onExecutePinnedAction(item.action);
       await loadOverview({ silent: true });
-      setStatus(t("已运行 {label}", { label: item.label }));
+      setStatus(t("已运行 {label}", { label: displayLabel }));
     } catch (reason) {
       setError(String(reason));
     } finally {
@@ -1611,7 +1695,9 @@ export function OverviewPage({
   async function runWorkflowChain(chain: WorkspaceWorkflowChain) {
     const confirmed = await confirm({
       title: t("运行“{name}”", { name: chain.name }),
-      description: chain.steps.map((step) => step.label).join(" → "),
+      description: chain.steps
+        .map((step) => translateInternalMessage(step.label, t))
+        .join(" → "),
       confirmLabel: t("开始运行"),
     });
     if (!confirmed) {
@@ -3148,6 +3234,24 @@ export function OverviewPage({
             const displayDetail = item.detail
               ? translateInternalMessage(item.detail, t)
               : "";
+            const statusKey = running
+              ? "running"
+              : workspaceActionStatusKey(item.statusKey);
+            const actionInProgress =
+              running || statusKey === "running" || statusKey === "queued";
+            const displayStatusLabel = statusKey
+              ? running
+                ? t(WORKSPACE_ACTION_STATUS_LABELS.running)
+                : translateInternalMessage(
+                    item.statusLabel?.trim() ||
+                      WORKSPACE_ACTION_STATUS_LABELS[statusKey],
+                    t,
+                  )
+              : "";
+            const displayResultSummary =
+              !actionInProgress && item.resultSummary
+                ? translateInternalMessage(item.resultSummary, t)
+                : "";
             const confirmationPreferenceKey =
               confirmationPreferenceKeyForTrayAction(item.action.kind);
             const actionNeedsConfirmation = confirmationPreferenceKey
@@ -3226,6 +3330,15 @@ export function OverviewPage({
                     flexWrap="wrap"
                     useFlexGap
                   >
+                    {statusKey && displayStatusLabel ? (
+                      <span
+                        className={`overview-action-status is-${statusKey}`}
+                        aria-label={displayStatusLabel}
+                      >
+                        <span className="overview-action-status-dot" aria-hidden="true" />
+                        <span>{displayStatusLabel}</span>
+                      </span>
+                    ) : null}
                     {item.projectKey ? (
                       <Typography component="span" noWrap>
                         {item.projectKey}
@@ -3240,8 +3353,23 @@ export function OverviewPage({
                         {item.sourceWorkspaceName}
                       </Typography>
                     ) : null}
+                    {displayResultSummary ? (
+                      <Typography
+                        component="span"
+                        className="overview-action-result"
+                        noWrap
+                        title={displayResultSummary}
+                      >
+                        {displayResultSummary}
+                      </Typography>
+                    ) : null}
                     {displayDetail ? (
-                      <Typography component="span" noWrap>
+                      <Typography
+                        component="span"
+                        className="overview-action-detail"
+                        noWrap
+                        title={displayDetail}
+                      >
                         {displayDetail}
                       </Typography>
                     ) : null}
@@ -3255,7 +3383,11 @@ export function OverviewPage({
                   ) : null}
                   <Tooltip
                     title={
-                      actionNeedsConfirmation ? t("确认后运行") : t("运行")
+                      actionInProgress
+                        ? t("执行中")
+                        : actionNeedsConfirmation
+                          ? t("确认后运行")
+                          : t("运行")
                     }
                   >
                     <span>
@@ -3263,10 +3395,14 @@ export function OverviewPage({
                         size="small"
                         className="overview-action-run"
                         onClick={() => void executeAction(item)}
-                        disabled={Boolean(runningKey)}
-                        aria-label={t("运行 {label}", { label: item.label })}
+                        disabled={Boolean(runningKey) || actionInProgress}
+                        aria-label={
+                          actionInProgress
+                            ? t("执行中")
+                            : t("运行 {label}", { label: item.label })
+                        }
                       >
-                        {running ? (
+                        {actionInProgress ? (
                           <CircularProgress size={15} thickness={5} />
                         ) : (
                           <ReplayIcon fontSize="small" />
@@ -4715,7 +4851,12 @@ export function OverviewPage({
                   </Typography>
                 </Stack>
               </Stack>
-              <Stack direction="row" alignItems="center" spacing={0.5}>
+              <Stack
+                direction="row"
+                alignItems="center"
+                spacing={0.5}
+                className="overview-ai-context-summary"
+              >
                 {aiContextGroup ? (
                   <>
                     <Chip
@@ -4747,6 +4888,7 @@ export function OverviewPage({
                 <Tooltip title={t("关闭")}>
                   <IconButton
                     size="small"
+                    className="overview-ai-context-close"
                     onClick={() => setAiContextOpen(false)}
                     aria-label={t("关闭 AI 上下文")}
                   >
@@ -4951,7 +5093,30 @@ export function OverviewPage({
                   <CircularProgress size={22} thickness={5} />
                 </Box>
               ) : aiContextPreviewText ? (
-                <pre>{aiContextPreviewText}</pre>
+                <div
+                  className="overview-ai-context-code"
+                  role="region"
+                  aria-label={t("AI 上下文")}
+                >
+                  {aiContextPreviewLines.map((line, index) => (
+                    <div
+                      className="overview-ai-context-code-line"
+                      key={`${index}:${line.slice(0, 24)}`}
+                    >
+                      <span
+                        className="overview-ai-context-line-number"
+                        aria-hidden="true"
+                      >
+                        {index + 1}
+                      </span>
+                      <code>
+                        {aiContextView === "json"
+                          ? renderJsonPreviewLine(line)
+                          : line || " "}
+                      </code>
+                    </div>
+                  ))}
+                </div>
               ) : (
                 <AppEmptyState
                   compact

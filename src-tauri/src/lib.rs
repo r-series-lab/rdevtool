@@ -1031,6 +1031,9 @@ struct WorkspacePinnedActionItem {
     kind_label: String,
     label: String,
     detail: Option<String>,
+    status_key: Option<String>,
+    status_label: Option<String>,
+    result_summary: Option<String>,
     project_key: Option<String>,
     params: Vec<WorkspaceActionParamItem>,
     confirm_required: bool,
@@ -1061,7 +1064,11 @@ struct WorkspaceBranchHistoryEntry {
     #[serde(default)]
     task_kind: String,
     #[serde(default)]
+    success: Option<bool>,
+    #[serde(default)]
     summary: String,
+    #[serde(default)]
+    detail: String,
     #[serde(default)]
     created_at: String,
     #[serde(default)]
@@ -1078,6 +1085,14 @@ struct WorkspaceLatestAction {
     history_identity: String,
     occurred_at: String,
     sort_key: String,
+    result: WorkspaceActionResult,
+}
+
+#[derive(Debug, Clone, Default)]
+struct WorkspaceActionResult {
+    status_key: Option<String>,
+    status_label: Option<String>,
+    result_summary: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -9691,7 +9706,7 @@ fn workspace_pinned_action_item(
     config: &AppConfig,
     action: TrayReplayAction,
 ) -> WorkspacePinnedActionItem {
-    workspace_action_item(config, action, false, true, None)
+    workspace_action_item(config, action, false, true, None, None)
 }
 
 fn workspace_action_item(
@@ -9700,13 +9715,25 @@ fn workspace_action_item(
     is_latest: bool,
     is_pinned: bool,
     occurred_at: Option<String>,
+    result: Option<WorkspaceActionResult>,
 ) -> WorkspacePinnedActionItem {
     let project_key = tray_action_project_keys(&action).into_iter().next();
     let params = workspace_action_params(config, &action);
+    let result = result.unwrap_or_default();
+    let detail = action.detail.clone().filter(|detail| {
+        result
+            .result_summary
+            .as_deref()
+            .map(|summary| detail.trim() != summary.trim())
+            .unwrap_or(true)
+    });
     WorkspacePinnedActionItem {
         kind_label: tray_action_kind_label(&action.kind),
         label: action.label.clone(),
-        detail: action.detail.clone(),
+        detail,
+        status_key: result.status_key,
+        status_label: result.status_label,
+        result_summary: result.result_summary,
         project_key,
         params,
         confirm_required: tray_action_confirm_required(&action.kind),
@@ -10135,14 +10162,36 @@ fn workspace_history_sort_key(value: &str) -> String {
     value.trim().replace(' ', "T")
 }
 
-fn is_terminal_workspace_build_history(entry: &BuildHistoryEntry) -> bool {
-    let state_key = entry.state_key.trim().to_ascii_lowercase();
-    if matches!(
-        state_key.as_str(),
-        "submitting" | "accepted" | "queued" | "running"
-    ) {
-        return false;
+fn compact_workspace_result_summary(value: &str) -> Option<String> {
+    let first_line = value.lines().map(str::trim).find(|line| !line.is_empty())?;
+    let mut summary = first_line.chars().take(120).collect::<String>();
+    if first_line.chars().count() > 120 {
+        summary.push('…');
     }
+    Some(summary)
+}
+
+fn workspace_action_result(
+    state_key: &str,
+    result_summary: Option<String>,
+) -> WorkspaceActionResult {
+    let (status_key, status_label) = match state_key.trim().to_ascii_lowercase().as_str() {
+        "success" | "succeeded" | "completed" => ("success", "成功"),
+        "failure" | "failed" | "error" | "aborted" => ("failed", "失败"),
+        "cancelled" | "canceled" | "stopped" => ("cancelled", "已取消"),
+        "running" => ("running", "运行中"),
+        "submitting" | "accepted" | "queued" => ("queued", "等待中"),
+        _ => return WorkspaceActionResult::default(),
+    };
+    WorkspaceActionResult {
+        status_key: Some(status_key.to_string()),
+        status_label: Some(status_label.to_string()),
+        result_summary,
+    }
+}
+
+fn is_visible_workspace_build_history(entry: &BuildHistoryEntry) -> bool {
+    let state_key = entry.state_key.trim().to_ascii_lowercase();
     !(matches!(
         state_key.as_str(),
         "cancelled" | "canceled" | "stopped" | "idle"
@@ -10157,15 +10206,17 @@ fn workspace_build_history_action(entry: &BuildHistoryEntry) -> WorkspaceLatestA
     } else {
         format!("{} / {}", entry.project_name, target)
     };
-    let detail = [
-        entry.env.trim(),
-        entry.branch.trim(),
-        entry.state_label.trim(),
-    ]
+    let detail = [entry.env.trim(), entry.branch.trim()]
     .into_iter()
     .filter(|value| !value.is_empty())
     .collect::<Vec<_>>()
     .join(" · ");
+    let result_summary = matches!(
+        entry.state_key.trim().to_ascii_lowercase().as_str(),
+        "failure" | "failed" | "error" | "aborted" | "cancelled" | "canceled" | "stopped"
+    )
+    .then(|| compact_workspace_result_summary(&entry.detail))
+    .flatten();
     let occurred_at = if entry.updated_at.trim().is_empty() {
         entry.created_at.clone()
     } else {
@@ -10191,6 +10242,7 @@ fn workspace_build_history_action(entry: &BuildHistoryEntry) -> WorkspaceLatestA
         history_identity: format!("build:{}", entry.history_key),
         sort_key: workspace_history_sort_key(&occurred_at),
         occurred_at,
+        result: workspace_action_result(&entry.state_key, result_summary),
     }
 }
 
@@ -10236,6 +10288,16 @@ fn workspace_branch_history_action(
         history_identity: format!("git:{}", entry.id),
         occurred_at: entry.created_at.clone(),
         sort_key: workspace_history_sort_key(&entry.created_at),
+        result: entry
+            .success
+            .map(|success| {
+                workspace_action_result(
+                    if success { "success" } else { "failed" },
+                    compact_workspace_result_summary(&entry.summary)
+                        .or_else(|| compact_workspace_result_summary(&entry.detail)),
+                )
+            })
+            .unwrap_or_default(),
     })
 }
 
@@ -10264,6 +10326,10 @@ fn workspace_merge_history_action(entry: &MergeHistoryEntry) -> WorkspaceLatestA
         history_identity: format!("git:{}", entry.history_key),
         occurred_at: entry.created_at.clone(),
         sort_key: workspace_history_sort_key(&entry.created_at),
+        result: workspace_action_result(
+            if entry.success { "success" } else { "failed" },
+            compact_workspace_result_summary(&entry.summary),
+        ),
     }
 }
 
@@ -10312,7 +10378,7 @@ fn group_workspace_latest_actions(
 
     for entry in build_history
         .iter()
-        .filter(|entry| is_terminal_workspace_build_history(entry))
+        .filter(|entry| is_visible_workspace_build_history(entry))
     {
         let candidate = workspace_build_history_action(entry);
         let Some(workspace_key) = workspace_key_for_latest_action(workspaces, &candidate.action)
@@ -10395,6 +10461,7 @@ fn workspace_overview_action_items(
             true,
             pinned_index.is_some(),
             Some(latest_action.occurred_at),
+            Some(latest_action.result),
         ));
     }
     pinned.sort_by(|left, right| right.updated_at_ms.cmp(&left.updated_at_ms));
@@ -13875,6 +13942,9 @@ mod workspace_config_watcher_tests {
         assert_eq!(items.len(), 1);
         assert!(items[0].is_latest);
         assert!(items[0].is_pinned);
+        assert_eq!(items[0].status_key.as_deref(), Some("success"));
+        assert_eq!(items[0].status_label.as_deref(), Some("成功"));
+        assert_eq!(items[0].detail.as_deref(), Some("uat · feature/demo"));
         assert_eq!(
             items[0].occurred_at.as_deref(),
             Some("2026-08-10T10:05:00Z")
@@ -13912,7 +13982,9 @@ mod workspace_config_watcher_tests {
         let latest = workspace_branch_history_action(&WorkspaceBranchHistoryEntry {
             id: "branch-1".to_string(),
             task_kind: "sync".to_string(),
+            success: Some(true),
             summary: "成功 1".to_string(),
+            detail: "已完成".to_string(),
             created_at: "2026-08-10T10:10:00Z".to_string(),
             workspace_key: Some("feature".to_string()),
             items: vec![WorkspaceBranchHistoryItem {
@@ -13945,16 +14017,41 @@ mod workspace_config_watcher_tests {
         assert_eq!(items.len(), 1);
         assert!(items[0].is_latest);
         assert!(items[0].is_pinned);
+        assert_eq!(items[0].status_key.as_deref(), Some("success"));
+        assert_eq!(items[0].status_label.as_deref(), Some("成功"));
+        assert_eq!(items[0].result_summary.as_deref(), Some("成功 1"));
     }
 
     #[test]
-    fn excludes_active_builds_from_workspace_latest_actions() {
-        assert!(!is_terminal_workspace_build_history(
-            &workspace_build_history("build-running", "running",)
-        ));
-        assert!(is_terminal_workspace_build_history(
+    fn includes_active_builds_in_workspace_latest_actions() {
+        let running = workspace_build_history("build-running", "running");
+        assert!(is_visible_workspace_build_history(&running));
+        assert!(is_visible_workspace_build_history(
             &workspace_build_history("build-success", "success",)
         ));
+        assert_eq!(
+            workspace_build_history_action(&running)
+                .result
+                .status_key
+                .as_deref(),
+            Some("running")
+        );
+
+        let mut idle = workspace_build_history("build-idle", "idle");
+        idle.state_label = "待打包".to_string();
+        idle.detail = "配置已就绪".to_string();
+        assert!(!is_visible_workspace_build_history(&idle));
+    }
+
+    #[test]
+    fn hides_unrecognized_workspace_history_statuses() {
+        let action = workspace_build_history_action(&workspace_build_history(
+            "build-unknown",
+            "unknown",
+        ));
+
+        assert_eq!(action.result.status_key, None);
+        assert_eq!(action.result.status_label, None);
     }
 
     #[test]

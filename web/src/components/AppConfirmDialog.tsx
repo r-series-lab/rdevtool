@@ -13,7 +13,8 @@ import {
   saveConfirmationPreferences,
   type ConfirmationPreferenceKey,
 } from "../lib/confirmationPreferences";
-import { translateNode, useI18n } from "../i18n";
+import { useI18n, type Translate } from "../i18n";
+import { translateInternalMessage } from "../i18n/internalMessages";
 import {
   AppActionDialog,
   type AppActionDialogProps,
@@ -38,6 +39,10 @@ export type AppConfirmDialogOptions = {
   contentClassName?: string;
   actionsClassName?: string;
 };
+
+export function translateConfirmNode(node: ReactNode, t: Translate): ReactNode {
+  return typeof node === "string" ? translateInternalMessage(node, t) : node;
+}
 
 export function useAppConfirmDialog() {
   const { t } = useI18n();
@@ -96,8 +101,8 @@ export function useAppConfirmDialog() {
     <AppActionDialog
       open={Boolean(options)}
       onClose={() => settle(false)}
-      title={options?.title}
-      description={options?.description}
+      title={translateConfirmNode(options?.title, t)}
+      description={translateConfirmNode(options?.description, t)}
       icon={options?.icon}
       contentIcon={options?.contentIcon}
       tone={options?.tone}
@@ -117,7 +122,7 @@ export function useAppConfirmDialog() {
               onClick={() => settle(false)}
               className="app-action-dialog-cancel"
             >
-              {translateNode(options?.cancelLabel ?? "取消", t)}
+              {translateConfirmNode(options?.cancelLabel ?? "取消", t)}
             </Button>
           ) : null}
           <Button
@@ -128,7 +133,7 @@ export function useAppConfirmDialog() {
             onClick={() => settle(true)}
             className="app-action-dialog-confirm"
           >
-            {translateNode(options?.confirmLabel ?? "确认", t)}
+            {translateConfirmNode(options?.confirmLabel ?? "确认", t)}
           </Button>
         </>
       }

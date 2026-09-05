@@ -49,6 +49,8 @@ The Workspace page answers, "What am I working on right now?"
 
 At the start of a requirement, choose its workspace before opening Projects, Git, or Build. Return to `system` when you need to investigate across all projects.
 
+For the complete workbench layout, Workspace Configuration dialog, project instances, and workspace-owned resources, continue with [Workspaces And The Workbench](workspace-guide_EN.md).
+
 ### Workspace-Owned Resources
 
 ![Managing workspace-owned resources in Workspace Configuration](assets/screenshots/workspace-resource-editor.png)
@@ -85,6 +87,8 @@ Each row has three layers: project identity and key on the left, repository path
 
 If a project appears unavailable, check that its repository folder exists, the active workspace points at the intended instance, and the configuration source loaded successfully.
 
+For the full startup flow, launch profiles, runtime config, preflight, logs, and web actions, continue with [Project Startup And The Runtime Panel](project-runtime_EN.md).
+
 ### Build
 
 The Build page uses one model for Jenkins, local commands, and R Series packaging: project + build target + parameters.
@@ -109,6 +113,8 @@ Use the Git page to inspect branch state and run sync, create, checkout, switch,
 ## Resources And Reusable Actions
 
 Resources brings websites, folders, apps, scripts, Links, and reusable Actions into one searchable page. Filter by type or category and use favorites or recent items for repeated work.
+
+For the full behavior of websites, folders, files, scripts, tool keys, workspace scope, and the connection between Resources and Runtime Panel, continue with [Resources And Tool Entries](resource-guide_EN.md).
 
 ![Resources page showing tools, Actions, and Links](assets/screenshots/resources-actions.png)
 
@@ -143,6 +149,8 @@ The Local Proxy page manages listening addresses, ports, and rules by profile an
 
 The service card on the left is a startable proxy profile; the right side contains rules for that profile. External occupation is not a successful start; it means the port is currently owned by a non-rDevTool process. Rule switches only decide whether the rule participates in matching. Creating, editing, importing, and exporting proxy packs modifies configuration, so review headers, cookies, and upstream addresses before sharing.
 
+For service fields, rule matching, Forward/Mock/Block behavior, request history, diagnosis, import/export, and CLI details, continue with [Local Proxy: Services, Rules, And Requests](proxy-guide_EN.md).
+
 ## Knowledge
 
 ![Knowledge Base Markdown notes](assets/screenshots/knowledge-base-notes.png)
@@ -173,11 +181,13 @@ Open project-specific start, build, and branch settings from **Project Managemen
 The top-right **Running & Activity** view combines Actions, builds, Git, runtimes, proxies, Links, and external configuration changes. The **Record** section inside a task page is better for reviewing history of one operation type.
 
 - Read the title, timestamp, and outer status first, then inspect project rows or the parameter summary.
-- Narrow the list with search, result, operation, and favorite filters.
-- A Latest Task label means this is the newest record of that type; it does not imply success.
-- Expand details for complete parameters, per-project outcomes, diagnostics, timelines, and result links.
-- Refresh reloads persisted records. Before deleting or clearing, make sure the evidence is no longer needed.
+- Use **All / Attention / Success / Failed** and **All origins / App / CLI / Tray** to narrow the view; the current activity center has no standalone keyword search or favorites filter.
+- The Running view groups current-workspace, other-workspace, and shared services, with log, directory, port diagnosis, adopt, focus, and stop actions where available.
+- Expand details for parameters, execution or chain timelines, diagnostics, per-project outcomes, and result links.
+- Refresh reads running or build status again; cleanup only removes handled records and keeps attention and running items.
 - Retry revalidates the current configuration and target. Do not assume historical parameters are still valid.
+
+For the complete behavior of live resources, the attention queue, activity cards, evidence boundaries, and CLI counterparts, continue with [Running And Activity](activity-guide_EN.md).
 
 ### Build Page And Build Record
 

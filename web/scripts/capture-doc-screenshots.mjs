@@ -198,6 +198,27 @@ async function captureProjectsList(browser) {
   await context.close();
 }
 
+async function captureRuntimePanel(browser) {
+  const { context, page } = await createPage(browser, {
+    query: "style=mono&docsScreenshot=runtime",
+  });
+  await page.getByLabel("项目列表文档截图页面").waitFor();
+  await page.getByRole("button", { name: "示例控制台 更多操作" }).click();
+  await page.getByRole("menuitem", { name: "运行面板", exact: true }).click();
+  await page.locator(".runtime-panel-dialog").waitFor();
+  await page.getByText("链路预检", { exact: true }).waitFor();
+  await page.getByText("运行上下文", { exact: true }).waitFor();
+  await assertPublicScreenshotIsSanitized(page, "project-runtime-panel.png", [
+    "示例控制台",
+    "链路预检",
+    "运行上下文",
+    "UAT3 VKE",
+  ]);
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: resolve(outputDir, "project-runtime-panel.png") });
+  await context.close();
+}
+
 async function captureResources(browser) {
   const { context, page } = await createPage(browser, {
     query: "style=mono&docsScreenshot=resources",
@@ -252,6 +273,32 @@ async function captureKnowledge(browser) {
   await context.close();
 }
 
+async function captureActivity(browser) {
+  const { context, page } = await createPage(browser, {
+    query: "style=mono&docsScreenshot=activity&overviewWorkspace=demo-workspace",
+  });
+  await page.getByLabel("打开活动中心").click();
+  await page.getByRole("complementary", { name: "活动中心" }).waitFor();
+  await page.getByText("运行与活动", { exact: true }).waitFor();
+  await page.getByRole("tab", { name: /活动记录/ }).click();
+  await page.getByText(/全部来源/).waitFor();
+  await page.getByText("示例控制台", { exact: true }).first().waitFor();
+  await assertPublicScreenshotIsSanitized(page, "activity-center-pagination-preview.jpeg", [
+    "运行与活动",
+    "运行中",
+    "活动记录",
+    "示例控制台",
+    "本地联调代理",
+  ]);
+  await page.waitForTimeout(600);
+  await page.screenshot({
+    path: resolve(outputDir, "activity-center-pagination-preview.jpeg"),
+    type: "jpeg",
+    quality: 90,
+  });
+  await context.close();
+}
+
 let browser;
 try {
   await mkdir(outputDir, { recursive: true });
@@ -262,11 +309,13 @@ try {
   });
   await captureAction(browser);
   await captureProjectsList(browser);
+  await captureRuntimePanel(browser);
   await captureBuildRecord(browser);
   await captureBranchRecord(browser);
   await captureResources(browser);
   await captureProxy(browser);
   await captureKnowledge(browser);
+  await captureActivity(browser);
   console.log(`Captured documentation screenshots in ${outputDir}`);
 } finally {
   await browser?.close();

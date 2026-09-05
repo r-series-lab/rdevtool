@@ -113,6 +113,16 @@
         "documentId": "interface-guide"
       },
       {
+        "id": "workspace-resource-editor",
+        "source": "docs/assets/screenshots/workspace-resource-editor.png",
+        "alt": "工作区专属资源编辑器",
+        "caption": "工作区配置区分可编辑的工作区专属入口与系统生成的资料目录、工作日志入口。",
+        "title": "工作区专属资源",
+        "description": "新增分类，维护只属于当前工作区的网站、目录、脚本和工具，保存后同步到工作台首页。",
+        "highlights": ["创建需求专属分类", "编辑、复制或删除普通入口", "保护系统生成入口"],
+        "documentId": "workspace"
+      },
+      {
         "id": "projects-list",
         "source": "docs/assets/screenshots/projects-list.png",
         "alt": "项目管理项目列表页面",
@@ -121,6 +131,26 @@
         "description": "用搜索、分类、收藏和最近使用定位项目，并从同一行启动、聚焦、打开目录或进入更多操作。",
         "highlights": ["运行中、外部占用、待配置等状态同屏可见", "启动前核对启动档案和命令", "项目配置入口保持在页面右上角"],
         "documentId": "interface-guide"
+      },
+      {
+        "id": "project-runtime-panel",
+        "source": "docs/assets/screenshots/project-runtime-panel.png",
+        "alt": "项目运行面板的概览、预检和运行上下文",
+        "caption": "运行面板把启动前检查、最终生效目标、运行状态和后续操作集中到一个可复核的界面。",
+        "title": "项目运行面板",
+        "description": "从项目启动档案进入运行面板，查看概览、运行配置、日志和网页动作，处理端口、代理与启动链路问题。",
+        "highlights": ["查看链路预检和运行上下文", "区分启动档案与运行环境", "从日志和网页动作继续排查"],
+        "documentId": "project-runtime"
+      },
+      {
+        "id": "activity-center",
+        "source": "docs/assets/screenshots/activity-center-pagination-preview.jpeg",
+        "alt": "运行与活动侧栏展示待处理队列、活动记录和分页",
+        "caption": "运行与活动侧栏把待处理队列、运行状态和跨页面操作记录集中到一个可处理的入口。",
+        "title": "运行与活动",
+        "description": "从运行中视图检查项目服务、代理和 Action，再从活动记录展开执行组、诊断失败并安全重试。",
+        "highlights": ["区分当前、其他工作区和共享服务", "按待办、结果和来源筛选活动", "展开时间线并保留结果证据"],
+        "documentId": "activity"
       },
       {
         "id": "action-batch-deploy-pre",
@@ -160,7 +190,7 @@
         "title": "资源入口",
         "description": "把环境网址、资料目录、脚本、Action 和联调 Link 放到当前工作区里，减少反复查路径和命令。",
         "highlights": ["按类型和分类过滤", "Action 使用闪电按钮进入确认", "Link 显示步骤数、代理和运行项目"],
-        "documentId": "interface-guide"
+        "documentId": "resources"
       },
       {
         "id": "local-proxy-rules",
@@ -170,7 +200,7 @@
         "title": "本地代理",
         "description": "用 profile 管理监听端口和转发、Mock、阻断规则，并把代理绑定到项目启动档案或联调 Link。",
         "highlights": ["识别 rDevTool 管理进程和外部端口占用", "逐条启停 Mock/Forward/Block 规则", "请求记录和诊断入口在同页"],
-        "documentId": "interface-guide"
+        "documentId": "proxy"
       },
       {
         "id": "knowledge-base-notes",
@@ -191,6 +221,41 @@
       "description": "首次配置、各页面功能、工作区与项目、构建、分支、Action、代理、知识库、诊断、Record 和失败排查。",
       "group": "使用指南",
       "source": "docs/interface-guide.md"
+    },
+    {
+      "id": "workspace",
+      "label": "工作区与工作台",
+      "description": "工作台首页、全局与需求工作区、配置弹窗、项目实例、范围选择和工作区专属资源。",
+      "group": "使用指南",
+      "source": "docs/workspace-guide.md"
+    },
+    {
+      "id": "resources",
+      "label": "资源入口与工具",
+      "description": "资源入口、网站、目录、文件、应用、脚本、Link、Action、Workflow、网页动作、Runtime 和运行面板之间的使用关系。",
+      "group": "使用指南",
+      "source": "docs/resource-guide.md"
+    },
+    {
+      "id": "proxy",
+      "label": "本地代理：服务、规则与请求列表",
+      "description": "本地代理服务 profile、规则匹配、转发/Mock/阻断、请求列表、规则诊断、导入导出和 CLI 操作。",
+      "group": "使用指南",
+      "source": "docs/proxy-guide.md"
+    },
+    {
+      "id": "project-runtime",
+      "label": "项目启动与运行面板",
+      "description": "从项目启动档案到运行预检、运行配置、日志、网页动作、CLI 对照和启动排障。",
+      "group": "使用指南",
+      "source": "docs/project-runtime.md"
+    },
+    {
+      "id": "activity",
+      "label": "运行与活动",
+      "description": "运行中资源、活动记录、待处理队列、执行组、诊断、状态同步、安全重试和 CLI 证据对照。",
+      "group": "使用指南",
+      "source": "docs/activity-guide.md"
     },
     {
       "id": "overview",
@@ -311,6 +376,16 @@
               "documentId": "interface-guide"
             },
             {
+              "id": "workspace-resource-editor",
+              "source": "docs/assets/screenshots/workspace-resource-editor.png",
+              "alt": "Workspace-owned resource editor",
+              "caption": "Workspace Configuration separates editable workspace-owned entries from generated resource-directory and worklog entries.",
+              "title": "Workspace-owned resources",
+              "description": "Add categories and maintain task-specific websites, folders, scripts, and tools, then save them to the active workspace.",
+              "highlights": ["Create task-specific categories", "Edit, duplicate, or delete ordinary entries", "Keep generated entries protected"],
+              "documentId": "workspace"
+            },
+            {
               "id": "projects-list",
               "source": "docs/assets/screenshots/projects-list.png",
               "alt": "The Project Management Projects list",
@@ -319,6 +394,16 @@
               "description": "Use search, categories, favorites, and recents to find a project, then start, focus, open, or inspect it from the same row.",
               "highlights": ["Running, externally occupied, and unconfigured states are visible together", "Check the launch profile and command before starting", "Project configuration stays one click away"],
               "documentId": "interface-guide"
+            },
+            {
+              "id": "activity-center",
+              "source": "docs/assets/screenshots/activity-center-pagination-preview.jpeg",
+              "alt": "Running and Activity side panel with attention queue, records, and pagination",
+              "caption": "Running & Activity brings the attention queue, live resources, and cross-page records into one actionable side panel.",
+              "title": "Running And Activity",
+              "description": "Use Running for project services, proxies, and Actions, then expand Activity records for execution groups, diagnostics, and guarded retry.",
+              "highlights": ["Separate current, other-workspace, and shared services", "Filter activity by attention, result, and origin", "Expand timelines and keep result evidence"],
+              "documentId": "activity"
             },
             {
               "id": "action-batch-deploy-pre",
@@ -358,7 +443,7 @@
               "title": "Resources",
               "description": "Keep environment URLs, resource folders, scripts, Actions, and debugging Links inside the active workspace.",
               "highlights": ["Filter by type and category", "Use the lightning action for Action confirmation", "Links show steps, proxies, and target project"],
-              "documentId": "interface-guide"
+              "documentId": "resources"
             },
             {
               "id": "local-proxy-rules",
@@ -368,7 +453,7 @@
               "title": "Local Proxy",
               "description": "Manage listen ports and forward, mock, or block rules, then bind a proxy to project launch profiles or Links.",
               "highlights": ["Distinguish rDevTool-managed services from external listeners", "Enable or disable Mock, Forward, and Block rules", "Request history and diagnosis live on the same page"],
-              "documentId": "interface-guide"
+              "documentId": "proxy"
             },
             {
               "id": "knowledge-base-notes",
@@ -389,6 +474,38 @@
             "description": "First-time setup, every main page, workspaces and projects, builds, branches, Actions, proxies, knowledge, diagnostics, Records, and troubleshooting.",
             "group": "User guide",
             "source": "docs/interface-guide_EN.md",
+            "reviewedForVersion": "0.1.5"
+          },
+          {
+            "id": "workspace",
+            "label": "Workspaces And The Workbench",
+            "description": "The Workspace home, global and requirement scopes, configuration dialog, project instances, scope selection, and workspace-owned resources.",
+            "group": "User guide",
+            "source": "docs/workspace-guide_EN.md",
+            "reviewedForVersion": "0.1.5"
+          },
+          {
+            "id": "resources",
+            "label": "Resources And Tool Entries",
+            "description": "Websites, folders, files, applications, scripts, Link, Action, Workflow, web actions, Runtime, and the connection to Runtime Panel.",
+            "group": "User guide",
+            "source": "docs/resource-guide_EN.md",
+            "reviewedForVersion": "0.1.5"
+          },
+          {
+            "id": "proxy",
+            "label": "Local Proxy: Services, Rules, And Requests",
+            "description": "Proxy profiles, rule matching, Forward/Mock/Block behavior, request history, diagnosis, import/export, and CLI operations.",
+            "group": "User guide",
+            "source": "docs/proxy-guide_EN.md",
+            "reviewedForVersion": "0.1.5"
+          },
+          {
+            "id": "activity",
+            "label": "Running And Activity",
+            "description": "Live resources, activity records, attention queue, execution groups, diagnostics, status sync, guarded retry, and CLI evidence.",
+            "group": "User guides",
+            "source": "docs/activity-guide_EN.md",
             "reviewedForVersion": "0.1.5"
           },
           {

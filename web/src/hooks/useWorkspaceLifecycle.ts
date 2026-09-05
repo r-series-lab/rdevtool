@@ -6,6 +6,7 @@ import type {
   WorkspaceArchivePlan,
 } from "../app-types";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
+import { useI18n } from "../i18n";
 import {
   unmanagedWorkspaceArchiveBlocker,
 } from "../lib/workspaceLifecycle";
@@ -22,6 +23,7 @@ export function useWorkspaceLifecycle({
   setError,
   setStatus,
 }: UseWorkspaceLifecycleOptions) {
+  const { t } = useI18n();
   const [busyKey, setBusyKey] = useState("");
   const [confirm, confirmDialog] = useAppConfirmDialog();
   const [requestArchive, archiveDialog] = useWorkspaceArchiveDialog();
@@ -65,9 +67,12 @@ export function useWorkspaceLifecycle({
     setStatus("");
     try {
       const confirmed = await confirm({
-        title: "恢复工作区",
-        description: `恢复“${workspace.name}”后，它会重新出现在工作区列表和相关快捷入口中。`,
-        confirmLabel: "恢复",
+        title: t("恢复工作区"),
+        description: t(
+          "恢复“{name}”后，它会重新出现在工作区列表和相关快捷入口中。",
+          { name: workspace.name },
+        ),
+        confirmLabel: t("恢复"),
         tone: "neutral",
       });
       if (!confirmed) {
@@ -77,7 +82,7 @@ export function useWorkspaceLifecycle({
         workspaceKey: workspace.key,
       });
       await onChanged();
-      setStatus(`已恢复工作区：${workspace.name}`);
+      setStatus(t("已恢复工作区：{name}", { name: workspace.name }));
     } catch (reason) {
       setError(String(reason));
     } finally {

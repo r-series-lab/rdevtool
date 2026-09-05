@@ -3613,11 +3613,16 @@ function SidebarSmokeHarness() {
   const documentationGitScreenshot = documentationScreenshot === "git";
   const documentationBuildScreenshot = documentationScreenshot === "build";
   const documentationProjectsScreenshot = documentationScreenshot === "projects";
+  const documentationRuntimeScreenshot = documentationScreenshot === "runtime";
   const documentationResourcesScreenshot = documentationScreenshot === "resources";
   const documentationProxyScreenshot = documentationScreenshot === "proxy";
   const documentationKnowledgeScreenshot = documentationScreenshot === "knowledge";
+  const documentationActivityScreenshot = documentationScreenshot === "activity";
   const documentationProjectScreenshot =
-    documentationGitScreenshot || documentationBuildScreenshot || documentationProjectsScreenshot;
+    documentationGitScreenshot ||
+    documentationBuildScreenshot ||
+    documentationProjectsScreenshot ||
+    documentationRuntimeScreenshot;
   const [activePage, setActivePage] = useState<PageKey>(
     documentationProjectScreenshot
       ? "projectManagement"
@@ -3680,7 +3685,7 @@ function SidebarSmokeHarness() {
   const [branchHistorySmokeOpen, setBranchHistorySmokeOpen] = useState(false);
   const [buildHistorySmokeOpen, setBuildHistorySmokeOpen] = useState(false);
   const [workspaceRuntimeSmokeOpen, setWorkspaceRuntimeSmokeOpen] = useState(
-    documentationActionScreenshot,
+    documentationActionScreenshot || documentationActivityScreenshot,
   );
   const [workspaceConfigFocusRequest, setWorkspaceConfigFocusRequest] =
     useState<WorkspaceConfigFocusRequest | null>(null);
@@ -4027,6 +4032,114 @@ function SidebarSmokeHarness() {
     activePage === "projectManagement"
       ? projectManagementContent[projectManagementView]
       : "总览内容";
+  const renderSmokeOverview = () => (
+    <OverviewPage
+      projectWorkspaces={smokeWorkspaces}
+      archivedProjectWorkspaces={smokeArchivedWorkspaces}
+      activeProjectWorkspaceKey={
+        smokeWorkspaces.some(
+          (workspace) => workspace.key === smokeParams.get("overviewWorkspace"),
+        )
+          ? (smokeParams.get("overviewWorkspace") as string)
+          : "feature_demo_checkout"
+      }
+      onProjectWorkspaceChange={() => undefined}
+      onNavigateToPage={() => undefined}
+      onProjectManagementViewChange={() => undefined}
+      onProjectChange={() => undefined}
+      onOpenProjectManagementTarget={(projectKey, target) => {
+        setWorkspaceRuntimeActionState(
+          target.kind === "projectSettings"
+            ? `${projectKey}:projectSettings:${target.section}`
+            : `${projectKey}:runtimePanel:${target.tab}`,
+        );
+      }}
+      onCreateProjectWorkspace={() => undefined}
+      onInitDemandWorkspace={() => ({
+        key: "feature_demo_checkout",
+        name: "需求工作区",
+        demandId: "REQ-1234",
+        project: {
+          key: "demo",
+          name: "示例控制台",
+          repoPath: "/mock/workspaces/feature/demo",
+        },
+        requirementEntry: {
+          category: "需求",
+          shortLabel: "REQ-1234",
+          name: "需求记录",
+          path: "/mock/workspaces/feature/resources/WORKLOG.md",
+        },
+        resources: {
+          workspaceKey: "feature_demo_checkout",
+          workspaceName: "需求工作区",
+          resourceDir: "/mock/workspaces/feature/resources",
+          worklogFile: "WORKLOG.md",
+          worklogPath: "/mock/workspaces/feature/resources/WORKLOG.md",
+          worklogExists: true,
+          worklogCreated: true,
+          autoRecordEnabled: true,
+        },
+        branch: {
+          expected: "feature/REQ-1234",
+          current: "feature/REQ-1234",
+          matches: true,
+        },
+        metadata: {},
+        warnings: [],
+      })}
+      onProjectConfigSaved={() => undefined}
+      workspaceConfigOpenSignal={workspaceConfigFocusRequest?.nonce ?? 0}
+      workspaceConfigFocusRequest={workspaceConfigFocusRequest}
+      onWorkspaceConfigOpenHandled={() => undefined}
+      runtimeEntries={[runtimeSmokeEntry]}
+      selectedDebugProfileKeys={{
+        demo:
+          runtimeSmokeProfileRepairMode === "create"
+            ? ""
+            : runtimeSmokeProfileRepairMode === "reset"
+              ? "removed"
+              : "uat3-vke",
+      }}
+      runtimeStartPromptMode="auto"
+      projectRuntimePreferencesHydrated
+      onProjectDebugProfileChange={(_projectKey, profileKey) =>
+        setWorkspaceRuntimeSelectedProfile(profileKey)
+      }
+      onRuntimeStartPromptModeChange={() => undefined}
+      onStartProjectRuntime={(
+        projectKey,
+        debugProfileKey,
+        _envOverrides,
+        expectedPort,
+      ) => {
+        setWorkspaceRuntimeStartState(
+          [projectKey, debugProfileKey || "base", expectedPort || ""]
+            .filter(Boolean)
+            .join(":"),
+        );
+      }}
+      onStartProxyProfile={(profileId, sourceId) => {
+        runtimeSmokeProxyRunning = true;
+        setWorkspaceRuntimeProxyState(`${profileId}:${sourceId || "default"}`);
+      }}
+      onStopProxyProfile={() => undefined}
+      onFocusProjectRuntime={() => undefined}
+      onExecutePinnedAction={async () => undefined}
+      workflowChains={[smokeWorkspaceWorkflowChain]}
+      workflowRunStates={
+        new URLSearchParams(window.location.search).get("workflowRun") ===
+        "running"
+          ? [smokeWorkspaceWorkflowRunState]
+          : []
+      }
+      onSaveWorkflowChain={async () => undefined}
+      onDeleteWorkflowChain={async () => undefined}
+      onWorkflowChainEnabledChange={async () => undefined}
+      onRunWorkflowChain={async () => "smoke-workflow-run"}
+      onCancelWorkflowRun={async () => undefined}
+    />
+  );
 
   return (
     <ThemeProvider theme={theme}>
@@ -4429,7 +4542,16 @@ function SidebarSmokeHarness() {
         {documentationGitScreenshot ? <DocumentationGitPage /> : null}
         {documentationBuildScreenshot ? <DocumentationBuildPage /> : null}
         {documentationProjectsScreenshot ? <DocumentationProjectsPage /> : null}
+        {documentationRuntimeScreenshot ? <DocumentationProjectsPage /> : null}
         {documentationResourcesScreenshot ? <DocumentationResourcesPage /> : null}
+        {documentationActivityScreenshot ? (
+          <Box
+            className="activity-documentation-overview"
+            sx={{ height: "100%", minHeight: 0, overflow: "hidden" }}
+          >
+            {renderSmokeOverview()}
+          </Box>
+        ) : null}
         <section
           aria-label="烟雾测试内容"
           hidden={
@@ -4658,15 +4780,27 @@ function SidebarSmokeHarness() {
             <Box
               aria-label="工作区运行来源测试"
               sx={{
-                position: documentationActionScreenshot ? "relative" : "fixed",
-                inset: documentationActionScreenshot ? "auto" : 0,
-                zIndex: documentationActionScreenshot ? "auto" : 1100,
+                position:
+                  documentationActionScreenshot || documentationActivityScreenshot
+                    ? "relative"
+                    : "fixed",
+                inset:
+                  documentationActionScreenshot || documentationActivityScreenshot
+                    ? "auto"
+                    : 0,
+                zIndex:
+                  documentationActionScreenshot || documentationActivityScreenshot
+                    ? "auto"
+                    : 1100,
                 bgcolor: "background.default",
                 overflow: "auto",
-                p: documentationActionScreenshot ? 0 : 1,
+                p:
+                  documentationActionScreenshot || documentationActivityScreenshot
+                    ? 0
+                    : 1,
               }}
             >
-              {documentationActionScreenshot ? null : (
+              {documentationActionScreenshot || documentationActivityScreenshot ? null : (
                 <Button
                   size="small"
                   variant="outlined"
@@ -4676,119 +4810,7 @@ function SidebarSmokeHarness() {
                   关闭工作区运行来源测试
                 </Button>
               )}
-              <OverviewPage
-                projectWorkspaces={smokeWorkspaces}
-                archivedProjectWorkspaces={smokeArchivedWorkspaces}
-                activeProjectWorkspaceKey={
-                  smokeWorkspaces.some(
-                    (workspace) =>
-                      workspace.key === smokeParams.get("overviewWorkspace"),
-                  )
-                    ? (smokeParams.get("overviewWorkspace") as string)
-                    : "feature_demo_checkout"
-                }
-                onProjectWorkspaceChange={() => undefined}
-                onNavigateToPage={() => undefined}
-                onProjectManagementViewChange={() => undefined}
-                onProjectChange={() => undefined}
-                onOpenProjectManagementTarget={(projectKey, target) => {
-                  setWorkspaceRuntimeActionState(
-                    target.kind === "projectSettings"
-                      ? `${projectKey}:projectSettings:${target.section}`
-                      : `${projectKey}:runtimePanel:${target.tab}`,
-                  );
-                }}
-                onCreateProjectWorkspace={() => undefined}
-                onInitDemandWorkspace={() => ({
-                  key: "feature_demo_checkout",
-                  name: "需求工作区",
-                  demandId: "REQ-1234",
-                  project: {
-                    key: "demo",
-                    name: "示例控制台",
-                    repoPath: "/mock/workspaces/feature/demo",
-                  },
-                  requirementEntry: {
-                    category: "需求",
-                    shortLabel: "REQ-1234",
-                    name: "需求记录",
-                    path: "/mock/workspaces/feature/resources/WORKLOG.md",
-                  },
-                  resources: {
-                    workspaceKey: "feature_demo_checkout",
-                    workspaceName: "需求工作区",
-                    resourceDir: "/mock/workspaces/feature/resources",
-                    worklogFile: "WORKLOG.md",
-                    worklogPath:
-                      "/mock/workspaces/feature/resources/WORKLOG.md",
-                    worklogExists: true,
-                    worklogCreated: true,
-                    autoRecordEnabled: true,
-                  },
-                  branch: {
-                    expected: "feature/REQ-1234",
-                    current: "feature/REQ-1234",
-                    matches: true,
-                  },
-                  metadata: {},
-                  warnings: [],
-                })}
-                onProjectConfigSaved={() => undefined}
-                workspaceConfigOpenSignal={
-                  workspaceConfigFocusRequest?.nonce ?? 0
-                }
-                workspaceConfigFocusRequest={workspaceConfigFocusRequest}
-                onWorkspaceConfigOpenHandled={() => undefined}
-                runtimeEntries={[runtimeSmokeEntry]}
-                selectedDebugProfileKeys={{
-                  demo:
-                    runtimeSmokeProfileRepairMode === "create"
-                      ? ""
-                      : runtimeSmokeProfileRepairMode === "reset"
-                        ? "removed"
-                        : "uat3-vke",
-                }}
-                runtimeStartPromptMode="auto"
-                projectRuntimePreferencesHydrated
-                onProjectDebugProfileChange={(_projectKey, profileKey) =>
-                  setWorkspaceRuntimeSelectedProfile(profileKey)
-                }
-                onRuntimeStartPromptModeChange={() => undefined}
-                onStartProjectRuntime={(
-                  projectKey,
-                  debugProfileKey,
-                  _envOverrides,
-                  expectedPort,
-                ) => {
-                  setWorkspaceRuntimeStartState(
-                    [projectKey, debugProfileKey || "base", expectedPort || ""]
-                      .filter(Boolean)
-                      .join(":"),
-                  );
-                }}
-                onStartProxyProfile={(profileId, sourceId) => {
-                  runtimeSmokeProxyRunning = true;
-                  setWorkspaceRuntimeProxyState(
-                    `${profileId}:${sourceId || "default"}`,
-                  );
-                }}
-                onStopProxyProfile={() => undefined}
-                onFocusProjectRuntime={() => undefined}
-                onExecutePinnedAction={async () => undefined}
-                workflowChains={[smokeWorkspaceWorkflowChain]}
-                workflowRunStates={
-                  new URLSearchParams(window.location.search).get(
-                    "workflowRun",
-                  ) === "running"
-                    ? [smokeWorkspaceWorkflowRunState]
-                    : []
-                }
-                onSaveWorkflowChain={async () => undefined}
-                onDeleteWorkflowChain={async () => undefined}
-                onWorkflowChainEnabledChange={async () => undefined}
-                onRunWorkflowChain={async () => "smoke-workflow-run"}
-                onCancelWorkflowRun={async () => undefined}
-              />
+              {renderSmokeOverview()}
               <output data-testid="workspace-runtime-start-state">
                 {workspaceRuntimeStartState}
               </output>

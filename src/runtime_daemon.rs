@@ -2087,7 +2087,6 @@ mod tests {
     const TEST_REQUEST_ENV: &str = "RDEVTOOL_RUNTIME_DAEMON_TEST_REQUEST";
     const TEST_STATE_ENV: &str = "RDEVTOOL_RUNTIME_DAEMON_TEST_STATE";
     const TEST_RUN_ID_ENV: &str = "RDEVTOOL_RUNTIME_DAEMON_TEST_RUN_ID";
-    const TEST_LISTENER_PORT_ENV: &str = "RDEVTOOL_RUNTIME_DAEMON_TEST_LISTENER_PORT";
 
     #[test]
     fn status_identity_contains_project_and_canonical_cwd() {
@@ -2244,13 +2243,15 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         drop(listener);
 
-        let mut external = Command::new(std::env::current_exe().unwrap());
+        let mut external = Command::new("python3");
         external
-            .arg("--exact")
-            .arg("runtime_daemon::tests::runtime_daemon_external_listener_entry")
-            .arg("--nocapture")
-            .arg("--test-threads=1")
-            .env(TEST_LISTENER_PORT_ENV, port.to_string())
+            .args([
+                "-m",
+                "http.server",
+                &port.to_string(),
+                "--bind",
+                "127.0.0.1",
+            ])
             .current_dir(&cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -2259,16 +2260,10 @@ mod tests {
         let external_pid = external.id();
         let started = Instant::now();
         let identity = loop {
-            if let Some(status) = external.try_wait().unwrap() {
-                panic!("external listener exited before listening on port {port}: {status}");
-            }
             if let Some(identity) = listening_process(port).unwrap() {
                 break identity;
             }
-            assert!(
-                started.elapsed() < Duration::from_secs(15),
-                "external listener did not start listening on port {port} within 15 seconds"
-            );
+            assert!(started.elapsed() < Duration::from_secs(5));
             thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(identity.pid, external_pid);
@@ -2279,7 +2274,7 @@ mod tests {
             project_key: project_key.clone(),
             project_name: "Adopt E2E".to_string(),
             cwd: cwd.clone(),
-            command: "runtime-daemon-test-listener".to_string(),
+            command: format!("python3 -m http.server {port}"),
             env: BTreeMap::new(),
             debug_profile: None,
             runtime_profile: None,
@@ -2379,20 +2374,6 @@ mod tests {
         assert!(RuntimeDaemonPhase::Starting.active());
         assert!(RuntimeDaemonPhase::Running.active());
         assert!(!RuntimeDaemonPhase::Exited.active());
-    }
-
-    #[test]
-    fn runtime_daemon_external_listener_entry() {
-        let Some(port) = std::env::var(TEST_LISTENER_PORT_ENV)
-            .ok()
-            .and_then(|value| value.parse::<u16>().ok())
-        else {
-            return;
-        };
-        let _listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
-        loop {
-            thread::sleep(Duration::from_secs(1));
-        }
     }
 
     #[test]

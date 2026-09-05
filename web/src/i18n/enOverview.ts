@@ -39,6 +39,8 @@ export const EN_OVERVIEW_MESSAGES: Record<string, string> = {
   "{title}快捷入口": "{title} Quick Access",
   "参数 {count}": "{count} Parameters",
   "最近": "Latest",
+  "已取消": "Cancelled",
+  "等待中": "Queued",
   "还有 {count} 条": "{count} more",
   "收起其余记录": "Show fewer",
   "确认后运行": "Run After Confirmation",
@@ -66,6 +68,9 @@ export const EN_OVERVIEW_MESSAGES: Record<string, string> = {
   "进入": "Open",
   "已进入工作区 {name}": "Opened workspace {name}",
   "当前": "Current",
+  "恢复": "Restore",
+  "恢复“{name}”后，它会重新出现在工作区列表和相关快捷入口中。":
+    "Restore “{name}” to return it to the workspace list and related shortcuts.",
   "空工作区": "Empty Workspace",
   "无项目": "No Projects",
   "{count} 目录待配": "{count} directories need setup",

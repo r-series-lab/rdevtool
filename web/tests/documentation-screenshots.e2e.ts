@@ -48,6 +48,21 @@ test("Projects documentation screenshot shows project finder state", async ({
   await expect(page.getByText("示例移动端", { exact: true })).toBeVisible();
 });
 
+test("Runtime documentation screenshot shows preflight and runtime context", async ({
+  page,
+}) => {
+  await page.goto("/smoke.html?style=mono&docsScreenshot=runtime");
+
+  await expect(page.getByLabel("项目列表文档截图页面")).toBeVisible();
+  await page.getByRole("button", { name: "示例控制台 更多操作" }).click();
+  await page.getByRole("menuitem", { name: "运行面板", exact: true }).click();
+  await expect(page.locator(".runtime-panel-dialog")).toBeVisible();
+  await expect(page.getByText("链路预检", { exact: true })).toBeVisible();
+  await expect(page.getByText("运行上下文", { exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "运行配置" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "日志" })).toBeVisible();
+});
+
 test("Resources documentation screenshot shows tool entries", async ({
   page,
 }) => {

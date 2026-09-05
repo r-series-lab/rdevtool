@@ -1,0 +1,4 @@
+interface:
+  display_name: "rDevTool"
+  short_description: "Inspect and operate rDevTool safely from CLI"
+  default_prompt: "Use $rdevtool to load only the relevant workspace context, perform the requested operation safely, and verify its result."

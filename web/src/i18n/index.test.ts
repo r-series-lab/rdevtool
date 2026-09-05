@@ -45,6 +45,18 @@ describe("i18n", () => {
     ).toBe("rDevTool · Knowledge Base");
   });
 
+  it("translates workspace restore confirmation copy with user data", () => {
+    expect(
+      translateMessage(
+        "en-US",
+        "恢复“{name}”后，它会重新出现在工作区列表和相关快捷入口中。",
+        { name: "需求 A" },
+      ),
+    ).toBe(
+      "Restore “需求 A” to return it to the workspace list and related shortcuts.",
+    );
+  });
+
   it("preserves missing interpolation parameters without corrupting copy", () => {
     expect(translateMessage("en-US", "切换到 {page}")).toBe(
       "Switch to {page}",
