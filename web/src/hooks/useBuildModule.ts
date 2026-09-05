@@ -1,0 +1,61 @@
+import { useBuildContext } from "./useBuildContext";
+import { useBuildHistory } from "./useBuildHistory";
+import type {
+  ActivityBulkUpdater,
+  ActivityRecorder,
+  ActivityUpdater,
+} from "../lib/activityCenter";
+export type { BuildResult } from "./useBuildHistory";
+
+type UseBuildModuleOptions = {
+  buildEnabled: boolean;
+  activeProjectWorkspaceKey: string;
+  selectedProject: string;
+  branchOptions: string[];
+  setBusy: (value: string) => void;
+  setError: (value: string) => void;
+  recordActivity?: ActivityRecorder;
+  updateActivity?: ActivityUpdater;
+  syncActivities?: ActivityBulkUpdater;
+};
+
+export function useBuildModule({
+  buildEnabled,
+  activeProjectWorkspaceKey,
+  selectedProject,
+  branchOptions,
+  setBusy,
+  setError,
+  recordActivity,
+  updateActivity,
+  syncActivities,
+}: UseBuildModuleOptions) {
+  const buildContext = useBuildContext({
+    enabled: buildEnabled,
+    selectedProject,
+    branchOptions,
+    setError,
+  });
+  const buildHistoryState = useBuildHistory({
+    enabled: buildEnabled,
+    activeProjectWorkspaceKey,
+    selectedProject,
+    target: buildContext.target,
+    env: buildContext.env,
+    branch: buildContext.branch,
+    buildParamMeta: buildContext.targetMeta?.params,
+    currentPlan: buildContext.plan,
+    currentBuildRequest: buildContext.currentBuildRequest,
+    setPlan: buildContext.setPlan,
+    setBusy,
+    setError,
+    recordActivity,
+    updateActivity,
+    syncActivities,
+  });
+
+  return {
+    ...buildContext,
+    ...buildHistoryState,
+  };
+}

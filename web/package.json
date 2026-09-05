@@ -1,0 +1,36 @@
+{
+  "name": "rdevtool-web",
+  "private": true,
+  "version": "0.1.5",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+    "build": "tsc && vite build",
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "docs:screenshots": "node scripts/capture-doc-screenshots.mjs",
+    "preview": "vite preview --host 127.0.0.1 --port 1420 --strictPort"
+  },
+  "dependencies": {
+    "@babel/parser": "7.29.2",
+    "@emotion/react": "^11.14.0",
+    "@emotion/styled": "^11.14.0",
+    "@mui/material": "^7.3.2",
+    "@tauri-apps/api": "^2.10.1",
+    "@tauri-apps/plugin-dialog": "^2.7.0",
+    "markdown-it": "^15.0.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@tauri-apps/cli": "^2.10.1",
+    "@types/markdown-it": "^14.1.2",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.1.0",
+    "typescript": "^5.9.3",
+    "vite": "^8.2.1",
+    "vitest": "^4.1.10"
+  }
+}

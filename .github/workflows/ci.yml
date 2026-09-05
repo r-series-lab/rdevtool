@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Install frontend dependencies
+        run: npm --prefix web ci
+      - name: Validate product contract
+        run: npm run manifest:check && npm run ipc:check
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+      - name: Test frontend and Rust
+        run: npm run web:test && npm run rust-test
+      - name: Build frontend and check Tauri shell
+        run: npm run web:build && npm run rust-check
+
+  browser-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install frontend dependencies
+        run: npm --prefix web ci
+      - name: Install Playwright Chromium
+        run: cd web && npx playwright install --with-deps chromium
+      - name: Run browser smoke tests
+        run: npm run web:test:e2e

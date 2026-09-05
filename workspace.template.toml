@@ -1,0 +1,11 @@
+[app]
+style_mode = "light"
+# active_workspace = "system"
+# default_page = "projects"
+# enabled_pages = ["overview", "knowledge", "projectManagement", "resources", "proxy"]
+# Leave enabled_pages empty to use the default menu set and default order.
+# If enabled_pages is provided, only those pages are shown and the order follows the list exactly.
+# active_workspace points to a file under workspaces/<key>.toml. The system workspace shows everything.
+# System-scope config source preferences are stored under [app.config_source_preferences].
+# Example: "configSource.proxy" = "default"
+# Keep dynamic data such as Git branch cache, recent selections, and histories in SQLite.

@@ -1,0 +1,159 @@
+[defaults]
+gitlab_api_base_url = "http://127.0.0.1:8181/gitlab/api/v4"
+gitlab_token_env = "GITLAB_TOKEN"
+
+[defaults.branch_rules]
+target_keywords = ["staging", "pre", "main", "release"]
+
+[defaults.jenkins_profiles.default]
+base_url = "http://127.0.0.1:8080"
+username = ""
+password_env = "JENKINS_PASSWORD"
+
+# [[defaults.runtime_profiles]]
+# key = "local-browser"
+# label = "本地浏览器"
+# browser = "Google Chrome"
+# browser_user_data_dir = "/tmp/rdevtool-local-browser"
+# proxy_url = "http://127.0.0.1:7897"
+# proxy_bypass = "localhost;127.0.0.1;::1;app.example.test"
+# host_resolver_rules = [
+#   "MAP app.example.test 127.0.0.1",
+# ]
+#
+# [defaults.runtime_profiles.network_proxy]
+# enabled = true
+# proxy_url = "http://127.0.0.1:7897"
+# inject_env = true
+# node_hook = false
+
+[[projects]]
+key = "example-web"
+name = "示例项目"
+category = "Workspace"
+repo_path = "/path/to/example-web"
+git_url = "http://git.example.com/group/example-web.git"
+
+[projects.dev]
+command = "npm run dev"
+
+[projects.dev.env]
+# PORT = "3000"
+
+[projects.focus]
+# bundle_id = "com.example.webapp"
+# url = "http://127.0.0.1:3000"
+
+# [[projects.debug_profiles]]
+# key = "local-chrome"
+# label = "本地联调"
+# runtime_profile = "local-browser"
+# [projects.debug_profiles.local_proxy]
+# enabled = true
+# listen = "127.0.0.1:3000"
+# frontend_url = "http://127.0.0.1:3001"
+# upstream_proxy = "http://127.0.0.1:7897"
+#
+# [[projects.debug_profiles.local_proxy.routes]]
+# match_prefix = "/api"
+# target = "http://api.example.internal"
+# rewrite_prefix = ""
+# headers = { sso = "debug-user" }
+#
+# [projects.debug_profiles.local_proxy.auth_helper]
+# enabled = true
+# path = "/__auth-helper"
+# redirect_path = "/#/"
+#
+# [[projects.debug_profiles.local_proxy.auth_helper.items]]
+# storage = "localStorage"
+# key = "token"
+# from_json_path = "$.token"
+#
+# [[projects.debug_profiles.local_proxy.auth_helper.items]]
+# storage = "cookie"
+# key = "SESSION"
+# from_json_path = "$.session"
+# cookie_path = "/"
+# cookie_same_site = "Lax"
+
+[projects.build]
+command = "npm run build"
+output_dir = "/path/to/example-web/target/release/bundle"
+
+[projects.build.env]
+# NODE_ENV = "production"
+
+# R 系列应用建议至少提供两个构建 target：
+# - web: 只跑前端构建，反馈快
+# - package: 走 r_series_package，本地打包桌面应用
+[[projects.deploy_targets]]
+key = "web"
+label = "前端构建"
+adapter = "local_command"
+action_kind = "build"
+job_name = "npm run web:build"
+
+[projects.deploy_targets.artifact]
+output_dir = "/path/to/example-web/dist"
+
+[[projects.deploy_targets]]
+key = "package"
+label = "本地打包"
+adapter = "r_series_package"
+action_kind = "package"
+job_name = ""
+
+[[projects.deploy_targets.params]]
+key = "platform"
+label = "系统"
+type = "select"
+default = "macos"
+options = ["macos", "windows", "linux"]
+
+[[projects.deploy_targets.params]]
+key = "profile"
+label = "配置"
+type = "select"
+default = "release"
+options = ["release", "debug"]
+
+[[projects.deploy_targets.params]]
+key = "channel"
+label = "渠道"
+type = "select"
+default = "local"
+options = ["local", "beta", "stable"]
+
+[[projects.deploy_targets]]
+key = "standard"
+label = "标准"
+adapter = "jenkins"
+action_kind = "deploy"
+jenkins_profile = "default"
+job_name = "Example/example-web"
+
+[[projects.deploy_targets.params]]
+key = "ENV_PROFILE"
+label = "环境"
+type = "select"
+default = "uat3"
+options = ["sit1", "sit2", "sit3", "uat1", "uat2", "uat3", "pre", "pro"]
+required = true
+
+[[projects.deploy_targets.params]]
+key = "BRANCH"
+label = "分支"
+type = "branch"
+required = true
+
+[[projects.deploy_targets.params]]
+key = "IS_GRAY"
+label = "灰度发布"
+type = "boolean"
+default = "否"
+true_value = "是"
+false_value = "否"
+
+[projects.branch_rules]
+target_keywords = ["staging", "pre", "main", "release"]
