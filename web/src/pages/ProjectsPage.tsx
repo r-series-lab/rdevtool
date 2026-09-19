@@ -7,6 +7,7 @@ import {
   type UIEvent,
 } from "react";
 import {
+  Alert,
   Box,
   Button,
   Chip,
@@ -1922,6 +1923,32 @@ export function ProjectsPage({
   const runtimeOptionsDefaultSaved =
     runtimeOptionsProfileKey === runtimeOptionsSavedProfileKey;
   const runtimePanelProfile = runtimeProfileDrafts[runtimeProfileIndex] ?? null;
+  const runtimeProfileUsageByKey = useMemo(() => {
+    const usage = new Map<
+      string,
+      Array<{ projectKey: string; projectName: string; profileKey: string; profileLabel: string }>
+    >();
+    for (const project of runtimeEntries) {
+      for (const profile of project.debugProfiles ?? []) {
+        const runtimeProfileKey = profile.runtimeProfile?.trim();
+        if (!runtimeProfileKey) {
+          continue;
+        }
+        const entries = usage.get(runtimeProfileKey) ?? [];
+        entries.push({
+          projectKey: project.key,
+          projectName: project.name || project.key,
+          profileKey: profile.key,
+          profileLabel: profile.label || profile.key,
+        });
+        usage.set(runtimeProfileKey, entries);
+      }
+    }
+    return usage;
+  }, [runtimeEntries]);
+  const runtimePanelProfileUsage = runtimePanelProfile
+    ? runtimeProfileUsageByKey.get(runtimePanelProfile.key) ?? []
+    : [];
   const runtimeProxyProfileById = useMemo(
     () => new Map(runtimeProxyProfiles.map((profile) => [profile.id, profile])),
     [runtimeProxyProfiles],
@@ -1943,6 +1970,9 @@ export function ProjectsPage({
         (profile) => profile.key === runtimeOptionsRuntimeProfileKey,
       ) ?? null
     : null;
+  const runtimeOptionsRuntimeProfileMissing = Boolean(
+    runtimeOptionsRuntimeProfileKey && !runtimeOptionsRuntimeProfile,
+  );
   const runtimeOptionsBoundProxy = runtimeOptionsRuntimeProfile?.rdevProxyProfileId
     ? runtimeProxyProfileById.get(
         runtimeOptionsRuntimeProfile.rdevProxyProfileId,
@@ -2042,7 +2072,8 @@ export function ProjectsPage({
         ? "runtimeProfile"
         : "direct");
   const runtimeOptionsPreflightFailed =
-    runtimePreflight.response?.statusKey === "error";
+    runtimePreflight.response?.statusKey === "error" ||
+    runtimeOptionsRuntimeProfileMissing;
   const detailsProjectPath =
     detailsProjectEntry?.cwd || detailsProjectEntry?.repoPath || "";
   const detailsWebActionsContext = useMemo<WebActionsDialogContext | null>(() => {
@@ -5019,67 +5050,128 @@ export function ProjectsPage({
                             </TextField>
 
                             {runtimePanelProfile ? (
-                              <Stack direction="row" spacing={0.55} flexWrap="wrap" useFlexGap>
-                                {runtimePanelProfile.browser ? (
+                              <Stack spacing={0.8}>
+                                <Stack direction="row" spacing={0.55} flexWrap="wrap" useFlexGap>
+                                  {runtimePanelProfile.browser ? (
+                                    <Chip
+                                      size="small"
+                                      label={runtimePanelProfile.browser}
+                                      variant="outlined"
+                                    />
+                                  ) : null}
+                                  {runtimePanelProfile.browserProfile ? (
+                                    <Chip
+                                      size="small"
+                                      label={`Profile ${runtimePanelProfile.browserProfile}`}
+                                      variant="outlined"
+                                    />
+                                  ) : null}
+                                  {runtimePanelProfile.browserUserDataDir ? (
+                                    <Chip
+                                      size="small"
+                                      label={t("独立数据目录")}
+                                      variant="outlined"
+                                    />
+                                  ) : null}
+                                  {runtimePanelProfile.rdevProxyProfileId ? (
+                                    <Chip
+                                      size="small"
+                                      label={
+                                        runtimePanelBoundProxy
+                                          ? t("代理服务 {name}", {
+                                              name: proxyProfileLabel(
+                                                runtimePanelBoundProxy,
+                                              ),
+                                            })
+                                          : t("代理服务缺失")
+                                      }
+                                      variant="outlined"
+                                    />
+                                  ) : runtimePanelProfile.proxyUrl ? (
+                                    <Chip
+                                      size="small"
+                                      label={t("浏览器代理")}
+                                      variant="outlined"
+                                    />
+                                  ) : null}
+                                  {runtimePanelProfile.hostResolverRulesText?.trim() ? (
+                                    <Chip
+                                      size="small"
+                                      label={t("域名映射")}
+                                      variant="outlined"
+                                    />
+                                  ) : null}
+                                  {runtimePanelProfile.webActionsEnabled ? (
+                                    <Chip
+                                      size="small"
+                                      label={t("受控 {port}", {
+                                        port:
+                                          runtimePanelProfile.webActionsPort ||
+                                          9223,
+                                      })}
+                                      variant="outlined"
+                                    />
+                                  ) : null}
+                                </Stack>
+                                <Box
+                                  sx={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    gap: 0.55,
+                                    flexWrap: "wrap",
+                                    minWidth: 0,
+                                  }}
+                                >
+                                  <Typography
+                                    variant="caption"
+                                    sx={{ color: tone.rowMeta, fontWeight: 760 }}
+                                  >
+                                    {t("绑定档案")}
+                                  </Typography>
                                   <Chip
                                     size="small"
-                                    label={runtimePanelProfile.browser}
                                     variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimePanelProfile.browserProfile ? (
-                                  <Chip
-                                    size="small"
-                                    label={`Profile ${runtimePanelProfile.browserProfile}`}
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimePanelProfile.browserUserDataDir ? (
-                                  <Chip
-                                    size="small"
-                                    label={t("独立数据目录")}
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimePanelProfile.rdevProxyProfileId ? (
-                                  <Chip
-                                    size="small"
-                                    label={
-                                      runtimePanelBoundProxy
-                                        ? t("代理服务 {name}", {
-                                            name: proxyProfileLabel(
-                                              runtimePanelBoundProxy,
-                                            ),
-                                          })
-                                        : t("代理服务缺失")
-                                    }
-                                    variant="outlined"
-                                  />
-                                ) : runtimePanelProfile.proxyUrl ? (
-                                  <Chip
-                                    size="small"
-                                    label={t("浏览器代理")}
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimePanelProfile.hostResolverRulesText?.trim() ? (
-                                  <Chip
-                                    size="small"
-                                    label={t("域名映射")}
-                                    variant="outlined"
-                                  />
-                                ) : null}
-                                {runtimePanelProfile.webActionsEnabled ? (
-                                  <Chip
-                                    size="small"
-                                    label={t("受控 {port}", {
-                                      port:
-                                        runtimePanelProfile.webActionsPort ||
-                                        9223,
+                                    color={runtimePanelProfileUsage.length > 0 ? "info" : "default"}
+                                    label={t("{count} 个启动档案", {
+                                      count: runtimePanelProfileUsage.length,
                                     })}
-                                    variant="outlined"
+                                    sx={{ height: 21 }}
                                   />
-                                ) : null}
+                                  {runtimePanelProfileUsage.slice(0, 4).map((usage) => (
+                                    <Chip
+                                      key={`${usage.projectKey}:${usage.profileKey}`}
+                                      size="small"
+                                      variant="outlined"
+                                      label={`${usage.projectName} · ${usage.profileLabel}`}
+                                      sx={{
+                                        maxWidth: { xs: "100%", sm: 240 },
+                                        height: 21,
+                                        "& .MuiChip-label": {
+                                          overflow: "hidden",
+                                          textOverflow: "ellipsis",
+                                        },
+                                      }}
+                                    />
+                                  ))}
+                                  {runtimePanelProfileUsage.length > 4 ? (
+                                    <Typography
+                                      variant="caption"
+                                      sx={{ color: tone.rowMeta, fontWeight: 720 }}
+                                    >
+                                      {t("还有 {count} 个", {
+                                        count: runtimePanelProfileUsage.length - 4,
+                                      })}
+                                    </Typography>
+                                  ) : null}
+                                  {runtimePanelProfileUsage.length === 0 ? (
+                                    <Typography
+                                      variant="caption"
+                                      sx={{ color: tone.rowMeta }}
+                                    >
+                                      {t("暂无项目启动档案绑定此环境模板")}
+                                    </Typography>
+                                  ) : null}
+                                </Box>
                               </Stack>
                             ) : null}
                               </Stack>
@@ -5123,7 +5215,9 @@ export function ProjectsPage({
                                     size="small"
                                     variant="outlined"
                                     label={
-                                      runtimePreflight.loading
+                                      runtimeOptionsRuntimeProfileMissing
+                                        ? t("环境模板缺失")
+                                        : runtimePreflight.loading
                                         ? t("检查中")
                                         : translateAppMessage(
                                             runtimePreflight.response?.statusMessage,
@@ -5133,6 +5227,7 @@ export function ProjectsPage({
                                           t("待检查")
                                     }
                                     color={
+                                      runtimeOptionsRuntimeProfileMissing ||
                                       runtimeOptionsPreflightFailed
                                         ? "error"
                                         : runtimePreflight.response?.statusKey ===
@@ -5266,6 +5361,29 @@ export function ProjectsPage({
                                 </Button>
                               </Stack>
                             </Stack>
+
+                            {runtimeOptionsRuntimeProfileMissing ? (
+                              <Alert
+                                severity="error"
+                                variant="outlined"
+                                action={
+                                  <Button
+                                    size="small"
+                                    color="inherit"
+                                    onClick={() =>
+                                      openProjectConfig(
+                                        runtimeOptionsEntry.key,
+                                        "projectRuntime",
+                                      )
+                                    }
+                                  >
+                                    {t("修复绑定")}
+                                  </Button>
+                                }
+                              >
+                                {t("当前启动档案引用的共享环境不存在，请重新选择环境模板后再启动。")}
+                              </Alert>
+                            ) : null}
 
                             <Box className="runtime-start-behavior-row">
                               <Box sx={{ minWidth: 0 }}>
@@ -5629,7 +5747,8 @@ export function ProjectsPage({
                               </Box>
                             </Box>
 
-                            {runtimeOptionsPreflightFailed ? (
+                            {runtimeOptionsPreflightFailed &&
+                            !runtimeOptionsRuntimeProfileMissing ? (
                               <Typography
                                 variant="caption"
                                 role="alert"

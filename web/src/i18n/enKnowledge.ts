@@ -34,6 +34,12 @@ export const EN_KNOWLEDGE_MESSAGES: Record<string, string> = {
     "The left index stays lightweight; content loads on demand.",
   "复制文件路径": "Copy File Path",
   "打开知识目录": "Open Knowledge Directory",
+  "删除知识文档": "Delete Knowledge Document",
+  "删除“{name}”？此操作会永久删除 Markdown 文件，无法撤销。":
+    "Delete “{name}”? This permanently deletes the Markdown file and cannot be undone.",
+  "根目录索引不可删除": "The Root Index Cannot Be Deleted",
+  "正在删除": "Deleting",
+  "删除": "Delete",
   "新建知识文档": "Create Knowledge Document",
   "归档范围": "Archive Scope",
   "标题": "Title",

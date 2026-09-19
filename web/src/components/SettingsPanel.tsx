@@ -55,6 +55,7 @@ import type {
   ProjectLocalProxyDraft,
   ProjectLocalProxyRouteDraft,
   ProjectNetworkProxyDraft,
+  RuntimeProfileDraft,
 } from "../app-types";
 import type { AppStyleMode } from "../theme";
 import {
@@ -515,15 +516,25 @@ function parseKeywordList(value: string) {
     .filter(Boolean);
 }
 
-function debugProfileMeta(profile: ProjectDebugProfileDraft, t: Translate) {
+function debugProfileMeta(
+  profile: ProjectDebugProfileDraft,
+  t: Translate,
+  runtimeProfiles: RuntimeProfileDraft[] = [],
+) {
   const enabledFiles = (profile.localFiles ?? []).filter((file) => file.enabled).length;
   const envCount = profile.envText
     .split("\n")
     .map((line) => line.trim())
     .filter((line) => line && !line.startsWith("#"))
     .length;
+  const runtimeProfileLabel = profile.runtimeProfile
+    ? runtimeProfiles.find((runtimeProfile) => runtimeProfile.key === profile.runtimeProfile)
+        ?.label || profile.runtimeProfile
+    : "";
   const parts = [
-    profile.runtimeProfile ? t("继承 {name}", { name: profile.runtimeProfile }) : "",
+    profile.runtimeProfile
+      ? t("环境：{name}", { name: runtimeProfileLabel })
+      : t("未绑定环境"),
     profile.cwd ? t("独有目录") : "",
     profile.readyProbe ? "HTTP Ready" : "",
     envCount > 0 ? `${envCount} env` : "",
@@ -3780,6 +3791,130 @@ export function SettingsPanel({
     );
   }
 
+  function renderProjectLaunchSummary() {
+    if (!selectedProject) {
+      return null;
+    }
+    const baseCommand = commandValue(selectedProject.dev).command.trim();
+    const selectedRuntimeProfile = selectedDebugProfile?.runtimeProfile
+      ? runtimeProfiles.find(
+          (profile) => profile.key === selectedDebugProfile.runtimeProfile,
+        )
+      : null;
+    const sourceScope =
+      editorState?.runtimeProfileScope === "override"
+        ? t("工作区覆盖")
+        : editorState?.runtimeProfileScope === "global"
+          ? t("全局配置")
+          : t("继承全局");
+    const hasProfile = Boolean(selectedDebugProfile);
+    const runtimeProfileKey = selectedDebugProfile?.runtimeProfile?.trim() || "";
+    const hasRuntimeReference = Boolean(runtimeProfileKey);
+    const hasRuntimeBinding = Boolean(selectedRuntimeProfile);
+    const runtimeProfileMissing = hasRuntimeReference && !selectedRuntimeProfile;
+    const profileLabel = selectedDebugProfile
+      ? selectedDebugProfile.label || selectedDebugProfile.key || t("未命名档案")
+      : (selectedProject.debugProfiles?.length ?? 0) > 0
+        ? t("未选择启动档案")
+        : t("暂无启动档案");
+    const runtimeLabel = hasRuntimeBinding
+      ? selectedRuntimeProfile?.label || runtimeProfileKey
+      : runtimeProfileMissing
+        ? t("环境模板缺失：{key}", { key: runtimeProfileKey })
+      : t("未绑定共享环境");
+
+    return (
+      <div className="settings-launch-summary">
+        <div className="settings-launch-summary-head">
+          <div>
+            <Typography variant="subtitle2">{t("档案绑定预览")}</Typography>
+            <Typography variant="caption">
+              {t("预览当前正在编辑的启动档案与共享运行环境绑定关系")}
+            </Typography>
+          </div>
+          <Chip
+            size="small"
+            color={runtimeProfileMissing ? "error" : hasProfile && hasRuntimeBinding ? "success" : "warning"}
+            variant="outlined"
+            label={
+              !hasProfile
+                ? t("待配置启动档案")
+                : runtimeProfileMissing
+                  ? t("绑定失效")
+                  : hasRuntimeBinding
+                  ? t("已绑定共享环境")
+                  : t("未绑定共享环境")
+            }
+          />
+        </div>
+
+        <div className="settings-launch-summary-grid">
+          <div className="settings-launch-summary-item">
+            <Typography variant="caption">{t("项目基础启动")}</Typography>
+            <Typography variant="body2" title={baseCommand || undefined}>
+              {baseCommand || t("未配置命令")}
+            </Typography>
+            <Typography variant="caption">{t("项目默认")}</Typography>
+          </div>
+          <div className="settings-launch-summary-item">
+            <Typography variant="caption">{t("当前启动档案")}</Typography>
+            <Typography variant="body2">{profileLabel}</Typography>
+            <Typography variant="caption">
+              {hasProfile ? t("项目级配置") : t("需要新增档案后才能绑定环境")}
+            </Typography>
+          </div>
+          <div
+            className={[
+              "settings-launch-summary-item",
+              !hasRuntimeBinding ? "is-warning" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+          >
+            <Typography variant="caption">{t("共享运行环境")}</Typography>
+            <Typography variant="body2">{runtimeLabel}</Typography>
+            <Typography variant="caption">
+              {runtimeProfileMissing
+                ? t("请重新选择可用的环境模板")
+                : hasRuntimeBinding
+                  ? t("由当前启动档案绑定")
+                  : t("不会自动应用到基础启动")}
+            </Typography>
+          </div>
+          <div className="settings-launch-summary-item">
+            <Typography variant="caption">{t("配置来源")}</Typography>
+            <Typography variant="body2">
+              {selectedRuntimeConfigSource?.name || t("默认配置")}
+            </Typography>
+            <Typography variant="caption">{sourceScope}</Typography>
+          </div>
+        </div>
+
+        {!hasProfile ? (
+          <Alert
+            severity="warning"
+            variant="outlined"
+            action={
+              <Button size="small" color="inherit" onClick={addDebugProfile} disabled={saving}>
+                {t("新增启动档案")}
+              </Button>
+            }
+          >
+            {t("当前项目还没有启动档案。基础命令可以启动，但不会自动绑定共享运行环境。")}
+          </Alert>
+        ) : runtimeProfileMissing ? (
+          <Alert severity="error" variant="outlined">
+            {t("当前启动档案引用的共享环境不存在，请重新选择环境模板后再启动。")}
+          </Alert>
+        ) : !hasRuntimeBinding ? (
+          <Alert severity="info" variant="outlined">
+            {t("当前启动档案尚未绑定共享环境；如需使用浏览器和代理能力，请在下方选择环境模板。")}
+          </Alert>
+        ) : null}
+      </div>
+    );
+  }
+
   function renderDebugProfilesBlock() {
     const profiles = selectedProject?.debugProfiles ?? [];
     const selectedNetworkProxy = selectedDebugProfile
@@ -3813,7 +3948,9 @@ export function SettingsPanel({
               <Typography variant="caption">
                 {profile.label || profile.key || t("档案 {index}", { index: index + 1 })}
               </Typography>
-              <Typography variant="caption">{debugProfileMeta(profile, t)}</Typography>
+              <Typography variant="caption">
+                {debugProfileMeta(profile, t, runtimeProfiles)}
+              </Typography>
             </button>
           ))}
           <Button
@@ -5110,6 +5247,7 @@ export function SettingsPanel({
     return (
       <Stack spacing={1.3}>
         {renderProjectSelector()}
+        {renderProjectLaunchSummary()}
         {runtimeConfigSources.length > 0 ? (
           <Stack spacing={0.55}>
             <Typography variant="caption" color="text.secondary" fontWeight={750}>

@@ -30,6 +30,7 @@ import {
   Typography,
 } from "@mui/material";
 import { AppEmptyState } from "../components/AppEmptyState";
+import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import { AppListEndState } from "../components/AppListEndState";
 import {
   CopyIcon,
@@ -40,6 +41,7 @@ import {
   PlusIcon,
   RefreshIcon,
   SearchIcon,
+  TrashIcon,
 } from "../components/AppIcons";
 import { useI18n, type AppLanguage, type Translate } from "../i18n";
 
@@ -85,6 +87,12 @@ type NoteDocument = {
 type CreateNoteDocumentResult = {
   created: boolean;
   document: NoteDocument;
+};
+
+type DeleteNoteDocumentResult = {
+  deleted: boolean;
+  path: string;
+  relativePath: string;
 };
 
 type ResolveNoteDocumentLinkResult = {
@@ -254,6 +262,7 @@ export function KnowledgePage({
   const [createProject, setCreateProject] = useState(selectedProject);
   const [createTitle, setCreateTitle] = useState("");
   const [creating, setCreating] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [scopeMenuAnchor, setScopeMenuAnchor] =
     useState<HTMLElement | null>(null);
   const [readerMenuAnchor, setReaderMenuAnchor] =
@@ -274,6 +283,7 @@ export function KnowledgePage({
   const lastReturnRefreshRef = useRef(0);
   const pendingFragmentRef = useRef<string | null>(null);
   const readerScrollRef = useRef<HTMLDivElement | null>(null);
+  const [confirm, confirmDialog] = useAppConfirmDialog();
 
   useEffect(() => {
     if (
@@ -568,6 +578,43 @@ export function KnowledgePage({
     }
   }
 
+  async function handleDeleteDocument() {
+    const target = document;
+    if (!target || target.summary.relativePath === "README.md") {
+      return;
+    }
+    setReaderMenuAnchor(null);
+    const confirmed = await confirm({
+      title: t("删除知识文档"),
+      description: t("删除“{name}”？此操作会永久删除 Markdown 文件，无法撤销。", {
+        name: target.summary.title,
+      }),
+      confirmLabel: t("删除"),
+      tone: "danger",
+    });
+    if (!confirmed) {
+      return;
+    }
+
+    setDeleting(true);
+    setError("");
+    try {
+      await invoke<DeleteNoteDocumentResult>("delete_note_document", {
+        path: target.summary.path,
+      });
+      documentRequestRef.current += 1;
+      selectedPathRef.current = "";
+      setSelectedPath("");
+      setDocument(null);
+      setDocumentLoading(false);
+      await loadIndex({ selectPath: "" });
+    } catch (reason) {
+      setError(String(reason));
+    } finally {
+      setDeleting(false);
+    }
+  }
+
   return (
     <div className="knowledge-page" data-knowledge-library="markdown">
       <header className="knowledge-page-head">
@@ -667,6 +714,7 @@ export function KnowledgePage({
             disabled={scope !== "all" && scope !== "project"}
             onChange={(event) => setNotesProject(event.target.value)}
             inputProps={{ "aria-label": t("项目范围") }}
+            slotProps={{ select: { displayEmpty: true } }}
             className="knowledge-project-select"
           >
             <MenuItem value="">{t("所有项目")}</MenuItem>
@@ -892,7 +940,23 @@ export function KnowledgePage({
           <FolderIcon fontSize="small" />
           {t("打开知识目录")}
         </MenuItem>
+        <MenuItem
+          className="knowledge-menu-item is-danger"
+          disabled={
+            !document || deleting || document.summary.relativePath === "README.md"
+          }
+          onClick={() => void handleDeleteDocument()}
+        >
+          <TrashIcon fontSize="small" />
+          {document?.summary.relativePath === "README.md"
+            ? t("根目录索引不可删除")
+            : deleting
+              ? t("正在删除")
+              : t("删除")}
+        </MenuItem>
       </Menu>
+
+      {confirmDialog}
 
       <Dialog
         open={createOpen}

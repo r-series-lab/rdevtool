@@ -98,9 +98,10 @@ use rdevtool_core::pinned_actions::{
     TrayReplayAction, list_tray_pinned_actions as core_list_tray_pinned_actions, valid_tray_action,
 };
 use rdevtool_core::project_notes::{
-    CreateNoteDocumentRequest, CreateNoteDocumentResult, NoteDocument, NotesFileIndex,
-    ResolveNoteDocumentLinkResult, create_note_document as create_file_note,
-    init_notes as init_file_notes, read_note_document as read_file_note,
+    CreateNoteDocumentRequest, CreateNoteDocumentResult, DeleteNoteDocumentResult, NoteDocument,
+    NotesFileIndex, ResolveNoteDocumentLinkResult, create_note_document as create_file_note,
+    delete_note_document as delete_file_note, init_notes as init_file_notes,
+    read_note_document as read_file_note,
     resolve_note_document_link as resolve_file_note_link,
     search_note_documents_scoped as search_file_notes,
 };
@@ -6302,6 +6303,15 @@ async fn create_note_document(
 ) -> Result<CreateNoteDocumentResult, String> {
     tauri::async_runtime::spawn_blocking(move || {
         create_file_note(request).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn delete_note_document(path: String) -> Result<DeleteNoteDocumentResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        delete_file_note(Path::new(&path)).map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -13186,6 +13196,7 @@ pub fn run() {
             get_note_document,
             resolve_note_document_link,
             create_note_document,
+            delete_note_document,
             open_local_path,
             open_external_resource,
             list_config_sources,

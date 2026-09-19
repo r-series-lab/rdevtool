@@ -278,8 +278,17 @@ export const EN_PROJECT_RUNTIME_MESSAGES: Record<string, string> = {
   "选择启动档案": "Choose Launch Profile",
   "选择 {name} 启动档案": "Choose a Launch Profile for {name}",
   "选择已失效": "Selection Invalid",
+  "环境模板缺失": "Environment Template Missing",
+  "修复绑定": "Fix Binding",
+  "当前启动档案引用的共享环境不存在，请重新选择环境模板后再启动。":
+    "The current launch profile references a missing shared environment. Choose another environment template before starting.",
   "自动识别": "Auto Detect",
   "工作区覆盖": "Workspace Override",
+  "绑定档案": "Bound Profiles",
+  "{count} 个启动档案": "{count} launch profiles",
+  "还有 {count} 个": "{count} more",
+  "暂无项目启动档案绑定此环境模板":
+    "No project launch profiles are bound to this environment template",
   "副本": "Copy",
   "绑定": "Bound",
   "开": "On",

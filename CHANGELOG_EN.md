@@ -6,6 +6,19 @@
 
 - No unreleased changes.
 
+## 0.1.6
+
+Configuration-chain clarity and release stability improvements.
+
+### Added and improved
+
+- Project launch profiles and shared runtime environments now show effective configuration previews, bindings, and missing-configuration notices so the selected profile's actual runtime behavior is easier to understand.
+- Runtime configuration panels now show profile usage counts, project binding state, and the source of launch parameters.
+
+### Fixed
+
+- Relaxed the transient startup wait in the external-process runtime test so a slow cold start on GitHub-hosted runners does not produce a false release-gate failure.
+
 ## 0.1.5
 
 The first user-facing Public Preview. It aligns the application, source Tag, and package version while completing configuration transfer, open-source governance, and release safety gates.

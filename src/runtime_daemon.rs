@@ -2263,7 +2263,10 @@ mod tests {
             if let Some(identity) = listening_process(port).unwrap() {
                 break identity;
             }
-            assert!(started.elapsed() < Duration::from_secs(5));
+            // Python startup can be noticeably slower on a cold GitHub Runner.
+            // Keep this as a bounded readiness wait without making the test
+            // fail merely because the runner is under transient load.
+            assert!(started.elapsed() < Duration::from_secs(15));
             thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(identity.pid, external_pid);

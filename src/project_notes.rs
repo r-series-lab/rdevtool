@@ -119,6 +119,14 @@ pub struct CreateNoteDocumentResult {
     pub document: NoteDocument,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteNoteDocumentResult {
+    pub deleted: bool,
+    pub path: PathBuf,
+    pub relative_path: PathBuf,
+}
+
 pub fn notes_info() -> NotesInfo {
     notes_info_in(&default_config_dir())
 }
@@ -167,6 +175,10 @@ pub fn create_note_document(
     request: CreateNoteDocumentRequest,
 ) -> Result<CreateNoteDocumentResult> {
     create_note_document_in(&default_config_dir(), request)
+}
+
+pub fn delete_note_document(path: &Path) -> Result<DeleteNoteDocumentResult> {
+    delete_note_document_in(&default_config_dir(), path)
 }
 
 fn notes_info_in(config_dir: &Path) -> NotesInfo {
@@ -506,6 +518,26 @@ fn create_note_document_in(
     Ok(CreateNoteDocumentResult {
         created: true,
         document: read_note_document_in(config_dir, &path)?,
+    })
+}
+
+fn delete_note_document_in(config_dir: &Path, path: &Path) -> Result<DeleteNoteDocumentResult> {
+    let info = notes_info_in(config_dir);
+    let (canonical_path, relative_path) = resolve_note_document_path(&info.notes_dir, path)?;
+    if relative_path == Path::new(NOTES_INDEX) {
+        bail!("the knowledge root index cannot be deleted");
+    }
+    let metadata = fs::symlink_metadata(&canonical_path)
+        .with_context(|| format!("failed to inspect note: {}", canonical_path.display()))?;
+    if !metadata.is_file() {
+        bail!("note path is not a file: {}", canonical_path.display());
+    }
+    fs::remove_file(&canonical_path)
+        .with_context(|| format!("failed to delete note: {}", canonical_path.display()))?;
+    Ok(DeleteNoteDocumentResult {
+        deleted: true,
+        path: canonical_path,
+        relative_path,
     })
 }
 
@@ -970,14 +1002,14 @@ fn project_notes_index(project_key: &str, project_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path};
 
     use uuid::Uuid;
 
     use super::{
-        CreateNoteDocumentRequest, create_note_document_in, init_notes_in, init_project_notes_in,
-        project_notes_info_in, read_note_document_in, resolve_note_document_link_in,
-        search_note_documents_in, search_note_documents_scoped_in,
+        CreateNoteDocumentRequest, create_note_document_in, delete_note_document_in, init_notes_in,
+        init_project_notes_in, project_notes_info_in, read_note_document_in,
+        resolve_note_document_link_in, search_note_documents_in, search_note_documents_scoped_in,
     };
 
     fn test_root() -> std::path::PathBuf {
@@ -1194,6 +1226,40 @@ mod tests {
         fs::write(&outside, "# Outside").expect("write outside note");
         let error = read_note_document_in(&root, &outside).expect_err("reject outside note");
         assert!(error.to_string().contains("outside the knowledge root"));
+        fs::remove_dir_all(&root).expect("cleanup");
+    }
+
+    #[test]
+    fn deletes_markdown_notes_only_inside_the_knowledge_root() {
+        let root = test_root();
+        let info = init_notes_in(&root).expect("initialize notes").info;
+        let note = info.inbox_dir.join("obsolete.md");
+        fs::write(&note, "# Obsolete").expect("write note");
+
+        let result = delete_note_document_in(&root, &note).expect("delete note");
+        assert!(result.deleted);
+        assert_eq!(result.relative_path, Path::new("inbox/obsolete.md"));
+        assert!(!note.exists());
+
+        let outside = root.join("outside.md");
+        fs::write(&outside, "# Outside").expect("write outside note");
+        let outside_error =
+            delete_note_document_in(&root, &outside).expect_err("reject deleting outside note");
+        assert!(
+            outside_error
+                .to_string()
+                .contains("outside the knowledge root")
+        );
+        assert!(outside.exists());
+
+        let root_index_error =
+            delete_note_document_in(&root, &info.index_path).expect_err("protect root index");
+        assert!(
+            root_index_error
+                .to_string()
+                .contains("root index cannot be deleted")
+        );
+        assert!(info.index_path.exists());
         fs::remove_dir_all(&root).expect("cleanup");
     }
 

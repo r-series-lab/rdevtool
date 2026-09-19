@@ -2590,7 +2590,8 @@ mod tests {
         let profile = ProxyProfile {
             id: "diagnosis".to_string(),
             name: "Local API".to_string(),
-            listen_port: 0,
+            listen_host: "rdevtool-proxy-test.invalid".to_string(),
+            listen_port: 8787,
             ..ProxyProfile::default()
         };
         let config = ProxyConfig {

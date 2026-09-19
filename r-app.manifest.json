@@ -474,7 +474,7 @@
             "description": "First-time setup, every main page, workspaces and projects, builds, branches, Actions, proxies, knowledge, diagnostics, Records, and troubleshooting.",
             "group": "User guide",
             "source": "docs/interface-guide_EN.md",
-            "reviewedForVersion": "0.1.5"
+            "reviewedForVersion": "0.1.6"
           },
           {
             "id": "workspace",
@@ -482,7 +482,7 @@
             "description": "The Workspace home, global and requirement scopes, configuration dialog, project instances, scope selection, and workspace-owned resources.",
             "group": "User guide",
             "source": "docs/workspace-guide_EN.md",
-            "reviewedForVersion": "0.1.5"
+            "reviewedForVersion": "0.1.6"
           },
           {
             "id": "resources",
@@ -490,7 +490,7 @@
             "description": "Websites, folders, files, applications, scripts, Link, Action, Workflow, web actions, Runtime, and the connection to Runtime Panel.",
             "group": "User guide",
             "source": "docs/resource-guide_EN.md",
-            "reviewedForVersion": "0.1.5"
+            "reviewedForVersion": "0.1.6"
           },
           {
             "id": "proxy",
@@ -498,7 +498,7 @@
             "description": "Proxy profiles, rule matching, Forward/Mock/Block behavior, request history, diagnosis, import/export, and CLI operations.",
             "group": "User guide",
             "source": "docs/proxy-guide_EN.md",
-            "reviewedForVersion": "0.1.5"
+            "reviewedForVersion": "0.1.6"
           },
           {
             "id": "activity",
@@ -506,7 +506,7 @@
             "description": "Live resources, activity records, attention queue, execution groups, diagnostics, status sync, guarded retry, and CLI evidence.",
             "group": "User guides",
             "source": "docs/activity-guide_EN.md",
-            "reviewedForVersion": "0.1.5"
+            "reviewedForVersion": "0.1.6"
           },
           {
             "id": "overview",
@@ -514,7 +514,7 @@
             "description": "Understand where rDevTool fits, its main work areas, installation, data boundaries, and common entry points.",
             "group": "Getting started",
             "source": "README_EN.md",
-            "reviewedForVersion": "0.1.5"
+            "reviewedForVersion": "0.1.6"
           },
           {
             "id": "configuration-packs",
@@ -522,7 +522,7 @@
             "description": "Move project, workspace, and resource configuration with .rdtpack planning, validation, transaction backups, and rollback.",
             "group": "User guide",
             "source": "docs/configuration-packs_EN.md",
-            "reviewedForVersion": "0.1.5"
+            "reviewedForVersion": "0.1.6"
           },
           {
             "id": "changelog",
@@ -530,7 +530,7 @@
             "description": "See important features, fixes, and usage changes in each version.",
             "group": "What's new",
             "source": "CHANGELOG_EN.md",
-            "reviewedForVersion": "0.1.5"
+            "reviewedForVersion": "0.1.6"
           }
         ]
       }

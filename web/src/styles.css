@@ -8327,6 +8327,11 @@ body::-webkit-scrollbar-corner,
   font-size: 1rem;
 }
 
+.knowledge-menu-item.MuiMenuItem-root.is-danger:not(.Mui-disabled),
+.knowledge-menu-item.MuiMenuItem-root.is-danger:not(.Mui-disabled) > svg {
+  color: var(--danger);
+}
+
 :root[data-style="mono"] .knowledge-reader,
 :root[data-style="mono"] .knowledge-document-item {
   border-color: rgba(126, 145, 169, 0.2);
@@ -9690,6 +9695,91 @@ body::-webkit-scrollbar-corner,
   padding: 8px;
   border-radius: 10px;
   background: rgba(255, 255, 255, 0.26);
+}
+
+.settings-launch-summary {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 13px;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, #ffffff 10%, transparent), transparent 52%),
+    color-mix(in srgb, var(--side-pane-control) 42%, transparent);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, #ffffff 18%, transparent);
+}
+
+.settings-launch-summary-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+}
+
+.settings-launch-summary-head > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.settings-launch-summary-head .MuiTypography-subtitle2 {
+  color: var(--text);
+  font-weight: 900;
+}
+
+.settings-launch-summary-head .MuiTypography-caption,
+.settings-launch-summary-item > .MuiTypography-caption {
+  color: var(--muted);
+  font-weight: 760;
+}
+
+.settings-launch-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.settings-launch-summary-item {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid color-mix(in srgb, var(--line-soft) 82%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--panel-strong) 44%, transparent);
+}
+
+.settings-launch-summary-item.is-warning {
+  border-color: color-mix(in srgb, #e0a100 58%, var(--line-soft));
+  background: color-mix(in srgb, #e0a100 8%, var(--panel-strong));
+}
+
+.settings-launch-summary-item > .MuiTypography-body2 {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: 850;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-launch-summary .MuiAlert-root {
+  align-items: center;
+  padding-block: 4px;
+}
+
+.settings-launch-summary .MuiAlert-message {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 760;
+  line-height: 1.4;
+}
+
+.settings-launch-summary .MuiAlert-action {
+  align-items: center;
+  padding-top: 0;
+  padding-bottom: 0;
 }
 
 .settings-compact-block {
@@ -23978,6 +24068,10 @@ body::-webkit-scrollbar-corner,
   .settings-project-toolbar,
   .settings-finder-toolbar {
     grid-template-columns: 1fr;
+  }
+
+  .settings-launch-summary-grid {
+    grid-template-columns: 1fr 1fr;
   }
 
   .settings-path-field {

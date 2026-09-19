@@ -3441,6 +3441,14 @@ mockIPC(
           },
         };
       }
+      case "delete_note_document": {
+        const path = String(args?.path ?? "");
+        return {
+          deleted: true,
+          path,
+          relativePath: path.replace("/mock/notes/", ""),
+        };
+      }
       case "get_doctor_snapshot": {
         smokeDoctorCheckCount += 1;
         const rechecked = smokeDoctorCheckCount > 1;
