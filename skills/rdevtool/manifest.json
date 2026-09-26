@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
-  "skillVersion": "0.1.6",
-  "generatedForVersion": "0.1.6",
+  "skillVersion": "0.1.7",
+  "generatedForVersion": "0.1.7",
   "requiredFeatures": [
     "workspace-context",
     "workspace-init-demand",

@@ -6,6 +6,15 @@
 
 - No unreleased changes.
 
+## 0.1.7
+
+Public Preview preparation update refreshing interface documentation screenshots, knowledge-library layout, and configuration-dialog regression coverage.
+
+### Changed
+
+- Refreshed public interface screenshots and website documentation assets generated from real components and test data.
+- Improved narrow knowledge-library layout and browser regression stability for configuration dialogs.
+
 ## 0.1.6
 
 Configuration-chain clarity and release stability improvements.
