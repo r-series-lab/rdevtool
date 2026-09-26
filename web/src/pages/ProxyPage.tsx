@@ -65,6 +65,7 @@ import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import { AppEmptyState } from "../components/AppEmptyState";
 import { AppListEndState } from "../components/AppListEndState";
 import { AppToast } from "../components/AppToast";
+import { ConfigDialogShell } from "../components/ConfigDialogShell";
 import { ConfigSourceManagerDialog } from "../components/ConfigSourceManagerDialog";
 import { ConfigSourceBar } from "../components/ConfigSourceBar";
 import {
@@ -1203,7 +1204,7 @@ export function ProxyPage({
       />
 
       <WorkspacePageToolbar
-        className="proxy-overview-toolbar"
+        className="finder-toolbar proxy-overview-toolbar"
         ariaLabel={t("本地代理概览与配置")}
         metrics={[
           {
@@ -1247,7 +1248,6 @@ export function ProxyPage({
         actions={
           <>
             <WorkspacePageToolbarAction
-              className="proxy-overview-action"
               startIcon={<WebsiteIcon fontSize="small" />}
               aria-label={t("请求记录")}
               title={t("请求记录")}
@@ -1257,7 +1257,6 @@ export function ProxyPage({
               {t("请求记录")}
             </WorkspacePageToolbarAction>
             <WorkspacePageToolbarAction
-              className="proxy-overview-action"
               startIcon={<SettingsIcon fontSize="small" />}
               aria-label={t("代理配置")}
               title={t("代理配置")}
@@ -2158,74 +2157,45 @@ function ProxyConfigDialog({
   const canExportSelected = Boolean(selectedProfile && !draftIsUnsaved);
 
   return (
-    <Dialog
+    <ConfigDialogShell
       open={open}
       onClose={onClose}
       maxWidth={false}
-      fullWidth
       className="proxy-config-dialog proxy-config-manager-dialog"
+      title={t("代理配置")}
+      subtitle={t("管理本地代理服务、默认转发和代理包。")}
+      titleIcon={<SettingsIcon fontSize="small" />}
+      headerActions={
+        <>
+          <Button
+            variant="contained"
+            startIcon={<PlusIcon fontSize="small" />}
+            disabled={busyDisabled}
+            onClick={onCreateProfile}
+          >
+            {t("新建服务")}
+          </Button>
+          <Button
+            variant="outlined"
+            color="inherit"
+            startIcon={<UploadIcon fontSize="small" />}
+            disabled={busyDisabled}
+            onClick={onImport}
+          >
+            {t("导入")}
+          </Button>
+          <Button
+            variant="outlined"
+            color="inherit"
+            startIcon={<DownloadIcon fontSize="small" />}
+            disabled={!canExportSelected || busyDisabled}
+            onClick={onExport}
+          >
+            {t("导出选中")}
+          </Button>
+        </>
+      }
     >
-      <DialogTitle>
-        <Stack
-          className="proxy-config-manager-title"
-          direction="row"
-          alignItems="center"
-          justifyContent="space-between"
-          spacing={1.2}
-        >
-          <Stack direction="row" alignItems="center" spacing={1} minWidth={0}>
-            <span className="proxy-config-manager-icon" aria-hidden="true">
-              <SettingsIcon fontSize="small" />
-            </span>
-            <Box minWidth={0}>
-              <Typography variant="h6" noWrap>
-                {t("代理配置")}
-              </Typography>
-              <Typography variant="body2" color="text.secondary" noWrap>
-                {t("管理本地代理服务、默认转发和代理包。")}
-              </Typography>
-            </Box>
-          </Stack>
-          <Stack className="proxy-config-manager-actions" direction="row" spacing={0.7} alignItems="center">
-            <Button
-              variant="contained"
-              startIcon={<PlusIcon fontSize="small" />}
-              disabled={busyDisabled}
-              onClick={onCreateProfile}
-            >
-              {t("新建服务")}
-            </Button>
-            <Button
-              variant="outlined"
-              color="inherit"
-              startIcon={<UploadIcon fontSize="small" />}
-              disabled={busyDisabled}
-              onClick={onImport}
-            >
-              {t("导入")}
-            </Button>
-            <Button
-              variant="outlined"
-              color="inherit"
-              startIcon={<DownloadIcon fontSize="small" />}
-              disabled={!canExportSelected || busyDisabled}
-              onClick={onExport}
-            >
-              {t("导出选中")}
-            </Button>
-            <Tooltip title={t("关闭")}>
-              <IconButton
-                className="proxy-config-manager-close"
-                aria-label={t("关闭代理配置")}
-                onClick={onClose}
-              >
-                <ClearIcon fontSize="small" />
-              </IconButton>
-            </Tooltip>
-          </Stack>
-        </Stack>
-      </DialogTitle>
-      <DialogContent className="proxy-config-manager-content-root">
         {configSources.length > 0 ? (
           <Box className="proxy-config-source-bar">
             <ConfigSourceBar
@@ -2424,8 +2394,7 @@ function ProxyConfigDialog({
             )}
           </Box>
         </Box>
-      </DialogContent>
-    </Dialog>
+    </ConfigDialogShell>
   );
 }
 
@@ -2651,9 +2620,28 @@ function RuleDialog({
   const forwardAction = draft?.action.kind === "forward" ? draft.action : null;
 
   return (
-    <Dialog open={open} onClose={onClose} maxWidth="md" fullWidth className="proxy-config-dialog proxy-rule-dialog">
-      <DialogTitle>{draft?.name ? t("规则配置") : t("新建规则")}</DialogTitle>
-      <DialogContent dividers>
+    <ConfigDialogShell
+      open={open}
+      onClose={onClose}
+      maxWidth="md"
+      className="proxy-config-dialog proxy-rule-dialog"
+      title={draft?.name ? t("规则配置") : t("新建规则")}
+      subtitle={t("匹配请求并决定转发、Mock 或阻断行为。")}
+      actions={
+        <>
+          {onDelete ? (
+            <Button color="error" startIcon={<TrashIcon fontSize="small" />} onClick={onDelete}>
+              {t("删除")}
+            </Button>
+          ) : null}
+          <Box sx={{ flex: 1 }} />
+          <Button color="inherit" onClick={onClose}>{t("取消")}</Button>
+          <Button variant="contained" onClick={onSave} disabled={Boolean(busy)}>
+            {t("保存规则")}
+          </Button>
+        </>
+      }
+    >
         {error ? <Alert severity="warning" sx={{ mb: 1 }}>{error}</Alert> : null}
         {draft ? (
           <Stack spacing={0.85} minWidth={0}>
@@ -2929,20 +2917,7 @@ function RuleDialog({
             ) : null}
           </Stack>
         ) : null}
-      </DialogContent>
-      <DialogActions>
-        {onDelete ? (
-          <Button color="error" startIcon={<TrashIcon fontSize="small" />} onClick={onDelete}>
-            {t("删除")}
-          </Button>
-        ) : null}
-        <Box sx={{ flex: 1 }} />
-        <Button color="inherit" onClick={onClose}>{t("取消")}</Button>
-        <Button variant="contained" onClick={onSave} disabled={Boolean(busy)}>
-          {t("保存规则")}
-        </Button>
-      </DialogActions>
-    </Dialog>
+    </ConfigDialogShell>
   );
 }
 

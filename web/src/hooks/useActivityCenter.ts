@@ -24,7 +24,6 @@ import {
 import { disposeTauriListener } from "../lib/tauriEvents";
 import {
   BUILD_STATUS_SYNC_MAX_FAILURES,
-  activityRequiresAttention,
   createActivityEntry,
   enrichBranchActivityFailureDetails,
   isBuildActivityKind,
@@ -471,30 +470,6 @@ export function useActivityCenter({
           }),
       ),
     [allItems, configActivityVisibility, includeAllProjects, projectKeySet],
-  );
-
-  const stats = useMemo(
-    () => ({
-      attention: scopedItems.filter(activityRequiresAttention).length,
-      running: scopedItems.filter(
-        (item) => item.status === "running" && !isBuildStatusSyncNotice(item),
-      ).length,
-      failed: scopedItems.filter(
-        (item) =>
-          item.status === "failed" &&
-          !item.acknowledgedAt &&
-          !isBuildStatusSyncNotice(item),
-      ).length,
-      handled: scopedItems.filter(
-        (item) =>
-          item.status === "failed" &&
-          item.acknowledgedAt &&
-          !isBuildStatusSyncNotice(item),
-      ).length,
-      success: scopedItems.filter((item) => item.status === "success").length,
-      total: scopedItems.length,
-    }),
-    [scopedItems],
   );
 
   const enqueueStorageOperation = useCallback((operation: () => Promise<void>) => {
@@ -983,7 +958,6 @@ export function useActivityCenter({
   return {
     items: scopedItems,
     allItems,
-    stats,
     recordActivity,
     updateActivity,
     syncActivities,

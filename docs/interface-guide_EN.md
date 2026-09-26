@@ -181,13 +181,13 @@ Open project-specific start, build, and branch settings from **Project Managemen
 The top-right **Running & Activity** view combines Actions, builds, Git, runtimes, proxies, Links, and external configuration changes. The **Record** section inside a task page is better for reviewing history of one operation type.
 
 - Read the title, timestamp, and outer status first, then inspect project rows or the parameter summary.
-- Use **All / Attention / Success / Failed** and **All origins / App / CLI / Tray** to narrow the view; the current activity center has no standalone keyword search or favorites filter.
+- Use **All / Success / Failed** and **All origins / App / CLI / Tray** to narrow the view; the current activity center has no standalone keyword search or favorites filter.
 - The Running view groups current-workspace, other-workspace, and shared services, with log, directory, port diagnosis, adopt, focus, and stop actions where available.
 - Expand details for parameters, execution or chain timelines, diagnostics, per-project outcomes, and result links.
-- Refresh reads running or build status again; cleanup only removes handled records and keeps attention and running items.
+- Refresh reads running or build status again; cleanup only removes handled records and keeps actionable and running items.
 - Retry revalidates the current configuration and target. Do not assume historical parameters are still valid.
 
-For the complete behavior of live resources, the attention queue, activity cards, evidence boundaries, and CLI counterparts, continue with [Running And Activity](activity-guide_EN.md).
+For the complete behavior of live resources, activity cards, evidence boundaries, and CLI counterparts, continue with [Running And Activity](activity-guide_EN.md).
 
 ### Build Page And Build Record
 

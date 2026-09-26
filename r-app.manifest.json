@@ -133,6 +133,16 @@
         "documentId": "interface-guide"
       },
       {
+        "id": "project-config-panel",
+        "source": "docs/assets/screenshots/project-config-panel.png",
+        "alt": "项目配置弹窗",
+        "caption": "项目配置弹窗以左侧检索列表和右侧当前项目编辑区组织启动、构建与分支配置。",
+        "title": "项目配置",
+        "description": "从项目列表进入配置弹窗，检索项目并核对当前项目、配置源和固定底部操作栏。",
+        "highlights": ["未指定项目时默认选中第一个", "左侧列表独立检索和滚动", "右侧内容区保留当前项目标识"],
+        "documentId": "interface-guide"
+      },
+      {
         "id": "project-runtime-panel",
         "source": "docs/assets/screenshots/project-runtime-panel.png",
         "alt": "项目运行面板的概览、预检和运行上下文",
@@ -145,11 +155,11 @@
       {
         "id": "activity-center",
         "source": "docs/assets/screenshots/activity-center-pagination-preview.jpeg",
-        "alt": "运行与活动侧栏展示待处理队列、活动记录和分页",
-        "caption": "运行与活动侧栏把待处理队列、运行状态和跨页面操作记录集中到一个可处理的入口。",
+        "alt": "运行与活动侧栏展示运行状态、活动记录和分页",
+        "caption": "运行与活动侧栏把运行状态和跨页面操作记录集中到一个可处理的入口。",
         "title": "运行与活动",
         "description": "从运行中视图检查项目服务、代理和 Action，再从活动记录展开执行组、诊断失败并安全重试。",
-        "highlights": ["区分当前、其他工作区和共享服务", "按待办、结果和来源筛选活动", "展开时间线并保留结果证据"],
+        "highlights": ["区分当前、其他工作区和共享服务", "按结果和来源筛选活动", "展开时间线并保留结果证据"],
         "documentId": "activity"
       },
       {
@@ -211,6 +221,16 @@
         "description": "把已验证的启动方式、环境约定和故障处理沉淀成长期可读的项目知识。",
         "highlights": ["按项目或知识范围过滤", "正文支持 Markdown 预览与链接跳转", "适合保存排障步骤，不保存凭据"],
         "documentId": "interface-guide"
+      },
+      {
+        "id": "config-source-manager",
+        "source": "docs/assets/screenshots/config-source-manager.png",
+        "alt": "配置源管理弹窗",
+        "caption": "配置源管理弹窗以左侧来源列表和右侧能力、文件及比较结果组织多来源配置。",
+        "title": "配置源管理",
+        "description": "浏览、比较和复制默认配置、工作区配置与自定义目录，不直接改写原来源。",
+        "highlights": ["查看来源名称和路径", "比较资源、Link、代理和 Runtime 能力", "复制后生成新的自定义来源"],
+        "documentId": "interface-guide"
       }
     ]
   },
@@ -253,7 +273,7 @@
     {
       "id": "activity",
       "label": "运行与活动",
-      "description": "运行中资源、活动记录、待处理队列、执行组、诊断、状态同步、安全重试和 CLI 证据对照。",
+      "description": "运行中资源、活动记录、执行组、诊断、状态同步、安全重试和 CLI 证据对照。",
       "group": "使用指南",
       "source": "docs/activity-guide.md"
     },
@@ -396,13 +416,23 @@
               "documentId": "interface-guide"
             },
             {
+              "id": "project-config-panel",
+              "source": "docs/assets/screenshots/project-config-panel.png",
+              "alt": "Project Configuration dialog",
+              "caption": "Project Configuration combines a searchable project list with the current project's launch, build, and branch settings.",
+              "title": "Project Configuration",
+              "description": "Find a project, confirm its active source, and edit the current project without losing the fixed bottom action bar.",
+              "highlights": ["Fallback to the first project when none is specified", "Search and scroll the left list independently", "Keep the current project visible in the editor header"],
+              "documentId": "interface-guide"
+            },
+            {
               "id": "activity-center",
               "source": "docs/assets/screenshots/activity-center-pagination-preview.jpeg",
-              "alt": "Running and Activity side panel with attention queue, records, and pagination",
-              "caption": "Running & Activity brings the attention queue, live resources, and cross-page records into one actionable side panel.",
+              "alt": "Running and Activity side panel with live resources, records, and pagination",
+              "caption": "Running & Activity brings live resources and cross-page records into one actionable side panel.",
               "title": "Running And Activity",
               "description": "Use Running for project services, proxies, and Actions, then expand Activity records for execution groups, diagnostics, and guarded retry.",
-              "highlights": ["Separate current, other-workspace, and shared services", "Filter activity by attention, result, and origin", "Expand timelines and keep result evidence"],
+              "highlights": ["Separate current, other-workspace, and shared services", "Filter activity by result and origin", "Expand timelines and keep result evidence"],
               "documentId": "activity"
             },
             {
@@ -464,6 +494,16 @@
               "description": "Store verified launch instructions, environment conventions, and troubleshooting notes as long-lived project knowledge.",
               "highlights": ["Filter by project or knowledge scope", "Preview Markdown and follow note links", "Keep troubleshooting steps here, not credentials"],
               "documentId": "interface-guide"
+            },
+            {
+              "id": "config-source-manager",
+              "source": "docs/assets/screenshots/config-source-manager.png",
+              "alt": "Configuration Sources dialog",
+              "caption": "Configuration Sources uses a source list on the left and capabilities, files, and comparison results on the right.",
+              "title": "Configuration Sources",
+              "description": "Browse, compare, and copy default, workspace, and custom configuration sources without changing the originals.",
+              "highlights": ["Confirm source name and path", "Compare resource, Link, proxy, and Runtime capabilities", "Copy into a new custom source"],
+              "documentId": "interface-guide"
             }
           ]
         },
@@ -503,7 +543,7 @@
           {
             "id": "activity",
             "label": "Running And Activity",
-            "description": "Live resources, activity records, attention queue, execution groups, diagnostics, status sync, guarded retry, and CLI evidence.",
+            "description": "Live resources, activity records, execution groups, diagnostics, status sync, guarded retry, and CLI evidence.",
             "group": "User guides",
             "source": "docs/activity-guide_EN.md",
             "reviewedForVersion": "0.1.6"

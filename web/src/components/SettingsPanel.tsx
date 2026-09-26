@@ -78,9 +78,11 @@ import {
   FolderIcon,
   OpenExternalIcon,
   RefreshIcon,
+  SearchIcon,
   TrashIcon,
 } from "./AppIcons";
 import { AppEmptyState } from "./AppEmptyState";
+import { ConfigDialogShell } from "./ConfigDialogShell";
 import { AppToast } from "./AppToast";
 import { ConfigSourceBar } from "./ConfigSourceBar";
 import { ConfigSourceManagerDialog } from "./ConfigSourceManagerDialog";
@@ -698,6 +700,7 @@ export function SettingsPanel({
   const [editorState, setEditorState] = useState<ProjectConfigEditorState | null>(null);
   const [navigationEditor, setNavigationEditor] = useState<NavigationEditorState | null>(null);
   const [selectedKey, setSelectedKey] = useState(selectedProjectKey);
+  const [projectQuery, setProjectQuery] = useState("");
   const [dirtyKeys, setDirtyKeys] = useState<Set<string>>(() => new Set());
   const [dirtyDeployProjectKeys, setDirtyDeployProjectKeys] = useState<Set<string>>(
     () => new Set(),
@@ -1268,10 +1271,23 @@ export function SettingsPanel({
   }, []);
 
   useEffect(() => {
-    if (!editorState || selectedKey) {
+    if (!editorState) {
       return;
     }
-    setSelectedKey(selectedProjectKey || editorState.projects[0]?.key || "");
+
+    // The panel can be reopened without a project key, or with the key from a
+    // previous context. Always recover to a valid project, preferring the
+    // caller's key and then the first loaded project.
+    const preferredKey =
+      (selectedProjectKey &&
+        editorState.projects.some((project) => project.key === selectedProjectKey) &&
+        selectedProjectKey) ||
+      editorState.projects[0]?.key ||
+      "";
+
+    if (!editorState.projects.some((project) => project.key === selectedKey)) {
+      setSelectedKey(preferredKey);
+    }
   }, [editorState, selectedKey, selectedProjectKey]);
 
   useEffect(() => {
@@ -1326,60 +1342,7 @@ export function SettingsPanel({
     };
   }, []);
 
-  useEffect(() => {
-    function handleKeyDown(event: KeyboardEvent) {
-      if (
-        event.key === "Tab" &&
-        !runtimeConfigSourceManagerOpen &&
-        !confirmState
-      ) {
-        const focusable = Array.from(
-          panelRef.current?.querySelectorAll<HTMLElement>(
-            'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-          ) ?? [],
-        ).filter((element) => !element.hasAttribute("hidden"));
-        const first = focusable[0];
-        const last = focusable[focusable.length - 1];
-        if (!first || !last) {
-          event.preventDefault();
-          panelRef.current?.focus();
-          return;
-        }
-        if (event.shiftKey && document.activeElement === first) {
-          event.preventDefault();
-          last.focus();
-        } else if (!event.shiftKey && document.activeElement === last) {
-          event.preventDefault();
-          first.focus();
-        }
-        return;
-      }
-      if (event.key === "Escape") {
-        if (runtimeConfigSourceManagerOpen) {
-          return;
-        }
-        if (confirmState) {
-          setConfirmState(null);
-          return;
-        }
-        requestClose();
-      }
-    }
-
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [confirmState, hasUnsavedChanges, onClose, runtimeConfigSourceManagerOpen]);
-
   function requestClose() {
-    if (hasUnsavedChanges) {
-      setConfirmState({
-        title: t("关闭设置？"),
-        message: t("当前有未保存的配置修改，关闭后这些修改不会生效。"),
-        confirmLabel: t("关闭"),
-        onConfirm: onClose,
-      });
-      return;
-    }
     onClose();
   }
 
@@ -3265,7 +3228,7 @@ export function SettingsPanel({
               <Typography variant="caption">{t("菜单")}</Typography>
               <Typography variant="caption">{t("未启用的菜单不会展示")}</Typography>
             </div>
-            <div className="settings-list-row settings-list-row--split">
+            <div className="settings-list-row settings-list-row--split settings-list-row--menu">
               <div className="settings-overview-copy">
                 <Typography variant="subtitle2">{t("展示菜单")}</Typography>
                 <Typography variant="caption">{t("至少保留一个工作区菜单。")}</Typography>
@@ -3688,6 +3651,95 @@ export function SettingsPanel({
       default:
         return renderMenuSettingsSection();
     }
+  }
+
+  function renderProjectSidebar() {
+    const projects = editorState?.projects ?? [];
+    const normalizedProjectQuery = projectQuery.trim().toLocaleLowerCase();
+    const visibleProjects = normalizedProjectQuery
+      ? projects.filter((project) =>
+          `${project.name} ${project.key}`.toLocaleLowerCase().includes(normalizedProjectQuery),
+        )
+      : projects;
+    const visibleSelectedKey = selectedProject?.key || selectedKey || projects[0]?.key || "";
+    return (
+      <aside className="settings-project-sidebar" aria-label={t("项目列表")}>
+        <div className="settings-project-sidebar-head">
+          <div>
+            <Typography variant="subtitle2">{t("项目")}</Typography>
+            <Typography variant="caption" color="text.secondary">
+              {t("{count} 个", { count: projects.length })}
+            </Typography>
+          </div>
+          <Tooltip title={t("刷新")}>
+            <span>
+              <IconButton
+                size="small"
+                aria-label={t("刷新项目配置")}
+                onClick={() => void loadProjectConfig(selectedKey)}
+                disabled={loading || saving}
+              >
+                <RefreshIcon fontSize="small" />
+              </IconButton>
+            </span>
+          </Tooltip>
+        </div>
+        <TextField
+          className="settings-project-sidebar-search"
+          size="small"
+          value={projectQuery}
+          placeholder={t("搜索项目名称或 key")}
+          onChange={(event) => setProjectQuery(event.target.value)}
+          InputProps={{
+            startAdornment: (
+              <InputAdornment position="start">
+                <SearchIcon fontSize="small" />
+              </InputAdornment>
+            ),
+            endAdornment: projectQuery ? (
+              <InputAdornment position="end">
+                <IconButton
+                  size="small"
+                  aria-label={t("清除搜索")}
+                  onClick={() => setProjectQuery("")}
+                >
+                  <ClearIcon fontSize="small" />
+                </IconButton>
+              </InputAdornment>
+            ) : undefined,
+          }}
+        />
+        <div className="settings-project-sidebar-list" role="list">
+          {visibleProjects.length > 0 ? (
+            visibleProjects.map((project) => (
+              <button
+                key={project.key}
+                type="button"
+                role="listitem"
+                className={`settings-project-sidebar-item${project.key === visibleSelectedKey ? " is-active" : ""}`}
+                onClick={() => setSelectedKey(project.key)}
+              >
+                <span className="settings-project-sidebar-icon" aria-hidden="true">
+                  <FolderIcon fontSize="small" />
+                </span>
+                <span className="settings-project-sidebar-copy">
+                  <span className="settings-project-sidebar-name">
+                    {project.name || project.key}
+                  </span>
+                  <span className="settings-project-sidebar-key">{project.key}</span>
+                </span>
+              </button>
+            ))
+          ) : (
+            <div className="settings-project-sidebar-empty">
+              <Typography variant="caption" color="text.secondary">
+                {projects.length > 0 ? t("没有匹配项目") : t("暂无项目")}
+              </Typography>
+            </div>
+          )}
+        </div>
+      </aside>
+    );
   }
 
   function renderProjectSelector() {
@@ -5212,7 +5264,6 @@ export function SettingsPanel({
     }
     return (
       <Stack spacing={1.3}>
-        {renderProjectSelector()}
         {renderNewProjectBlock()}
         {renderProjectIdentityBlock()}
         {renderProjectSaveRow(true)}
@@ -5227,7 +5278,6 @@ export function SettingsPanel({
     }
     return (
       <Stack spacing={1.3}>
-        {renderProjectSelector()}
         {renderProjectLocalCommandsBlock()}
         {renderProjectFocusBlock()}
         {renderProjectSaveRow()}
@@ -5246,7 +5296,6 @@ export function SettingsPanel({
         : editorState?.runtimeConfigPath || selectedRuntimeConfigSource?.files.runtimeOverrides;
     return (
       <Stack spacing={1.3}>
-        {renderProjectSelector()}
         {renderProjectLaunchSummary()}
         {runtimeConfigSources.length > 0 ? (
           <Stack spacing={0.55}>
@@ -6002,7 +6051,6 @@ export function SettingsPanel({
             {t("保存默认")}
           </Button>
         </div>
-        {renderProjectSelector()}
         {renderProjectSectionBlock(
           "项目分支规则",
           "留空继承默认规则；当前项目填写后会优先使用项目规则",
@@ -6272,7 +6320,6 @@ export function SettingsPanel({
 
     return (
       <Stack spacing={1.2}>
-        {renderProjectSelector()}
         <div className="settings-save-row">
           <Typography variant="caption">
             {t("{count} 个构建配置", {
@@ -6585,47 +6632,48 @@ export function SettingsPanel({
 
   return createPortal(
     (
-    <div
+    <ConfigDialogShell
+      open
+      onClose={requestClose}
+      maxWidth="lg"
       className={`settings-overlay${surface === "projectManagement" ? " settings-overlay--drawer" : ""}`}
-      role="presentation"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) {
-          requestClose();
-        }
-      }}
+      paperClassName={`settings-panel settings-panel-wide${
+        surface === "projectManagement" ? " settings-panel--project-config" : " settings-panel--global"
+      }`}
+      dirty={hasUnsavedChanges}
+      dirtyLabel="未保存"
+      closeLabel="关闭设置"
+      title={t(surface === "projectManagement" ? "项目配置" : "设置")}
+      subtitle={t(surface === "projectManagement" ? "项目管理" : "应用偏好与行为")}
     >
-      <div
-        ref={panelRef}
-        className={`settings-panel settings-panel-wide${
-          surface === "projectManagement" ? " settings-panel--project-config" : " settings-panel--global"
-        }`}
-        role="dialog"
-        aria-modal="true"
-        tabIndex={-1}
-        aria-label={t(surface === "projectManagement" ? "项目配置" : "设置")}
-        onMouseDown={(event) => event.stopPropagation()}
-      >
-        <div className="settings-panel-head">
-          <div>
-            <Typography variant="subtitle2">
-              {t(surface === "projectManagement" ? "项目配置" : "设置")}
-            </Typography>
-            <Typography variant="caption">
-              {t(surface === "projectManagement" ? "项目管理" : "应用偏好与行为")}
-            </Typography>
-          </div>
-          <button
-            type="button"
-            className="settings-close-button"
-            aria-label={t("关闭设置")}
-            onClick={requestClose}
+      <div className={`settings-panel-body${surface === "projectManagement" ? " settings-panel-body--project" : ""}`}>
+          {surface === "projectManagement" ? renderProjectSidebar() : null}
+          <div className="settings-project-main">
+          {surface === "projectManagement" ? (
+            <div className="settings-project-current-project">
+              <span className="settings-project-current-project-icon" aria-hidden="true">
+                <FolderIcon fontSize="small" />
+              </span>
+              <span className="settings-project-current-project-copy">
+                <Typography className="settings-project-current-project-label" variant="caption">
+                  {t("当前项目")}
+                </Typography>
+                <Typography className="settings-project-current-project-name" variant="subtitle2" noWrap>
+                  {selectedProject?.name || selectedProject?.key || t("未选择项目")}
+                </Typography>
+                {selectedProject?.name && selectedProject.key ? (
+                  <Typography className="settings-project-current-project-key" variant="caption" noWrap>
+                    {selectedProject.key}
+                  </Typography>
+                ) : null}
+              </span>
+            </div>
+          ) : null}
+          <div
+            className={`settings-section-nav${surface === "projectManagement" ? " settings-section-nav--top" : ""}`}
+            role="tablist"
+            aria-label={t("设置分类")}
           >
-            <ClearIcon fontSize="small" />
-          </button>
-        </div>
-
-        <div className="settings-panel-body">
-          <div className="settings-section-nav" role="tablist" aria-label={t("设置分类")}>
             {visibleSectionItems.map((item) => (
               <button
                 key={item.key}
@@ -6688,7 +6736,7 @@ export function SettingsPanel({
               renderGeneralSection()
             )}
           </div>
-        </div>
+          </div>
       </div>
       <ConfigSourceManagerDialog
         open={runtimeConfigSourceManagerOpen}
@@ -6740,7 +6788,7 @@ export function SettingsPanel({
           </div>
         </div>
       ) : null}
-    </div>
+    </ConfigDialogShell>
     ),
     document.body,
   );

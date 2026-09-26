@@ -5,12 +5,15 @@ import {
   DialogActions,
   DialogContent,
   DialogTitle,
+  IconButton,
   Stack,
+  Tooltip,
   Typography,
   type DialogProps,
 } from "@mui/material";
 import { translateNode, useI18n } from "../i18n";
 import { useAppConfirmDialog } from "./AppConfirmDialog";
+import { ClearIcon } from "./AppIcons";
 
 type ConfigDialogShellProps = {
   open: boolean;
@@ -23,6 +26,8 @@ type ConfigDialogShellProps = {
   dirty?: boolean;
   dirtyLabel?: string;
   closeDisabled?: boolean;
+  showClose?: boolean;
+  closeLabel?: string;
   maxWidth?: DialogProps["maxWidth"];
   className?: string;
   paperClassName?: string;
@@ -44,6 +49,8 @@ export function ConfigDialogShell({
   dirty = false,
   dirtyLabel = "未保存",
   closeDisabled = false,
+  showClose = true,
+  closeLabel = "关闭",
   maxWidth = "lg",
   className,
   paperClassName,
@@ -78,14 +85,20 @@ export function ConfigDialogShell({
         onClose={() => void requestClose()}
         fullWidth
         maxWidth={maxWidth}
-        className={className}
-        PaperProps={{ className: paperClassName }}
+        className={`config-dialog-shell ${className ?? ""}`}
+        PaperProps={{ className: `config-dialog-shell-paper ${paperClassName ?? ""}` }}
       >
-        <DialogTitle className={titleClassName}>
-          <Stack direction="row" alignItems="center" justifyContent="space-between" spacing={1}>
+        <DialogTitle className={`config-dialog-shell-title ${titleClassName ?? ""}`}>
+          <Stack
+            className="config-dialog-shell-heading"
+            direction="row"
+            alignItems="flex-start"
+            justifyContent="space-between"
+            spacing={1}
+          >
             <Stack direction="row" spacing={titleIcon ? 1 : 0} alignItems="center" minWidth={0}>
               {titleIcon ? (
-                <span className={titleIconClassName}>{titleIcon}</span>
+                <span className={`config-dialog-shell-title-icon ${titleIconClassName ?? ""}`}>{titleIcon}</span>
               ) : null}
               <Stack spacing={0.1} minWidth={0}>
                 <Typography variant="subtitle1" noWrap>
@@ -98,17 +111,29 @@ export function ConfigDialogShell({
                 ) : null}
               </Stack>
             </Stack>
-            {dirty || headerActions ? (
-              <Stack direction="row" spacing={0.6} alignItems="center" flexShrink={0}>
-                {dirty ? <Chip size="small" color="primary" label={t(dirtyLabel)} /> : null}
-                {headerActions}
-              </Stack>
-            ) : null}
+            <Stack direction="row" spacing={0.6} alignItems="center" flexShrink={0}>
+              {dirty ? <Chip size="small" color="primary" label={t(dirtyLabel)} /> : null}
+              {headerActions}
+              {showClose ? (
+                <Tooltip title={t(closeLabel)}>
+                  <span>
+                    <IconButton
+                      size="small"
+                      aria-label={t(closeLabel)}
+                      disabled={closeDisabled}
+                      onClick={() => void requestClose()}
+                    >
+                      <ClearIcon fontSize="small" />
+                    </IconButton>
+                  </span>
+                </Tooltip>
+              ) : null}
+            </Stack>
           </Stack>
         </DialogTitle>
-        <DialogContent className={contentClassName}>{children}</DialogContent>
+        <DialogContent className={`config-dialog-shell-content ${contentClassName ?? ""}`}>{children}</DialogContent>
         {actions !== undefined ? (
-          <DialogActions className={actionsClassName}>
+          <DialogActions className={`config-dialog-shell-actions ${actionsClassName ?? ""}`}>
             {typeof actions === "function" ? actions(() => void requestClose()) : actions}
           </DialogActions>
         ) : null}

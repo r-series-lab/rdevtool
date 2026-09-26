@@ -62,10 +62,10 @@ describe("i18n", () => {
       "Switch to {page}",
     );
     expect(
-      translateMessage("en-US", "共 {count} 条。忽略后不再提醒，记录仍可在“全部”中查看。", {
+      translateMessage("en-US", "本次 {count} 个请求", {
         count: 3,
       }),
-    ).toContain("3 items");
+    ).toBe("3 requests this session");
   });
 
   it("reports whether a message has an explicit translation", () => {

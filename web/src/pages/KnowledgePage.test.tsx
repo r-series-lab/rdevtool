@@ -15,7 +15,7 @@ describe("KnowledgePage", () => {
 
     expect(html).toContain('data-knowledge-library="markdown"');
     expect(html).toContain("知识库");
-    expect(html).toContain("更多知识范围");
+    expect(html).toContain("知识范围");
     expect(html).toContain("项目");
     expect(html).toContain("搜索标题、正文或路径");
     expect(html).toContain("新建");
@@ -33,11 +33,11 @@ describe("KnowledgePage", () => {
       </I18nProvider>,
     );
 
+    expect(html).toContain("Documents");
+    expect(html).toContain("Projects");
     expect(html).toContain("Knowledge Base");
-    expect(html).toContain("Long-term Markdown knowledge");
-    expect(html).toContain("More Knowledge Scopes");
+    expect(html).toContain("Knowledge Scope");
     expect(html).toContain("Search titles, content, or paths");
     expect(html).toContain("New");
-    expect(html).not.toContain("知识库");
   });
 });

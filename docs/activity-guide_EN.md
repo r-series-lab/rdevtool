@@ -11,11 +11,11 @@ The activity center is a local workbench view for observation and follow-up. It 
 
 ![Running and Activity side panel](assets/screenshots/activity-center-pagination-preview.jpeg)
 
-The screenshot shows the attention queue, activity filters, failed/running states, related-entry actions, and pagination. Counts and record contents vary with the active Workspace and local runtime state.
+The screenshot shows activity filters, failed/running states, related-entry actions, and pagination. Counts and record contents vary with the active Workspace and local runtime state.
 
 ## Open It And Understand Scope
 
-Click the activity icon in the top-right window toolbar. Its number is the count of unresolved items in the current scope; when there are no unresolved items but live resources exist, it shows a live indicator. Click the icon again or use the collapse button to close the panel.
+Click the activity icon in the top-right window toolbar. When live resources exist, it shows a live indicator. Click the icon again or use the collapse button to close the panel.
 
 Activity is recalculated for the active workspace:
 
@@ -63,17 +63,16 @@ Deep diagnosis shows the port, inspection time, listener process, PID, command, 
 
 **Activity Records** keep recent cross-page outcomes. The toolbar provides:
 
-- Mark all failed as handled: removes unresolved reminders without deleting records.
+- Mark all failed as handled: acknowledges failed records without deleting them.
 - Refresh activity state: re-reads Jenkins state for running builds or build status-sync failures.
-- Clear handled records: requires confirmation; removes successful, informational, and acknowledged-failure records while keeping unresolved and running items.
+- Clear handled records: requires confirmation; removes successful, informational, and acknowledged-failure records while keeping actionable and running items.
 - Collapse: closes the panel without changing live resources.
 
 The activity view has two filter rows:
 
 | Filter | Contents |
 | --- | --- |
-| All | Unhandled activity, ordinary history, and the pending queue in the current scope |
-| Attention | Failures or records with a follow-up action |
+| All | All activity records in the current scope, including running, failed, and ordinary history |
 | Success | Terminal successful records |
 | Failed | Explicit failures; build status-sync notices are handled separately |
 | All origins / App / CLI / Tray | Filter by where the activity was created |
@@ -88,7 +87,7 @@ Read a card from top to bottom instead of relying on color alone:
 
 1. **Title and time**: identify the operation and its latest update.
 2. **Kind and origin**: for example runtime, build, Git workflow, local proxy, Link, or configuration, plus App/CLI/Tray.
-3. **Outer status**: Running, Success, Failed, or Info; an actionable entry is shown as Attention.
+3. **Outer status**: Running, Success, Failed, or Info; records with actions expose their action buttons directly.
 4. **Project and summary**: confirm the project, operation summary, build number, or remote queue information.
 5. **Parameter summary**: expand the card to distinguish effective values from defaults; secrets are configured or redacted, never exposed.
 6. **Actions**: open a resource, locate the workspace, inspect diagnostics, retry, or mark the entry handled.
@@ -101,21 +100,7 @@ Read a card from top to bottom instead of relying on color alone:
 
 Expanded timelines mark failure reasons. Build entries can retain a Jenkins queue URL or build URL. A URL is an evidence link, not proof that rDevTool observed the remote terminal success.
 
-## The Attention Queue
-
-The attention queue appears above the activity list when a failure or actionable configuration change needs a decision. It groups entries by project, execution chain, or configuration update so a batch does not create a separate reminder for every related event.
-
-Typical actions are:
-
-- **Reload configuration**: read external workspace, project, or project-workspace changes again.
-- **Compare configuration source**: open a comparison after a source changed, before deciding whether to switch or save.
-- **Check and retry**: run a guarded recovery action for a Link, build, runtime, proxy, or Git failure.
-- **Open linked resource**: open a build link, remote task, or resource URL.
-- **Locate**: return to the workspace, project, or feature page that produced the record.
-- **Mark handled**: keep the record but stop the reminder. Handled does not mean successful.
-- **Ignore all**: requires confirmation and marks the current attention items handled; they remain visible under All.
-
-### Guarded retry
+## Guarded Retry
 
 A retry button appears only when the record carries an explicit recovery action. The confirmation dialog revalidates current configuration:
 
@@ -135,7 +120,7 @@ Do not retry an ambiguous remote POST. First open the remote task, Jenkins, GitL
 | Success | The local operation or remote request returned success | Open the result link when the remote terminal state matters |
 | Failed | A concrete failure was received | Read the reason, diagnostics, and project row before replanning |
 | Info | An informational event or an old running state that can no longer be confirmed | Keep it as context, not as current runtime state |
-| Attention | An unresolved failure or follow-up action exists | Inspect the evidence, then retry or mark handled |
+| Actionable | A record exposes a follow-up action | Inspect the evidence, then run the action or mark the failure handled |
 | Handled | The failure reminder was acknowledged | The record remains until it is cleared |
 
 The activity center follows four evidence layers:
@@ -149,11 +134,11 @@ An idle button, a build URL, or a Success label alone does not prove layer four.
 
 ## Activity Versus Page Records
 
-The activity center answers “what happened recently across modules” and “what needs attention.” A page Record answers “what were the complete parameters and per-project results for this one Build, Git, or Action?”
+The activity center answers “what happened recently across modules.” A page Record answers “what were the complete parameters and per-project results for this one Build, Git, or Action?”
 
 - **Runtime Panel**: launch profile, preflight, runtime config, live logs, and web actions; Activity shows cross-project live resources and the startup outcome.
 - **Build**: build target, default/effective parameters, and repeated build history; Activity shows unified module state and Jenkins synchronization.
-- **Git**: merge, branch creation, commit/push, and worktree results per project; Activity provides failure reminders and guarded replay.
+- **Git**: merge, branch creation, commit/push, and worktree results per project; Activity provides failure details and guarded replay.
 - **Local Proxy**: services, rules, and request details; Activity shows whether the proxy runs, request/error counts, and the latest request.
 - **Resources/Link**: exact steps and parameters; Activity shows whether a Link is in check, start, wait, or stop.
 
@@ -176,7 +161,7 @@ The activity center answers “what happened recently across modules” and “w
 
 ### A batch Git or Action partially failed
 
-1. Open Attention and identify the failure group and project count.
+1. Open Activity Records, switch to Failed, and identify the failure group and project count.
 2. Expand the execution or chain group and read every project's branch, parameters, HTTP status, and diagnostics.
 3. Do not retry successful projects. Use Check and retry only for failures with an explicit recovery action.
 4. Fix 403 permissions, conflicts, protected branches, or worktree blockers before creating a new plan.
@@ -184,9 +169,9 @@ The activity center answers “what happened recently across modules” and “w
 
 ## Local Data, Cleanup, And Safety
 
-Activity is stored in local application storage. The current UI retains up to 60 normalized recent entries and prioritizes unresolved items. At startup, rDevTool reconciles local activity storage with build/merge history and operation-event history; duplicate events are deduplicated, and old unconfirmed running entries are downgraded to informational records.
+Activity is stored in local application storage. The current UI retains up to 60 normalized recent entries and prioritizes actionable items. At startup, rDevTool reconciles local activity storage with build/merge history and operation-event history; duplicate events are deduplicated, and old unconfirmed running entries are downgraded to informational records.
 
-Cleanup only affects clearable records in the visible scope. Running and attention entries remain. Before cleanup, record a redacted summary in Knowledge or the worklog: project key, workspace, operation kind, time, plan/run ID, result URL, commit, error type, and next step. Never put tokens, passwords, cookies, Authorization headers, private keys, or full business responses into activity summaries, shared logs, or screenshots.
+Cleanup only affects clearable records in the visible scope. Running and actionable entries remain. Before cleanup, record a redacted summary in Knowledge or the worklog: project key, workspace, operation kind, time, plan/run ID, result URL, commit, error type, and next step. Never put tokens, passwords, cookies, Authorization headers, private keys, or full business responses into activity summaries, shared logs, or screenshots.
 
 ## CLI Counterpart
 
@@ -206,9 +191,9 @@ rdevtool --json history replay-plan build:<history-key>
 
 | What you see | Where to look first |
 | --- | --- |
-| A red attention count | Activity > Attention; read the reason and recovery action |
+| A failed activity | Activity > Failed; read the reason and recovery action |
 | A live indicator | Running > Current, Other, or Shared |
 | A build URL with unknown state | Open the Jenkins queue/build page; Activity only synchronizes it |
 | A port occupied warning | Running > Deep diagnosis; verify PID and directory ownership |
-| An external configuration change | Attention > Reload or Compare configuration source |
+| An external configuration change | Activity > All; open the record's Reload or Compare action |
 | Too many records | Filter by origin/result, then clear handled records after review |

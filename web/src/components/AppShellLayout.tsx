@@ -71,7 +71,6 @@ type AppShellLayoutProps = {
   onCreateProjectWorkspace: (payload: CreateProjectWorkspacePayload) => Promise<void> | void;
   onProjectConfigSaved: () => Promise<void> | void;
   activityItems: ActivityEntry[];
-  activityAlertCount: number;
   activeSessions: ActiveSession[];
   activeSessionsLoading: boolean;
   activeSessionsError: string;
@@ -152,7 +151,6 @@ export function AppShellLayout({
   onCreateProjectWorkspace,
   onProjectConfigSaved,
   activityItems,
-  activityAlertCount,
   activeSessions,
   activeSessionsLoading,
   activeSessionsError,
@@ -355,11 +353,7 @@ export function AppShellLayout({
           aria-expanded={activityOpen}
         >
           <PanelSideIcon fontSize="small" />
-          {activityAlertCount > 0 ? (
-            <span className="activity-badge">
-              {activityAlertCount > 99 ? "99+" : activityAlertCount}
-            </span>
-          ) : activeSessions.length > 0 ? (
+          {activeSessions.length > 0 ? (
             <span className="activity-live-indicator" aria-hidden="true" />
           ) : null}
         </button>

@@ -219,6 +219,30 @@ async function captureRuntimePanel(browser) {
   await context.close();
 }
 
+async function captureRuntimeConfigPanel(browser) {
+  const { context, page } = await createPage(browser, {
+    query: "style=mono&docsScreenshot=runtime",
+  });
+  await page.getByLabel("项目列表文档截图页面").waitFor();
+  await page.getByRole("button", { name: "示例控制台 更多操作" }).click();
+  await page.getByRole("menuitem", { name: "运行面板", exact: true }).click();
+  await page.locator(".runtime-panel-dialog").waitFor();
+  await page.getByRole("tab", { name: /运行配置/ }).click();
+  await page.getByText("共享运行环境", { exact: true }).waitFor();
+  await page.getByText("解析链", { exact: true }).waitFor();
+  await assertPublicScreenshotIsSanitized(page, "project-runtime-config-panel.png", [
+    "示例控制台",
+    "解析链",
+    "共享运行环境",
+    "UAT3 VKE",
+  ]);
+  await page.waitForTimeout(600);
+  await page.screenshot({
+    path: resolve(outputDir, "project-runtime-config-panel.png"),
+  });
+  await context.close();
+}
+
 async function captureResources(browser) {
   const { context, page } = await createPage(browser, {
     query: "style=mono&docsScreenshot=resources",
@@ -242,7 +266,10 @@ async function captureProxy(browser) {
     query: "style=mono&docsScreenshot=proxy",
   });
   await page.locator('[data-proxy-dashboard="services-rules"]').waitFor();
-  await page.locator(".proxy-overview-action", { hasText: "代理配置" }).waitFor();
+  await page
+    .locator(".proxy-overview-toolbar")
+    .getByRole("button", { name: "代理配置", exact: true })
+    .waitFor();
   await page.getByText("订单查询 Mock", { exact: true }).waitFor();
   await assertPublicScreenshotIsSanitized(page, "local-proxy-rules.png", [
     "代理配置",
@@ -299,6 +326,42 @@ async function captureActivity(browser) {
   await context.close();
 }
 
+async function captureProjectConfig(browser) {
+  const { context, page } = await createPage(browser, {
+    query: "style=mono&docsScreenshot=project-config",
+  });
+  const dialog = page.getByRole("dialog", { name: /项目配置/ });
+  await dialog.waitFor();
+  await page.getByText("基础信息", { exact: true }).waitFor();
+  await page.getByText("Demo", { exact: true }).first().waitFor();
+  await assertPublicScreenshotIsSanitized(page, "project-config-panel.png", [
+    "项目配置",
+    "Demo",
+    "demo",
+    "基础信息",
+  ]);
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: resolve(outputDir, "project-config-panel.png") });
+  await context.close();
+}
+
+async function captureConfigSource(browser) {
+  const { context, page } = await createPage(browser, {
+    query: "style=mono&docsScreenshot=config-source",
+  });
+  const dialog = page.getByRole("dialog", { name: /配置源管理/ });
+  await dialog.waitFor();
+  await page.getByText("默认配置", { exact: true }).first().waitFor();
+  await assertPublicScreenshotIsSanitized(page, "config-source-manager.png", [
+    "配置源管理",
+    "默认配置",
+    "资源入口",
+  ]);
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: resolve(outputDir, "config-source-manager.png") });
+  await context.close();
+}
+
 let browser;
 try {
   await mkdir(outputDir, { recursive: true });
@@ -310,12 +373,15 @@ try {
   await captureAction(browser);
   await captureProjectsList(browser);
   await captureRuntimePanel(browser);
+  await captureRuntimeConfigPanel(browser);
   await captureBuildRecord(browser);
   await captureBranchRecord(browser);
   await captureResources(browser);
   await captureProxy(browser);
   await captureKnowledge(browser);
   await captureActivity(browser);
+  await captureProjectConfig(browser);
+  await captureConfigSource(browser);
   console.log(`Captured documentation screenshots in ${outputDir}`);
 } finally {
   await browser?.close();

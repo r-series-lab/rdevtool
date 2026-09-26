@@ -27,7 +27,7 @@ Open **Project Management > Projects**. Each project row shows environment and p
 1. Confirm the active workspace in the lower-left switcher. A requirement workspace may use a managed project copy, so the project name alone is not enough to identify the actual directory.
 2. Review the row's working directory, command, environment, and profile chips.
 3. Use the play button for a quick start, or choose **More > Choose launch profile** to select the profile explicitly.
-4. In the start dialog, choose **Project default startup** or a named profile and review command, working directory, port, and shared environment.
+4. In the start dialog, choose **Project default startup** or a named profile and review command, working directory, port, and shared environment. The summary tags show the profile's variable count and whether the network and local proxies are enabled.
 5. Choose a quick-start policy: **Confirm only when necessary**, **Ask every time**, or **Start directly**. Keep confirmation for unfamiliar or consequential projects.
 6. Enable **Set as the default profile for this workspace** when later quick starts in this workspace should reuse the selection. This does not change the project's global default.
 7. Wait for startup preflight. A blocking check keeps **Start project** disabled until the issue is fixed and the checks are refreshed.
@@ -55,8 +55,10 @@ Refresh the preflight when a proxy, port, or configuration changes. When a check
 **Runtime Context** separates three kinds of facts:
 
 - **Requested**: project, launch profile, runtime profile, command override, port override, and environment override requested for this call.
-- **Effective**: the merged working directory, command, focus URL, port, Ready probe, and environment after workspace, project, profile, and one-off values are resolved.
-- **Observed**: sessions, PIDs, states, and managed artifacts actually seen by rDevTool.
+- **Effective**: the merged working directory, command, focus URL, port, Ready probe, and environment after workspace, project, profile, and one-off values are resolved. Each row carries a source label such as *Project Launch Profile* or *Workspace Runtime*.
+- **Observed**: daemon sessions actually seen by rDevTool, with runId, PID, phase, and start time.
+
+Risks are listed as warnings or errors inside the context. Expand **Evidence and recommended actions** to see evidence sources and the matching CLI fix commands.
 
 The state area also shows PID, start time, elapsed time, log path, build state, and build output directory. `Running` means a process exists. Ready or HTTP verification is the additional evidence that the access path has completed its configured check.
 
@@ -68,21 +70,30 @@ The state area also shows PID, start time, elapsed time, log path, build state, 
 | Running externally | A process owns the port but rDevTool did not create it | Confirm the PID before taking action |
 | Cannot start | Preflight found a blocker | Fix the reason and run preflight again |
 
-## 4. Runtime Config: inspect and save profiles
+## 4. Runtime Config: resolution chain, effective values, and profiles
 
-Open **Runtime Config** and start with the configuration-source bar and scope labels. Runtime values may come from global configuration, a workspace override, project configuration, or an inherited source. The source label answers “where did this value come from?” After an external TOML edit, refresh or switch sources before saving so an old draft does not overwrite the new file.
+![Runtime Config tab of the runtime panel](assets/screenshots/project-runtime-config-panel.png)
 
-The panel commonly exposes:
+The Runtime Config tab has two cards: **Project launch** decides which values the next start uses, and **Shared runtime environment** manages the Runtime Profile reused by many launch profiles. Key values carry source labels that answer "where did this value come from?".
 
-- **Runtime profile**: the shared Runtime Profile to use.
-- **Browser**: browser type, browser profile, independent user-data directory, and browser arguments.
-- **Network proxy**: Node injection, proxy URL, bypass list, and optional Node hook.
-- **Local proxy**: the rDevTool proxy profile bound to this project; startup can require the proxy to be started first.
-- **Browser debugging**: web-action enablement, controlled CDP port, and web-action user-data directory.
-- **Host resolver rules**: fixed host mapping for a test environment, with care for cross-project effects.
-- **One-off overrides**: temporary command, port, or environment changes without rewriting an existing profile.
+### 4.1 Project launch: pick a profile and preview effective values
 
-Use a one-off override to test a change such as a different port or `API_REGION`. When the result is reusable, click **Save as launch profile** and name it. This creates project-level configuration available from every workspace. The workspace default remains a separate choice made with **Set as the default profile for this workspace** in the start dialog.
+- **Launch profile**: switch between *Project default startup* and each Debug Profile; options annotate variable and local-file counts. Use **Set as Workspace Default** to make the current choice the quick-start default for this workspace only; the project's global default stays unchanged.
+- **Quick-start confirmation**: controls the confirm behavior of the project card and workspace play button: **Confirm only when necessary**, **Ask every time**, or **Start directly**.
+- **Resolution chain**: shows each layer — Workspace → Project base → Launch profile → Shared environment → One-off overrides — and whether it contributed a value. Missing layers show placeholders such as *No launch profile override* or *No shared environment*.
+- **Effective values**: working directory, command, expected port, local files, browser, and proxy rows each carry a source label (for example *Project Launch Profile*, *Workspace Runtime*, *Workspace Instance + Launch Profile*). Read the label first to decide whether to fix the value in project configuration or a workspace override.
+- **Environment variables**: shows the count of finally merged variables; expand to inspect each key/value pair.
+- **One-off overrides**: add temporary environment variables as `KEY=VALUE` lines. Only same-named variables are overridden and launch profiles stay untouched. Click **Save as Launch Profile** when a change is reusable, or **Clear overrides** to undo a temporary test.
+- When the profile references a missing shared environment, a **Fix binding** prompt appears. Failed preflight keeps **Start project** disabled.
+
+### 4.2 Shared runtime environment: manage Runtime Profiles
+
+The shared runtime environment card shows its scope (*Global Template*, *Workspace Template*, *Inherit Global*, or *Read-only*) and summarizes the capabilities: browser, proxy, host mapping, and web actions. Expand **Manage Templates** to:
+
+- Switch or refresh the template, or add and edit templates. When the current scope is a workspace template, **Restore Global Runtime Inheritance** becomes available.
+- Inspect template highlights as tags: browser and profile, independent user-data directory, the bound proxy service or browser proxy, host mapping, and the controlled CDP port.
+- Check **Bound profiles**: how many project launch profiles currently use this template. Review the binding count before changing or deleting a template.
+- See the configuration-source bar that appears when expanded. After an external TOML edit, refresh or re-select the source first so an old draft does not overwrite the new file.
 
 ### Choosing Debug Profile vs Runtime Profile
 

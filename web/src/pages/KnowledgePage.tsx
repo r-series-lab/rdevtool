@@ -23,9 +23,8 @@ import {
   InputAdornment,
   Menu,
   MenuItem,
+  Popover,
   TextField,
-  ToggleButton,
-  ToggleButtonGroup,
   Tooltip,
   Typography,
 } from "@mui/material";
@@ -33,8 +32,13 @@ import { AppEmptyState } from "../components/AppEmptyState";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import { AppListEndState } from "../components/AppListEndState";
 import {
+  WorkspacePageToolbar,
+  WorkspacePageToolbarAction,
+} from "../components/WorkspacePageToolbar";
+import {
   CopyIcon,
   EditIcon,
+  ExpandIcon,
   FolderIcon,
   KnowledgeIcon,
   MoreIcon,
@@ -117,23 +121,6 @@ const markdown = new MarkdownIt({
   linkify: false,
   typographer: false,
 });
-
-const PRIMARY_SCOPE_OPTIONS: Array<{
-  value: Extract<KnowledgeScope, "project" | "playbook" | "environment">;
-  label: string;
-}> = [
-  { value: "project", label: "项目" },
-  { value: "playbook", label: "手册" },
-  { value: "environment", label: "环境" },
-];
-
-const SECONDARY_SCOPE_OPTIONS: Array<{
-  value: Extract<KnowledgeScope, "all" | "inbox">;
-  label: string;
-}> = [
-  { value: "all", label: "全部知识" },
-  { value: "inbox", label: "收件箱" },
-];
 
 const CREATE_SCOPE_OPTIONS: Array<{
   value: CreatableKnowledgeScope;
@@ -263,16 +250,9 @@ export function KnowledgePage({
   const [createTitle, setCreateTitle] = useState("");
   const [creating, setCreating] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [scopeMenuAnchor, setScopeMenuAnchor] =
-    useState<HTMLElement | null>(null);
   const [readerMenuAnchor, setReaderMenuAnchor] =
     useState<HTMLElement | null>(null);
-  const activeSecondaryScope = SECONDARY_SCOPE_OPTIONS.find(
-    (option) => option.value === scope,
-  );
-  const secondaryScopeTooltip = activeSecondaryScope
-    ? t("切换知识范围")
-    : t("更多知识范围");
+  const [cascadeAnchor, setCascadeAnchor] = useState<HTMLElement | null>(null);
   const emptyIndexTitle = query ? t("没有匹配知识") : t("暂无知识文档");
   const emptyIndexDescription = query
     ? t("调整关键词或知识范围。")
@@ -284,7 +264,30 @@ export function KnowledgePage({
   const pendingFragmentRef = useRef<string | null>(null);
   const readerScrollRef = useRef<HTMLDivElement | null>(null);
   const [confirm, confirmDialog] = useAppConfirmDialog();
-
+  const knowledgeProjectCount = new Set(projects.map((item) => item.key)).size;
+  const selectedKnowledgeProject = projects.find(
+    (project) => project.key === notesProject,
+  );
+  const activeCascadeScope =
+    selectedKnowledgeProject || notesProject ? "project" : scope;
+  const cascadeCount = selectedKnowledgeProject
+    ? index?.matchedCount ?? 0
+    : scope === "project"
+      ? projects.length
+      : scope === "all"
+        ? index?.scannedCount ?? 0
+        : null;
+  const cascadeLabel = selectedKnowledgeProject
+    ? selectedKnowledgeProject.name || selectedKnowledgeProject.key
+    : scope === "all"
+      ? t("全部知识")
+      : scope === "project"
+        ? t("项目")
+        : scope === "playbook"
+          ? t("手册")
+          : scope === "environment"
+            ? t("环境")
+            : t("收件箱");
   useEffect(() => {
     if (
       selectedProject &&
@@ -467,11 +470,18 @@ export function KnowledgePage({
     }
   }
 
-  function handleScopeChange(nextScope: KnowledgeScope | null) {
-    if (!nextScope) {
-      return;
-    }
+  function selectCascadeScope(nextScope: KnowledgeScope) {
     setScope(nextScope);
+    if (nextScope !== "project") {
+      setNotesProject("");
+      setCascadeAnchor(null);
+    }
+  }
+
+  function selectCascadeProject(projectKey: string) {
+    setScope("project");
+    setNotesProject(projectKey);
+    setCascadeAnchor(null);
   }
 
   async function handleMarkdownClick(
@@ -617,113 +627,76 @@ export function KnowledgePage({
 
   return (
     <div className="knowledge-page" data-knowledge-library="markdown">
-      <header className="knowledge-page-head">
-        <div className="knowledge-title-group">
-          <span className="knowledge-brand-icon" aria-hidden="true">
-            <KnowledgeIcon fontSize="small" />
-          </span>
-          <div className="knowledge-title-copy">
-            <Typography component="h1" variant="h6">
-              {t("知识库")}
-            </Typography>
-            <Typography variant="caption">
-              {t("面向项目与自动化工具的 Markdown 长期知识")}
-            </Typography>
-          </div>
-        </div>
-        <div className="knowledge-page-actions">
-          <Tooltip title={t("刷新知识库")}>
-            <span>
-              <IconButton
-                size="small"
-                aria-label={t("刷新知识库")}
-                onClick={refreshKnowledge}
-                disabled={indexLoading}
-              >
-                <RefreshIcon fontSize="small" />
-              </IconButton>
-            </span>
-          </Tooltip>
-          <Button
-            size="small"
-            variant="outlined"
-            color="inherit"
-            startIcon={<FolderIcon fontSize="small" />}
-            disabled={!index?.notesRoot}
-            onClick={() =>
-              void invoke("open_local_path", { path: index?.notesRoot })
-            }
-          >
-            {t("目录")}
-          </Button>
-          <Button
-            size="small"
-            variant="contained"
-            startIcon={<PlusIcon fontSize="small" />}
-            onClick={openCreateDialog}
-          >
-            {t("新建")}
-          </Button>
-        </div>
-      </header>
+      <WorkspacePageToolbar
+        className="finder-toolbar knowledge-page-toolbar"
+        ariaLabel="知识库概览与操作"
+        metrics={[
+          {
+            key: "documents",
+            label: t("文档"),
+            value: index?.matchedCount ?? 0,
+            icon: <KnowledgeIcon fontSize="small" />,
+            tone: "violet",
+          },
+          {
+            key: "projects",
+            label: t("项目"),
+            value: knowledgeProjectCount,
+            icon: <FolderIcon fontSize="small" />,
+            tone: "blue",
+          },
+        ]}
+        actions={
+          <>
+            <WorkspacePageToolbarAction
+              startIcon={<RefreshIcon fontSize="small" />}
+              aria-label={t("刷新知识库")}
+              onClick={refreshKnowledge}
+              disabled={indexLoading}
+            >
+              {t("刷新知识库")}
+            </WorkspacePageToolbarAction>
+            <WorkspacePageToolbarAction
+              startIcon={<FolderIcon fontSize="small" />}
+              disabled={!index?.notesRoot}
+              onClick={() =>
+                void invoke("open_local_path", { path: index?.notesRoot })
+              }
+            >
+              {t("目录")}
+            </WorkspacePageToolbarAction>
+            <WorkspacePageToolbarAction
+              startIcon={<PlusIcon fontSize="small" />}
+              onClick={openCreateDialog}
+            >
+              {t("新建")}
+            </WorkspacePageToolbarAction>
+          </>
+        }
+      />
 
       <form className="knowledge-toolbar" onSubmit={handleSearch}>
-        <div className="knowledge-scope-tools">
-          <ToggleButtonGroup
-            className="knowledge-scope-control"
-            size="small"
-            exclusive
-            value={scope}
-            onChange={(_event, value: KnowledgeScope | null) =>
-              handleScopeChange(value)
-            }
+        <div className="knowledge-cascade-tools">
+          <button
+            type="button"
+            className="knowledge-cascade-trigger"
             aria-label={t("知识范围")}
+            aria-haspopup="dialog"
+            aria-expanded={Boolean(cascadeAnchor)}
+            onClick={(event) => setCascadeAnchor(event.currentTarget)}
           >
-            {PRIMARY_SCOPE_OPTIONS.map((option) => (
-              <ToggleButton key={option.value} value={option.value}>
-                {t(option.label)}
-              </ToggleButton>
-            ))}
-          </ToggleButtonGroup>
-          <Tooltip title={secondaryScopeTooltip}>
-            <Button
-              type="button"
-              size="small"
-              color="inherit"
-              aria-label={t("更多知识范围")}
-              aria-haspopup="menu"
-              aria-expanded={Boolean(scopeMenuAnchor)}
-              className={`knowledge-scope-more${
-                scope === "all" || scope === "inbox" ? " is-active" : ""
-              }`}
-              onClick={(event) => setScopeMenuAnchor(event.currentTarget)}
-            >
-              {activeSecondaryScope ? (
-                t(activeSecondaryScope.label)
-              ) : (
-                <MoreIcon fontSize="small" />
-              )}
-            </Button>
-          </Tooltip>
+            <span className="knowledge-cascade-trigger-label">
+              {cascadeLabel}
+            </span>
+            {cascadeCount !== null ? (
+              <span className="knowledge-cascade-trigger-count">
+                {cascadeCount}
+              </span>
+            ) : null}
+            <ExpandIcon fontSize="small" className="knowledge-cascade-arrow" />
+          </button>
         </div>
         <div className="knowledge-filter-tools">
-          <TextField
-            select
-            size="small"
-            value={notesProject}
-            disabled={scope !== "all" && scope !== "project"}
-            onChange={(event) => setNotesProject(event.target.value)}
-            inputProps={{ "aria-label": t("项目范围") }}
-            slotProps={{ select: { displayEmpty: true } }}
-            className="knowledge-project-select"
-          >
-            <MenuItem value="">{t("所有项目")}</MenuItem>
-            {projects.map((project) => (
-              <MenuItem key={project.key} value={project.key}>
-                {project.name || project.key}
-              </MenuItem>
-            ))}
-          </TextField>
           <TextField
             size="small"
             value={queryDraft}
@@ -747,10 +720,76 @@ export function KnowledgePage({
             variant="outlined"
             color="inherit"
           >
-            {t("搜索")}
-          </Button>
+              {t("搜索")}
+            </Button>
         </div>
       </form>
+
+      <Popover
+        open={Boolean(cascadeAnchor)}
+        anchorEl={cascadeAnchor}
+        onClose={() => setCascadeAnchor(null)}
+        anchorOrigin={{ vertical: "bottom", horizontal: "left" }}
+        transformOrigin={{ vertical: "top", horizontal: "left" }}
+        slotProps={{ paper: { className: "knowledge-cascade-paper" } }}
+      >
+        <div
+          className="knowledge-cascade"
+          role="dialog"
+          aria-label={t("知识范围")}
+        >
+          <div className="knowledge-cascade-pane">
+            {[
+              { value: "all" as KnowledgeScope, label: t("全部知识") },
+              { value: "project" as KnowledgeScope, label: t("项目") },
+              { value: "playbook" as KnowledgeScope, label: t("手册") },
+              { value: "environment" as KnowledgeScope, label: t("环境") },
+              { value: "inbox" as KnowledgeScope, label: t("收件箱") },
+            ].map((option) => (
+              <button
+                key={option.value}
+                type="button"
+                className={`knowledge-cascade-option${
+                  activeCascadeScope === option.value ? " is-active" : ""
+                }`}
+                onClick={() => selectCascadeScope(option.value)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          {activeCascadeScope === "project" ? (
+            <div className="knowledge-cascade-pane knowledge-cascade-secondary">
+              <span className="knowledge-cascade-pane-title">
+                {t("项目列表")}
+              </span>
+              <button
+                type="button"
+                className={`knowledge-cascade-option${
+                  !selectedKnowledgeProject ? " is-active" : ""
+                }`}
+                onClick={() => selectCascadeProject("")}
+              >
+                {t("所有项目")}
+              </button>
+              {projects.map((project) => (
+                <button
+                  key={project.key}
+                  type="button"
+                  className={`knowledge-cascade-option${
+                    selectedKnowledgeProject?.key === project.key
+                      ? " is-active"
+                      : ""
+                  }`}
+                  onClick={() => selectCascadeProject(project.key)}
+                >
+                  {project.name || project.key}
+                </button>
+              ))}
+            </div>
+          ) : null}
+        </div>
+      </Popover>
 
       {error ? <Alert severity="error">{error}</Alert> : null}
 
@@ -890,25 +929,6 @@ export function KnowledgePage({
           )}
         </section>
       </div>
-
-      <Menu
-        anchorEl={scopeMenuAnchor}
-        open={Boolean(scopeMenuAnchor)}
-        onClose={() => setScopeMenuAnchor(null)}
-      >
-        {SECONDARY_SCOPE_OPTIONS.map((option) => (
-          <MenuItem
-            key={option.value}
-            selected={scope === option.value}
-            onClick={() => {
-              setScope(option.value);
-              setScopeMenuAnchor(null);
-            }}
-          >
-            {t(option.label)}
-          </MenuItem>
-        ))}
-      </Menu>
 
       <Menu
         anchorEl={readerMenuAnchor}

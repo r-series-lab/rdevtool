@@ -16,7 +16,6 @@ import {
   Chip,
   CircularProgress,
   Dialog,
-  DialogActions,
   DialogContent,
   DialogTitle,
   FormControlLabel,
@@ -83,6 +82,7 @@ import {
 import type { WorkspaceRuntimePreflightAction } from "../lib/workspaceRuntimePreflightActions";
 import { useAppConfirmDialog } from "../components/AppConfirmDialog";
 import { AppEmptyState } from "../components/AppEmptyState";
+import { ConfigDialogShell } from "../components/ConfigDialogShell";
 import { AppListEndState } from "../components/AppListEndState";
 import {
   LinkPlanDialog,
@@ -5128,98 +5128,50 @@ export function OverviewPage({
           </DialogContent>
         </Dialog>
 
-        <Dialog
+        <ConfigDialogShell
           open={manageOpen}
           onClose={closeManageDialog}
           maxWidth="lg"
-          fullWidth
           className="overview-workspace-config-dialog"
-          PaperProps={{
-            className: "overview-workspace-config-paper",
-          }}
-        >
-          <DialogTitle className="overview-workspace-config-title">
-            <Stack
-              direction="row"
-              alignItems="center"
-              justifyContent="space-between"
-              spacing={1}
-            >
-              <Stack
-                className="overview-workspace-config-title-copy"
-                direction="row"
-                alignItems="center"
-                spacing={0.75}
-                minWidth={0}
+          paperClassName="overview-workspace-config-paper"
+          titleClassName="overview-workspace-config-title"
+          contentClassName="overview-workspace-config-content"
+          title={t("工作区配置")}
+          subtitle={
+            workspaceDraft?.name ??
+            editingWorkspaceSummary?.name ??
+            activeGroup?.name ??
+            activeProjectWorkspaceKey
+          }
+          dirty={workspaceDirty}
+          titleIcon={<SettingsIcon fontSize="small" />}
+          actionsClassName="overview-workspace-config-actions"
+          actions={() => (
+            <>
+              <Box sx={{ flex: 1 }} />
+              <Button onClick={closeManageDialog}>{t("取消")}</Button>
+              <Button
+                variant="contained"
+                startIcon={
+                  workspaceSaving ? (
+                    <CircularProgress size={14} />
+                  ) : (
+                    <CheckIcon fontSize="small" />
+                  )
+                }
+                onClick={() => void saveWorkspaceEditor()}
+                disabled={
+                  !workspaceDraft ||
+                  workspaceDraft.system ||
+                  workspaceSaving ||
+                  !workspaceDirty
+                }
               >
-                <Box
-                  className="overview-workspace-config-title-icon"
-                  sx={(theme) => ({
-                    width: 28,
-                    height: 28,
-                    display: "grid",
-                    placeItems: "center",
-                    borderRadius: "9px",
-                    color: theme.palette.primary.main,
-                    bgcolor: alpha(
-                      theme.palette.primary.main,
-                      theme.palette.mode === "dark" ? 0.12 : 0.08,
-                    ),
-                  })}
-                >
-                  <SettingsIcon fontSize="small" />
-                </Box>
-                <Stack
-                  className="overview-workspace-config-title-text"
-                  spacing={0.1}
-                  minWidth={0}
-                >
-                  <Typography
-                    variant="subtitle1"
-                    sx={{ fontWeight: 860, lineHeight: 1.2 }}
-                  >
-                    {t("工作区配置")}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary" noWrap>
-                    {workspaceDraft?.name ??
-                      editingWorkspaceSummary?.name ??
-                      activeGroup?.name ??
-                      activeProjectWorkspaceKey}
-                  </Typography>
-                </Stack>
-                {workspaceDirty ? (
-                  <Chip size="small" color="primary" label={t("未保存")} />
-                ) : null}
-              </Stack>
-              <Stack direction="row" alignItems="center" spacing={0.25}>
-                <Tooltip title={t("关闭")}>
-                  <IconButton
-                    className="overview-workspace-config-close"
-                    size="small"
-                    onClick={closeManageDialog}
-                    aria-label={t("关闭工作区配置")}
-                    sx={(theme) => ({
-                      width: 32,
-                      height: 32,
-                      borderRadius: "10px",
-                      color: theme.palette.text.secondary,
-                      "&:hover": {
-                        color: theme.palette.text.primary,
-                        bgcolor: alpha(
-                          theme.palette.text.primary,
-                          theme.palette.mode === "dark" ? 0.08 : 0.06,
-                        ),
-                      },
-                    })}
-                  >
-                    <ClearIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-              </Stack>
-            </Stack>
-          </DialogTitle>
-
-          <DialogContent className="overview-workspace-config-content">
+                {t("保存")}
+              </Button>
+            </>
+          )}
+        >
             <Box
               sx={{
                 display: "grid",
@@ -6505,32 +6457,7 @@ export function OverviewPage({
                 ) : null}
               </Stack>
             </Box>
-          </DialogContent>
-
-          <DialogActions className="overview-workspace-config-actions">
-            <Box sx={{ flex: 1 }} />
-            <Button onClick={closeManageDialog}>{t("取消")}</Button>
-            <Button
-              variant="contained"
-              startIcon={
-                workspaceSaving ? (
-                  <CircularProgress size={14} />
-                ) : (
-                  <CheckIcon fontSize="small" />
-                )
-              }
-              onClick={() => void saveWorkspaceEditor()}
-              disabled={
-                !workspaceDraft ||
-                workspaceDraft.system ||
-                workspaceSaving ||
-                !workspaceDirty
-              }
-            >
-              {t("保存")}
-            </Button>
-          </DialogActions>
-        </Dialog>
+        </ConfigDialogShell>
       </Stack>
     </Box>
   );

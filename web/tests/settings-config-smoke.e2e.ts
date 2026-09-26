@@ -477,58 +477,18 @@ test("config change action opens the comparison result directly", async ({ page 
   await expect(dialog.getByText("4 项一致", { exact: true })).toBeVisible();
 });
 
-test("handled config activities stay hidden until all records are enabled", async ({ page }) => {
+test("config change actions appear in activity records", async ({ page }) => {
   await page.getByLabel("打开活动中心").click();
 
   const activityCenter = page.getByRole("complementary", { name: "活动中心" });
   await expect(activityCenter).toBeVisible();
-  const configQueueCard = activityCenter
-    .locator(".activity-queue-card")
-    .filter({ hasText: "配置更新" });
-  await expect(configQueueCard).toHaveCount(1);
-  await expect(configQueueCard).toContainText("需重新加载 3");
-  await activityCenter
-    .getByRole("button", { name: "全部重新加载 3", exact: true })
-    .click();
-
-  await expect(page.getByTestId("config-activity-state")).toHaveText("success");
-  await expect(activityCenter.getByRole("button", { name: "重新加载" })).toHaveCount(0);
-  await expect(activityCenter.getByText("已重新加载并应用最新配置")).toHaveCount(0);
-
-  await activityCenter.getByLabel("收起活动中心").click();
-  await page.getByLabel("打开设置").click();
-  const settings = page.getByRole("dialog", { name: "设置", exact: true });
-  const configActivityVisibility = settings.getByRole("radiogroup", {
-    name: "配置变更活动显示",
-  });
-  await configActivityVisibility.getByRole("radio", { name: "全部记录" }).click();
-  await expect(
-    configActivityVisibility.getByRole("radio", { name: "全部记录" }),
-  ).toHaveAttribute("aria-checked", "true");
-  await settings.getByLabel("关闭设置").click();
-
-  await page.getByLabel("打开活动中心").click();
-  const handledConfigRecords = page
-    .getByRole("complementary", { name: "活动中心" })
-    .getByText("已重新加载并应用最新配置");
-  await expect(handledConfigRecords).toHaveCount(3);
-  await expect(handledConfigRecords.first()).toBeVisible();
-});
-
-test("config reload notices can be ignored as one grouped reminder", async ({ page }) => {
-  await page.getByLabel("打开活动中心").click();
-
-  const activityCenter = page.getByRole("complementary", { name: "活动中心" });
-  const configQueueCard = activityCenter
-    .locator(".activity-queue-card")
-    .filter({ hasText: "配置更新" });
-  await configQueueCard.getByRole("button", { name: "忽略", exact: true }).click();
-
-  await expect(page.getByTestId("config-activity-state")).toHaveText("info");
-  await expect(configQueueCard).toHaveCount(0);
-  await expect(
-    activityCenter.getByRole("button", { name: "全部重新加载 3", exact: true }),
-  ).toHaveCount(0);
+  const activityList = activityCenter.locator(".activity-list-scroll");
+  const configCard = activityList
+    .locator(".activity-record-card")
+    .filter({ hasText: "工作区配置已变更" })
+    .first();
+  await expect(configCard).toBeVisible();
+  await expect(configCard.getByRole("button", { name: "重新加载" })).toBeVisible();
 });
 
 test("activity cards show complete grouped and standalone details", async ({ page }) => {
@@ -536,8 +496,7 @@ test("activity cards show complete grouped and standalone details", async ({ pag
 
   const activityCenter = page.getByRole("complementary", { name: "活动中心" });
   const activityList = activityCenter.locator(".activity-list-scroll");
-  const pendingQueue = activityCenter.locator(".activity-queue-section");
-  await expect(pendingQueue).not.toContainText("触发部署（进行中测试）");
+  await activityCenter.getByRole("tab", { name: /^托盘 / }).click();
   const runningDeployCard = activityList
     .locator(".activity-record-card")
     .filter({ hasText: "触发部署（进行中测试）" });
@@ -626,39 +585,12 @@ test("activity source tabs isolate App, CLI and tray records", async ({ page }) 
   await expect(activityCenter).not.toContainText("触发部署（进行中测试）");
 });
 
-test("activity bulk confirmations use the shared compact action dialog", async ({
-  page,
-}) => {
-  await page.getByLabel("打开活动中心").click();
-
-  const activityCenter = page.getByRole("complementary", { name: "活动中心" });
-  await activityCenter.getByRole("tab", { name: /^待办 / }).click();
-  await activityCenter.getByRole("button", { name: "忽略全部" }).click();
-
-  const dialog = page.getByRole("dialog", {
-    name: "忽略全部待处理项？",
-  });
-  await expect(dialog).toBeVisible();
-  await expect(dialog).toHaveClass(/app-action-dialog-paper/);
-  await expect(dialog.locator(".app-action-dialog-title-icon")).toBeVisible();
-  await expect(dialog.getByRole("button", { name: "关闭弹窗" })).toBeVisible();
-  await expect(dialog).toContainText("记录仍可在“全部”中查看");
-
-  const width = await dialog.evaluate((element) =>
-    Math.round(element.getBoundingClientRect().width),
-  );
-  expect(width).toBeLessThanOrEqual(500);
-
-  await dialog.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(dialog).toHaveCount(0);
-});
-
 test("failed Link activity exposes diagnostics and checks before retrying", async ({ page }) => {
   await page.getByLabel("打开活动中心").click();
 
   const activityCenter = page.getByRole("complementary", { name: "活动中心" });
   const activityList = activityCenter.locator(".activity-list-scroll");
-  await activityCenter.getByRole("tab", { name: /^待办 / }).click();
+  await activityCenter.getByRole("tab", { name: /^托盘 / }).click();
   const linkCard = activityCenter
     .locator(".activity-record-card")
     .filter({ hasText: "示例联调" })
@@ -680,7 +612,7 @@ test("failed Link activity exposes diagnostics and checks before retrying", asyn
   await expect(confirmDialog).toContainText("只有检查通过后");
   await confirmDialog.getByRole("button", { name: "检查并重试" }).click();
 
-  await activityCenter.getByRole("tab", { name: /^全部 / }).click();
+  await activityCenter.getByRole("tab", { name: /^全部来源 / }).click();
   const recoveredCard = activityList
     .locator(".activity-record-card")
     .filter({ hasText: "示例联调" })
@@ -715,7 +647,6 @@ test("Git, Runtime and proxy recovery explain their safety checks", async ({ pag
   await page.getByLabel("打开活动中心").click();
 
   const activityCenter = page.getByRole("complementary", { name: "活动中心" });
-  await activityCenter.getByRole("tab", { name: /^待办 / }).click();
 
   await activityCenter.getByRole("tab", { name: /^CLI / }).click();
   await activityCenter

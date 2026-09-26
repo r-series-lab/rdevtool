@@ -22,7 +22,6 @@ const TRANSLATED_SURFACES = [
   "components/branch/BranchPushStatusCard.tsx",
   "components/branch/PushCommitConfirmContent.tsx",
   "components/branch/LocalWorkspaceStatusCard.tsx",
-  "components/ActivityAttentionQueue.tsx",
   "components/ActiveSessionsPanel.tsx",
   "components/ActiveSessionRow.tsx",
   "components/web-actions/FetchImportEditor.tsx",

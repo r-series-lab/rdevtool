@@ -1267,7 +1267,6 @@ function App() {
         onCreateProjectWorkspace={createProjectWorkspace}
         onProjectConfigSaved={reloadProjectsAfterConfigSave}
         activityItems={activityCenter.items}
-        activityAlertCount={activityCenter.stats.attention}
         activeSessions={activeSessions.sessions}
         activeSessionsLoading={activeSessions.loading}
         activeSessionsError={activeSessions.error}

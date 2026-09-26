@@ -3,14 +3,14 @@ import { expect, test } from "@playwright/test";
 test.beforeEach(async ({ page }) => {
   await page.goto("/smoke.html");
   await page.getByLabel("打开设置").click();
-  const dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  const dialog = page.getByRole("dialog", { name: /设置/ });
   await dialog.getByRole("tab", { name: "配置迁移" }).click();
 });
 
 test("configuration pack import plans mappings and supports transaction rollback", async ({
   page,
 }) => {
-  const dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  const dialog = page.getByRole("dialog", { name: /设置/ });
   await expect(dialog.getByRole("checkbox", { name: "项目、构建、部署与 Git" })).toBeChecked();
   await expect(dialog.getByText("示例控制台", { exact: true })).toBeVisible();
   await expect(dialog.getByText("Feature A", { exact: true })).toBeVisible();
@@ -59,7 +59,7 @@ test("configuration pack import plans mappings and supports transaction rollback
 test("configuration pack export keeps modules and scopes readable in the settings width", async ({
   page,
 }) => {
-  const dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  const dialog = page.getByRole("dialog", { name: /设置/ });
   await expect(dialog.getByRole("tab", { name: "导出", exact: true })).toHaveAttribute(
     "aria-selected",
     "true",
@@ -94,7 +94,7 @@ test("configuration pack export keeps modules and scopes readable in the setting
 test("configuration pack operations can be filtered and selectively replanned", async ({
   page,
 }) => {
-  const dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  const dialog = page.getByRole("dialog", { name: /设置/ });
   await dialog.getByRole("tab", { name: "导入", exact: true }).click();
   await dialog.getByRole("button", { name: "选择配置包" }).click();
   await dialog.getByRole("button", { name: "生成导入计划" }).click();
@@ -121,7 +121,7 @@ test("configuration pack operations can be filtered and selectively replanned", 
 test("configuration pack history lists durable transactions and refreshes rollback state", async ({
   page,
 }) => {
-  const dialog = page.getByRole("dialog", { name: "设置", exact: true });
+  const dialog = page.getByRole("dialog", { name: /设置/ });
   await dialog.getByRole("tab", { name: "历史", exact: true }).click();
 
   const active = dialog.locator(".config-pack-history-row", {

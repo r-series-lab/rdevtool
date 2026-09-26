@@ -41,7 +41,6 @@ const EXACT_INTERNAL_MESSAGE_KEYS = new Set([
   "当前配置源不支持运行环境模板覆盖。",
   "当前项目未配置目录",
   "当前修复计划不完整，请打开对应配置页处理。",
-  "可重试",
   "CLI Link run 暂不打开浏览器页面；可使用 runtime focus 或 App 查看。",
   "CLI detached runtime 暂无 Link stop 所有权语义，未执行停止。",
   "上传成功",
@@ -65,9 +64,7 @@ const EXACT_INTERNAL_MESSAGE_KEYS = new Set([
   "推送、合并并构建",
   "合并并推送成功",
   "合并成功",
-  "配置更新",
   "失败",
-  "忽略",
   "已停止",
   "已取消",
   "已停止自动重试",
@@ -101,9 +98,6 @@ const EXACT_INTERNAL_MESSAGE_KEYS = new Set([
   "构建已取消",
   "构建已触发",
   "构建取消",
-  "需查看差异",
-  "需确认失败",
-  "需重新加载",
   "检查并重试 Git 操作",
   "检查并重新停止",
   "检查并重新启动",
@@ -693,18 +687,6 @@ function translateInternalMessageCore(message: string, t: Translate): string {
   const failureCountMatch = message.match(/^失败\s+(\d+)$/);
   if (failureCountMatch) {
     return t("失败 {count}", { count: failureCountMatch[1] });
-  }
-
-  const reloadNeededMatch = message.match(/^需重新加载\s+(\d+)$/);
-  if (reloadNeededMatch) {
-    return t("需重新加载 {count}", { count: reloadNeededMatch[1] });
-  }
-
-  const failureConfirmNeededMatch = message.match(/^需确认失败\s+(\d+)$/);
-  if (failureConfirmNeededMatch) {
-    return t("需确认失败 {count}", {
-      count: failureConfirmNeededMatch[1],
-    });
   }
 
   const healthIssueCountMatch = message.match(

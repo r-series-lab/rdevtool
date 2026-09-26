@@ -15,7 +15,6 @@ import {
 } from "@mui/material";
 import {
   BUILD_STATUS_SYNC_MAX_FAILURES,
-  activityRequiresAttention,
   activityExecutionKey,
   isBuildActivityKind,
   latestActivityExecutionStatus,
@@ -34,7 +33,6 @@ import {
   ActivityIcon,
   AppWindowIcon,
   CheckIcon,
-  ClockIcon,
   CollapseIcon,
   ClearIcon,
   ExpandIcon,
@@ -53,11 +51,6 @@ import {
 } from "./AppIcons";
 import { AppEmptyState } from "./AppEmptyState";
 import { AppActionDialog } from "./AppActionDialog";
-import { ActivityAttentionQueue } from "./ActivityAttentionQueue";
-import {
-  buildActivityQueueGroups,
-  compareActivityPriority,
-} from "./activityCenterQueue";
 import { activityCanBeCleared } from "../lib/activityResolution";
 import type { Theme } from "@mui/material/styles";
 import type {
@@ -68,7 +61,6 @@ import type {
 import { ActiveSessionsPanel } from "./ActiveSessionsPanel";
 
 type ActivityFilter =
-  | "attention"
   | "all"
   | "success"
   | "failed";
@@ -626,6 +618,15 @@ function isUnhandledFailure(item: ActivityEntry) {
   return isFailureActivity(item) && !item.acknowledgedAt;
 }
 
+function compareActivityPriority(left: ActivityEntry, right: ActivityEntry) {
+  const leftFailed = isUnhandledFailure(left) ? 1 : 0;
+  const rightFailed = isUnhandledFailure(right) ? 1 : 0;
+  if (leftFailed !== rightFailed) {
+    return rightFailed - leftFailed;
+  }
+  return right.updatedAt.localeCompare(left.updatedAt);
+}
+
 function hasActivityDiagnostics(item: ActivityEntry) {
   return Boolean(
     item.detail?.trim() || item.diagnostics?.length || item.warnings?.length,
@@ -982,7 +983,6 @@ export function ActivityCenter({
   const [toggledGroupIds, setToggledGroupIds] = useState<Set<string>>(() => new Set());
   const [fullExecutionGroupIds, setFullExecutionGroupIds] = useState<Set<string>>(() => new Set());
   const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
-  const [resolveAllConfirmOpen, setResolveAllConfirmOpen] = useState(false);
   const [detailEntry, setDetailEntry] = useState<ActivityEntry | null>(null);
   const [recoverConfirmEntry, setRecoverConfirmEntry] = useState<ActivityEntry | null>(null);
   const [manualRefreshing, setManualRefreshing] = useState(false);
@@ -1012,9 +1012,8 @@ export function ActivityCenter({
 
   useEffect(() => {
     if (open && !wasOpenRef.current) {
-      const hasAttention = items.some(activityRequiresAttention);
       setCenterView(
-        !hasAttention && activeSessions.length > 0 ? "active" : "activity",
+        activeSessions.length > 0 && items.length === 0 ? "active" : "activity",
       );
     }
     wasOpenRef.current = open;
@@ -1102,10 +1101,6 @@ export function ActivityCenter({
     ],
     [originCounts.all, originCounts.app, originCounts.cli, originCounts.tray],
   );
-  const attentionItems = useMemo(
-    () => originItems.filter(activityRequiresAttention),
-    [originItems],
-  );
   const failedItems = useMemo(
     () => originItems.filter(isFailureActivity),
     [originItems],
@@ -1120,13 +1115,11 @@ export function ActivityCenter({
   );
   const counts = useMemo(
     () => ({
-      attention: attentionItems.length,
       all: originItems.length,
       success: successItems.length,
       failed: failedItems.length,
     }),
     [
-      attentionItems.length,
       failedItems.length,
       originItems.length,
       successItems.length,
@@ -1135,11 +1128,10 @@ export function ActivityCenter({
   const filterOptions = useMemo<Array<{ key: ActivityFilter; label: string; count: number; icon: ReactElement }>>(
     () => [
       { key: "all", label: "全部", count: counts.all, icon: <AppWindowIcon fontSize="small" /> },
-      { key: "attention", label: "待办", count: counts.attention, icon: <ClockIcon fontSize="small" /> },
       { key: "success", label: "成功", count: counts.success, icon: <CheckIcon fontSize="small" /> },
       { key: "failed", label: "失败", count: counts.failed, icon: <ClearIcon fontSize="small" /> },
     ],
-    [counts.all, counts.attention, counts.failed, counts.success],
+    [counts.all, counts.failed, counts.success],
   );
   useEffect(() => {
     if (filterOptions.some((item) => item.key === filter)) {
@@ -1147,35 +1139,26 @@ export function ActivityCenter({
     }
     setFilter(filterOptions[0]?.key ?? "all");
   }, [filter, filterOptions]);
-  const queueGroups = useMemo(() => {
-    return buildActivityQueueGroups(attentionItems);
-  }, [attentionItems]);
   const clearableItems = useMemo(
     () => items.filter(activityCanBeCleared),
     [items],
   );
-  const showQueue =
-    queueGroups.length > 0 && (filter === "all" || filter === "attention");
-  const showActivityList = filter !== "attention" || queueGroups.length === 0;
   const visibleItems = useMemo(() => {
-    if (filter === "attention") {
-      return [];
-    }
     if (filter === "success") {
       return successItems;
     }
     if (filter === "failed") {
       return failedItems;
     }
-    return originItems.filter((item) => !activityRequiresAttention(item));
-  }, [attentionItems, failedItems, filter, originItems, successItems]);
+    return originItems;
+  }, [failedItems, filter, originItems, successItems]);
   const visibleUnits = useMemo(() => {
     const visibleIds = new Set(visibleItems.map((item) => item.id));
     const visibleChainIds = new Set(
       visibleItems.map((item) => item.chainId).filter((value): value is string => Boolean(value)),
     );
     const chainAwareItems =
-      filter === "attention" || filter === "all"
+      filter === "all"
         ? visibleItems
         : originItems.filter(
             (item) => visibleIds.has(item.id) || (item.chainId && visibleChainIds.has(item.chainId)),
@@ -1235,10 +1218,6 @@ export function ActivityCenter({
   const handleClearConfirmed = () => {
     onClear();
     setClearConfirmOpen(false);
-  };
-  const handleResolveAllConfirmed = () => {
-    onResolveEntries(attentionItems);
-    setResolveAllConfirmOpen(false);
   };
   const runActivityAction = useCallback(async (item: ActivityEntry) => {
     if (!item.action || actionRunningId) {
@@ -1562,26 +1541,9 @@ export function ActivityCenter({
           />
         ) : (
           <>
-        {showQueue ? (
-          <ActivityAttentionQueue
-            groups={queueGroups}
-            attentionCount={counts.attention}
-            expanded={filter === "attention"}
-            actionRunningId={actionRunningId}
-            onShowAll={() => setFilter("attention")}
-            onRunAction={requestActivityAction}
-            onOpenDetail={setDetailEntry}
-            onOpenResource={onOpenResource}
-            onOpenEntry={onOpenEntry}
-            onResolveEntries={onResolveEntries}
-            onRequestResolveAll={() => setResolveAllConfirmOpen(true)}
-          />
-        ) : null}
-
         <Divider
           className="activity-list-divider"
           sx={{
-            display: showActivityList ? "block" : "none",
             borderColor: "var(--line-soft)",
             opacity: 0.78,
           }}
@@ -1591,7 +1553,6 @@ export function ActivityCenter({
           className="activity-list-scroll"
           spacing={1}
           sx={{
-            display: showActivityList ? "flex" : "none",
             mt: 0.9,
             mb: 0.7,
             p: 0.2,
@@ -1638,12 +1599,8 @@ export function ActivityCenter({
         >
           {visibleUnits.length === 0 ? (
             <AppEmptyState
-              title={t(filter === "attention" ? "暂无待处理" : "没有匹配记录")}
-              description={
-                t(filter === "attention"
-                  ? "未处理失败和需要人工操作的活动会出现在这里。"
-                  : "换个筛选条件看看其他活动。")
-              }
+              title={t("没有匹配记录")}
+              description={t("换个筛选条件看看其他活动。")}
             />
           ) : (
             paginatedUnits.map((unit) => {
@@ -2390,35 +2347,6 @@ export function ActivityCenter({
               }}
             >
               {t("检查并重试")}
-            </Button>
-          </>
-        }
-      />
-      <AppActionDialog
-        open={resolveAllConfirmOpen}
-        onClose={() => setResolveAllConfirmOpen(false)}
-        title={t("忽略全部待处理项？")}
-        description={t("共 {count} 条。忽略后不再提醒，记录仍可在“全部”中查看。", {
-          count: attentionItems.length,
-        })}
-        tone="primary"
-        actions={
-          <>
-            <Button
-              variant="outlined"
-              color="inherit"
-              onClick={() => setResolveAllConfirmOpen(false)}
-              className="app-action-dialog-cancel"
-            >
-              {t("取消")}
-            </Button>
-            <Button
-              autoFocus
-              variant="contained"
-              onClick={handleResolveAllConfirmed}
-              className="app-action-dialog-confirm"
-            >
-              {t("忽略全部")}
             </Button>
           </>
         }

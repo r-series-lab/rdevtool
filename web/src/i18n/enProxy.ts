@@ -188,6 +188,8 @@ export const EN_PROXY_MESSAGES: Record<string, string> = {
   "新规则": "New Rule",
   "新建服务": "New Service",
   "新建规则": "New Rule",
+  "匹配请求并决定转发、Mock 或阻断行为。":
+    "Match requests and decide whether to forward, mock, or block them.",
   "新建服务或导入代理包后会显示在这里。":
     "Services will appear here after one is created or imported.",
   "新建规则后可转发、Mock 或阻断请求。":

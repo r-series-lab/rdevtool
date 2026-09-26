@@ -244,9 +244,9 @@ test("workspace quick launch card exposes its effective configuration sources", 
       checkBackground: getComputedStyle(check).backgroundColor,
     };
   });
-  expect(lightPreflightSurface.paperBackground).toBe("rgb(248, 251, 255)");
-  expect(lightPreflightSurface.paperBackgroundImage).toBe("none");
-  expect(lightPreflightSurface.paperBackdrop).toBe("none");
+  expect(lightPreflightSurface.paperBackground).toBe("rgb(251, 253, 255)");
+  expect(lightPreflightSurface.paperBackgroundImage).toContain("linear-gradient");
+  expect(lightPreflightSurface.paperBackdrop).toContain("blur(18px)");
   expect(lightPreflightSurface.checkBackground).toBe("rgb(255, 255, 255)");
   await expect(preflightDialog).toContainText("启动命令");
   await expect(preflightDialog).toContainText("第 1 次检查");
@@ -352,8 +352,8 @@ test("workspace quick launch card exposes its effective configuration sources", 
       checkBackground: getComputedStyle(check).backgroundColor,
     };
   });
-  expect(darkPreflightSurface.paperBackground).toBe("rgb(18, 23, 30)");
-  expect(darkPreflightSurface.checkBackground).toBe("rgb(24, 31, 40)");
+  expect(darkPreflightSurface.paperBackground).toBe("rgb(16, 22, 29)");
+  expect(darkPreflightSurface.checkBackground).toBe("rgb(22, 29, 37)");
   await page.waitForTimeout(250);
   await darkPreflightDialog.screenshot({
     path: "node_modules/.cache/playwright-results/workspace-runtime-preflight-dark.png",

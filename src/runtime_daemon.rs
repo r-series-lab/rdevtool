@@ -2259,6 +2259,7 @@ mod tests {
         let mut external = external.spawn().unwrap();
         let external_pid = external.id();
         let started = Instant::now();
+        let readiness_timeout = Duration::from_secs(60);
         let identity = loop {
             if let Some(identity) = listening_process(port).unwrap() {
                 break identity;
@@ -2266,7 +2267,13 @@ mod tests {
             // Python startup can be noticeably slower on a cold GitHub Runner.
             // Keep this as a bounded readiness wait without making the test
             // fail merely because the runner is under transient load.
-            assert!(started.elapsed() < Duration::from_secs(15));
+            if started.elapsed() >= readiness_timeout {
+                let _ = external.kill();
+                let _ = external.wait();
+                panic!(
+                    "timed out waiting for python http.server on port {port} after {readiness_timeout:?}"
+                );
+            }
             thread::sleep(Duration::from_millis(50));
         };
         assert_eq!(identity.pid, external_pid);

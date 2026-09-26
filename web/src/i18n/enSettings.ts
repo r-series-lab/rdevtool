@@ -1,4 +1,9 @@
 export const EN_SETTINGS_MESSAGES: Record<string, string> = {
+  "搜索项目名称或 key": "Search project name or key",
+  "清除搜索": "Clear search",
+  "没有匹配项目": "No matching projects",
+  "当前项目": "Current project",
+  "未选择项目": "No project selected",
   "类型": "Type",
   "前置条件：{items}": "Prerequisites: {items}",
   "只读清理评估": "Read-only Cleanup Assessment",

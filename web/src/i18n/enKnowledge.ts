@@ -1,6 +1,8 @@
 export const EN_KNOWLEDGE_MESSAGES: Record<string, string> = {
   "面向项目与自动化工具的 Markdown 长期知识":
     "Long-term Markdown knowledge for projects and automation tools",
+  "文档": "Documents",
+  "项目": "Projects",
   "刷新知识库": "Refresh Knowledge Base",
   "新建": "New",
   "搜索": "Search",

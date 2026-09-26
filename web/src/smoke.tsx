@@ -3626,6 +3626,8 @@ function SidebarSmokeHarness() {
   const documentationProxyScreenshot = documentationScreenshot === "proxy";
   const documentationKnowledgeScreenshot = documentationScreenshot === "knowledge";
   const documentationActivityScreenshot = documentationScreenshot === "activity";
+  const documentationProjectConfigScreenshot = documentationScreenshot === "project-config";
+  const documentationConfigSourceScreenshot = documentationScreenshot === "config-source";
   const documentationProjectScreenshot =
     documentationGitScreenshot ||
     documentationBuildScreenshot ||
@@ -3677,10 +3679,14 @@ function SidebarSmokeHarness() {
   const [defaultPage, setDefaultPage] = useState<PageKey>("overview");
   const [selectedProxyProfileId, setSelectedProxyProfileId] =
     useState("smoke-proxy");
-  const [configSourceManagerOpen, setConfigSourceManagerOpen] = useState(false);
+  const [configSourceManagerOpen, setConfigSourceManagerOpen] = useState(
+    documentationConfigSourceScreenshot,
+  );
   const [configSourceCompareOnOpen, setConfigSourceCompareOnOpen] =
     useState(false);
-  const [projectBuildConfigOpen, setProjectBuildConfigOpen] = useState(false);
+  const [projectBuildConfigOpen, setProjectBuildConfigOpen] = useState(
+    documentationProjectConfigScreenshot,
+  );
   const [runtimeConfigSmokeOpen, setRuntimeConfigSmokeOpen] = useState(false);
   const [resourceActionSmokeTarget, setResourceActionSmokeTarget] = useState<{
     key: string;
@@ -4179,9 +4185,6 @@ function SidebarSmokeHarness() {
         onCreateProjectWorkspace={() => undefined}
         onProjectConfigSaved={() => undefined}
         activityItems={visibleActivityItems}
-        activityAlertCount={
-          visibleActivityItems.filter(activityRequiresAttention).length
-        }
         activeSessions={[
           {
             id: "runtime:rdevtool",

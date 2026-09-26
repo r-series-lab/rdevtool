@@ -1442,6 +1442,9 @@ export function ResourceConfigDialog({
     const ready = navigationEntryReady(entry);
     const categoryLabel = category.shortLabel?.trim() || category.title?.trim();
 
+    const targetSummary = navigationEntryTargetSummary(entry);
+    const entryName = entry.name || t("未命名入口");
+
     return (
       <button
         key={`${categoryIndex}-${entry.name}-${entry.kind}-${entryIndex}`}
@@ -1463,19 +1466,29 @@ export function ResourceConfigDialog({
         </span>
         <span className="resource-config-entry-main">
           <span className="resource-config-entry-title-line">
-            <span className="resource-config-entry-name">{entry.name || t("未命名入口")}</span>
+            <span className="resource-config-entry-name" title={entryName}>
+              {entryName}
+            </span>
+            <span
+              className={ready ? "resource-config-entry-status" : "resource-config-entry-status is-warn"}
+            >
+              {t(ready ? "可用" : "待补")}
+            </span>
+          </span>
+          <span className="resource-config-entry-meta">
             <span className={`resource-config-entry-kind is-${entry.kind}`}>{kindLabel}</span>
             {toolLabel ? (
               <span className="resource-config-entry-kind is-tool-type">{toolLabel}</span>
             ) : null}
             {categoryLabel ? (
-              <span className="resource-config-entry-kind is-category">{categoryLabel}</span>
+              <span className="resource-config-entry-kind is-category" title={categoryLabel}>
+                {categoryLabel}
+              </span>
             ) : null}
           </span>
-          <span className="resource-config-entry-target">{navigationEntryTargetSummary(entry)}</span>
-        </span>
-        <span className={ready ? "resource-config-entry-status" : "resource-config-entry-status is-warn"}>
-          {t(ready ? "可用" : "待补")}
+          <span className="resource-config-entry-target" title={targetSummary}>
+            {targetSummary}
+          </span>
         </span>
       </button>
     );
