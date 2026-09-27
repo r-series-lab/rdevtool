@@ -24,4 +24,4 @@ tungstenite = "0.21.0"
 toml = "0.9.8"
 tray-icon = "0.19.2"
 uuid = { version = "1.18.1", features = ["v4"] }
-zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
