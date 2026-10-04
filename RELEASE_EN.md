@@ -36,8 +36,8 @@ The release matrix invokes the same command and selects each target with `--targ
 `.github/workflows/release.yml` creates desktop packages plus target-specific release manifests and SHA-256 checksum files, then uploads them as workflow artifacts. Pushing a version tag creates a draft prerelease containing artifacts for all targets.
 
 ```bash
-git tag v0.1.7
-git push origin v0.1.7
+git tag v0.1.8
+git push origin v0.1.8
 ```
 
 ## Version Checklist

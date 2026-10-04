@@ -6,6 +6,15 @@
 
 - No unreleased changes.
 
+## 0.1.8
+
+Public Preview update adding the promo-video project, build dependencies, and public product assets.
+
+### Changed
+
+- Added a Remotion promo-video project and resources backed by public interface screenshots.
+- Synchronized the web dependency lockfile and product assets to keep cross-platform release inputs reproducible.
+
 ## 0.1.7
 
 Public Preview preparation update refreshing interface documentation screenshots, knowledge-library layout, and configuration-dialog regression coverage.

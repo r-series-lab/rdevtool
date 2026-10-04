@@ -100,7 +100,7 @@
       "title": "配置与记录留在本机，远程动作始终可见",
       "body": "rDevTool 不替代 GitLab、Jenkins 或现有 CI/CD。连接信息来自本地环境或私有配置，推送、合并、构建和部署前会展示操作范围，并在完成后保留结果。"
     },
-    "releaseSummary": "当前预览版已覆盖工作区与项目管理、分支和构建、通用 Action、代理与本地联调、知识库、诊断和统一 Record，并支持明确错误、执行取消与失败任务重试。",
+    "releaseSummary": "0.1.8 Public Preview 更新工作区、配置迁移与宣传视频资产，并保持跨平台桌面包与校验清单。",
     "screenshots": [
       {
         "id": "workspace-overview",
@@ -383,7 +383,7 @@
             "title": "Configuration and records stay local, and remote actions stay visible",
             "body": "rDevTool does not replace GitLab, Jenkins, or your CI/CD. Connection details come from local environment or private configuration, and push, merge, build, and deployment actions show their scope before running and keep the result afterward."
           },
-          "releaseSummary": "The current preview covers workspace and project management, branches and builds, reusable Actions, proxies and local debugging, the knowledge library, diagnostics, and unified Records, with clear errors, cancellation, and failed-task retry.",
+          "releaseSummary": "The 0.1.8 Public Preview refreshes workspace, configuration-transfer, and promo-video assets while retaining cross-platform desktop packages and checksum manifests.",
           "screenshots": [
             {
               "id": "workspace-overview",
@@ -514,7 +514,7 @@
             "description": "First-time setup, every main page, workspaces and projects, builds, branches, Actions, proxies, knowledge, diagnostics, Records, and troubleshooting.",
             "group": "User guide",
             "source": "docs/interface-guide_EN.md",
-            "reviewedForVersion": "0.1.7"
+            "reviewedForVersion": "0.1.8"
           },
           {
             "id": "workspace",
@@ -522,7 +522,7 @@
             "description": "The Workspace home, global and requirement scopes, configuration dialog, project instances, scope selection, and workspace-owned resources.",
             "group": "User guide",
             "source": "docs/workspace-guide_EN.md",
-            "reviewedForVersion": "0.1.7"
+            "reviewedForVersion": "0.1.8"
           },
           {
             "id": "resources",
@@ -530,7 +530,7 @@
             "description": "Websites, folders, files, applications, scripts, Link, Action, Workflow, web actions, Runtime, and the connection to Runtime Panel.",
             "group": "User guide",
             "source": "docs/resource-guide_EN.md",
-            "reviewedForVersion": "0.1.7"
+            "reviewedForVersion": "0.1.8"
           },
           {
             "id": "proxy",
@@ -538,7 +538,7 @@
             "description": "Proxy profiles, rule matching, Forward/Mock/Block behavior, request history, diagnosis, import/export, and CLI operations.",
             "group": "User guide",
             "source": "docs/proxy-guide_EN.md",
-            "reviewedForVersion": "0.1.7"
+            "reviewedForVersion": "0.1.8"
           },
           {
             "id": "activity",
@@ -546,7 +546,7 @@
             "description": "Live resources, activity records, execution groups, diagnostics, status sync, guarded retry, and CLI evidence.",
             "group": "User guides",
             "source": "docs/activity-guide_EN.md",
-            "reviewedForVersion": "0.1.7"
+            "reviewedForVersion": "0.1.8"
           },
           {
             "id": "overview",
@@ -554,7 +554,7 @@
             "description": "Understand where rDevTool fits, its main work areas, installation, data boundaries, and common entry points.",
             "group": "Getting started",
             "source": "README_EN.md",
-            "reviewedForVersion": "0.1.7"
+            "reviewedForVersion": "0.1.8"
           },
           {
             "id": "configuration-packs",
@@ -562,7 +562,7 @@
             "description": "Move project, workspace, and resource configuration with .rdtpack planning, validation, transaction backups, and rollback.",
             "group": "User guide",
             "source": "docs/configuration-packs_EN.md",
-            "reviewedForVersion": "0.1.7"
+            "reviewedForVersion": "0.1.8"
           },
           {
             "id": "changelog",
@@ -570,7 +570,7 @@
             "description": "See important features, fixes, and usage changes in each version.",
             "group": "What's new",
             "source": "CHANGELOG_EN.md",
-            "reviewedForVersion": "0.1.7"
+            "reviewedForVersion": "0.1.8"
           }
         ]
       }
